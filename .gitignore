@@ -1,0 +1,43 @@
+# Build output
+/bin/
+/dist/
+*.exe
+*.test
+*.out
+coverage.*
+
+# Local brain instance data (belongs in the private data repository)
+/brain.yaml
+/brain.local.yaml
+/data/
+/projects/
+/mail/
+/connectors/
+/journal/
+/global/
+/backups/
+/index/
+/secrets/
+registry.json
+
+# Databases
+*.db
+*.sqlite
+*.sqlite3
+*.sqlite-*
+
+# Secrets and local environment
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+
+# Editors and OS noise
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+*.swp
