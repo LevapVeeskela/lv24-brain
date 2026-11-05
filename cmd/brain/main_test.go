@@ -895,6 +895,20 @@ legacy goal
 	if err := os.WriteFile(filepath.Join(projectDir, "state.md"), []byte(state), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	registry := map[string]any{
+		"version": 1,
+		"projects": []any{map[string]any{
+			"id": "demo", "path": filepath.Join(root, "demo-repo"), "kind": "monorepo",
+			"repo": "https://example.test/demo.git", "branch": "main",
+		}},
+	}
+	rawRegistry, err := json.Marshal(registry)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(source, "registry.json"), rawRegistry, 0o644); err != nil {
+		t.Fatal(err)
+	}
 
 	code, stdout, stderr := runForTest(t, "migrate", "--from", source, "--data-dir", target, "--dry-run")
 	if code != 0 {
@@ -917,6 +931,7 @@ legacy goal
 	if _, err := os.Stat(filepath.Join(target, "projects", "demo", "state.md")); err != nil {
 		t.Fatalf("migrated state missing: %v", err)
 	}
+	assertMigratedRegistryMetadata(t, target, filepath.Join(root, "demo-repo"))
 	cfg, err := config.Load(filepath.Join(target, "brain.yaml"))
 	if err != nil {
 		t.Fatalf("load migrated config: %v", err)
@@ -968,6 +983,155 @@ legacy goal
 	code, _, stderr = runForTest(t, "migrate", "--data-dir", target)
 	if code != 2 || !strings.Contains(stderr, "--from is required") {
 		t.Fatalf("missing --from exit code = %d, stderr = %q", code, stderr)
+	}
+}
+
+func assertMigratedRegistryMetadata(t *testing.T, targetDir, wantPath string) {
+	t.Helper()
+	var registry struct {
+		Projects []struct {
+			ID            string   `json:"id"`
+			Paths         []string `json:"paths"`
+			Kind          string   `json:"kind"`
+			RepoURL       string   `json:"repo_url"`
+			DefaultBranch string   `json:"default_branch"`
+		} `json:"projects"`
+	}
+	raw, err := os.ReadFile(filepath.Join(targetDir, "registry.json"))
+	if err != nil {
+		t.Fatalf("read migrated registry: %v", err)
+	}
+	if err := json.Unmarshal(raw, &registry); err != nil {
+		t.Fatalf("parse migrated registry: %v", err)
+	}
+	for _, project := range registry.Projects {
+		if project.ID != "demo" {
+			continue
+		}
+		if len(project.Paths) != 1 || project.Paths[0] != wantPath {
+			t.Fatalf("migrated paths = %v, want %q", project.Paths, wantPath)
+		}
+		if project.Kind != string(domain.ProjectKindRepository) {
+			t.Fatalf("migrated kind = %q, want repository", project.Kind)
+		}
+		if project.RepoURL != "https://example.test/demo.git" || project.DefaultBranch != "main" {
+			t.Fatalf("migrated repo metadata = %+v", project)
+		}
+		return
+	}
+	t.Fatal("migrated registry has no demo project")
+}
+
+func TestMigratePreservesRelativeDataDir(t *testing.T) {
+	root := t.TempDir()
+	source := filepath.Join(root, "legacy")
+	target := filepath.Join(root, "data")
+	projectDir := filepath.Join(source, "projects", "demo")
+	if err := os.MkdirAll(projectDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	state := "---\nproject_id: demo\nkind: state\n---\n\n# Demo\n"
+	if err := os.WriteFile(filepath.Join(projectDir, "state.md"), []byte(state), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(target, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(target, "brain.yaml")
+	configRaw := "mode: local\ndata_dir: \".\"\nuser: tester\nschema_version: 1\nupdate_channel: stable\n"
+	if err := os.WriteFile(configPath, []byte(configRaw), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	code, _, stderr := runForTest(t, "migrate", "--from", source, "--config", configPath)
+	if code != 0 {
+		t.Fatalf("migrate exit code = %d (stderr: %s)", code, stderr)
+	}
+	raw, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("read config: %v", err)
+	}
+	if !strings.Contains(string(raw), `data_dir: "."`) && !strings.Contains(string(raw), "data_dir: .") {
+		t.Fatalf("relative data_dir was not preserved:\n%s", raw)
+	}
+	cfg, err := config.Load(configPath)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	if cfg.DataDir != target {
+		t.Fatalf("resolved data_dir = %q, want %q", cfg.DataDir, target)
+	}
+}
+
+func TestMigrateKeepsCuratedProjectMetadata(t *testing.T) {
+	root := t.TempDir()
+	source := filepath.Join(root, "legacy")
+	target := filepath.Join(root, "data")
+	projectDir := filepath.Join(source, "projects", "demo")
+	if err := os.MkdirAll(projectDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(projectDir, "state.md"), []byte("---\nproject_id: demo\nkind: state\n---\n\n# Demo\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	sourceRegistry := map[string]any{
+		"version": 1,
+		"projects": []any{map[string]any{
+			"id": "demo", "path": "C:\\legacy\\demo", "kind": "monorepo",
+			"repo": "https://legacy.example/demo.git", "branch": "legacy",
+		}},
+	}
+	rawSource, _ := json.Marshal(sourceRegistry)
+	if err := os.WriteFile(filepath.Join(source, "registry.json"), rawSource, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(target, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	curated := map[string]any{
+		"version": 1,
+		"projects": []any{map[string]any{
+			"id": "demo", "name": "Curated", "paths": []string{"C:\\curated\\demo"},
+			"kind": "app", "repo_url": "https://curated.example/demo.git",
+			"default_branch": "trunk", "created_at": "2026-01-01T00:00:00Z",
+			"updated_at": "2026-01-01T00:00:00Z",
+		}},
+	}
+	rawCurated, _ := json.Marshal(curated)
+	if err := os.WriteFile(filepath.Join(target, "registry.json"), rawCurated, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	code, _, stderr := runForTest(t, "migrate", "--from", source, "--data-dir", target)
+	if code != 0 {
+		t.Fatalf("migrate exit code = %d (stderr: %s)", code, stderr)
+	}
+	raw, err := os.ReadFile(filepath.Join(target, "registry.json"))
+	if err != nil {
+		t.Fatalf("read registry: %v", err)
+	}
+	var registry struct {
+		Projects []struct {
+			ID            string   `json:"id"`
+			Name          string   `json:"name"`
+			Paths         []string `json:"paths"`
+			Kind          string   `json:"kind"`
+			RepoURL       string   `json:"repo_url"`
+			DefaultBranch string   `json:"default_branch"`
+		} `json:"projects"`
+	}
+	if err := json.Unmarshal(raw, &registry); err != nil {
+		t.Fatalf("parse registry: %v", err)
+	}
+	if len(registry.Projects) != 1 {
+		t.Fatalf("projects = %d, want 1", len(registry.Projects))
+	}
+	project := registry.Projects[0]
+	if project.Name != "Curated" || len(project.Paths) != 1 || project.Paths[0] != "C:\\curated\\demo" {
+		t.Fatalf("curated metadata overwritten: %+v", project)
+	}
+	if project.Kind != "app" || project.RepoURL != "https://curated.example/demo.git" || project.DefaultBranch != "trunk" {
+		t.Fatalf("curated metadata overwritten: %+v", project)
 	}
 }
 

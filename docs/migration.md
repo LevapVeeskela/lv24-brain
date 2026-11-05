@@ -5,8 +5,9 @@ into an LV24 Brain filesystem-store data directory.
 
 The importer lives in `internal/migrate` and is exposed as `brain migrate`. It
 is idempotent, never overwrites an existing target file, and only touches
-knowledge records. It does not copy mail, connector dumps, journals, or
-registry metadata that has no schema-v1 field.
+knowledge records. It does not copy mail, connector dumps, or journals. Project
+registry metadata from the legacy `registry.json` is merged by the CLI after a
+successful import.
 
 ## What is imported
 
@@ -30,12 +31,14 @@ Everything else is intentionally ignored:
 - `mail/`
 - `connectors/`
 - `journal/`
-- `registry.json`
 - `global/`, `docs/`, `templates/`, `bin/`
 - `secrets/`, `index/`, `backups/`
 
-Copy those non-knowledge parts separately, as described in the product design,
-or leave them in the legacy directory.
+`registry.json` is not copied verbatim, but its project entries are read to
+enrich the target registry (see below).
+
+Copy the remaining non-knowledge parts separately, as described in the product
+design, or leave them in the legacy directory.
 
 Every imported file gets data schema version `1` frontmatter with
 `project_id`, `kind`, `updated_at`, and `schema_version`. Existing optional
@@ -265,14 +268,16 @@ Exit codes:
 After a successful non-dry run, the CLI:
 
 - writes `schema_version: 1` into the target `brain.yaml` (creating a minimal
-  config when none exists);
-- registers each imported project in `registry.json` with its id, name, and
-  `kind: other` when it is not already present. Legacy `path`, `repo`, and
-  `branch` metadata is not carried into the project record.
+  config when none exists) and preserves a relative `data_dir` such as `.`;
+- merges each imported project into `registry.json`: the legacy `path`, `repo`,
+  and `branch` fill empty `paths`, `repo_url`, and `default_branch` fields, and
+  legacy `kind` values map to `repository`, `app`, `service`, `infra`, or
+  `other`. Curated values already present in the target registry are never
+  overwritten; a project is rewritten only when a field was filled.
 
 The importer itself does not touch configuration or the registry; that work is
 done by the CLI after `migrate.Run` succeeds. If you call the package directly,
-set `schema_version` yourself.
+set `schema_version` and registry metadata yourself.
 
 ## Known limitations
 

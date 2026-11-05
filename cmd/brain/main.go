@@ -3,7 +3,9 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -18,6 +20,8 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"gopkg.in/yaml.v3"
 
 	"github.com/levapveeskela/lv24-brain/internal/adapters/fsstore"
 	"github.com/levapveeskela/lv24-brain/internal/adapters/httpclient"
@@ -925,7 +929,7 @@ func runMigrate(args []string, stdout, stderr io.Writer) int {
 	if *dryRun {
 		return 0
 	}
-	if err := registerMigratedProjects(result.TargetDir, result); err != nil {
+	if err := registerMigratedProjects(result.TargetDir, result.SourceDir, result); err != nil {
 		return reportError(stderr, "migrate", err)
 	}
 	if configPath == "" {
@@ -937,13 +941,71 @@ func runMigrate(args []string, stdout, stderr io.Writer) int {
 	return 0
 }
 
-func registerMigratedProjects(targetDir string, result migrate.Result) error {
+// legacyRegistryEntry is the subset of the legacy .brain registry.json used to
+// enrich migrated projects. Unknown fields are ignored.
+type legacyRegistryEntry struct {
+	ID      string   `json:"id"`
+	Path    string   `json:"path"`
+	Kind    string   `json:"kind"`
+	Repo    string   `json:"repo"`
+	Branch  string   `json:"branch"`
+	Aliases []string `json:"aliases"`
+}
+
+type legacyRegistry struct {
+	Projects []legacyRegistryEntry `json:"projects"`
+}
+
+// readLegacyRegistry parses <source>/registry.json. A missing, malformed or
+// BOM-prefixed file is not fatal: migration still registers project ids, just
+// without repository metadata.
+func readLegacyRegistry(sourceDir string) map[string]legacyRegistryEntry {
+	raw, err := os.ReadFile(filepath.Join(sourceDir, "registry.json"))
+	if err != nil {
+		return nil
+	}
+	raw = bytes.TrimPrefix(raw, []byte{0xEF, 0xBB, 0xBF})
+	var registry legacyRegistry
+	if err := json.Unmarshal(raw, &registry); err != nil {
+		return nil
+	}
+	entries := make(map[string]legacyRegistryEntry, len(registry.Projects))
+	for _, entry := range registry.Projects {
+		if strings.TrimSpace(entry.ID) != "" {
+			entries[entry.ID] = entry
+		}
+	}
+	return entries
+}
+
+// migratedProjectKind maps the legacy kind vocabulary onto domain.ProjectKind.
+func migratedProjectKind(kind string) domain.ProjectKind {
+	switch strings.ToLower(strings.TrimSpace(kind)) {
+	case "app":
+		return domain.ProjectKindApp
+	case "service":
+		return domain.ProjectKindService
+	case "infra":
+		return domain.ProjectKindInfra
+	case "repo", "repository", "monorepo", "worktree":
+		return domain.ProjectKindRepository
+	default:
+		return domain.ProjectKindOther
+	}
+}
+
+// registerMigratedProjects creates or enriches registry entries for imported
+// projects. Legacy registry metadata (path, repo, branch, kind) fills only
+// empty fields, so a curated registry is never overwritten by stale legacy
+// values. Existing entries are rewritten only when something actually changed.
+func registerMigratedProjects(targetDir, sourceDir string, result migrate.Result) error {
 	succeeded := make(map[string]struct{})
 	for _, file := range result.Files {
 		if file.Status == migrate.StatusCreated || file.Status == migrate.StatusUnchanged {
 			succeeded[file.ProjectID] = struct{}{}
 		}
 	}
+	legacy := readLegacyRegistry(sourceDir)
 	store, err := fsstore.New(targetDir)
 	if err != nil {
 		return err
@@ -953,18 +1015,53 @@ func registerMigratedProjects(targetDir string, result migrate.Result) error {
 		if _, ok := succeeded[projectID]; !ok {
 			continue
 		}
-		_, getErr := store.GetProject(ctx, projectID)
-		if getErr == nil {
-			continue
-		}
-		if !errors.Is(getErr, domain.ErrNotFound) {
+		meta, hasMeta := legacy[projectID]
+		current, getErr := store.GetProject(ctx, projectID)
+		exists := getErr == nil
+		if getErr != nil && !errors.Is(getErr, domain.ErrNotFound) {
 			return getErr
 		}
-		if err := store.PutProject(ctx, domain.Project{
-			ID:   projectID,
-			Name: projectID,
-			Kind: domain.ProjectKindOther,
-		}); err != nil {
+		project := domain.Project{ID: projectID, Name: projectID, Kind: domain.ProjectKindOther}
+		if exists {
+			project = current
+		}
+		changed := !exists
+		if project.Name == "" {
+			project.Name = projectID
+			changed = true
+		}
+		if hasMeta {
+			if len(project.Paths) == 0 && strings.TrimSpace(meta.Path) != "" {
+				project.Paths = []string{strings.TrimSpace(meta.Path)}
+				changed = true
+			}
+			if project.RepoURL == "" && strings.TrimSpace(meta.Repo) != "" {
+				project.RepoURL = strings.TrimSpace(meta.Repo)
+				changed = true
+			}
+			if project.DefaultBranch == "" && strings.TrimSpace(meta.Branch) != "" {
+				project.DefaultBranch = strings.TrimSpace(meta.Branch)
+				changed = true
+			}
+			if len(project.Aliases) == 0 && len(meta.Aliases) > 0 {
+				project.Aliases = append([]string(nil), meta.Aliases...)
+				changed = true
+			}
+			if project.Kind == "" || project.Kind == domain.ProjectKindOther {
+				if kind := migratedProjectKind(meta.Kind); kind != project.Kind {
+					project.Kind = kind
+					changed = true
+				}
+			}
+		}
+		if project.Kind == "" {
+			project.Kind = domain.ProjectKindOther
+			changed = true
+		}
+		if !changed {
+			continue
+		}
+		if err := store.PutProject(ctx, project); err != nil {
 			return err
 		}
 	}
@@ -992,6 +1089,18 @@ func printMigrateResult(w io.Writer, result migrate.Result) {
 }
 
 func setMigratedSchema(configPath, targetDir string) error {
+	// Preserve a relative data_dir in the YAML: config.Load resolves it to an
+	// absolute path for runtime use, and saving that absolute value would make
+	// a portable git-backed instance machine-specific.
+	rawDataDir := ""
+	if raw, readErr := os.ReadFile(configPath); readErr == nil {
+		var rawCfg struct {
+			DataDir string `yaml:"data_dir"`
+		}
+		if yaml.Unmarshal(raw, &rawCfg) == nil {
+			rawDataDir = strings.TrimSpace(rawCfg.DataDir)
+		}
+	}
 	cfg, err := config.Load(configPath)
 	if err != nil {
 		if !config.IsNotExist(err) {
@@ -1006,6 +1115,9 @@ func setMigratedSchema(configPath, targetDir string) error {
 	}
 	if cfg.UpdateChannel == "" {
 		cfg.UpdateChannel = config.ChannelStable
+	}
+	if rawDataDir != "" && !filepath.IsAbs(rawDataDir) {
+		cfg.DataDir = rawDataDir
 	}
 	cfg.SchemaVersion = 1
 	return config.Save(configPath, cfg)
