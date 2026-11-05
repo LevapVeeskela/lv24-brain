@@ -4,8 +4,8 @@ The engine is public; brain data is private. Keep that boundary strict.
 
 ## Data boundary
 
-Public `lv24-brain` may contain code, docs, templates, tests, and installers
-only. It must not contain:
+Public `lv24-brain` may contain code, docs, templates, tests, installers, and
+deployment files only. It must not contain:
 
 - notes, decisions, attempts, handoffs, journals, or project state;
 - mail, connector dumps, contact details, or other personal data;
@@ -14,58 +14,132 @@ only. It must not contain:
 - database files, indexes, or backups of private data.
 
 Private `lv24-brain-data` stores approved brain data and owns `brain.yaml`.
-Never commit `secrets/`, `index/`, `backups/`, `*.db`, `*.sqlite*`, `.env`,
-OS keychain exports, access tokens, or passwords. The repository `.gitignore`
-covers these paths; a pre-commit secret scan is added with the data repository.
+Never commit `secrets/`, `index/`, `backups/`, `*.db`, `*.sqlite*`, `.env`, OS
+keychain exports, access tokens, or passwords. The public repository
+`.gitignore` excludes the same local paths, and `brain init --mode git` writes a
+matching `.gitignore` into the data directory.
 
 ## Secrets
 
-- Connector and server credentials live in the OS keychain or environment
-  variables, resolved at runtime.
-- `brain.yaml` stores names and non-secret settings only.
-- Secrets are never written to Markdown, git history, indexes, logs, error
-  messages, or telemetry.
-- Server secrets are provided by the deployment environment; Docker Compose
-  files reference variables rather than embedding values.
-- Rotate any key that is exposed in a transcript, log, or commit.
+- Connector and server credentials resolve at runtime from the environment or
+  the OS secret store. `internal/adapters/secrets` reads
+  `BRAIN_SECRET_<NAME>` first, then the platform store.
+- Platform backends: Windows Credential Manager, macOS Keychain, and Linux
+  Secret Service. A host without one reports the store as unavailable rather
+  than falling back to a plain file.
+- An environment-provided value shadows the OS store. `Set` and `Delete` fail
+  closed for such a key instead of silently changing the wrong source.
+- `brain secret set <name>` reads the value from stdin and prints only the name;
+  `brain secret list` returns names without values; `brain secret remove`
+  deletes an OS-store entry.
+- Server-mode CLI tokens resolve from `BRAIN_TOKEN` first, then the OS store key
+  `server-token`. The value is never written to `brain.yaml` or printed.
+- `brain.yaml` stores names and non-secret settings only. Credentials never
+  appear in Markdown, git history, indexes, logs, error text, or telemetry.
+- Server secrets come from the deployment environment. `deploy/.env.example`
+  references variables and never contains values; `deploy/.env` is ignored.
+- Rotate any key that appears in a transcript, log, commit, or screenshot.
+
+## Redaction and error handling
+
+- Server request logs contain request id, method, path, status, and duration.
+  Authorization headers and request bodies are not logged.
+- Client-facing server errors are short typed envelopes; internal details stay
+  in server logs.
+- `httpclient` (server-mode store client) removes `Bearer <token>` patterns from
+  returned error text, bounds response sizes, and reports 401/403 as typed
+  errors.
+- `gitstore` runs git without a shell, disables interactive prompts, bounds each
+  command with a timeout, and sanitizes command errors so remote URLs with
+  embedded credentials or tokens do not leak.
+- Connector run records redact caller-supplied secrets before truncating the
+  error text, strip control characters, and collapse whitespace.
+- The updater never prints a token; release URLs must be HTTPS except for
+  loopback test servers.
 
 ## Connector privacy
 
 - GitHub, GitLab, and IMAP connectors are read-only.
-- IMAP uses `BODY.PEEK`, fetches metadata and snippets only, and never sends,
-  deletes, moves, or flags messages.
-- Mail and connector metadata are explicit private data and still personal data;
-  store only what the user approved.
-- Logs redact credentials and message bodies. Full mail bodies are out of scope
+- IMAP selects mailboxes read-only, uses `BODY.PEEK`, and keeps envelope
+  metadata plus a bounded plain-text snippet. The adapter has no send, delete,
+  move, append, copy, or flag operation.
+- Mail and connector metadata are explicit private data and still personal
+  data. Store only what the user approved; full mail bodies are out of scope
   for v1.
+- Connector runs are idempotent and produce status, counts, and a sanitized
+  error. `brain connector run` prints that record and writes Markdown dumps
+  under the data directory; run records are not persisted yet. Connector events
+  are telemetry about the run, not message content.
 
-## Server hardening (planned server mode)
+## Server hardening
 
-- Local bootstrap accounts: Argon2id password hashes.
-- OIDC authorization code with PKCE, `state`, and `nonce` validation.
-- Short-lived JWT access tokens with refresh rotation and revocation.
-- Scoped API tokens for CLI and connectors.
-- Roles: `viewer` reads/searches/exports; `member` writes own/shared knowledge
-  and runs own sync; `admin` manages users, roles, connectors, settings, and
-  backups. Authorization is checked server-side on every request.
-- Rate limits on auth and write paths; audit log for admin, role, and connector
-  changes.
-- Browser sessions, if added later, need CSRF-safe cookies and strict headers.
-- `/health`, `/ready`, and `/version` expose no secrets or user data.
+Implemented in `internal/adapters/httpapi` and `internal/auth`:
 
-## Logging and errors
+- Argon2id password hashes with per-password salts and constant-time
+  verification; failed logins use a dummy hash to equalize timing.
+- HS256 JWT access tokens with issuer, audience, expiry, not-before, and
+  allowed-method validation; 15-minute default TTL.
+- Rotating refresh tokens stored as SHA-256 hashes; reuse revokes the token
+  family.
+- Opaque API tokens with the `brain_` prefix, stored as SHA-256 hashes, with
+  role and owner checks when minted.
+- OIDC authorization code with PKCE, `state`, and `nonce`; issuer metadata is
+  discovered over HTTPS and ID tokens are verified.
+- Server-side authorization on every route. `viewer` reads, `member` writes,
+  `admin` manages users and destructive operations.
+- Login rate limiting, bounded request bodies, request timeouts, recovery from
+  panics, and security headers (`nosniff`, `DENY`, `no-referrer`, no-store,
+  restrictive permissions policy).
+- SSE accepts a bearer token in the header; the query-token path is limited to
+  the event stream for clients that cannot set headers.
 
-- Log structured events with context; never log tokens, passwords, mail bodies,
-  or full connector payloads.
-- Client-facing errors are typed and short; details stay in server logs.
+Current limits, stated plainly:
+
+- Without `BRAIN_DATABASE_URL`, `brain-server` uses the in-memory store and
+  loses data on restart. With a database URL it uses Postgres and applies
+  embedded migrations on startup; startup logs redact the database URL.
+- An existing Postgres schema with pending migrations refuses to start until a
+  backup is taken and `BRAIN_DATABASE_BACKUP_CONFIRMED=1` is set. Migrations are
+  forward-only.
+- API tokens and refresh-token families are process-memory even with Postgres,
+  because the current schema has no `api_tokens` / `refresh_tokens` tables.
+  Clients re-authenticate after a restart and multi-replica deployment is not
+  safe.
+- The CLI has no `brain login` or OIDC flow; the token must be obtained through
+  `POST /v1/auth/login` (or minted as an API token) and supplied through
+  `BRAIN_TOKEN` or `brain secret set server-token`.
+- There is no browser session/cookie flow, so CSRF-safe cookie settings do not
+  apply yet. Do not add browser sessions without that work.
+- Multi-replica deployment is unsupported while API/refresh tokens are
+  process-local; the in-memory fallback makes it impossible even with Postgres.
+- Server auto-update is not implemented. `BRAIN_SERVER_AUTO_UPDATE` is a
+  reserved placeholder; container upgrades replace the image.
+
+## Update integrity
+
+- Release checks and downloads use HTTPS only.
+- The manifest version must match the git tag, and its channel must match the
+  GitHub prerelease flag.
+- Every artifact is verified by SHA-256 before apply; missing manifest or
+  checksum fails closed.
+- Manifest, response, and download sizes are capped; downloads are capped at
+  256 MiB.
+- Apply stages the binary and keeps `brain(.exe).previous`; a failed replacement
+  leaves the current binary untouched.
+- The updater never mutates the brain data repository.
+- Signature metadata is reserved for a future cosign/Sigstore step. v1 verifies
+  checksums only; do not describe an artifact as signature-verified yet.
 
 ## Supply chain and releases
 
-- Release artifacts are checksummed (SHA-256) and optionally signed with
-  Sigstore; the updater verifies before replacing the binary.
-- Dependency versions are pinned; new dependencies need justification.
-- CI runs formatting, vet, tests, and a secret scan. No paid runners, storage,
-  or marketplace add-ons; only the free provider allowance is used.
+- Dependencies are pinned in `go.mod`; new dependencies need justification.
+- CI runs `gofmt`, `go vet`, `go test ./...`, both builds, a JavaScript syntax
+  check, and Compose config validation.
+- Release artifacts are built on GitHub-hosted free-tier runners and published
+  as GitHub Releases with `checksums.txt` and `release.json`.
+- Run a secret scan before committing to the private data repository. The
+  importer does not redact credentials because it cannot guess which text is
+  knowledge and which is a secret; review every match.
 
 ## Reporting
 

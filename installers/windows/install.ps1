@@ -9,8 +9,8 @@ its SHA-256 checksum, writes brain.yaml, optionally adds the install directory
 to the user PATH, and optionally installs the OpenCode handoff hook.
 
 The installer never asks for, writes, or logs secrets. Git mode uses the
-existing Git credential helper; server mode asks you to sign in later with the
-server CLI.
+existing Git credential helper; server mode uses BRAIN_TOKEN or
+`brain secret set server-token` (no login command yet).
 
 .PARAMETER Mode
 Install mode: local, git, or server. Prompted when omitted unless -Yes is set.
@@ -583,7 +583,7 @@ try {
     Write-Note "channel: $Channel"
     Write-Host ''
     if ($installMode -eq 'server') {
-        Write-Note "Next: sign in to $ServerUrl with the server CLI, then run brain status."
+        Write-Note "Next: set BRAIN_TOKEN or run: brain secret set server-token; then run brain status."
     }
     else {
         Write-Note "Next: brain status --config `"$configPath`""

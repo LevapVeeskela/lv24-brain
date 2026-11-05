@@ -74,9 +74,12 @@ Server mode:
   -ServerUrl https://brain.example.com
 ```
 
-Sign in with the server CLI after installation (OIDC or a local account).
-Passwords and tokens are kept by the CLI credential store, not by
-`brain.yaml`.
+The installer writes `server_url` to `brain.yaml` and never creates or stores a
+credential. After installation, obtain a token from `POST /v1/auth/login` (or
+mint an API token), then either export `BRAIN_TOKEN` or store the token with
+`brain secret set server-token`. There is no `brain login` or OIDC CLI flow yet.
+
+Local and Git modes write a `data_dir`; server mode writes only `server_url`.
 
 ### Installer options
 
@@ -117,19 +120,22 @@ Passwords and tokens are kept by the CLI credential store, not by
 3. Place the binary on `PATH` (for example
    `%LOCALAPPDATA%\Programs\lv24-brain\brain.exe` on Windows or
    `~/.local/bin/brain` on macOS/Linux) and make it executable.
-4. Create `brain.yaml`:
+4. Create an instance:
 
-   ```yaml
-   mode: local
-   data_dir: '<absolute path to your brain data>'
-   schema_version: 1
-   update_channel: stable
+   ```sh
+   brain init --mode local --data-dir <brain-data> --config <brain-data>/brain.yaml
    ```
 
-   For `server` mode use `server_url` instead of `data_dir`; for `git` mode
-   keep both and point `data_dir` at the clone of the private data repository.
+   For `server` mode use `--mode server --server-url <url>` and
+   `--config <config-path>` instead of `--data-dir`; for `git` mode use
+   `--mode git` and point `--data-dir` at the clone of the private data
+   repository. The generated `brain.yaml` records `mode`, `data_dir`
+   (local/git), `server_url` (server), `schema_version`, and `update_channel`.
 
 5. Run `brain status --config <path-to-brain.yaml>`.
+
+6. For server mode, obtain a token from `POST /v1/auth/login` and set
+   `BRAIN_TOKEN` or store it with `brain secret set server-token`.
 
 ## OpenCode handoff hook
 
@@ -163,4 +169,5 @@ overrides (`BRAIN_BIN`, `BRAIN_CONFIG`, `BRAIN_HANDOFF_SUMMARY`).
 - `SHA-256 mismatch`: the download is corrupt or the release is not trusted.
   Do not run it; retry or report the release.
 - `Could not replace brain.exe`: stop a running `brain` process and retry.
-- Automatic checks are disabled: unset `BRAIN_NO_UPDATE` or set it to `0`.
+- `BRAIN_NO_UPDATE` only affects background update checks. No background check
+  ships yet, and explicit `brain update` runs ignore the switch.

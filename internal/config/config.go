@@ -60,7 +60,24 @@ func Load(path string) (BrainConfig, error) {
 		return BrainConfig{}, fmt.Errorf("parse config %s: %w", path, err)
 	}
 	cfg.applyDefaults()
+	if err := cfg.resolveDataDir(path); err != nil {
+		return BrainConfig{}, err
+	}
 	return cfg, nil
+}
+
+// resolveDataDir makes a relative data_dir relative to the config file, not
+// the caller's current working directory. The YAML remains portable.
+func (c *BrainConfig) resolveDataDir(configPath string) error {
+	if c.DataDir == "" || filepath.IsAbs(c.DataDir) {
+		return nil
+	}
+	abs, err := filepath.Abs(filepath.Join(filepath.Dir(configPath), c.DataDir))
+	if err != nil {
+		return fmt.Errorf("resolve data_dir %q: %w", c.DataDir, err)
+	}
+	c.DataDir = abs
+	return nil
 }
 
 // Save validates cfg and writes it to path atomically.

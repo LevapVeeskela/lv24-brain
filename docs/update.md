@@ -13,8 +13,8 @@ previous binary for rollback.
 | `beta` | Stable and prerelease releases. |
 
 The channel is stored in `brain.yaml` as `update_channel`. `brain update
---channel beta` overrides it for one run once the CLI update use case is
-wired. Release selection uses semantic-version ordering, not upload time.
+--channel beta` overrides it for one run. Release selection uses
+semantic-version ordering, not upload time.
 
 ## Checking and applying
 
@@ -24,15 +24,20 @@ brain update --yes
 brain update --yes --channel beta
 ```
 
-The daily background check is disabled by any truthy `BRAIN_NO_UPDATE` value
-(`1`, `true`, `yes`, `on`):
+`brain update --check` only reports. `brain update --yes` downloads, verifies,
+and applies when a newer release exists. A plain `brain update` without
+`--check` or `--yes` behaves like a check and does not change the binary.
+
+The updater package honors any truthy `BRAIN_NO_UPDATE` value (`1`, `true`,
+`yes`, `on`) for background checks:
 
 ```powershell
 $env:BRAIN_NO_UPDATE = '1'
 ```
 
-Explicit update runs can bypass the environment switch through the updater's
-`IgnoreDisabled` option. The updater never mutates the brain data repository.
+No background scheduler ships yet. The CLI wires the updater's
+`IgnoreDisabled` option, so explicit `brain update` runs always proceed. The
+updater never mutates the brain data repository.
 
 ## Download locations
 
@@ -64,7 +69,7 @@ Each GitHub release must contain `release.json`:
       "os": "windows",
       "arch": "amd64",
       "name": "brain_1.2.3_windows_amd64.exe",
-      "url": "https://github.com/LevapVeeskela/lv24-brain/releases/download/v1.2.3/brain_1.2.3_windows_amd64.exe",
+      "url": "https://github.com/<owner>/lv24-brain/releases/download/v1.2.3/brain_1.2.3_windows_amd64.exe",
       "sha256": "<64 hex characters>"
     }
   ]
@@ -113,9 +118,10 @@ mv "$(command -v brain).previous" "$(command -v brain)"
 
 ## Server updates
 
-Server auto-update is opt-in with `BRAIN_SERVER_AUTO_UPDATE=1`; the default is
-notify-only. Container deployments should pin an image tag or digest and roll
-back by starting the previous digest:
+Server auto-update is not implemented. `BRAIN_SERVER_AUTO_UPDATE` is a
+reserved placeholder and has no effect in this release. Container deployments
+upgrade by pulling or building a new image and roll back by starting the
+previous tag or digest:
 
 ```sh
 docker compose --env-file deploy/.env -f deploy/docker-compose.yml up -d \
@@ -143,9 +149,10 @@ The tests use `httptest` for GitHub API and asset responses; they cover stable
 and beta selection, checksum fallback and mismatch, staged downloads, zip and
 tar.gz archives, apply, rollback, `BRAIN_NO_UPDATE`, and version ordering.
 
-## Current scaffold status
+## Current status
 
-The updater package is complete, and release artifacts are produced by CI. The
-`brain update` CLI use case and background scheduler are wired in a later work
-package; until then the command reports the typed `not implemented` error.
-Manual `.previous` restoration remains the supported rollback path.
+The updater package and the `brain update` command are wired, and release
+artifacts are produced by CI. `--check` reports; `--yes` verifies and applies a
+newer release. There is no background scheduler and no `--rollback` flag yet;
+manual `.previous` restoration remains the supported rollback path. Server
+auto-update is not implemented.

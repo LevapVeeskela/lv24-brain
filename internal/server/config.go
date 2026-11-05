@@ -47,6 +47,15 @@ type Config struct {
 	BootstrapLogin    string
 	BootstrapPassword string
 
+	// DatabaseURL enables durable server-mode persistence. When empty the
+	// server uses the in-memory store, which is a development-only mode.
+	DatabaseURL string
+	// DatabaseTimeout bounds the startup health check and migrations.
+	DatabaseTimeout time.Duration
+	// DatabaseBackupConfirmed acknowledges that a backup exists before
+	// pending migrations are applied to an existing schema.
+	DatabaseBackupConfirmed bool
+
 	OIDC            oidc.Config
 	OIDCAllowSignup bool
 
@@ -69,6 +78,7 @@ func DefaultConfig() Config {
 		SSERetry:        3 * time.Second,
 		ShutdownTimeout: 10 * time.Second,
 		LoginRateLimit:  20,
+		DatabaseTimeout: 30 * time.Second,
 		OIDCAllowSignup: true,
 		Now:             time.Now,
 		PasswordParams:  auth.DefaultArgon2Params,
@@ -159,6 +169,12 @@ func (c Config) Validate() error {
 	if c.LoginRateLimit < 0 || c.LoginRateLimit > 10000 {
 		return errors.New("server: login rate limit must be between 0 and 10000")
 	}
+	if c.DatabaseTimeout < time.Second || c.DatabaseTimeout > 5*time.Minute {
+		return errors.New("server: database timeout must be between 1s and 5m")
+	}
+	if err := validateDatabaseURL(c.DatabaseURL); err != nil {
+		return err
+	}
 	if (c.BootstrapLogin == "") != (c.BootstrapPassword == "") {
 		return errors.New("server: bootstrap admin login and password must be set together")
 	}
@@ -201,6 +217,50 @@ func validateOIDC(cfg oidc.Config) error {
 	return nil
 }
 
+// PersistenceBackend names the configured store for startup logs.
+func (c Config) PersistenceBackend() string {
+	if strings.TrimSpace(c.DatabaseURL) != "" {
+		return "postgres"
+	}
+	return "memory"
+}
+
+// validateDatabaseURL rejects malformed or non-Postgres URLs without ever
+// including the configured value in an error.
+func validateDatabaseURL(raw string) error {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil
+	}
+	parsed, err := url.Parse(raw)
+	if err != nil || parsed.Host == "" {
+		return errors.New("server: database url must be a postgres:// URL with a host")
+	}
+	switch strings.ToLower(parsed.Scheme) {
+	case "postgres", "postgresql":
+		return nil
+	default:
+		return errors.New("server: database url must use the postgres or postgresql scheme")
+	}
+}
+
+// redactDatabaseURL renders a log-safe destination: scheme, host, and path
+// stay, while credentials and query parameters are removed.
+func redactDatabaseURL(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+	parsed, err := url.Parse(raw)
+	if err != nil || parsed.Host == "" {
+		return "<redacted>"
+	}
+	parsed.User = nil
+	parsed.RawQuery = ""
+	parsed.Fragment = ""
+	return parsed.String()
+}
+
 func applyEnvironment(cfg *Config, getenv func(string) string) error {
 	if value := strings.TrimSpace(getenv("BRAIN_JWT_SECRET")); value != "" {
 		cfg.JWTSecret = value
@@ -235,6 +295,20 @@ func applyEnvironment(cfg *Config, getenv func(string) string) error {
 		return err
 	}
 	cfg.LoginRateLimit = rateLimit
+
+	if cfg.DatabaseTimeout, err = envDuration(getenv, "BRAIN_DATABASE_TIMEOUT", cfg.DatabaseTimeout); err != nil {
+		return err
+	}
+	if value := strings.TrimSpace(getenv("BRAIN_DATABASE_URL")); value != "" {
+		cfg.DatabaseURL = value
+	} else if value := strings.TrimSpace(getenv("DATABASE_URL")); value != "" {
+		cfg.DatabaseURL = value
+	}
+	backupConfirmed, err := envBool(getenv, "BRAIN_DATABASE_BACKUP_CONFIRMED", cfg.DatabaseBackupConfirmed)
+	if err != nil {
+		return err
+	}
+	cfg.DatabaseBackupConfirmed = backupConfirmed
 
 	cfg.BootstrapLogin = strings.TrimSpace(getenv("BRAIN_BOOTSTRAP_ADMIN_LOGIN"))
 	cfg.BootstrapPassword = getenv("BRAIN_BOOTSTRAP_ADMIN_PASSWORD")
@@ -303,6 +377,18 @@ func envInt(getenv func(string) string, name string, fallback int) (int, error) 
 	parsed, err := strconv.Atoi(value)
 	if err != nil {
 		return 0, fmt.Errorf("server: %s: %w", name, err)
+	}
+	return parsed, nil
+}
+
+func envBool(getenv func(string) string, name string, fallback bool) (bool, error) {
+	value := strings.TrimSpace(getenv(name))
+	if value == "" {
+		return fallback, nil
+	}
+	parsed, err := strconv.ParseBool(value)
+	if err != nil {
+		return false, fmt.Errorf("server: %s: %w", name, err)
 	}
 	return parsed, nil
 }

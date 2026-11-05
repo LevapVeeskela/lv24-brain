@@ -348,6 +348,10 @@ func notFound(kind, id string) error {
 }
 
 func validateRecordFrontmatter(path string, fm markdown.Frontmatter, wantKind string) error {
+	// The legacy Company Brain wrote notes with kind "notes" (plural).
+	if wantKind == "note" && fm.Kind == "notes" {
+		return nil
+	}
 	if fm.Kind != "" && fm.Kind != wantKind {
 		return domain.NewValidationError("kind", fmt.Sprintf("%s: expected %q, found %q", path, wantKind, fm.Kind))
 	}

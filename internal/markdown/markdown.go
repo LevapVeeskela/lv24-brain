@@ -10,6 +10,7 @@ package markdown
 import (
 	"errors"
 	"fmt"
+	"regexp"
 	"strings"
 	"time"
 
@@ -17,6 +18,10 @@ import (
 )
 
 const delimiter = "---"
+
+// legacyTimestamp accepts the space-separated timestamps written by the
+// original Company Brain PowerShell implementation.
+var legacyTimestamp = regexp.MustCompile(`(?m)^(\s*(?:updated_at|created_at|fresh_until):\s*)(\d{4}-\d{2}-\d{2})[ T](\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})?)`)
 
 // Errors returned when a document does not start with a well-formed
 // frontmatter block.
@@ -57,7 +62,7 @@ func Parse(data []byte, out any) (string, error) {
 		return "", ErrUnterminatedFrontmatter
 	}
 	if out != nil {
-		header := strings.Join(lines[1:end], "\n")
+		header := legacyTimestamp.ReplaceAllString(strings.Join(lines[1:end], "\n"), "${1}${2}T${3}")
 		if err := yaml.Unmarshal([]byte(header), out); err != nil {
 			return "", fmt.Errorf("markdown: decode frontmatter: %w", err)
 		}

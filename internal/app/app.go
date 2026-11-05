@@ -1,5 +1,5 @@
-// Package app holds the brain use cases. Feature implementations land in later
-// work packages; the skeletons below define the stable call surface.
+// Package app holds the brain use cases. Adapters are supplied at bootstrap;
+// this package depends only on the domain, ports, and configuration contracts.
 package app
 
 import (
@@ -27,6 +27,9 @@ func (e *NotImplementedError) Error() string {
 }
 
 func (e *NotImplementedError) Unwrap() error { return ErrNotImplemented }
+
+// DefaultBootstrapBudget bounds the generated context in runes.
+const DefaultBootstrapBudget = 4000
 
 // Dependencies are adapter implementations selected at bootstrap.
 type Dependencies struct {
@@ -69,7 +72,11 @@ type InitResult struct {
 }
 
 // DoctorOptions configures compatibility checks.
-type DoctorOptions struct{}
+type DoctorOptions struct {
+	// ConfigPath is the brain.yaml path used for the run. Empty skips the file
+	// existence probe and checks the in-memory configuration only.
+	ConfigPath string
+}
 
 // DoctorCheck is one compatibility probe.
 type DoctorCheck struct {
@@ -97,6 +104,8 @@ type OpenResult struct {
 // BootstrapOptions selects the project to bootstrap.
 type BootstrapOptions struct {
 	ProjectID string
+	// Budget bounds the summary in runes; zero selects DefaultBootstrapBudget.
+	Budget int
 }
 
 // BootstrapResult summarizes generated context.
@@ -227,48 +236,13 @@ func notImplemented(feature string) error {
 	return &NotImplementedError{Feature: feature}
 }
 
-// Init creates a new brain instance.
-func (a *App) Init(ctx context.Context, opts InitOptions) (InitResult, error) {
-	return InitResult{}, notImplemented("init")
-}
-
-// Doctor checks engine and data compatibility.
-func (a *App) Doctor(ctx context.Context, opts DoctorOptions) (DoctorReport, error) {
-	return DoctorReport{}, notImplemented("doctor")
-}
-
-// Open loads the active project context.
-func (a *App) Open(ctx context.Context, opts OpenOptions) (OpenResult, error) {
-	return OpenResult{}, notImplemented("open")
-}
-
-// Bootstrap builds the agent context for a project.
-func (a *App) Bootstrap(ctx context.Context, opts BootstrapOptions) (BootstrapResult, error) {
-	return BootstrapResult{}, notImplemented("bootstrap")
-}
-
-// Note appends a note.
-func (a *App) Note(ctx context.Context, input NoteInput) (NoteResult, error) {
-	return NoteResult{}, notImplemented("note")
-}
-
-// Decision appends a decision.
-func (a *App) Decision(ctx context.Context, input DecisionInput) (DecisionResult, error) {
-	return DecisionResult{}, notImplemented("decision")
-}
-
-// Attempt appends an attempt.
-func (a *App) Attempt(ctx context.Context, input AttemptInput) (AttemptResult, error) {
-	return AttemptResult{}, notImplemented("attempt")
-}
-
-// Handoff appends a handoff.
-func (a *App) Handoff(ctx context.Context, input HandoffInput) (HandoffResult, error) {
-	return HandoffResult{}, notImplemented("handoff")
-}
-
 // Status reports the configured instance without touching adapters.
 func (a *App) Status(ctx context.Context) (StatusResult, error) {
+	if ctx != nil {
+		if err := ctx.Err(); err != nil {
+			return StatusResult{}, err
+		}
+	}
 	return StatusResult{
 		Mode:          a.cfg.Mode,
 		DataDir:       a.cfg.DataDir,
@@ -278,19 +252,4 @@ func (a *App) Status(ctx context.Context) (StatusResult, error) {
 		EngineVersion: version.Version,
 		UpdateChannel: a.cfg.UpdateChannel,
 	}, nil
-}
-
-// Review builds a review report.
-func (a *App) Review(ctx context.Context, opts ReviewOptions) (ReviewResult, error) {
-	return ReviewResult{}, notImplemented("review")
-}
-
-// Sync pulls, commits and pushes brain data.
-func (a *App) Sync(ctx context.Context, opts SyncOptions) (SyncResult, error) {
-	return SyncResult{}, notImplemented("sync")
-}
-
-// Update checks for and applies engine updates.
-func (a *App) Update(ctx context.Context, opts UpdateOptions) (UpdateResult, error) {
-	return UpdateResult{}, notImplemented("update")
 }

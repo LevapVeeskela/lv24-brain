@@ -2,6 +2,7 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"flag"
@@ -9,22 +10,33 @@ import (
 	"io"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
 	"syscall"
+	"time"
 
+	"github.com/levapveeskela/lv24-brain/internal/adapters/fsstore"
 	"github.com/levapveeskela/lv24-brain/internal/app"
+	"github.com/levapveeskela/lv24-brain/internal/bootstrap"
 	"github.com/levapveeskela/lv24-brain/internal/config"
 	"github.com/levapveeskela/lv24-brain/internal/domain"
+	"github.com/levapveeskela/lv24-brain/internal/migrate"
+	"github.com/levapveeskela/lv24-brain/internal/ports"
 	"github.com/levapveeskela/lv24-brain/internal/server"
 	"github.com/levapveeskela/lv24-brain/internal/version"
 )
 
 func main() {
-	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
+	os.Exit(runWithInput(os.Args[1:], os.Stdin, os.Stdout, os.Stderr))
 }
 
 func run(args []string, stdout, stderr io.Writer) int {
+	return runWithInput(args, os.Stdin, stdout, stderr)
+}
+
+func runWithInput(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
 		printUsage(stderr)
 		return 2
@@ -38,7 +50,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 		printVersion(stdout)
 		return 0
 	case "init":
-		return runInit(rest, stderr)
+		return runInit(rest, stdout, stderr)
 	case "doctor":
 		return runDoctor(rest, stdout, stderr)
 	case "open":
@@ -59,6 +71,16 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return runReview(rest, stdout, stderr)
 	case "sync":
 		return runSync(rest, stdout, stderr)
+	case "index":
+		return runIndex(rest, stdout, stderr)
+	case "search":
+		return runSearch(rest, stdout, stderr)
+	case "connector":
+		return runConnector(rest, stdout, stderr)
+	case "migrate":
+		return runMigrate(rest, stdout, stderr)
+	case "secret":
+		return runSecret(rest, stdin, stdout, stderr)
 	case "serve":
 		return runServe(rest, stdout, stderr)
 	case "update":
@@ -93,6 +115,11 @@ Commands:
   status     Show the configured instance
   review     Build a review report
   sync       Pull, commit, and push brain data
+  index      Rebuild or refresh the local search index
+  search     Search the local index
+  connector  Run a read-only GitHub, GitLab, or IMAP connector
+  migrate    Import a legacy .brain data directory
+  secret     Manage OS-backed secrets (set, list, remove)
   serve      Run the HTTP server
   update     Check for or apply engine updates
   version    Print version information
@@ -100,6 +127,11 @@ Commands:
 
 Global flags:
   --config <path>   Path to brain.yaml (default: $BRAIN_CONFIG or brain.yaml)
+
+Server mode authentication:
+  Set BRAIN_TOKEN in the environment, or store it in the OS secret store:
+    brain secret set server-token
+  The token value is read from stdin; brain login/OIDC is not implemented yet.
 
 Run "brain <command> --help" for command flags.
 `)
@@ -119,6 +151,10 @@ func configFlag(fs *flag.FlagSet) *string {
 	return fs.String("config", defaultPath, "path to brain.yaml")
 }
 
+func initConfigFlag(fs *flag.FlagSet) *string {
+	return fs.String("config", os.Getenv("BRAIN_CONFIG"), "path to brain.yaml (default: <data-dir>/brain.yaml)")
+}
+
 func loadConfigOrDefault(path string) (config.BrainConfig, error) {
 	cfg, err := config.Load(path)
 	if err == nil {
@@ -126,6 +162,17 @@ func loadConfigOrDefault(path string) (config.BrainConfig, error) {
 	}
 	if config.IsNotExist(err) {
 		return config.Default(), nil
+	}
+	return config.BrainConfig{}, err
+}
+
+func loadRequiredConfig(path string) (config.BrainConfig, error) {
+	cfg, err := config.Load(path)
+	if err == nil {
+		return cfg, nil
+	}
+	if config.IsNotExist(err) {
+		return config.BrainConfig{}, fmt.Errorf("no brain instance at %s; run brain init first", path)
 	}
 	return config.BrainConfig{}, err
 }
@@ -139,12 +186,12 @@ func reportError(w io.Writer, command string, err error) int {
 	return 1
 }
 
-func runInit(args []string, stderr io.Writer) int {
+func runInit(args []string, stdout, stderr io.Writer) int {
 	fs := newFlagSet("init", stderr)
 	mode := fs.String("mode", config.ModeLocal, "install mode: local, git, or server")
 	dataDir := fs.String("data-dir", "", "brain data directory")
 	serverURL := fs.String("server-url", "", "brain server URL (server mode)")
-	cfgPath := configFlag(fs)
+	cfgPath := initConfigFlag(fs)
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -153,13 +200,22 @@ func runInit(args []string, stderr io.Writer) int {
 	cfg.DataDir = *dataDir
 	cfg.ServerURL = *serverURL
 	useCase := app.New(cfg, app.Dependencies{})
-	if _, err := useCase.Init(context.Background(), app.InitOptions{
+	result, err := useCase.Init(context.Background(), app.InitOptions{
 		ConfigPath: *cfgPath,
 		Mode:       *mode,
 		DataDir:    *dataDir,
 		ServerURL:  *serverURL,
-	}); err != nil {
+	})
+	if err != nil {
 		return reportError(stderr, "init", err)
+	}
+	fmt.Fprintf(stdout, "initialized %s brain\n", result.Mode)
+	fmt.Fprintf(stdout, "config: %s\n", result.ConfigPath)
+	if result.DataDir != "" {
+		fmt.Fprintf(stdout, "data_dir: %s\n", result.DataDir)
+	}
+	if result.Mode == config.ModeServer {
+		fmt.Fprintln(stdout, "next: set BRAIN_TOKEN or run brain secret set server-token")
 	}
 	return 0
 }
@@ -174,13 +230,24 @@ func runDoctor(args []string, stdout, stderr io.Writer) int {
 	if err != nil {
 		return reportError(stderr, "doctor", err)
 	}
-	useCase := app.New(cfg, app.Dependencies{})
-	report, err := useCase.Doctor(context.Background(), app.DoctorOptions{})
+	useCase, err := bootstrap.Build(cfg)
 	if err != nil {
 		return reportError(stderr, "doctor", err)
 	}
+	defer func() { _ = useCase.Close() }()
+	report, err := useCase.App.Doctor(context.Background(), app.DoctorOptions{ConfigPath: *cfgPath})
+	if err != nil {
+		return reportError(stderr, "doctor", err)
+	}
+	failed := false
 	for _, check := range report.Checks {
 		fmt.Fprintf(stdout, "%s: %s (%s)\n", check.Status, check.Name, check.Message)
+		if check.Status == "fail" {
+			failed = true
+		}
+	}
+	if failed {
+		return 1
 	}
 	return 0
 }
@@ -192,37 +259,98 @@ func runOpen(args []string, stdout, stderr io.Writer) int {
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
-	cfg, err := loadConfigOrDefault(*cfgPath)
+	cfg, err := loadRequiredConfig(*cfgPath)
 	if err != nil {
 		return reportError(stderr, "open", err)
 	}
-	useCase := app.New(cfg, app.Dependencies{})
-	result, err := useCase.Open(context.Background(), app.OpenOptions{ProjectID: *project})
+	useCase, err := bootstrap.Build(cfg)
 	if err != nil {
 		return reportError(stderr, "open", err)
 	}
-	fmt.Fprintf(stdout, "%s\n", result.Project.Name)
+	defer func() { _ = useCase.Close() }()
+	result, err := useCase.App.Open(context.Background(), app.OpenOptions{ProjectID: *project})
+	if err != nil {
+		return reportError(stderr, "open", err)
+	}
+	printOpenResult(stdout, result)
 	return 0
+}
+
+func printOpenResult(w io.Writer, result app.OpenResult) {
+	name := result.Project.Name
+	if name == "" {
+		name = result.Project.ID
+	}
+	fmt.Fprintf(w, "project: %s (%s)\n", name, result.Project.ID)
+	fmt.Fprintf(w, "kind: %s\n", result.Project.Kind)
+	fmt.Fprintf(w, "goal: %s\n", valueOr(result.State.Goal, "not set"))
+	printList(w, "active", result.State.Active)
+	printList(w, "blocked", result.State.Blocked)
+	fmt.Fprintf(w, "next_action: %s\n", valueOr(result.State.NextAction, "not set"))
+	printList(w, "open_questions", result.State.OpenQuestions)
+	if result.State.UpdatedAt.IsZero() {
+		fmt.Fprintln(w, "state_updated: unknown")
+	} else {
+		fmt.Fprintf(w, "state_updated: %s\n", result.State.UpdatedAt.UTC().Format(time.RFC3339))
+	}
+	if result.State.FreshUntil.IsZero() {
+		fmt.Fprintln(w, "fresh_until: not set")
+	} else {
+		fmt.Fprintf(w, "fresh_until: %s\n", result.State.FreshUntil.UTC().Format(time.RFC3339))
+	}
+}
+
+func printList(w io.Writer, label string, values []string) {
+	if len(values) == 0 {
+		fmt.Fprintf(w, "%s: none\n", label)
+		return
+	}
+	fmt.Fprintf(w, "%s:\n", label)
+	for _, value := range values {
+		fmt.Fprintf(w, "- %s\n", value)
+	}
+}
+
+func valueOr(value, fallback string) string {
+	if strings.TrimSpace(value) == "" {
+		return fallback
+	}
+	return value
 }
 
 func runBootstrap(args []string, stdout, stderr io.Writer) int {
 	fs := newFlagSet("bootstrap", stderr)
 	project := fs.String("project", "", "project id")
+	budget := fs.Int("budget", app.DefaultBootstrapBudget, "summary size budget in runes")
 	cfgPath := configFlag(fs)
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
-	cfg, err := loadConfigOrDefault(*cfgPath)
+	cfg, err := loadRequiredConfig(*cfgPath)
 	if err != nil {
 		return reportError(stderr, "bootstrap", err)
 	}
-	useCase := app.New(cfg, app.Dependencies{})
-	result, err := useCase.Bootstrap(context.Background(), app.BootstrapOptions{ProjectID: *project})
+	useCase, err := bootstrap.Build(cfg)
 	if err != nil {
 		return reportError(stderr, "bootstrap", err)
 	}
-	fmt.Fprint(stdout, result.Summary)
+	defer func() { _ = useCase.Close() }()
+	result, err := useCase.App.Bootstrap(context.Background(), app.BootstrapOptions{
+		ProjectID: *project,
+		Budget:    *budget,
+	})
+	if err != nil {
+		return reportError(stderr, "bootstrap", err)
+	}
+	printSummary(stdout, result.Summary)
 	return 0
+}
+
+func printSummary(w io.Writer, summary string) {
+	fmt.Fprint(w, summary)
+	if !strings.HasSuffix(summary, "\n") {
+		fmt.Fprintln(w)
+	}
 }
 
 func runNote(args []string, stdout, stderr io.Writer) int {
@@ -230,19 +358,25 @@ func runNote(args []string, stdout, stderr io.Writer) int {
 	project := fs.String("project", "", "project id")
 	title := fs.String("title", "", "note title")
 	body := fs.String("body", "", "note body in Markdown")
+	tags := fs.String("tags", "", "comma-separated tags")
 	cfgPath := configFlag(fs)
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
-	cfg, err := loadConfigOrDefault(*cfgPath)
+	cfg, err := loadRequiredConfig(*cfgPath)
 	if err != nil {
 		return reportError(stderr, "note", err)
 	}
-	useCase := app.New(cfg, app.Dependencies{})
-	result, err := useCase.Note(context.Background(), app.NoteInput{
+	useCase, err := bootstrap.Build(cfg)
+	if err != nil {
+		return reportError(stderr, "note", err)
+	}
+	defer func() { _ = useCase.Close() }()
+	result, err := useCase.App.Note(context.Background(), app.NoteInput{
 		ProjectID: *project,
 		Title:     *title,
 		Body:      *body,
+		Tags:      splitList(*tags),
 	})
 	if err != nil {
 		return reportError(stderr, "note", err)
@@ -264,12 +398,16 @@ func runDecision(args []string, stdout, stderr io.Writer) int {
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
-	cfg, err := loadConfigOrDefault(*cfgPath)
+	cfg, err := loadRequiredConfig(*cfgPath)
 	if err != nil {
 		return reportError(stderr, "decision", err)
 	}
-	useCase := app.New(cfg, app.Dependencies{})
-	result, err := useCase.Decision(context.Background(), app.DecisionInput{
+	useCase, err := bootstrap.Build(cfg)
+	if err != nil {
+		return reportError(stderr, "decision", err)
+	}
+	defer func() { _ = useCase.Close() }()
+	result, err := useCase.App.Decision(context.Background(), app.DecisionInput{
 		ProjectID:    *project,
 		Title:        *title,
 		Status:       domain.DecisionStatus(*status),
@@ -296,12 +434,16 @@ func runAttempt(args []string, stdout, stderr io.Writer) int {
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
-	cfg, err := loadConfigOrDefault(*cfgPath)
+	cfg, err := loadRequiredConfig(*cfgPath)
 	if err != nil {
 		return reportError(stderr, "attempt", err)
 	}
-	useCase := app.New(cfg, app.Dependencies{})
-	result, err := useCase.Attempt(context.Background(), app.AttemptInput{
+	useCase, err := bootstrap.Build(cfg)
+	if err != nil {
+		return reportError(stderr, "attempt", err)
+	}
+	defer func() { _ = useCase.Close() }()
+	result, err := useCase.App.Attempt(context.Background(), app.AttemptInput{
 		ProjectID:  *project,
 		Title:      *title,
 		Hypothesis: *hypothesis,
@@ -320,18 +462,24 @@ func runHandoff(args []string, stdout, stderr io.Writer) int {
 	project := fs.String("project", "", "project id")
 	summary := fs.String("summary", "", "handoff summary")
 	next := fs.String("next", "", "next action")
+	gitContext := fs.String("git-context", "", "git context for the handoff")
 	cfgPath := configFlag(fs)
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
-	cfg, err := loadConfigOrDefault(*cfgPath)
+	cfg, err := loadRequiredConfig(*cfgPath)
 	if err != nil {
 		return reportError(stderr, "handoff", err)
 	}
-	useCase := app.New(cfg, app.Dependencies{})
-	result, err := useCase.Handoff(context.Background(), app.HandoffInput{
+	useCase, err := bootstrap.Build(cfg)
+	if err != nil {
+		return reportError(stderr, "handoff", err)
+	}
+	defer func() { _ = useCase.Close() }()
+	result, err := useCase.App.Handoff(context.Background(), app.HandoffInput{
 		ProjectID:  *project,
 		Summary:    *summary,
+		GitContext: *gitContext,
 		NextAction: *next,
 	})
 	if err != nil {
@@ -374,19 +522,23 @@ func runReview(args []string, stdout, stderr io.Writer) int {
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
-	cfg, err := loadConfigOrDefault(*cfgPath)
+	cfg, err := loadRequiredConfig(*cfgPath)
 	if err != nil {
 		return reportError(stderr, "review", err)
 	}
-	useCase := app.New(cfg, app.Dependencies{})
-	result, err := useCase.Review(context.Background(), app.ReviewOptions{
+	useCase, err := bootstrap.Build(cfg)
+	if err != nil {
+		return reportError(stderr, "review", err)
+	}
+	defer func() { _ = useCase.Close() }()
+	result, err := useCase.App.Review(context.Background(), app.ReviewOptions{
 		ProjectID: *project,
 		Since:     *since,
 	})
 	if err != nil {
 		return reportError(stderr, "review", err)
 	}
-	fmt.Fprintln(stdout, result.Summary)
+	printSummary(stdout, result.Summary)
 	return 0
 }
 
@@ -398,20 +550,499 @@ func runSync(args []string, stdout, stderr io.Writer) int {
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
-	cfg, err := loadConfigOrDefault(*cfgPath)
+	cfg, err := loadRequiredConfig(*cfgPath)
 	if err != nil {
 		return reportError(stderr, "sync", err)
 	}
-	useCase := app.New(cfg, app.Dependencies{})
-	result, err := useCase.Sync(context.Background(), app.SyncOptions{
+	useCase, err := bootstrap.Build(cfg)
+	if err != nil {
+		return reportError(stderr, "sync", err)
+	}
+	defer func() { _ = useCase.Close() }()
+	result, err := useCase.App.Sync(context.Background(), app.SyncOptions{
 		StatusOnly: *statusOnly,
 		Push:       *push,
 	})
 	if err != nil {
 		return reportError(stderr, "sync", err)
 	}
+	if result.Provider != "" {
+		fmt.Fprintf(stdout, "provider: %s\n", result.Provider)
+	}
 	fmt.Fprintf(stdout, "ahead: %d\nbehind: %d\nchanged: %d\n", result.Ahead, result.Behind, result.Changed)
+	for _, conflict := range result.Conflicts {
+		fmt.Fprintf(stdout, "conflict: %s\n", conflict)
+	}
 	return 0
+}
+
+func runIndex(args []string, stdout, stderr io.Writer) int {
+	fs := newFlagSet("index", stderr)
+	rebuild := fs.Bool("rebuild", false, "delete and rebuild the local index from Markdown")
+	cfgPath := configFlag(fs)
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	if fs.NArg() > 0 {
+		fmt.Fprintf(stderr, "brain index: unexpected arguments: %s\n", strings.Join(fs.Args(), " "))
+		return 2
+	}
+	cfg, err := loadRequiredConfig(*cfgPath)
+	if err != nil {
+		return reportError(stderr, "index", err)
+	}
+	var runtime *bootstrap.Runtime
+	if *rebuild {
+		runtime, err = bootstrap.ResetIndex(cfg)
+	} else {
+		runtime, err = bootstrap.Build(cfg)
+	}
+	if err != nil {
+		return reportError(stderr, "index", err)
+	}
+	defer func() { _ = runtime.Close() }()
+	result, err := runtime.App.Reindex(context.Background(), app.IndexOptions{Rebuild: *rebuild})
+	if err != nil {
+		return reportError(stderr, "index", err)
+	}
+	fmt.Fprintf(stdout, "projects: %d\n", result.Projects)
+	fmt.Fprintf(stdout, "states: %d\n", result.States)
+	fmt.Fprintf(stdout, "notes: %d\n", result.Notes)
+	fmt.Fprintf(stdout, "decisions: %d\n", result.Decisions)
+	fmt.Fprintf(stdout, "attempts: %d\n", result.Attempts)
+	fmt.Fprintf(stdout, "handoffs: %d\n", result.Handoffs)
+	fmt.Fprintf(stdout, "documents: %d\n", result.Documents)
+	fmt.Fprintf(stdout, "rebuilt: %t\n", result.Rebuild)
+	return 0
+}
+
+func runSearch(args []string, stdout, stderr io.Writer) int {
+	fs := newFlagSet("search", stderr)
+	project := fs.String("project", "", "project id filter")
+	limit := fs.Int("limit", app.DefaultSearchLimit, "maximum results")
+	cfgPath := configFlag(fs)
+	flagArgs, queryParts := splitValueFlags(args, map[string]bool{
+		"project": true,
+		"limit":   true,
+		"config":  true,
+	})
+	if err := fs.Parse(flagArgs); err != nil {
+		return 2
+	}
+	if len(queryParts) == 0 {
+		fmt.Fprintln(stderr, "brain search: query is required")
+		return 2
+	}
+	if *limit < 0 {
+		fmt.Fprintln(stderr, "brain search: --limit must not be negative")
+		return 2
+	}
+	query := strings.TrimSpace(strings.Join(queryParts, " "))
+	if query == "" {
+		fmt.Fprintln(stderr, "brain search: query is required")
+		return 1
+	}
+	cfg, err := loadRequiredConfig(*cfgPath)
+	if err != nil {
+		return reportError(stderr, "search", err)
+	}
+	runtime, err := bootstrap.Build(cfg)
+	if err != nil {
+		return reportError(stderr, "search", err)
+	}
+	defer func() { _ = runtime.Close() }()
+	hits, err := runtime.App.Search(context.Background(), query, *project, *limit)
+	if err != nil {
+		return reportError(stderr, "search", err)
+	}
+	for _, hit := range hits {
+		fmt.Fprintf(stdout, "%s/%s/%s\n  %s\n", hit.Kind, hit.ProjectID, hit.Title, hit.Snippet)
+	}
+	return 0
+}
+
+func runConnector(args []string, stdout, stderr io.Writer) int {
+	if len(args) == 0 {
+		printConnectorUsage(stderr)
+		return 2
+	}
+	switch args[0] {
+	case "help", "-h", "--help":
+		printConnectorUsage(stdout)
+		return 0
+	case "run":
+		return runConnectorRun(args[1:], stdout, stderr)
+	default:
+		fmt.Fprintf(stderr, "brain connector: unknown subcommand %q\n\n", args[0])
+		printConnectorUsage(stderr)
+		return 2
+	}
+}
+
+func runConnectorRun(args []string, stdout, stderr io.Writer) int {
+	fs := newFlagSet("connector run", stderr)
+	name := fs.String("name", "", "github, gitlab, or imap")
+	project := fs.String("project", "", "configured repository/project filter (ignored for imap)")
+	sinceRaw := fs.String("since", "", "only items updated at or after this RFC3339 time")
+	limit := fs.Int("limit", 0, "per-collection item limit (0 uses the connector default)")
+	cfgPath := configFlag(fs)
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	if fs.NArg() > 0 {
+		fmt.Fprintf(stderr, "brain connector run: unexpected arguments: %s\n", strings.Join(fs.Args(), " "))
+		return 2
+	}
+	connectorName := strings.ToLower(strings.TrimSpace(*name))
+	switch connectorName {
+	case "github", "gitlab", "imap":
+	default:
+		if connectorName == "" {
+			fmt.Fprintln(stderr, "brain connector run: --name is required")
+		} else {
+			fmt.Fprintf(stderr, "brain connector run: --name must be github, gitlab, or imap (got %q)\n", *name)
+		}
+		return 2
+	}
+	if *limit < 0 {
+		fmt.Fprintln(stderr, "brain connector run: --limit must not be negative")
+		return 2
+	}
+	var since *time.Time
+	if raw := strings.TrimSpace(*sinceRaw); raw != "" {
+		parsed, err := time.Parse(time.RFC3339Nano, raw)
+		if err != nil {
+			fmt.Fprintf(stderr, "brain connector run: --since must be RFC3339: %v\n", err)
+			return 2
+		}
+		utc := parsed.UTC()
+		since = &utc
+	}
+	cfg, err := loadRequiredConfig(*cfgPath)
+	if err != nil {
+		return reportError(stderr, "connector run", err)
+	}
+	connector, err := bootstrap.BuildConnector(cfg, bootstrap.ConnectorOptions{
+		Name:    connectorName,
+		Project: strings.TrimSpace(*project),
+		Limit:   *limit,
+	}, bootstrap.Options{})
+	if err != nil {
+		return reportError(stderr, "connector run", err)
+	}
+	runOptions := ports.ConnectorOptions{Since: since, Limit: *limit}
+	if connectorName != "imap" && strings.TrimSpace(*project) != "" {
+		runOptions.Projects = []string{strings.TrimSpace(*project)}
+	}
+	run, err := connector.Run(context.Background(), runOptions)
+	printConnectorRun(stdout, run)
+	if err != nil {
+		return reportError(stderr, "connector run", err)
+	}
+	if run.Status != domain.ConnectorSuccess {
+		return 1
+	}
+	return 0
+}
+
+func printConnectorRun(w io.Writer, run domain.ConnectorRun) {
+	if run.Source != "" {
+		fmt.Fprintf(w, "source: %s\n", run.Source)
+	}
+	if run.Status != "" {
+		fmt.Fprintf(w, "status: %s\n", run.Status)
+	}
+	keys := make([]string, 0, len(run.Counts))
+	for key := range run.Counts {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		fmt.Fprintf(w, "count %s: %d\n", key, run.Counts[key])
+	}
+	if run.Error != "" {
+		fmt.Fprintf(w, "error: %s\n", run.Error)
+	}
+}
+
+func printConnectorUsage(w io.Writer) {
+	fmt.Fprint(w, `Usage:
+  brain connector run --name github|gitlab|imap [flags]
+
+Flags:
+  --project <value>   GitHub owner/repository or GitLab project filter; ignored for imap
+  --since <RFC3339>   Only collect items updated at or after this time
+  --limit <n>         Per-collection item limit (0 uses the connector default)
+  --config <path>     Path to brain.yaml
+
+Environment:
+  GitHub: BRAIN_GITHUB_REPOS (comma-separated owner/repository),
+          BRAIN_GITHUB_BASE_URL (optional); token key github/token
+  GitLab: BRAIN_GITLAB_PROJECTS (comma-separated), BRAIN_GITLAB_BASE_URL
+          (optional); token key gitlab/token
+  IMAP:   BRAIN_IMAP_ACCOUNT, BRAIN_IMAP_ADDRESS (host:port),
+          BRAIN_IMAP_USERNAME, BRAIN_IMAP_PASSWORD_KEY (optional; default
+          imap/<account-slug>/password), BRAIN_IMAP_FOLDERS (optional
+          comma-separated), BRAIN_IMAP_STATE (optional cursor path)
+
+For github/gitlab, --project also seeds the repository list when the matching
+BRAIN_GITHUB_REPOS/BRAIN_GITLAB_PROJECTS variable is empty. For imap it is
+ignored.
+
+Credentials are resolved from BRAIN_SECRET_* environment variables or the OS
+secret store. Store one with: brain secret set <token-key>
+Connector dumps are written below the brain data directory; values are never
+printed.
+`)
+}
+
+func runMigrate(args []string, stdout, stderr io.Writer) int {
+	fs := newFlagSet("migrate", stderr)
+	from := fs.String("from", "", "legacy .brain data directory")
+	dataDir := fs.String("data-dir", "", "target data directory")
+	dryRun := fs.Bool("dry-run", false, "report without writing")
+	cfgPath := initConfigFlag(fs)
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	if fs.NArg() > 0 {
+		fmt.Fprintf(stderr, "brain migrate: unexpected arguments: %s\n", strings.Join(fs.Args(), " "))
+		return 2
+	}
+	if strings.TrimSpace(*from) == "" {
+		fmt.Fprintln(stderr, "brain migrate: --from is required")
+		return 2
+	}
+
+	target := strings.TrimSpace(*dataDir)
+	configPath := strings.TrimSpace(*cfgPath)
+	if target == "" {
+		loadPath := configPath
+		if loadPath == "" {
+			loadPath = config.FileName
+		}
+		cfg, err := config.Load(loadPath)
+		if err != nil {
+			return reportError(stderr, "migrate", err)
+		}
+		target = strings.TrimSpace(cfg.DataDir)
+		if configPath == "" {
+			configPath = loadPath
+		}
+	}
+	if target == "" {
+		fmt.Fprintln(stderr, "brain migrate: target data directory is required; pass --data-dir or set data_dir in brain.yaml")
+		return 1
+	}
+
+	result, runErr := migrate.Run(context.Background(), migrate.Options{
+		SourceDir: *from,
+		TargetDir: target,
+		DryRun:    *dryRun,
+	})
+	printMigrateResult(stdout, result)
+	if runErr != nil {
+		return reportError(stderr, "migrate", runErr)
+	}
+	if *dryRun {
+		return 0
+	}
+	if err := registerMigratedProjects(result.TargetDir, result); err != nil {
+		return reportError(stderr, "migrate", err)
+	}
+	if configPath == "" {
+		configPath = filepath.Join(result.TargetDir, config.FileName)
+	}
+	if err := setMigratedSchema(configPath, result.TargetDir); err != nil {
+		return reportError(stderr, "migrate", err)
+	}
+	return 0
+}
+
+func registerMigratedProjects(targetDir string, result migrate.Result) error {
+	succeeded := make(map[string]struct{})
+	for _, file := range result.Files {
+		if file.Status == migrate.StatusCreated || file.Status == migrate.StatusUnchanged {
+			succeeded[file.ProjectID] = struct{}{}
+		}
+	}
+	store, err := fsstore.New(targetDir)
+	if err != nil {
+		return err
+	}
+	ctx := context.Background()
+	for _, projectID := range result.Projects {
+		if _, ok := succeeded[projectID]; !ok {
+			continue
+		}
+		_, getErr := store.GetProject(ctx, projectID)
+		if getErr == nil {
+			continue
+		}
+		if !errors.Is(getErr, domain.ErrNotFound) {
+			return getErr
+		}
+		if err := store.PutProject(ctx, domain.Project{
+			ID:   projectID,
+			Name: projectID,
+			Kind: domain.ProjectKindOther,
+		}); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func printMigrateResult(w io.Writer, result migrate.Result) {
+	fmt.Fprintf(w, "created   %d\n", result.Created)
+	fmt.Fprintf(w, "unchanged %d\n", result.Unchanged)
+	fmt.Fprintf(w, "conflicts %d\n", result.Conflicts)
+	fmt.Fprintf(w, "failed    %d\n", result.Failed)
+	for _, file := range result.Files {
+		if file.Status != migrate.StatusConflict && file.Status != migrate.StatusFailed {
+			continue
+		}
+		detail := file.SourcePath
+		if file.TargetPath != "" {
+			detail += " -> " + file.TargetPath
+		}
+		if file.Error != "" {
+			detail += ": " + file.Error
+		}
+		fmt.Fprintf(w, "%s: %s\n", file.Status, detail)
+	}
+}
+
+func setMigratedSchema(configPath, targetDir string) error {
+	cfg, err := config.Load(configPath)
+	if err != nil {
+		if !config.IsNotExist(err) {
+			return err
+		}
+		cfg = config.Default()
+		cfg.Mode = migratedMode(targetDir)
+		cfg.DataDir = targetDir
+	}
+	if cfg.DataDir == "" && cfg.Mode != config.ModeServer {
+		cfg.DataDir = targetDir
+	}
+	if cfg.UpdateChannel == "" {
+		cfg.UpdateChannel = config.ChannelStable
+	}
+	cfg.SchemaVersion = 1
+	return config.Save(configPath, cfg)
+}
+
+func migratedMode(targetDir string) string {
+	if _, err := os.Stat(filepath.Join(targetDir, ".git")); err == nil {
+		return config.ModeGit
+	}
+	return config.ModeLocal
+}
+
+func runSecret(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
+	if len(args) == 0 {
+		printSecretUsage(stderr)
+		return 2
+	}
+	subcommand, rest := args[0], args[1:]
+	switch subcommand {
+	case "help", "-h", "--help":
+		printSecretUsage(stdout)
+		return 0
+	case "set":
+		if len(rest) != 1 {
+			printSecretUsage(stderr)
+			return 2
+		}
+		value, err := readSecretValue(stdin)
+		if err != nil {
+			fmt.Fprintf(stderr, "brain secret set: %v\n", err)
+			return 1
+		}
+		useCase, closeRuntime, err := secretRuntime()
+		if err != nil {
+			return reportError(stderr, "secret set", err)
+		}
+		defer closeRuntime()
+		name, err := useCase.SecretSet(context.Background(), rest[0], value)
+		if err != nil {
+			return reportError(stderr, "secret set", err)
+		}
+		fmt.Fprintln(stdout, name)
+		return 0
+	case "list":
+		if len(rest) != 0 {
+			printSecretUsage(stderr)
+			return 2
+		}
+		useCase, closeRuntime, err := secretRuntime()
+		if err != nil {
+			return reportError(stderr, "secret list", err)
+		}
+		defer closeRuntime()
+		names, err := useCase.SecretList(context.Background())
+		if err != nil {
+			return reportError(stderr, "secret list", err)
+		}
+		for _, name := range names {
+			fmt.Fprintln(stdout, name)
+		}
+		return 0
+	case "remove":
+		if len(rest) != 1 {
+			printSecretUsage(stderr)
+			return 2
+		}
+		useCase, closeRuntime, err := secretRuntime()
+		if err != nil {
+			return reportError(stderr, "secret remove", err)
+		}
+		defer closeRuntime()
+		if err := useCase.SecretRemove(context.Background(), rest[0]); err != nil {
+			return reportError(stderr, "secret remove", err)
+		}
+		fmt.Fprintln(stdout, strings.TrimSpace(rest[0]))
+		return 0
+	default:
+		fmt.Fprintf(stderr, "brain secret: unknown subcommand %q\n\n", subcommand)
+		printSecretUsage(stderr)
+		return 2
+	}
+}
+
+func secretRuntime() (*app.App, func(), error) {
+	runtime, err := bootstrap.Build(config.Default())
+	if err != nil {
+		return nil, func() {}, err
+	}
+	return runtime.App, func() { _ = runtime.Close() }, nil
+}
+
+func printSecretUsage(w io.Writer) {
+	fmt.Fprint(w, `Usage:
+  brain secret set <name>      Read the value from stdin and store it
+  brain secret list            List secret names
+  brain secret remove <name>   Remove a secret from the OS store
+
+Secret values are never printed. Environment-supplied secrets cannot be
+overwritten or removed through this command.
+`)
+}
+
+func readSecretValue(stdin io.Reader) (string, error) {
+	if stdin == nil {
+		return "", errors.New("stdin is not available")
+	}
+	line, err := bufio.NewReader(stdin).ReadString('\n')
+	if err != nil && !errors.Is(err, io.EOF) {
+		return "", err
+	}
+	value := strings.TrimRight(line, "\r\n")
+	if value == "" {
+		return "", errors.New("value is required on stdin")
+	}
+	return value, nil
 }
 
 func runServe(args []string, stdout, stderr io.Writer) int {
@@ -441,7 +1072,7 @@ func runUpdate(args []string, stdout, stderr io.Writer) int {
 	fs := newFlagSet("update", stderr)
 	check := fs.Bool("check", false, "only check for a newer release")
 	yes := fs.Bool("yes", false, "apply without prompting")
-	channel := fs.String("channel", config.ChannelStable, "release channel: stable or beta")
+	channel := fs.String("channel", "", "release channel: stable or beta (default: brain.yaml)")
 	cfgPath := configFlag(fs)
 	if err := fs.Parse(args); err != nil {
 		return 2
@@ -450,8 +1081,12 @@ func runUpdate(args []string, stdout, stderr io.Writer) int {
 	if err != nil {
 		return reportError(stderr, "update", err)
 	}
-	useCase := app.New(cfg, app.Dependencies{})
-	result, err := useCase.Update(context.Background(), app.UpdateOptions{
+	useCase, err := bootstrap.Build(cfg)
+	if err != nil {
+		return reportError(stderr, "update", err)
+	}
+	defer func() { _ = useCase.Close() }()
+	result, err := useCase.App.Update(context.Background(), app.UpdateOptions{
 		Check:   *check,
 		Yes:     *yes,
 		Channel: *channel,
@@ -461,6 +1096,33 @@ func runUpdate(args []string, stdout, stderr io.Writer) int {
 	}
 	fmt.Fprintf(stdout, "current: %s\nlatest: %s\napplied: %t\n", result.Current.Version, result.Latest.Version, result.Applied)
 	return 0
+}
+
+// splitValueFlags separates flags from positional arguments so a query may be
+// written before or after flags. valueFlags names flags that consume a value.
+func splitValueFlags(args []string, valueFlags map[string]bool) (flags, positional []string) {
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		if arg == "--" {
+			positional = append(positional, args[i+1:]...)
+			break
+		}
+		if !strings.HasPrefix(arg, "-") || arg == "-" {
+			positional = append(positional, arg)
+			continue
+		}
+		flags = append(flags, arg)
+		name := strings.TrimLeft(arg, "-")
+		if idx := strings.IndexByte(name, '='); idx >= 0 {
+			name = name[:idx]
+			continue
+		}
+		if valueFlags[name] && i+1 < len(args) {
+			i++
+			flags = append(flags, args[i])
+		}
+	}
+	return flags, positional
 }
 
 func splitList(value string) []string {

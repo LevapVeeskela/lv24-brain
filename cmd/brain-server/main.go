@@ -28,6 +28,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 	if cfg.Notice != "" {
 		logger.Warn(cfg.Notice)
 	}
+	logger.Info("persistence backend", "backend", cfg.PersistenceBackend())
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 

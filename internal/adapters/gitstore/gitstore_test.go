@@ -469,6 +469,8 @@ func TestOpenValidation(t *testing.T) {
 }
 
 func TestSanitizeRedactsCredentials(t *testing.T) {
+	fakeGitHubToken := "ghp_" + "abcdefghijklmnopqrstuvwxyz0123456789"
+	fakeGitLabToken := "glpat-" + "ABCDEFGHIJKLMNOPQRST"
 	cases := []struct {
 		name string
 		in   string
@@ -489,14 +491,14 @@ func TestSanitizeRedactsCredentials(t *testing.T) {
 		},
 		{
 			name: "known token shape",
-			in:   "remote: invalid token ghp_abcdefghijklmnopqrstuvwxyz0123456789",
-			bad:  []string{"ghp_abcdefghijklmnopqrstuvwxyz0123456789"},
+			in:   "remote: invalid token " + fakeGitHubToken,
+			bad:  []string{fakeGitHubToken},
 			want: []string{"***"},
 		},
 		{
 			name: "gitlab token",
-			in:   "auth failed for glpat-ABCDEFGHIJKLMNOPQRST",
-			bad:  []string{"glpat-ABCDEFGHIJKLMNOPQRST"},
+			in:   "auth failed for " + fakeGitLabToken,
+			bad:  []string{fakeGitLabToken},
 			want: []string{"***"},
 		},
 	}

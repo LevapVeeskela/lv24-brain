@@ -30,4 +30,4 @@ Environment overrides take precedence: `BRAIN_BIN`, `BRAIN_CONFIG`,
 `BRAIN_HANDOFF_SUMMARY`.
 
 No secrets belong in the hook or in `brain.yaml`. Authentication for server
-mode is stored by the CLI credential store, never in this file.
+mode comes from BRAIN_TOKEN or the OS secret `server-token`; no token is stored in this file.
