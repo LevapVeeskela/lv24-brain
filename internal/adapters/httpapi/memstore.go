@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"context"
+	"maps"
 	"sort"
 	"strconv"
 	"strings"
@@ -40,6 +41,8 @@ type MemoryStore struct {
 	attempts  map[string]AttemptRecord
 	handoffs  map[string]HandoffRecord
 
+	connectorRuns map[string]ConnectorRunRecord
+
 	refresh map[string]auth.RefreshRecord
 	// revokedSessions and revokedFamilies mirror the durable PostgreSQL
 	// auth_revocations tombstones so a logout racing an in-flight refresh
@@ -62,6 +65,7 @@ func NewMemoryStore() *MemoryStore {
 		decisions:       make(map[string]DecisionRecord),
 		attempts:        make(map[string]AttemptRecord),
 		handoffs:        make(map[string]HandoffRecord),
+		connectorRuns:   make(map[string]ConnectorRunRecord),
 		refresh:         make(map[string]auth.RefreshRecord),
 		revokedSessions: make(map[string]struct{}),
 		revokedFamilies: make(map[string]struct{}),
@@ -1011,6 +1015,127 @@ func (m *MemoryStore) DeleteHandoff(ctx context.Context, id string, expected int
 	revision := m.nextRevisionLocked(ctx, "handoff", id, "delete", nil)
 	delete(m.handoffs, id)
 	return revision, nil
+}
+
+// CreateConnectorRun starts a connector run record. An empty ID is generated,
+// an empty status defaults to running, and an empty start time defaults to now.
+func (m *MemoryStore) CreateConnectorRun(ctx context.Context, run domain.ConnectorRun) (ConnectorRunRecord, domain.SyncRevision, error) {
+	if run.ID == "" {
+		id, err := auth.RandomID("run")
+		if err != nil {
+			return ConnectorRunRecord{}, domain.SyncRevision{}, err
+		}
+		run.ID = id
+	}
+	if run.Status == "" {
+		run.Status = domain.ConnectorRunning
+	}
+	if err := run.Validate(); err != nil {
+		return ConnectorRunRecord{}, domain.SyncRevision{}, err
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if _, exists := m.connectorRuns[run.ID]; exists {
+		return ConnectorRunRecord{}, domain.SyncRevision{}, domain.ErrConflict
+	}
+	if run.StartedAt.IsZero() {
+		run.StartedAt = m.nowUTC()
+	} else {
+		run.StartedAt = run.StartedAt.UTC()
+	}
+	if run.Counts == nil {
+		run.Counts = map[string]int{}
+	}
+	revision := m.nextRevisionLocked(ctx, "connector_run", run.ID, "start", map[string]any{"status": string(run.Status)})
+	record := cloneConnectorRun(ConnectorRunRecord{ConnectorRun: run, Revision: revisionValue(revision)})
+	m.connectorRuns[run.ID] = record
+	return cloneConnectorRun(record), revision, nil
+}
+
+// FinishConnectorRun records the final status, counts and error of a run.
+// expected is the caller's last seen revision; zero skips the check.
+func (m *MemoryStore) FinishConnectorRun(ctx context.Context, id string, status domain.ConnectorStatus, counts map[string]int, errorMessage string, expected int64) (ConnectorRunRecord, domain.SyncRevision, error) {
+	if strings.TrimSpace(id) == "" {
+		return ConnectorRunRecord{}, domain.SyncRevision{}, domain.NewValidationError("connectorRun.id", "is required")
+	}
+	if !status.Valid() {
+		return ConnectorRunRecord{}, domain.SyncRevision{}, domain.NewValidationError("connectorRun.status", "unknown status")
+	}
+	if counts == nil {
+		counts = map[string]int{}
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	current, ok := m.connectorRuns[id]
+	if !ok {
+		return ConnectorRunRecord{}, domain.SyncRevision{}, domain.ErrNotFound
+	}
+	if expected > 0 && current.Revision != expected {
+		return ConnectorRunRecord{}, domain.SyncRevision{}, &ConflictError{
+			Entity: "connector_run", ID: id, Expected: expected, Current: current.Revision,
+		}
+	}
+	finished := m.nowUTC()
+	current.Status = status
+	current.Counts = maps.Clone(counts)
+	current.Error = errorMessage
+	current.FinishedAt = &finished
+	revision := m.nextRevisionLocked(ctx, "connector_run", id, "finish", map[string]any{"status": string(status)})
+	current.Revision = revisionValue(revision)
+	m.connectorRuns[id] = current
+	return cloneConnectorRun(current), revision, nil
+}
+
+// GetConnectorRun loads one connector run.
+func (m *MemoryStore) GetConnectorRun(_ context.Context, id string) (ConnectorRunRecord, error) {
+	if strings.TrimSpace(id) == "" {
+		return ConnectorRunRecord{}, domain.NewValidationError("connectorRun.id", "is required")
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	record, ok := m.connectorRuns[id]
+	if !ok {
+		return ConnectorRunRecord{}, domain.ErrNotFound
+	}
+	return cloneConnectorRun(record), nil
+}
+
+// ListConnectorRuns returns runs newest first with optional source and status
+// filters.
+func (m *MemoryStore) ListConnectorRuns(_ context.Context, filter ConnectorRunFilter) ([]ConnectorRunRecord, error) {
+	if filter.Status != "" && !filter.Status.Valid() {
+		return nil, domain.NewValidationError("connectorRun.status", "unknown status")
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	records := make([]ConnectorRunRecord, 0, len(m.connectorRuns))
+	for _, record := range m.connectorRuns {
+		if filter.Source != "" && record.Source != filter.Source {
+			continue
+		}
+		if filter.Status != "" && record.Status != filter.Status {
+			continue
+		}
+		records = append(records, cloneConnectorRun(record))
+	}
+	sort.Slice(records, func(i, j int) bool {
+		if records[i].StartedAt.Equal(records[j].StartedAt) {
+			return records[i].ID < records[j].ID
+		}
+		return records[i].StartedAt.After(records[j].StartedAt)
+	})
+	return page(records, filter.Limit, filter.Offset), nil
+}
+
+func cloneConnectorRun(record ConnectorRunRecord) ConnectorRunRecord {
+	record.Counts = maps.Clone(record.Counts)
+	if record.FinishedAt != nil {
+		finished := *record.FinishedAt
+		record.FinishedAt = &finished
+	}
+	return record
 }
 
 // Search performs a case-insensitive substring search across knowledge.

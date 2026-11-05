@@ -20,8 +20,8 @@
 // empty for this store. Handlers and SSE clients must rely on EntityKind and
 // the entity's own state instead of the action label.
 //
-// Connector-run and role passthroughs are provided for server bootstrap code;
-// they are not part of httpapi.Store.
+// Connector-run passthroughs implement httpapi.Store and back the server-side
+// connector runner; role passthroughs remain server-bootstrap helpers.
 package serverstore
 
 import (
@@ -457,28 +457,54 @@ func (s *Store) ListRoles(ctx context.Context) ([]postgres.RoleRecord, error) {
 	return roles, mapError(err)
 }
 
-// CreateConnectorRun starts a connector run record. Not part of httpapi.Store.
-func (s *Store) CreateConnectorRun(ctx context.Context, run domain.ConnectorRun) (postgres.ConnectorRunRecord, domain.SyncRevision, error) {
+// CreateConnectorRun starts a connector run record.
+func (s *Store) CreateConnectorRun(ctx context.Context, run domain.ConnectorRun) (httpapi.ConnectorRunRecord, domain.SyncRevision, error) {
 	record, revision, err := s.pg.CreateConnectorRun(ctx, run)
-	return record, revision, mapError(err)
+	if err != nil {
+		return httpapi.ConnectorRunRecord{}, revision, mapError(err)
+	}
+	return connectorRunRecord(record), revision, nil
 }
 
 // FinishConnectorRun records the final state of a connector run.
-func (s *Store) FinishConnectorRun(ctx context.Context, id string, status domain.ConnectorStatus, counts map[string]int, errorMessage string, expected int64) (postgres.ConnectorRunRecord, domain.SyncRevision, error) {
+func (s *Store) FinishConnectorRun(ctx context.Context, id string, status domain.ConnectorStatus, counts map[string]int, errorMessage string, expected int64) (httpapi.ConnectorRunRecord, domain.SyncRevision, error) {
 	record, revision, err := s.pg.FinishConnectorRun(ctx, id, status, counts, errorMessage, expected)
-	return record, revision, mapError(err)
+	if err != nil {
+		return httpapi.ConnectorRunRecord{}, revision, mapError(err)
+	}
+	return connectorRunRecord(record), revision, nil
 }
 
 // GetConnectorRun loads one connector run.
-func (s *Store) GetConnectorRun(ctx context.Context, id string) (postgres.ConnectorRunRecord, error) {
+func (s *Store) GetConnectorRun(ctx context.Context, id string) (httpapi.ConnectorRunRecord, error) {
 	record, err := s.pg.GetConnectorRun(ctx, id)
-	return record, mapError(err)
+	if err != nil {
+		return httpapi.ConnectorRunRecord{}, mapError(err)
+	}
+	return connectorRunRecord(record), nil
 }
 
 // ListConnectorRuns returns connector runs newest first.
-func (s *Store) ListConnectorRuns(ctx context.Context, filter postgres.ConnectorRunFilter) ([]postgres.ConnectorRunRecord, error) {
-	records, err := s.pg.ListConnectorRuns(ctx, filter)
-	return records, mapError(err)
+func (s *Store) ListConnectorRuns(ctx context.Context, filter httpapi.ConnectorRunFilter) ([]httpapi.ConnectorRunRecord, error) {
+	records, err := s.pg.ListConnectorRuns(ctx, postgres.ConnectorRunFilter{
+		Source: filter.Source,
+		Status: filter.Status,
+		Limit:  filter.Limit,
+		Offset: filter.Offset,
+	})
+	if err != nil {
+		return nil, mapError(err)
+	}
+	converted := make([]httpapi.ConnectorRunRecord, 0, len(records))
+	for _, record := range records {
+		converted = append(converted, connectorRunRecord(record))
+	}
+	return converted, nil
+}
+
+// connectorRunRecord converts a postgres row into the httpapi record type.
+func connectorRunRecord(record postgres.ConnectorRunRecord) httpapi.ConnectorRunRecord {
+	return httpapi.ConnectorRunRecord{ConnectorRun: record.ConnectorRun, Revision: record.Revision}
 }
 
 // DeleteConnectorRun removes a connector run.

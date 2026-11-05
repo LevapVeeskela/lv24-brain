@@ -43,8 +43,8 @@ type Runtime struct {
 	// Updater is the concrete updater behind App. Update; the CLI uses it for
 	// the notify-only daily check.
 	Updater *update.Updater
-	// RunStore persists connector run records. It is nil in server mode until
-	// server-side connector runs are implemented.
+	// RunStore persists connector run records. It is nil in server mode: the CLI
+	// calls the server API instead of writing a local Markdown run store.
 	RunStore ports.ConnectorRunStore
 	index    *sqliteindex.Index
 }

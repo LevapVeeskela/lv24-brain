@@ -158,10 +158,17 @@ with `BRAIN_IMAP_PASSWORD_KEY`). Dumps are written below the data directory:
 `mail/<account>/<folder>.md`.
 
 `--since <RFC3339>` limits items by update time; `--limit <n>` caps each
-collection. The command prints source, status, counts, and a sanitized error,
-and persists each run as Markdown under `connectors/runs/`. Connectors require
-local or `git` mode; server mode does not run connectors and has no server-side
-run store yet.
+collection. The command prints source, status, counts, and a sanitized error.
+In local or `git` mode it also writes dumps below the data directory and
+persists each run as Markdown under `connectors/runs/`. In server mode the same
+command calls `POST /v1/connectors/run`; the server stores the run record in
+PostgreSQL (or the in-memory development store) and discards the bulk dumps.
+`GET /v1/connectors/runs` lists records, `GET /v1/connectors/runs/{id}` returns
+one, and `GET /v1/connectors/runs/{id}/markdown` exports it as Markdown.
+`BRAIN_CONNECTOR_TIMEOUT` (default `5m`, clamped to `10s`–`1h`) bounds a server run.
+The CLI allows `1h10s` for this synchronous request, including persistence;
+ordinary API and authentication requests retain the `30s` default timeout.
+IMAP server runs are stateless unless `BRAIN_IMAP_STATE` is set.
 
 ## 2. Git mode
 

@@ -855,6 +855,57 @@ func TestConnectorRunCLI(t *testing.T) {
 	}
 }
 
+func TestConnectorRunServerModeCLI(t *testing.T) {
+	const token = "brain_server_connector_test"
+	var got struct {
+		Name     string   `json:"name"`
+		Limit    int      `json:"limit"`
+		Projects []string `json:"projects"`
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/connectors/run" || r.Method != http.MethodPost {
+			http.NotFound(w, r)
+			return
+		}
+		if gotToken := r.Header.Get("Authorization"); gotToken != "Bearer "+token {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
+			t.Errorf("decode request: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(domain.ConnectorRun{
+			ID:        "run-server-1",
+			Source:    "github",
+			Status:    domain.ConnectorSuccess,
+			StartedAt: time.Now().UTC(),
+			Counts:    map[string]int{"repos": 2},
+		})
+	}))
+	t.Cleanup(server.Close)
+	t.Setenv("BRAIN_TOKEN", token)
+
+	root := t.TempDir()
+	cfgPath := filepath.Join(root, "brain-server.yaml")
+	code, _, stderr := runForTest(t, "init", "--mode", "server", "--server-url", server.URL, "--config", cfgPath)
+	if code != 0 {
+		t.Fatalf("init exit code = %d (stderr: %s)", code, stderr)
+	}
+	code, stdout, stderr := runForTest(t, "connector", "run", "--name", "github", "--limit", "5", "--config", cfgPath)
+	if code != 0 {
+		t.Fatalf("connector exit code = %d (stderr: %s)", code, stderr)
+	}
+	for _, want := range []string{"source: github", "status: success", "count repos: 2"} {
+		if !strings.Contains(stdout, want) {
+			t.Fatalf("connector stdout missing %q:\n%s", want, stdout)
+		}
+	}
+	if got.Name != "github" || got.Limit != 5 {
+		t.Fatalf("request = %+v", got)
+	}
+}
+
 func TestConnectorIMAPFailsClosedCLI(t *testing.T) {
 	for _, key := range []string{"BRAIN_IMAP_ACCOUNT", "BRAIN_IMAP_ADDRESS", "BRAIN_IMAP_USERNAME"} {
 		t.Setenv(key, "")

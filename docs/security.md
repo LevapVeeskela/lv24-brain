@@ -86,10 +86,12 @@ matching `.gitignore` into the data directory.
   data. Store only what the user approved; full mail bodies are out of scope
   for v1.
 - Connector runs are idempotent and produce status, counts, and a sanitized
-  error. `brain connector run` prints that record, writes Markdown dumps under
-  the data directory, and persists the run under `connectors/runs/` in local or
-  `git` mode. Server mode rejects connectors, and no server-side run store is
-  wired yet. Connector events are telemetry about the run, not message content.
+  error. Local or `git` mode writes Markdown dumps under the data directory and
+  persists the run under `connectors/runs/`. Server mode runs through
+  `POST /v1/connectors/run` (admin only), persists the run record, and discards
+  the bulk GitHub/GitLab/IMAP Markdown dumps; the per-run Markdown export
+  contains only status, counts and the sanitized error. Connector events are
+  telemetry about the run, not message content.
 
 ## Server hardening
 
@@ -110,7 +112,10 @@ Implemented in `internal/adapters/httpapi` and `internal/auth`:
 - OIDC authorization code with PKCE, `state`, and `nonce`; issuer metadata is
   discovered over HTTPS and ID tokens are verified.
 - Server-side authorization on every route. `viewer` reads, `member` writes,
-  `admin` manages users and destructive operations.
+  `admin` manages users and destructive operations. Connector execution is
+  admin-only (`POST /v1/connectors/run`); viewers may list, read and export run
+  records. The runner is bounded by `BRAIN_CONNECTOR_TIMEOUT` and uses the same
+  environment/OS secret store as the CLI.
 - Login rate limiting, bounded request bodies, request timeouts, recovery from
   panics, and security headers (`nosniff`, `DENY`, `no-referrer`, no-store,
   restrictive permissions policy).

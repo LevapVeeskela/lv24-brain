@@ -246,14 +246,21 @@ read-only, uses `BODY.PEEK`, keeps metadata and a bounded snippet, and exposes
 no send, delete, move, append, copy, or flag operations. Runs are idempotent and
 build `ConnectorRun` values with sanitized errors.
 
-`brain connector run --name github|gitlab|imap` selects one adapter and writes
-Markdown dumps under the data directory (`github/...`, `gitlab/...`,
-`mail/<account>/...`). The command also persists each run as Markdown at
+`brain connector run --name github|gitlab|imap` selects one adapter. In local or
+git mode it writes Markdown dumps under the data directory (`github/...`,
+`gitlab/...`, `mail/<account>/...`) and persists each run as Markdown at
 `connectors/runs/<UTC timestamp>-<source>-<run-id>.md`, including status,
-counts, and the sanitized error, in addition to printing the record.
-Re-appending the same run record rewrites the same file, so retries stay
-idempotent. Connectors require local or git mode with `data_dir`; server mode
-rejects them, and there is no server-side connector runner or run store yet.
+counts, and the sanitized error. Re-appending the same run record rewrites the
+same file, so retries stay idempotent.
+
+In server mode the command calls `POST /v1/connectors/run`; the server builds the
+same adapter from environment/OS secrets, runs it with `BRAIN_CONNECTOR_TIMEOUT`,
+discards the bulk Markdown dumps, and stores the run record through
+`httpapi.Store` (PostgreSQL when configured). Viewers can list and fetch runs
+at `GET /v1/connectors/runs` and `GET /v1/connectors/runs/{id}`; `GET
+/v1/connectors/runs/{id}/markdown` exports the run record. The run record keeps
+status, counts and the sanitized error. IMAP server runs are stateless unless
+`BRAIN_IMAP_STATE` is set.
 
 `internal/adapters/secrets` resolves credentials from
 `BRAIN_SECRET_<NAME>` first and the platform store second: Windows Credential
@@ -323,7 +330,7 @@ left untouched and the command exits non-zero.
 | No CLI OIDC flow | `brain login` supports local accounts only; OIDC is browser-based |
 | `brain sync` not implemented in server mode | API is the only server sync path |
 | Multi-replica deployment unsupported | the SSE broker and login rate limiter are per-process even with durable tokens |
-| No server-side connector runs | connectors require local/git mode; runs persist under `connectors/runs/` only there |
+| Server-side connector dumps are not persisted | run records and per-run Markdown export are available; bulk GitHub/GitLab/IMAP Markdown dumps are discarded in server mode |
 | CLI search/index are local-only | server mode uses `GET /v1/search`; no local index is built |
 | No server-side Markdown import/export | migrate into Markdown first; server records go through the API |
 | Server auto-update not implemented | upgrade by pulling a new image; `BRAIN_SERVER_AUTO_UPDATE` is reserved |

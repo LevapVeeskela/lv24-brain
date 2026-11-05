@@ -101,6 +101,35 @@ type HandoffRecord struct {
 	Revision int64 `json:"revision"`
 }
 
+// ConnectorRunRecord is a connector run plus its current server revision.
+type ConnectorRunRecord struct {
+	domain.ConnectorRun
+	Revision int64 `json:"revision"`
+}
+
+// ConnectorRunFilter narrows a connector run listing.
+type ConnectorRunFilter struct {
+	Source string
+	Status domain.ConnectorStatus
+	Limit  int
+	Offset int
+}
+
+// ConnectorRunRequest selects one connector run from the HTTP API.
+type ConnectorRunRequest struct {
+	Name     string     `json:"name"`
+	Projects []string   `json:"projects,omitempty"`
+	Since    *time.Time `json:"since,omitempty"`
+	Limit    int        `json:"limit,omitempty"`
+}
+
+// ConnectorRunner executes one connector and persists its run record. The
+// returned run is a completed record even when the connector reported a
+// failed/partial status; build and persistence errors are returned separately.
+type ConnectorRunner interface {
+	Run(ctx context.Context, req ConnectorRunRequest) (domain.ConnectorRun, error)
+}
+
 // ConflictError reports an optimistic concurrency failure and unwraps to
 // domain.ErrConflict.
 type ConflictError struct {
@@ -175,6 +204,11 @@ type Store interface {
 	Search(ctx context.Context, query ports.Query) ([]ports.Hit, error)
 	CurrentRevision(ctx context.Context) (domain.SyncRevision, error)
 	ListRevisions(ctx context.Context, filter RevisionFilter) ([]RevisionRecord, error)
+
+	CreateConnectorRun(ctx context.Context, run domain.ConnectorRun) (ConnectorRunRecord, domain.SyncRevision, error)
+	FinishConnectorRun(ctx context.Context, id string, status domain.ConnectorStatus, counts map[string]int, errorMessage string, expected int64) (ConnectorRunRecord, domain.SyncRevision, error)
+	GetConnectorRun(ctx context.Context, id string) (ConnectorRunRecord, error)
+	ListConnectorRuns(ctx context.Context, filter ConnectorRunFilter) ([]ConnectorRunRecord, error)
 }
 
 // revisionValue converts a server revision into its numeric id.

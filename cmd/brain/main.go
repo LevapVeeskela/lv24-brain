@@ -1096,11 +1096,27 @@ func runConnectorRun(args []string, stdout, stderr io.Writer) int {
 	if err != nil {
 		return reportError(stderr, "connector run", err)
 	}
-	connector, err := bootstrap.BuildConnector(cfg, bootstrap.ConnectorOptions{
+	opts := bootstrap.ConnectorOptions{
 		Name:    connectorName,
 		Project: strings.TrimSpace(*project),
 		Limit:   *limit,
-	}, bootstrap.Options{})
+	}
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	if cfg.Mode == config.ModeServer {
+		run, err := bootstrap.RunServerConnector(ctx, cfg, opts, since)
+		printConnectorRun(stdout, run)
+		if err != nil {
+			return reportError(stderr, "connector run", err)
+		}
+		if run.Status != domain.ConnectorSuccess {
+			return 1
+		}
+		return 0
+	}
+
+	connector, err := bootstrap.BuildConnector(cfg, opts, bootstrap.Options{})
 	if err != nil {
 		return reportError(stderr, "connector run", err)
 	}
@@ -1115,8 +1131,6 @@ func runConnectorRun(args []string, stdout, stderr io.Writer) int {
 	if connectorName != "imap" && strings.TrimSpace(*project) != "" {
 		runOptions.Projects = []string{strings.TrimSpace(*project)}
 	}
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
 	run, err := connector.Run(ctx, runOptions)
 	printConnectorRun(stdout, run)
 	if err != nil {
@@ -1174,8 +1188,10 @@ ignored.
 
 Credentials are resolved from BRAIN_SECRET_* environment variables or the OS
 secret store. Store one with: brain secret set <token-key>
-Connector dumps are written below the brain data directory; values are never
-printed.
+In local/git mode connector dumps are written below the brain data directory.
+In server mode the command calls POST /v1/connectors/run; the server stores the
+run record (PostgreSQL when configured) and discards bulk dumps. The run record
+is exported by GET /v1/connectors/runs/{id}/markdown. Values are never printed.
 `)
 }
 

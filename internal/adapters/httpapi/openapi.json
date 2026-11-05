@@ -167,6 +167,29 @@
           "detail": { "type": "object", "additionalProperties": true },
           "createdAt": { "type": "string", "format": "date-time" }
         }
+      },
+      "ConnectorRun": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "string" },
+          "source": { "type": "string", "enum": ["github", "gitlab", "imap"] },
+          "startedAt": { "type": "string", "format": "date-time" },
+          "finishedAt": { "type": "string", "format": "date-time" },
+          "status": { "type": "string", "enum": ["running", "success", "partial", "failed"] },
+          "counts": { "type": "object", "additionalProperties": { "type": "integer" } },
+          "error": { "type": "string" },
+          "revision": { "type": "integer", "format": "int64" }
+        }
+      },
+      "ConnectorRunRequest": {
+        "type": "object",
+        "required": ["name"],
+        "properties": {
+          "name": { "type": "string", "enum": ["github", "gitlab", "imap"] },
+          "projects": { "type": "array", "items": { "type": "string" } },
+          "since": { "type": "string", "format": "date-time" },
+          "limit": { "type": "integer", "minimum": 0 }
+        }
       }
     }
   },
@@ -474,6 +497,82 @@
             "content": { "text/event-stream": { "schema": { "type": "string" } } }
           },
           "401": { "description": "Unauthenticated" }
+        }
+      }
+    },
+    "/v1/connectors/run": {
+      "post": {
+        "summary": "Run a read-only GitHub, GitLab, or IMAP connector (admin)",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/ConnectorRunRequest" }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Completed run record; inspect status for success, partial, or failed",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ConnectorRun" }
+              }
+            }
+          },
+          "400": { "description": "Invalid request", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } },
+          "403": { "description": "Admin role required" },
+          "501": { "description": "Connector runner is not configured" }
+        }
+      }
+    },
+    "/v1/connectors/runs": {
+      "get": {
+        "summary": "List connector runs, newest first",
+        "parameters": [
+          { "name": "source", "in": "query", "schema": { "type": "string" } },
+          { "name": "status", "in": "query", "schema": { "type": "string", "enum": ["running", "success", "partial", "failed"] } },
+          { "name": "limit", "in": "query", "schema": { "type": "integer" } },
+          { "name": "offset", "in": "query", "schema": { "type": "integer" } }
+        ],
+        "responses": {
+          "200": {
+            "description": "Connector runs",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "items": { "type": "array", "items": { "$ref": "#/components/schemas/ConnectorRun" } }
+                  }
+                }
+              }
+            }
+          },
+          "400": { "description": "Unknown status filter" }
+        }
+      }
+    },
+    "/v1/connectors/runs/{id}": {
+      "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }],
+      "get": {
+        "summary": "Get one connector run",
+        "responses": {
+          "200": { "description": "Connector run", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ConnectorRun" } } } },
+          "404": { "description": "Not found" }
+        }
+      }
+    },
+    "/v1/connectors/runs/{id}/markdown": {
+      "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }],
+      "get": {
+        "summary": "Export one connector run as Markdown",
+        "responses": {
+          "200": {
+            "description": "Markdown run record",
+            "content": { "text/markdown": { "schema": { "type": "string" } } }
+          },
+          "404": { "description": "Not found" }
         }
       }
     }

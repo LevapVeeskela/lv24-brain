@@ -41,6 +41,7 @@ type Config struct {
 	PasswordParams  auth.Argon2Params
 	OIDC            auth.OIDCProvider
 	OIDCAllowSignup bool
+	ConnectorRunner ConnectorRunner
 	Now             func() time.Time
 	Logger          *slog.Logger
 	Build           BuildInfo
@@ -224,6 +225,12 @@ func (a *API) routes() {
 
 	a.authed("GET /v1/search", a.search, domain.RoleViewer, false)
 	a.authed("GET /v1/revisions", a.listRevisions, domain.RoleViewer, false)
+
+	a.authed("POST /v1/connectors/run", a.runConnector, domain.RoleAdmin, false)
+	a.authed("GET /v1/connectors/runs", a.listConnectorRuns, domain.RoleViewer, false)
+	a.authed("GET /v1/connectors/runs/{id}/markdown", a.exportConnectorRun, domain.RoleViewer, false)
+	a.authed("GET /v1/connectors/runs/{id}", a.getConnectorRun, domain.RoleViewer, false)
+
 	a.authed("GET /v1/events", a.events, domain.RoleViewer, true)
 }
 

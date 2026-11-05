@@ -162,6 +162,16 @@ func TestHealthVersionAndOpenAPI(t *testing.T) {
 	if _, ok := paths["/v1/events"]; !ok {
 		t.Fatal("openapi is missing /v1/events")
 	}
+	for _, path := range []string{
+		"/v1/connectors/run",
+		"/v1/connectors/runs",
+		"/v1/connectors/runs/{id}",
+		"/v1/connectors/runs/{id}/markdown",
+	} {
+		if _, ok := paths[path]; !ok {
+			t.Fatalf("openapi is missing %s", path)
+		}
+	}
 }
 
 func TestUnauthenticatedRequests(t *testing.T) {

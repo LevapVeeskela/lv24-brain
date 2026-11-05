@@ -97,6 +97,66 @@ func mustProject(t *testing.T, ctx context.Context, store *Store, id string) htt
 	return record
 }
 
+func TestConnectorRunLifecycle(t *testing.T) {
+	store := newTestStore(t)
+	ctx := testContext(t)
+
+	record, revision, err := store.CreateConnectorRun(ctx, domain.ConnectorRun{
+		Source:    "github",
+		Status:    domain.ConnectorRunning,
+		StartedAt: time.Now().UTC(),
+	})
+	if err != nil {
+		t.Fatalf("CreateConnectorRun: %v", err)
+	}
+	if record.ID == "" || record.Revision == 0 || revision.Value == "" {
+		t.Fatalf("created = %+v revision = %+v", record, revision)
+	}
+
+	finished, finishRevision, err := store.FinishConnectorRun(ctx, record.ID, domain.ConnectorSuccess, map[string]int{"repos": 1}, "", 0)
+	if err != nil {
+		t.Fatalf("FinishConnectorRun: %v", err)
+	}
+	if finished.Status != domain.ConnectorSuccess || finished.Counts["repos"] != 1 {
+		t.Fatalf("finished = %+v", finished)
+	}
+	if finishRevision.Value == "" || finished.Revision <= record.Revision {
+		t.Fatalf("finish revision = %+v record revision = %d", finishRevision, record.Revision)
+	}
+
+	got, err := store.GetConnectorRun(ctx, record.ID)
+	if err != nil {
+		t.Fatalf("GetConnectorRun: %v", err)
+	}
+	if got.ID != record.ID || got.Status != domain.ConnectorSuccess {
+		t.Fatalf("got = %+v", got)
+	}
+
+	list, err := store.ListConnectorRuns(ctx, httpapi.ConnectorRunFilter{Source: "github", Limit: 10})
+	if err != nil {
+		t.Fatalf("ListConnectorRuns: %v", err)
+	}
+	if len(list) != 1 || list[0].ID != record.ID {
+		t.Fatalf("list = %+v", list)
+	}
+
+	if _, _, err := store.FinishConnectorRun(ctx, record.ID, domain.ConnectorSuccess, nil, "", 1); err == nil {
+		t.Fatal("expected a revision conflict")
+	} else {
+		var conflict *httpapi.ConflictError
+		if !errors.As(err, &conflict) {
+			t.Fatalf("conflict error = %v", err)
+		}
+	}
+
+	if _, err := store.DeleteConnectorRun(ctx, record.ID, 0); err != nil {
+		t.Fatalf("DeleteConnectorRun: %v", err)
+	}
+	if _, err := store.GetConnectorRun(ctx, record.ID); !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("Get after delete = %v, want ErrNotFound", err)
+	}
+}
+
 func TestStorePing(t *testing.T) {
 	store := newTestStore(t)
 	if err := store.Ping(testContext(t)); err != nil {

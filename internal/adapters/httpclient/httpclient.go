@@ -108,13 +108,14 @@ func (e *ConflictError) Unwrap() error { return domain.ErrConflict }
 
 // Client talks to the brain HTTP API.
 type Client struct {
-	baseURL    string
-	token      string
-	provider   TokenProvider
-	refresher  func(context.Context) (string, error)
-	refreshMu  sync.Mutex
-	httpClient *http.Client
-	maxBody    int64
+	baseURL             string
+	token               string
+	provider            TokenProvider
+	refresher           func(context.Context) (string, error)
+	refreshMu           sync.Mutex
+	httpClient          *http.Client
+	connectorHTTPClient *http.Client
+	maxBody             int64
 }
 
 // New validates cfg and returns a client.
@@ -135,13 +136,21 @@ func New(cfg Config) (*Client, error) {
 	if httpClient == nil {
 		httpClient = &http.Client{Timeout: timeout}
 	}
+	connectorHTTPClient := httpClient
+	if cfg.HTTPClient == nil && cfg.Timeout <= 0 {
+		// A synchronous connector can consume the server's full one-hour
+		// maximum plus its detached persistence window. Keep ordinary requests,
+		// especially refresh under the shared auth lock, bounded to 30 seconds.
+		connectorHTTPClient = &http.Client{Timeout: time.Hour + 10*time.Second}
+	}
 	return &Client{
-		baseURL:    baseURL,
-		token:      strings.TrimSpace(cfg.Token),
-		provider:   cfg.TokenProvider,
-		refresher:  cfg.Refresh,
-		httpClient: httpClient,
-		maxBody:    maxBody,
+		baseURL:             baseURL,
+		token:               strings.TrimSpace(cfg.Token),
+		provider:            cfg.TokenProvider,
+		refresher:           cfg.Refresh,
+		httpClient:          httpClient,
+		connectorHTTPClient: connectorHTTPClient,
+		maxBody:             maxBody,
 	}, nil
 }
 
@@ -209,6 +218,10 @@ func (c *Client) doWithToken(ctx context.Context, method, path string, query url
 }
 
 func (c *Client) execute(ctx context.Context, method, path string, query url.Values, body, out any, tokenOverride string, anonymous, allowRefresh bool) error {
+	return c.executeWithClient(ctx, method, path, query, body, out, tokenOverride, anonymous, allowRefresh, c.httpClient)
+}
+
+func (c *Client) executeWithClient(ctx context.Context, method, path string, query url.Values, body, out any, tokenOverride string, anonymous, allowRefresh bool, httpClient *http.Client) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -248,7 +261,7 @@ func (c *Client) execute(ctx context.Context, method, path string, query url.Val
 		request.Header.Set("Authorization", "Bearer "+token)
 	}
 
-	response, err := c.httpClient.Do(request)
+	response, err := httpClient.Do(request)
 	if err != nil {
 		return c.transportError(ctx, method, path, err, token)
 	}
@@ -267,7 +280,7 @@ func (c *Client) execute(ctx context.Context, method, path string, query url.Val
 			fresh, refreshErr := c.refreshAccessToken(ctx, token)
 			switch {
 			case refreshErr == nil && fresh != "":
-				return c.execute(ctx, method, path, query, body, out, fresh, false, false)
+				return c.executeWithClient(ctx, method, path, query, body, out, fresh, false, false, httpClient)
 			case refreshErr != nil && !errors.Is(refreshErr, ErrUnauthorized) && !errors.Is(refreshErr, errNoRefreshToken):
 				// Surface transient refresh failures (5xx, transport) instead
 				// of pretending the original 401 was the whole story. A

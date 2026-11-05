@@ -112,8 +112,9 @@ type Connector interface {
 }
 
 // ConnectorRunStore persists connector run records for review and audit.
-// Local and Git modes write Markdown under connectors/runs. There is no
-// server-side run store yet: server mode returns a nil ConnectorRunStore.
+// Local and Git modes write Markdown under connectors/runs. Server mode does
+// not expose this interface to the CLI runtime; brain-server stores runs through
+// httpapi.Store and the HTTP API.
 type ConnectorRunStore interface {
 	AppendConnectorRun(ctx context.Context, run domain.ConnectorRun) error
 	// ListConnectorRuns returns runs newest first. An empty source means every

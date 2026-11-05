@@ -188,7 +188,9 @@ survive a restart; refresh rotation still revokes the whole family when a used
 token is presented again. Migration `0003_auth_revocations.sql` adds durable
 family/session revocation tombstones that are never pruned, so an expired or
 pruned token row cannot resurrect a revoked family or session. Connector runs
-remain a local/`git` feature and are not persisted server-side yet.
+are persisted server-side in the `connector_runs` table (migration `0001`).
+Server mode discards bulk Markdown dumps and exports each run record on demand
+through `GET /v1/connectors/runs/{id}/markdown`.
 
 Current limits:
 

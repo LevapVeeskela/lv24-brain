@@ -43,6 +43,8 @@ type Config struct {
 	SSERetry        time.Duration
 	ShutdownTimeout time.Duration
 	LoginRateLimit  int
+	// ConnectorTimeout bounds one server-side connector run.
+	ConnectorTimeout time.Duration
 
 	BootstrapLogin    string
 	BootstrapPassword string
@@ -67,21 +69,22 @@ type Config struct {
 // signing key. Production callers must set BRAIN_JWT_SECRET via LoadConfig.
 func DefaultConfig() Config {
 	return Config{
-		Addr:            defaultAddr,
-		JWTSecret:       randomSecret(),
-		Issuer:          defaultIssuer,
-		Audience:        defaultAudience,
-		AccessTTL:       15 * time.Minute,
-		RefreshTTL:      30 * 24 * time.Hour,
-		MaxBodyBytes:    1 << 20,
-		SSEHeartbeat:    15 * time.Second,
-		SSERetry:        3 * time.Second,
-		ShutdownTimeout: 10 * time.Second,
-		LoginRateLimit:  20,
-		DatabaseTimeout: 30 * time.Second,
-		OIDCAllowSignup: true,
-		Now:             time.Now,
-		PasswordParams:  auth.DefaultArgon2Params,
+		Addr:             defaultAddr,
+		JWTSecret:        randomSecret(),
+		Issuer:           defaultIssuer,
+		Audience:         defaultAudience,
+		AccessTTL:        15 * time.Minute,
+		RefreshTTL:       30 * 24 * time.Hour,
+		MaxBodyBytes:     1 << 20,
+		SSEHeartbeat:     15 * time.Second,
+		SSERetry:         3 * time.Second,
+		ShutdownTimeout:  10 * time.Second,
+		LoginRateLimit:   20,
+		ConnectorTimeout: 5 * time.Minute,
+		DatabaseTimeout:  30 * time.Second,
+		OIDCAllowSignup:  true,
+		Now:              time.Now,
+		PasswordParams:   auth.DefaultArgon2Params,
 	}
 }
 
@@ -168,6 +171,9 @@ func (c Config) Validate() error {
 	}
 	if c.LoginRateLimit < 0 || c.LoginRateLimit > 10000 {
 		return errors.New("server: login rate limit must be between 0 and 10000")
+	}
+	if c.ConnectorTimeout < 10*time.Second || c.ConnectorTimeout > time.Hour {
+		return errors.New("server: connector timeout must be between 10s and 1h")
 	}
 	if c.DatabaseTimeout < time.Second || c.DatabaseTimeout > 5*time.Minute {
 		return errors.New("server: database timeout must be between 1s and 5m")
@@ -295,6 +301,10 @@ func applyEnvironment(cfg *Config, getenv func(string) string) error {
 		return err
 	}
 	cfg.LoginRateLimit = rateLimit
+	if cfg.ConnectorTimeout, err = envDuration(getenv, "BRAIN_CONNECTOR_TIMEOUT", cfg.ConnectorTimeout); err != nil {
+		return err
+	}
+	cfg.ConnectorTimeout = max(10*time.Second, min(cfg.ConnectorTimeout, time.Hour))
 
 	if cfg.DatabaseTimeout, err = envDuration(getenv, "BRAIN_DATABASE_TIMEOUT", cfg.DatabaseTimeout); err != nil {
 		return err

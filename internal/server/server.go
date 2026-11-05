@@ -16,6 +16,7 @@ import (
 	"github.com/levapveeskela/lv24-brain/internal/adapters/httpapi"
 	"github.com/levapveeskela/lv24-brain/internal/adapters/oidc"
 	"github.com/levapveeskela/lv24-brain/internal/adapters/postgres"
+	"github.com/levapveeskela/lv24-brain/internal/adapters/secrets"
 	"github.com/levapveeskela/lv24-brain/internal/adapters/serverstore"
 	"github.com/levapveeskela/lv24-brain/internal/auth"
 	"github.com/levapveeskela/lv24-brain/internal/domain"
@@ -84,6 +85,7 @@ func New(ctx context.Context, cfg Config, logger *slog.Logger) (*Server, error) 
 		provider = authenticator
 	}
 
+	connectorRunner := newConnectorRunner(store, secrets.Default(), cfg.ConnectorTimeout, logger)
 	api, err := httpapi.New(httpapi.Config{
 		Secret:          []byte(cfg.JWTSecret),
 		Issuer:          cfg.Issuer,
@@ -97,6 +99,7 @@ func New(ctx context.Context, cfg Config, logger *slog.Logger) (*Server, error) 
 		PasswordParams:  cfg.PasswordParams,
 		OIDC:            provider,
 		OIDCAllowSignup: cfg.OIDCAllowSignup,
+		ConnectorRunner: connectorRunner,
 		Now:             cfg.Now,
 		Logger:          logger,
 	}, store)

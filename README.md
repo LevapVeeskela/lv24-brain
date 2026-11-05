@@ -23,7 +23,7 @@ The engine has moved past the initial scaffold. Implemented and tested today:
 | Git sync | `fetch`, `pull --rebase`, commit, optional push; read-only `--status`; conflict reporting |
 | HTTP server | Health/readiness/version, OpenAPI JSON, JWT + rotating refresh tokens, API tokens, durable auth tables (migrations `0002_auth_tokens.sql` and `0003_auth_revocations.sql`, server schema 3), local admin bootstrap, OIDC (PKCE/state/nonce), roles `admin\|member\|viewer`, SSE revision stream; Postgres when `BRAIN_DATABASE_URL` is set, in-memory fallback otherwise |
 | Server-mode CLI | `brain login` / `brain logout`; one atomic OS secret-store bundle `server-session` (server URL, access token, refresh token) bound to the configured `server_url`; `server-token` remains an explicit static API-token fallback; the HTTP client refreshes once on `401` and retries; `BRAIN_TOKEN` overrides stored credentials |
-| Connectors | GitHub, GitLab, and IMAP adapters plus `brain connector run`; Markdown dumps under the data directory and run records in `connectors/runs/` in local/`git` mode; server-side connector runs are not implemented |
+| Connectors | GitHub, GitLab, and IMAP adapters plus `brain connector run`; local/`git` writes Markdown dumps and run records under the data directory. Server mode runs through `POST /v1/connectors/run`, stores run records in PostgreSQL, and exports each run as Markdown at `GET /v1/connectors/runs/{id}/markdown` |
 | Auto-update | `brain update --check`, `--yes`, and `--rollback`; notify-only daily check; release check, SHA-256 verification, staged apply, previous binary kept; GoReleaser release workflow |
 | Installers | Windows PowerShell/BAT installer (with optional OpenCode handoff hook) and macOS/Linux bash installer |
 | Migration | `brain migrate` imports legacy `.brain` knowledge (idempotent, dry-run, path validation), registers projects, and sets `schema_version` |
@@ -43,9 +43,10 @@ Known gaps, stated plainly:
 
 - Server auto-update is not implemented; `BRAIN_SERVER_AUTO_UPDATE` is a
   reserved placeholder and deployments upgrade by replacing the image.
-- `brain connector run` requires local or `git` mode; it persists run records
-  under `connectors/runs/`, but there is no server-side connector runner or
-  server-side run store yet.
+- Server-side connector runs persist the run record, status, counts and
+  sanitized error in PostgreSQL, but discard the bulk connector Markdown dumps.
+  The per-run Markdown export contains the run record, not the dump content.
+  IMAP server runs are stateless unless `BRAIN_IMAP_STATE` is set.
 - `brain sync` is not implemented in server mode; the server API is the sync
   path.
 - `brain index` and `brain search` are local-only; server-mode search uses
@@ -133,6 +134,7 @@ printf '%s\n' '<admin password>' | ./bin/brain login --config ~/brain-server.yam
 ./bin/brain status --config ~/brain-server.yaml
 ./bin/brain note --project demo --title "First note" --body "Server smoke" \
   --config ~/brain-server.yaml
+./bin/brain connector run --name github --config ~/brain-server.yaml
 ./bin/brain logout --config ~/brain-server.yaml
 ```
 
