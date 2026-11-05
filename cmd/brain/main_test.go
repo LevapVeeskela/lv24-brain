@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -1482,5 +1483,147 @@ func TestProjectSetDefaultsNameToID(t *testing.T) {
 	project := readCLIRegistry(t, dataDir).Projects[0]
 	if project.Name != "plain" || project.Kind != "other" {
 		t.Fatalf("project = %+v", project)
+	}
+}
+
+func TestProjectSetRejectsExplicitEmptyFlags(t *testing.T) {
+	t.Setenv("BRAIN_CONFIG", "")
+	root := t.TempDir()
+	dataDir := filepath.Join(root, "brain")
+	cfgPath := filepath.Join(dataDir, "brain.yaml")
+	if code, _, stderr := runForTest(t, "init", "--mode", "local", "--data-dir", dataDir); code != 0 {
+		t.Fatalf("init exit code = %d (stderr: %s)", code, stderr)
+	}
+
+	tests := []struct {
+		name       string
+		args       []string
+		wantCode   int
+		wantStderr string
+	}{
+		{
+			name:       "empty path",
+			args:       []string{"project", "set", "demo", "--path", "", "--config", cfgPath},
+			wantCode:   2,
+			wantStderr: "must not be empty",
+		},
+		{
+			name:       "empty path with equals",
+			args:       []string{"project", "set", "demo", "--path=", "--config", cfgPath},
+			wantCode:   2,
+			wantStderr: "must not be empty",
+		},
+		{
+			name:       "blank alias",
+			args:       []string{"project", "set", "demo", "--alias", "  ", "--config", cfgPath},
+			wantCode:   2,
+			wantStderr: "must not be empty",
+		},
+		{
+			name:       "empty kind",
+			args:       []string{"project", "set", "demo", "--kind", "", "--config", cfgPath},
+			wantCode:   2,
+			wantStderr: "--kind must not be empty",
+		},
+		{
+			name:       "empty name on create",
+			args:       []string{"project", "set", "demo", "--name", "", "--config", cfgPath},
+			wantCode:   1,
+			wantStderr: "project.name",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			code, _, stderr := runForTest(t, test.args...)
+			if code != test.wantCode || !strings.Contains(stderr, test.wantStderr) {
+				t.Fatalf("exit code = %d, stderr = %q; want %d containing %q", code, stderr, test.wantCode, test.wantStderr)
+			}
+		})
+	}
+}
+
+func TestProjectSetDeduplicatesRepeatableFlags(t *testing.T) {
+	t.Setenv("BRAIN_CONFIG", "")
+	root := t.TempDir()
+	dataDir := filepath.Join(root, "brain")
+	cfgPath := filepath.Join(dataDir, "brain.yaml")
+	if code, _, stderr := runForTest(t, "init", "--mode", "local", "--data-dir", dataDir); code != 0 {
+		t.Fatalf("init exit code = %d (stderr: %s)", code, stderr)
+	}
+
+	projectPath := filepath.Join(root, "src", "demo")
+	code, stdout, stderr := runForTest(t, "project", "set", "demo",
+		"--path", projectPath,
+		"--path", "  "+projectPath+"  ",
+		"--alias", "d",
+		"--alias", "d",
+		"--config", cfgPath)
+	if code != 0 {
+		t.Fatalf("project set exit code = %d (stderr: %s)", code, stderr)
+	}
+	project := readCLIRegistry(t, dataDir).Projects[0]
+	if len(project.Paths) != 1 || project.Paths[0] != projectPath {
+		t.Fatalf("paths = %+v, want one deduplicated path", project.Paths)
+	}
+	if len(project.Aliases) != 1 || project.Aliases[0] != "d" {
+		t.Fatalf("aliases = %+v, want one deduplicated alias", project.Aliases)
+	}
+	if strings.Count(stdout, projectPath) != 1 {
+		t.Fatalf("project set output repeated the path:\n%s", stdout)
+	}
+}
+
+func TestProjectClearServerModeSendsEmptyArrays(t *testing.T) {
+	t.Setenv("BRAIN_CONFIG", "")
+	t.Setenv("BRAIN_TOKEN", "test-token")
+	project := domain.Project{
+		ID:      "demo",
+		Name:    "Demo",
+		Paths:   []string{"/src/demo"},
+		Aliases: []string{"d"},
+		Kind:    domain.ProjectKindRepository,
+	}
+	var patchedBody []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/projects/demo":
+			_ = json.NewEncoder(w).Encode(project)
+		case r.Method == http.MethodPatch && r.URL.Path == "/v1/projects/demo":
+			body, err := io.ReadAll(r.Body)
+			if err != nil {
+				t.Errorf("read patch body: %v", err)
+				http.Error(w, "read failed", http.StatusInternalServerError)
+				return
+			}
+			patchedBody = append([]byte(nil), body...)
+			project.Paths = []string{}
+			project.Aliases = []string{}
+			_ = json.NewEncoder(w).Encode(project)
+		default:
+			t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(server.Close)
+	cfgPath := writeServerConfig(t, server.URL)
+
+	code, stdout, stderr := runForTest(t, "project", "set", "demo",
+		"--clear-paths", "--clear-aliases", "--config", cfgPath)
+	if code != 0 {
+		t.Fatalf("project set exit code = %d (stderr: %s)", code, stderr)
+	}
+	body := string(patchedBody)
+	if !strings.Contains(body, `"paths":[]`) {
+		t.Fatalf("patch body does not clear paths with []: %s", body)
+	}
+	if !strings.Contains(body, `"aliases":[]`) {
+		t.Fatalf("patch body does not clear aliases with []: %s", body)
+	}
+	if strings.Contains(body, `"paths":null`) || strings.Contains(body, `"aliases":null`) {
+		t.Fatalf("patch body sent null instead of []: %s", body)
+	}
+	if !strings.Contains(stdout, "paths: -") || !strings.Contains(stdout, "aliases: -") {
+		t.Fatalf("project set output does not show cleared lists:\n%s", stdout)
 	}
 }

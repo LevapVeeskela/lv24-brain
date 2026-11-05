@@ -10,6 +10,7 @@ import (
 	"github.com/levapveeskela/lv24-brain/internal/app"
 	"github.com/levapveeskela/lv24-brain/internal/config"
 	"github.com/levapveeskela/lv24-brain/internal/domain"
+	"github.com/levapveeskela/lv24-brain/internal/ports"
 )
 
 func newProjectTestApp(t *testing.T) (*app.App, *fsstore.Store) {
@@ -213,16 +214,29 @@ func TestSaveProjectRejectsEmptyNameOnUpdate(t *testing.T) {
 	}
 }
 
-func TestSaveProjectDefaultsEmptyNameOnCreate(t *testing.T) {
+func TestSaveProjectDefaultsNameToIDOnCreate(t *testing.T) {
 	useCase, _ := newProjectTestApp(t)
 	ctx := context.Background()
 
-	project, err := useCase.SaveProject(ctx, app.ProjectInput{ID: "demo", Name: projectValue("  ")})
+	project, err := useCase.SaveProject(ctx, app.ProjectInput{ID: "demo"})
 	if err != nil {
 		t.Fatalf("SaveProject: %v", err)
 	}
 	if project.Name != "demo" {
 		t.Fatalf("name = %q, want demo", project.Name)
+	}
+}
+
+func TestSaveProjectRejectsEmptyNameOnCreate(t *testing.T) {
+	useCase, _ := newProjectTestApp(t)
+	ctx := context.Background()
+
+	_, err := useCase.SaveProject(ctx, app.ProjectInput{ID: "demo", Name: projectValue("  ")})
+	if !errors.Is(err, domain.ErrValidation) {
+		t.Fatalf("err = %v, want ErrValidation", err)
+	}
+	if _, getErr := useCase.GetProject(ctx, "demo"); !errors.Is(getErr, domain.ErrNotFound) {
+		t.Fatalf("explicit empty name created a project: %v", getErr)
 	}
 }
 
@@ -271,5 +285,68 @@ func TestProjectOperationsRequireStore(t *testing.T) {
 	}
 	if _, err := useCase.SaveProject(ctx, app.ProjectInput{ID: "demo"}); !errors.Is(err, domain.ErrUnsupported) {
 		t.Fatalf("SaveProject err = %v, want ErrUnsupported", err)
+	}
+}
+
+// recordingProjectStore captures PutProject so tests can inspect the exact
+// record a server-like (or filesystem) adapter would receive.
+type recordingProjectStore struct {
+	ports.Store
+	project domain.Project
+	puts    []domain.Project
+}
+
+func (s *recordingProjectStore) GetProject(_ context.Context, id string) (domain.Project, error) {
+	if s.project.ID == "" || id != s.project.ID {
+		return domain.Project{}, domain.ErrNotFound
+	}
+	return s.project, nil
+}
+
+func (s *recordingProjectStore) ListProjects(context.Context) ([]domain.Project, error) {
+	if s.project.ID == "" {
+		return []domain.Project{}, nil
+	}
+	return []domain.Project{s.project}, nil
+}
+
+func (s *recordingProjectStore) PutProject(_ context.Context, project domain.Project) error {
+	s.project = project
+	s.puts = append(s.puts, project)
+	return nil
+}
+
+func TestSaveProjectClearKeepsNonNilEmptySlices(t *testing.T) {
+	store := &recordingProjectStore{project: domain.Project{
+		ID:      "demo",
+		Name:    "Demo",
+		Paths:   []string{"/src/demo"},
+		Aliases: []string{"d"},
+		Kind:    domain.ProjectKindRepository,
+	}}
+	cfg := config.Default()
+	cfg.Mode = config.ModeLocal
+	useCase := app.New(cfg, app.Dependencies{Store: store})
+
+	project, err := useCase.SaveProject(context.Background(), app.ProjectInput{
+		ID:      "demo",
+		Paths:   projectValue([]string{}),
+		Aliases: projectValue([]string{}),
+	})
+	if err != nil {
+		t.Fatalf("SaveProject: %v", err)
+	}
+	if len(store.puts) != 1 {
+		t.Fatalf("PutProject calls = %d, want 1", len(store.puts))
+	}
+	saved := store.puts[0]
+	if saved.Paths == nil || len(saved.Paths) != 0 {
+		t.Fatalf("saved paths = %#v, want non-nil empty", saved.Paths)
+	}
+	if saved.Aliases == nil || len(saved.Aliases) != 0 {
+		t.Fatalf("saved aliases = %#v, want non-nil empty", saved.Aliases)
+	}
+	if project.Paths == nil || project.Aliases == nil {
+		t.Fatalf("returned project lost explicit empty slices: %+v", project)
 	}
 }

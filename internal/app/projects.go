@@ -11,7 +11,8 @@ import (
 
 // ProjectInput is a registry upsert. Nil fields keep the stored value; a
 // non-nil pointer is applied even when it is empty, which clears paths,
-// aliases, or text fields.
+// aliases, or text fields. An explicit empty name is rejected; a new project
+// without a name input (nil) uses its ID.
 type ProjectInput struct {
 	ID            string
 	Name          *string
@@ -76,10 +77,10 @@ func (a *App) SaveProject(ctx context.Context, input ProjectInput) (domain.Proje
 		project.Name = strings.TrimSpace(*input.Name)
 	}
 	if input.Paths != nil {
-		project.Paths = append([]string(nil), (*input.Paths)...)
+		project.Paths = append([]string{}, (*input.Paths)...)
 	}
 	if input.Aliases != nil {
-		project.Aliases = append([]string(nil), (*input.Aliases)...)
+		project.Aliases = append([]string{}, (*input.Aliases)...)
 	}
 	if input.Kind != nil {
 		project.Kind = *input.Kind
@@ -94,11 +95,11 @@ func (a *App) SaveProject(ctx context.Context, input ProjectInput) (domain.Proje
 	if project.Kind == "" {
 		project.Kind = domain.ProjectKindOther
 	}
-	if creating && strings.TrimSpace(project.Name) == "" {
-		project.Name = projectID
-	}
-	if !creating && input.Name != nil && strings.TrimSpace(project.Name) == "" {
+	if input.Name != nil && strings.TrimSpace(project.Name) == "" {
 		return domain.Project{}, domain.NewValidationError("project.name", "is required")
+	}
+	if creating && input.Name == nil {
+		project.Name = projectID
 	}
 	if err := project.Validate(); err != nil {
 		return domain.Project{}, err

@@ -513,11 +513,29 @@ func runProjectSet(args []string, stdout, stderr io.Writer) int {
 	clearAliases := fs.Bool("clear-aliases", false, "clear all aliases")
 	asJSON := fs.Bool("json", false, "print JSON")
 	var paths, aliases []string
+	seenPaths := map[string]bool{}
+	seenAliases := map[string]bool{}
 	fs.Func("path", "add a filesystem path (repeatable)", func(value string) error {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			return errors.New("must not be empty")
+		}
+		if seenPaths[value] {
+			return nil
+		}
+		seenPaths[value] = true
 		paths = append(paths, value)
 		return nil
 	})
 	fs.Func("alias", "add a project alias (repeatable)", func(value string) error {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			return errors.New("must not be empty")
+		}
+		if seenAliases[value] {
+			return nil
+		}
+		seenAliases[value] = true
 		aliases = append(aliases, value)
 		return nil
 	})
@@ -538,6 +556,10 @@ func runProjectSet(args []string, stdout, stderr io.Writer) int {
 	}
 	if *clearAliases && seen["alias"] {
 		fmt.Fprintln(stderr, "brain project set: --alias cannot be combined with --clear-aliases")
+		return 2
+	}
+	if seen["kind"] && strings.TrimSpace(*kind) == "" {
+		fmt.Fprintln(stderr, "brain project set: --kind must not be empty; use app, service, repository, infra, or other")
 		return 2
 	}
 

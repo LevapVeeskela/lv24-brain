@@ -46,10 +46,10 @@ through the configured store (filesystem or HTTP API).
 
 Omitted flags keep their stored values, so
 `brain project set demo --branch dev` only changes the branch.
-`--clear-paths` and `--clear-aliases` store an explicitly empty list, and
-`--json` prints the registry record for scripts. Projects are still created
-automatically on first write; `brain project set` just makes the metadata
-explicit.
+`--clear-paths` and `--clear-aliases` store an explicitly empty list; in server
+mode they send empty arrays (`[]`), not omitted fields. `--json` prints the
+registry record for scripts. Projects are still created automatically on first
+write; `brain project set` just makes the metadata explicit.
 
 ## 1. Local mode
 
