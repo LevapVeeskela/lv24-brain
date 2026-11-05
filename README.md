@@ -9,7 +9,7 @@ handoffs, and state for teams of humans and agents. Apache-2.0.
 > search, sync, connectors, server auth, and auto-update land in later work
 > packages and return a typed "not implemented" error today.
 
-Product design (source of truth): `lv24/main/docs/plans/2026-11-05-lv24-brain-product-design.md`
+Product design (source of truth): [`docs/product-design.md`](docs/product-design.md).
 in the LV24 workspace.
 
 - Public engine: this repository (`LevapVeeskela/lv24-brain`).
