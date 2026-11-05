@@ -1,0 +1,74 @@
+version: 2
+
+project_name: brain
+
+before:
+  hooks:
+    - go mod verify
+
+builds:
+  - id: brain
+    main: ./cmd/brain
+    binary: 'brain_{{ .Version }}_{{ .Os }}_{{ .Arch }}{{ .Ext }}'
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - windows
+      - linux
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w
+      - -X github.com/levapveeskela/lv24-brain/internal/version.Version={{ .Version }}
+      - -X github.com/levapveeskela/lv24-brain/internal/version.Commit={{ .Commit }}
+      - -X github.com/levapveeskela/lv24-brain/internal/version.Date={{ .Date }}
+
+  - id: brain-server
+    main: ./cmd/brain-server
+    binary: 'brain-server_{{ .Version }}_{{ .Os }}_{{ .Arch }}{{ .Ext }}'
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - windows
+      - linux
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w
+      - -X github.com/levapveeskela/lv24-brain/internal/version.Version={{ .Version }}
+      - -X github.com/levapveeskela/lv24-brain/internal/version.Commit={{ .Commit }}
+      - -X github.com/levapveeskela/lv24-brain/internal/version.Date={{ .Date }}
+
+archives:
+  - id: brain
+    ids:
+      - brain
+    formats:
+      - binary
+    name_template: 'brain_{{ .Version }}_{{ .Os }}_{{ .Arch }}{{ .Ext }}'
+
+  - id: brain-server
+    ids:
+      - brain-server
+    formats:
+      - binary
+    name_template: 'brain-server_{{ .Version }}_{{ .Os }}_{{ .Arch }}{{ .Ext }}'
+
+checksum:
+  name_template: checksums.txt
+  algorithm: sha256
+
+snapshot:
+  version_template: "{{ incpatch .Version }}-next"
+
+changelog:
+  disable: true
+

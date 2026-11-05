@@ -1,0 +1,885 @@
+package postgres
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"os"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/levapveeskela/lv24-brain/internal/domain"
+	"github.com/levapveeskela/lv24-brain/internal/ports"
+)
+
+// newTestStore builds an isolated PostgreSQL schema per test. Tests skip when
+// TestDatabaseURLEnv is unset so the default `go test` run stays offline.
+func newTestStore(t *testing.T) *Store {
+	t.Helper()
+	databaseURL := os.Getenv(TestDatabaseURLEnv)
+	if databaseURL == "" {
+		t.Skipf("%s is not set; skipping PostgreSQL integration test", TestDatabaseURLEnv)
+	}
+
+	adminCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	adminPool, err := pgxpool.New(adminCtx, databaseURL)
+	if err != nil {
+		t.Fatal("open test admin pool failed")
+	}
+	if err := adminPool.Ping(adminCtx); err != nil {
+		adminPool.Close()
+		t.Fatalf("ping test database: %v", err)
+	}
+
+	schema := fmt.Sprintf("brain_test_%d_%d", os.Getpid(), time.Now().UnixNano())
+	quotedSchema := pgx.Identifier{schema}.Sanitize()
+	if _, err := adminPool.Exec(adminCtx, "CREATE SCHEMA "+quotedSchema); err != nil {
+		adminPool.Close()
+		t.Fatalf("create test schema: %v", err)
+	}
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		if _, err := adminPool.Exec(ctx, "DROP SCHEMA "+quotedSchema+" CASCADE"); err != nil {
+			t.Logf("drop test schema %s: %v", schema, err)
+		}
+		adminPool.Close()
+	})
+
+	cfg, err := pgxpool.ParseConfig(databaseURL)
+	if err != nil {
+		t.Fatal("parse test database url failed")
+	}
+	if cfg.ConnConfig.RuntimeParams == nil {
+		cfg.ConnConfig.RuntimeParams = map[string]string{}
+	}
+	cfg.ConnConfig.RuntimeParams["search_path"] = schema
+	cfg.MaxConns = 4
+	pool, err := pgxpool.NewWithConfig(adminCtx, cfg)
+	if err != nil {
+		t.Fatalf("open test pool: %v", err)
+	}
+	store := New(pool)
+	t.Cleanup(store.Close)
+
+	if _, err := store.Migrate(adminCtx); err != nil {
+		t.Fatalf("migrate test schema: %v", err)
+	}
+	return store
+}
+
+func testContext(t *testing.T) context.Context {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	t.Cleanup(cancel)
+	return ctx
+}
+
+func revisionNumber(t *testing.T, revision domain.SyncRevision) int64 {
+	t.Helper()
+	value, err := RevisionValue(revision)
+	if err != nil {
+		t.Fatalf("revision %+v: %v", revision, err)
+	}
+	return value
+}
+
+func mustProject(t *testing.T, ctx context.Context, store *Store, id string) ProjectRecord {
+	t.Helper()
+	record, _, err := store.CreateProject(ctx, domain.Project{
+		ID: id, Name: "Project " + id, Kind: domain.ProjectKindApp,
+	})
+	if err != nil {
+		t.Fatalf("create project %s: %v", id, err)
+	}
+	return record
+}
+
+func TestMigrateIsIdempotent(t *testing.T) {
+	store := newTestStore(t)
+	ctx := testContext(t)
+
+	result, err := store.Migrate(ctx)
+	if err != nil {
+		t.Fatalf("second Migrate: %v", err)
+	}
+	if len(result.Applied) != 0 {
+		t.Fatalf("second Migrate applied %v, want none", result.Applied)
+	}
+	if result.Version != SchemaVersion {
+		t.Fatalf("version = %d, want %d", result.Version, SchemaVersion)
+	}
+	migrations, err := LoadMigrations()
+	if err != nil {
+		t.Fatalf("LoadMigrations: %v", err)
+	}
+	var recorded int
+	if err := store.Pool().QueryRow(ctx, `SELECT count(*) FROM brain_schema_migrations`).Scan(&recorded); err != nil {
+		t.Fatalf("count migrations: %v", err)
+	}
+	if recorded != len(migrations) {
+		t.Fatalf("recorded migrations = %d, embedded = %d", recorded, len(migrations))
+	}
+
+	var roleCount int
+	if err := store.Pool().QueryRow(ctx, `SELECT count(*) FROM roles`).Scan(&roleCount); err != nil {
+		t.Fatalf("count roles: %v", err)
+	}
+	if roleCount != 3 {
+		t.Fatalf("role count = %d, want 3", roleCount)
+	}
+	if _, err := store.Pool().Exec(ctx, `INSERT INTO roles (name) VALUES ('root')`); err == nil {
+		t.Fatal("roles table accepted an invalid role")
+	}
+
+	var tableCount int
+	err = store.Pool().QueryRow(ctx, `
+		SELECT count(*) FROM information_schema.tables
+		WHERE table_schema = current_schema()
+		  AND table_name IN (
+		    'roles', 'users', 'projects', 'notes', 'decisions', 'attempts',
+		    'handoffs', 'connector_runs', 'revisions', 'audit_events', 'project_state'
+		  )`).Scan(&tableCount)
+	if err != nil {
+		t.Fatalf("count tables: %v", err)
+	}
+	if tableCount != 11 {
+		t.Fatalf("table count = %d, want 11", tableCount)
+	}
+}
+
+func TestMigrateDetectsChecksumDrift(t *testing.T) {
+	store := newTestStore(t)
+	ctx := testContext(t)
+
+	if _, err := store.Pool().Exec(ctx, `UPDATE brain_schema_migrations SET checksum = 'drifted' WHERE version = 1`); err != nil {
+		t.Fatalf("tamper checksum: %v", err)
+	}
+	if _, err := store.Migrate(ctx); err == nil || !strings.Contains(err.Error(), "checksum mismatch") {
+		t.Fatalf("Migrate drift error = %v, want checksum mismatch", err)
+	}
+}
+
+func TestMigrateRejectsNewerSchema(t *testing.T) {
+	store := newTestStore(t)
+	ctx := testContext(t)
+
+	if _, err := store.Pool().Exec(
+		ctx,
+		`INSERT INTO brain_schema_migrations (version, name, checksum) VALUES (99, 'future', 'future')`,
+	); err != nil {
+		t.Fatalf("insert future migration: %v", err)
+	}
+	if _, err := store.Migrate(ctx); err == nil || !strings.Contains(err.Error(), "newer than this engine") {
+		t.Fatalf("Migrate newer-schema error = %v", err)
+	}
+}
+
+func TestUsersCRUD(t *testing.T) {
+	store := newTestStore(t)
+	ctx := WithActor(testContext(t), "admin")
+
+	record, revision, err := store.CreateUser(ctx, domain.User{ID: "user_1", Login: "alice"}, "test-hash-not-a-secret")
+	if err != nil {
+		t.Fatalf("CreateUser: %v", err)
+	}
+	if record.Role != domain.RoleMember {
+		t.Fatalf("role = %q, want member", record.Role)
+	}
+	if record.AuthSource != "local" {
+		t.Fatalf("auth source = %q", record.AuthSource)
+	}
+	if record.PasswordHash != "test-hash-not-a-secret" {
+		t.Fatalf("password hash = %q", record.PasswordHash)
+	}
+	if record.Revision == 0 || record.CreatedAt.IsZero() || record.UpdatedAt.IsZero() {
+		t.Fatalf("record not fully populated: %+v", record)
+	}
+	if revisionNumber(t, revision) != record.Revision {
+		t.Fatalf("returned revision does not match record revision")
+	}
+
+	stored, err := store.GetUser(ctx, "user_1")
+	if err != nil {
+		t.Fatalf("GetUser: %v", err)
+	}
+	if stored.Login != "alice" {
+		t.Fatalf("login = %q", stored.Login)
+	}
+	byLogin, err := store.GetUserByLogin(ctx, "ALICE")
+	if err != nil || byLogin.ID != "user_1" {
+		t.Fatalf("GetUserByLogin = (%+v, %v)", byLogin, err)
+	}
+
+	if _, _, err := store.CreateUser(ctx, domain.User{ID: "user_2", Login: "Alice"}, ""); !errors.Is(err, domain.ErrConflict) {
+		t.Fatalf("duplicate login error = %v, want conflict", err)
+	}
+	if _, _, err := store.CreateUser(ctx, domain.User{ID: "user_3", Login: "bob", Role: "root"}, ""); !errors.Is(err, domain.ErrValidation) {
+		t.Fatalf("invalid role error = %v, want validation", err)
+	}
+	if _, _, err := store.CreateUser(ctx, domain.User{ID: "user_3", Login: "   "}, ""); !errors.Is(err, domain.ErrValidation) {
+		t.Fatalf("blank login error = %v, want validation", err)
+	}
+
+	oidcRevision, err := store.SetUserOIDC(ctx, "user_1", "https://id.example", "subject-1", record.Revision)
+	if err != nil {
+		t.Fatalf("SetUserOIDC: %v", err)
+	}
+	oidcValue := revisionNumber(t, oidcRevision)
+	byOIDC, err := store.GetUserByOIDC(ctx, "https://id.example", "subject-1")
+	if err != nil || byOIDC.ID != "user_1" {
+		t.Fatalf("GetUserByOIDC = (%+v, %v)", byOIDC, err)
+	}
+	if _, err := store.SetUserOIDC(ctx, "user_1", "", "subject-2", oidcValue); !errors.Is(err, domain.ErrValidation) {
+		t.Fatalf("partial OIDC pair error = %v, want validation", err)
+	}
+
+	_, _, err = store.UpdateUserRole(ctx, "user_1", domain.RoleAdmin, record.Revision)
+	var conflict *RevisionConflictError
+	if !errors.As(err, &conflict) {
+		t.Fatalf("stale role update error = %v, want RevisionConflictError", err)
+	}
+	if conflict.Current != oidcValue {
+		t.Fatalf("conflict current = %d, want %d", conflict.Current, oidcValue)
+	}
+	if !errors.Is(err, domain.ErrConflict) {
+		t.Fatal("conflict must unwrap to domain.ErrConflict")
+	}
+
+	updated, roleRevision, err := store.UpdateUserRole(ctx, "user_1", domain.RoleAdmin, oidcValue)
+	if err != nil {
+		t.Fatalf("UpdateUserRole: %v", err)
+	}
+	if updated.Role != domain.RoleAdmin {
+		t.Fatalf("role = %q", updated.Role)
+	}
+	roleValue := revisionNumber(t, roleRevision)
+
+	passwordRevision, err := store.UpdateUserPasswordHash(ctx, "user_1", "rotated-hash", roleValue)
+	if err != nil {
+		t.Fatalf("UpdateUserPasswordHash: %v", err)
+	}
+	passwordValue := revisionNumber(t, passwordRevision)
+	stored, err = store.GetUser(ctx, "user_1")
+	if err != nil {
+		t.Fatalf("GetUser after password: %v", err)
+	}
+	if stored.PasswordHash != "rotated-hash" {
+		t.Fatalf("password hash = %q", stored.PasswordHash)
+	}
+
+	profile := stored.User
+	profile.DisplayName = "Alice Example"
+	profile.Role = domain.RoleViewer
+	_, profileRevision, err := store.UpdateUser(ctx, profile, passwordValue)
+	if err != nil {
+		t.Fatalf("UpdateUser: %v", err)
+	}
+	profileValue := revisionNumber(t, profileRevision)
+
+	users, err := store.ListUsers(ctx)
+	if err != nil || len(users) != 1 {
+		t.Fatalf("ListUsers = (%d, %v)", len(users), err)
+	}
+	roles, err := store.ListRoles(ctx)
+	if err != nil || len(roles) != 3 {
+		t.Fatalf("ListRoles = (%d, %v)", len(roles), err)
+	}
+
+	if _, err := store.DeleteUser(ctx, "user_1", passwordValue); !errors.Is(err, domain.ErrConflict) {
+		t.Fatalf("stale delete error = %v, want conflict", err)
+	}
+	if _, err := store.DeleteUser(ctx, "user_1", profileValue); err != nil {
+		t.Fatalf("DeleteUser: %v", err)
+	}
+	if _, err := store.GetUser(ctx, "user_1"); !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("GetUser after delete = %v, want not found", err)
+	}
+	if _, err := store.GetUserByLogin(ctx, "alice"); !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("GetUserByLogin after delete = %v, want not found", err)
+	}
+}
+
+func TestProjectsOptimisticRevision(t *testing.T) {
+	store := newTestStore(t)
+	ctx := WithActor(testContext(t), "member")
+
+	record, revision, err := store.CreateProject(ctx, domain.Project{ID: "p1", Name: "Alpha"})
+	if err != nil {
+		t.Fatalf("CreateProject: %v", err)
+	}
+	if record.Kind != domain.ProjectKindOther {
+		t.Fatalf("kind = %q", record.Kind)
+	}
+	if revisionNumber(t, revision) != record.Revision {
+		t.Fatal("revision mismatch")
+	}
+
+	project, err := store.GetProject(ctx, "p1")
+	if err != nil || project.Name != "Alpha" {
+		t.Fatalf("GetProject = (%+v, %v)", project, err)
+	}
+
+	record.Name = "Alpha 2"
+	updated, updateRevision, err := store.UpdateProject(ctx, record.Project, record.Revision)
+	if err != nil {
+		t.Fatalf("UpdateProject: %v", err)
+	}
+	updateValue := revisionNumber(t, updateRevision)
+	if updated.Name != "Alpha 2" || updated.Revision != updateValue {
+		t.Fatalf("updated = %+v", updated)
+	}
+
+	_, _, err = store.UpdateProject(ctx, record.Project, record.Revision)
+	var conflict *RevisionConflictError
+	if !errors.As(err, &conflict) || conflict.Current != updateValue {
+		t.Fatalf("stale update error = %v, want conflict at %d", err, updateValue)
+	}
+
+	projects, err := store.ListProjects(ctx)
+	if err != nil || len(projects) != 1 {
+		t.Fatalf("ListProjects = (%d, %v)", len(projects), err)
+	}
+	records, err := store.ListProjectRecords(ctx)
+	if err != nil || len(records) != 1 || records[0].Revision != updateValue {
+		t.Fatalf("ListProjectRecords = (%+v, %v)", records, err)
+	}
+
+	record.Name = "Alpha 3"
+	if err := store.PutProject(ctx, record.Project); err != nil {
+		t.Fatalf("PutProject: %v", err)
+	}
+	afterPut, err := store.GetProjectRecord(ctx, "p1")
+	if err != nil || afterPut.Name != "Alpha 3" {
+		t.Fatalf("GetProjectRecord after put = (%+v, %v)", afterPut, err)
+	}
+	if afterPut.Revision <= updateValue {
+		t.Fatalf("PutProject revision %d did not advance past %d", afterPut.Revision, updateValue)
+	}
+
+	before := afterPut.Revision
+	if _, _, err := store.CreateProject(ctx, domain.Project{ID: "p1", Name: "Duplicate"}); !errors.Is(err, domain.ErrConflict) {
+		t.Fatalf("duplicate project error = %v, want conflict", err)
+	}
+	current, err := store.CurrentRevision(ctx)
+	if err != nil {
+		t.Fatalf("CurrentRevision: %v", err)
+	}
+	if revisionNumber(t, current) != before {
+		t.Fatalf("failed create advanced revision to %s, want %d", current.Value, before)
+	}
+
+	if _, _, err := store.CreateProject(ctx, domain.Project{ID: "p2", Name: "   "}); !errors.Is(err, domain.ErrValidation) {
+		t.Fatalf("blank name error = %v, want validation", err)
+	}
+
+	if _, err := store.DeleteProject(ctx, "p1", updateValue); !errors.Is(err, domain.ErrConflict) {
+		t.Fatalf("stale delete error = %v, want conflict", err)
+	}
+	if _, err := store.DeleteProject(ctx, "p1", before); err != nil {
+		t.Fatalf("DeleteProject: %v", err)
+	}
+	if _, err := store.GetProject(ctx, "p1"); !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("GetProject after delete = %v, want not found", err)
+	}
+}
+
+func TestNotesCRUD(t *testing.T) {
+	store := newTestStore(t)
+	ctx := WithActor(testContext(t), "member")
+	project := mustProject(t, ctx, store, "p1")
+
+	note, revision, err := store.CreateNote(ctx, domain.Note{
+		ProjectID: project.ID, Title: "First", Body: "Body one", Tags: nil,
+	})
+	if err != nil {
+		t.Fatalf("CreateNote: %v", err)
+	}
+	if note.ID == "" || note.Tags == nil {
+		t.Fatalf("note not normalized: %+v", note)
+	}
+	if revisionNumber(t, revision) != note.Revision {
+		t.Fatal("revision mismatch")
+	}
+
+	if _, err := store.AppendNote(ctx, domain.Note{ID: "note_port", ProjectID: project.ID, Body: "Body two"}); err != nil {
+		t.Fatalf("AppendNote: %v", err)
+	}
+	portNote, err := store.GetNote(ctx, "note_port")
+	if err != nil || portNote.Body != "Body two" {
+		t.Fatalf("GetNote(port) = (%+v, %v)", portNote, err)
+	}
+
+	notes, err := store.ListNotes(ctx, ListOptions{ProjectID: project.ID})
+	if err != nil || len(notes) != 2 {
+		t.Fatalf("ListNotes = (%d, %v)", len(notes), err)
+	}
+	other, err := store.ListNotes(ctx, ListOptions{ProjectID: "other"})
+	if err != nil || len(other) != 0 {
+		t.Fatalf("ListNotes(other) = (%d, %v)", len(other), err)
+	}
+
+	note.Title = "First edited"
+	note.Body = "Body one edited"
+	note.Tags = []string{"tag"}
+	_, _, err = store.UpdateNote(ctx, note.Note, note.Revision-1)
+	var conflict *RevisionConflictError
+	if !errors.As(err, &conflict) || conflict.Current != note.Revision {
+		t.Fatalf("stale note update error = %v", err)
+	}
+
+	updated, updateRevision, err := store.UpdateNote(ctx, note.Note, note.Revision)
+	if err != nil {
+		t.Fatalf("UpdateNote: %v", err)
+	}
+	updateValue := revisionNumber(t, updateRevision)
+	if updated.Title != "First edited" || len(updated.Tags) != 1 {
+		t.Fatalf("updated note = %+v", updated)
+	}
+	if !updated.CreatedAt.Equal(note.CreatedAt) {
+		t.Fatalf("created_at changed: %v -> %v", note.CreatedAt, updated.CreatedAt)
+	}
+
+	before, err := store.CurrentRevision(ctx)
+	if err != nil {
+		t.Fatalf("CurrentRevision: %v", err)
+	}
+	if _, _, err := store.CreateNote(ctx, domain.Note{ProjectID: project.ID, Body: "  "}); !errors.Is(err, domain.ErrValidation) {
+		t.Fatalf("invalid note error = %v, want validation", err)
+	}
+	after, err := store.CurrentRevision(ctx)
+	if err != nil {
+		t.Fatalf("CurrentRevision: %v", err)
+	}
+	if before.Value != after.Value {
+		t.Fatalf("failed note create advanced revision %s -> %s", before.Value, after.Value)
+	}
+
+	if _, err := store.DeleteNote(ctx, note.ID, note.Revision); !errors.Is(err, domain.ErrConflict) {
+		t.Fatalf("stale delete error = %v, want conflict", err)
+	}
+	if _, err := store.DeleteNote(ctx, note.ID, updateValue); err != nil {
+		t.Fatalf("DeleteNote: %v", err)
+	}
+	if _, err := store.GetNote(ctx, note.ID); !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("GetNote after delete = %v, want not found", err)
+	}
+}
+
+func TestDecisionsAttemptsHandoffs(t *testing.T) {
+	store := newTestStore(t)
+	ctx := WithActor(testContext(t), "member")
+	project := mustProject(t, ctx, store, "p1")
+
+	decision, revision, err := store.CreateDecision(ctx, domain.Decision{
+		ProjectID: project.ID, Title: "Choose storage",
+		Alternatives: []string{"postgres", "sqlite"},
+	})
+	if err != nil {
+		t.Fatalf("CreateDecision: %v", err)
+	}
+	if decision.Status != domain.DecisionProposed {
+		t.Fatalf("status = %q", decision.Status)
+	}
+	decisionValue := revisionNumber(t, revision)
+	decision.Status = domain.DecisionAccepted
+	decision.Context = "Server mode needs shared storage"
+	updatedDecision, decisionRevision, err := store.UpdateDecision(ctx, decision.Decision, decisionValue)
+	if err != nil {
+		t.Fatalf("UpdateDecision: %v", err)
+	}
+	decisionValue = revisionNumber(t, decisionRevision)
+	if updatedDecision.Status != domain.DecisionAccepted {
+		t.Fatalf("status = %q", updatedDecision.Status)
+	}
+	if _, err := store.AppendDecision(ctx, domain.Decision{ID: "decision_port", ProjectID: project.ID, Title: "Port"}); err != nil {
+		t.Fatalf("AppendDecision: %v", err)
+	}
+	decisions, err := store.ListDecisions(ctx, ListOptions{ProjectID: project.ID})
+	if err != nil || len(decisions) != 2 {
+		t.Fatalf("ListDecisions = (%d, %v)", len(decisions), err)
+	}
+	if _, _, err := store.CreateDecision(ctx, domain.Decision{ProjectID: project.ID}); !errors.Is(err, domain.ErrValidation) {
+		t.Fatalf("blank decision title error = %v, want validation", err)
+	}
+
+	attempt, attemptRevision, err := store.CreateAttempt(ctx, domain.Attempt{
+		ProjectID: project.ID, Title: "Try cache", Hypothesis: "Redis helps",
+	})
+	if err != nil {
+		t.Fatalf("CreateAttempt: %v", err)
+	}
+	attemptValue := revisionNumber(t, attemptRevision)
+	attempt.Result = "faster"
+	updatedAttempt, attemptRevision, err := store.UpdateAttempt(ctx, attempt.Attempt, attemptValue)
+	if err != nil {
+		t.Fatalf("UpdateAttempt: %v", err)
+	}
+	attemptValue = revisionNumber(t, attemptRevision)
+	if updatedAttempt.Result != "faster" {
+		t.Fatalf("attempt result = %q", updatedAttempt.Result)
+	}
+	if _, err := store.AppendAttempt(ctx, domain.Attempt{ID: "attempt_port", ProjectID: project.ID, Title: "Port"}); err != nil {
+		t.Fatalf("AppendAttempt: %v", err)
+	}
+	attempts, err := store.ListAttempts(ctx, ListOptions{ProjectID: project.ID})
+	if err != nil || len(attempts) != 2 {
+		t.Fatalf("ListAttempts = (%d, %v)", len(attempts), err)
+	}
+
+	handoff, handoffRevision, err := store.CreateHandoff(ctx, domain.Handoff{
+		ProjectID: project.ID, Summary: "Continue WP4", NextAction: "Wire HTTP",
+	})
+	if err != nil {
+		t.Fatalf("CreateHandoff: %v", err)
+	}
+	handoffValue := revisionNumber(t, handoffRevision)
+	if _, err := store.AppendHandoff(ctx, domain.Handoff{ID: "handoff_port", ProjectID: project.ID, Summary: "Port"}); err != nil {
+		t.Fatalf("AppendHandoff: %v", err)
+	}
+	handoffs, err := store.ListHandoffs(ctx, ListOptions{ProjectID: project.ID})
+	if err != nil || len(handoffs) != 2 {
+		t.Fatalf("ListHandoffs = (%d, %v)", len(handoffs), err)
+	}
+	if _, _, err := store.CreateHandoff(ctx, domain.Handoff{ProjectID: project.ID}); !errors.Is(err, domain.ErrValidation) {
+		t.Fatalf("blank handoff summary error = %v, want validation", err)
+	}
+
+	if _, err := store.DeleteDecision(ctx, decision.ID, decisionValue); err != nil {
+		t.Fatalf("DeleteDecision: %v", err)
+	}
+	if _, err := store.DeleteAttempt(ctx, attempt.ID, attemptValue); err != nil {
+		t.Fatalf("DeleteAttempt: %v", err)
+	}
+	if _, err := store.DeleteHandoff(ctx, handoff.ID, handoffValue); err != nil {
+		t.Fatalf("DeleteHandoff: %v", err)
+	}
+}
+
+func TestStateLifecycleAndCascade(t *testing.T) {
+	store := newTestStore(t)
+	ctx := WithActor(testContext(t), "member")
+	project := mustProject(t, ctx, store, "p1")
+	if _, _, err := store.CreateNote(ctx, domain.Note{ID: "note_1", ProjectID: project.ID, Body: "cascade"}); err != nil {
+		t.Fatalf("CreateNote: %v", err)
+	}
+
+	if _, err := store.GetState(ctx, project.ID); !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("GetState before put = %v, want not found", err)
+	}
+
+	freshUntil := time.Now().Add(24 * time.Hour).UTC().Truncate(time.Second)
+	state := domain.State{
+		ProjectID: project.ID, Goal: "Ship WP4", Active: []string{"persistence"},
+		NextAction: "write tests", FreshUntil: freshUntil,
+	}
+	revision, err := store.PutState(ctx, state)
+	if err != nil {
+		t.Fatalf("PutState: %v", err)
+	}
+	stateValue := revisionNumber(t, revision)
+	stored, err := store.GetState(ctx, project.ID)
+	if err != nil || stored.Goal != "Ship WP4" || len(stored.Active) != 1 {
+		t.Fatalf("GetState = (%+v, %v)", stored, err)
+	}
+	if !stored.FreshUntil.Equal(freshUntil) {
+		t.Fatalf("fresh until = %v, want %v", stored.FreshUntil, freshUntil)
+	}
+
+	state.Goal = "Ship WP4 and WP5"
+	updated, stateRevision, err := store.PutStateAt(ctx, state, stateValue)
+	if err != nil {
+		t.Fatalf("PutStateAt: %v", err)
+	}
+	stateValue = revisionNumber(t, stateRevision)
+	if updated.Goal != state.Goal {
+		t.Fatalf("goal = %q", updated.Goal)
+	}
+	if _, _, err := store.PutStateAt(ctx, state, stateValue-1); !errors.Is(err, domain.ErrConflict) {
+		t.Fatalf("stale state error = %v, want conflict", err)
+	}
+
+	if _, err := store.DeleteProject(ctx, project.ID, project.Revision); err != nil {
+		t.Fatalf("DeleteProject: %v", err)
+	}
+	if _, err := store.GetState(ctx, project.ID); !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("GetState after cascade = %v, want not found", err)
+	}
+	notes, err := store.ListNotes(ctx, ListOptions{ProjectID: project.ID})
+	if err != nil || len(notes) != 0 {
+		t.Fatalf("ListNotes after cascade = (%d, %v)", len(notes), err)
+	}
+}
+
+func TestConnectorRuns(t *testing.T) {
+	store := newTestStore(t)
+	ctx := WithActor(testContext(t), "admin")
+
+	run, revision, err := store.CreateConnectorRun(ctx, domain.ConnectorRun{Source: "github"})
+	if err != nil {
+		t.Fatalf("CreateConnectorRun: %v", err)
+	}
+	if run.Status != domain.ConnectorRunning || run.ID == "" || run.StartedAt.IsZero() {
+		t.Fatalf("run = %+v", run)
+	}
+	if run.Counts == nil {
+		t.Fatal("counts must be non-nil")
+	}
+	runValue := revisionNumber(t, revision)
+
+	if _, _, err := store.FinishConnectorRun(ctx, run.ID, domain.ConnectorSuccess, nil, "", runValue+10); !errors.Is(err, domain.ErrConflict) {
+		t.Fatalf("stale finish error = %v, want conflict", err)
+	}
+
+	finished, finishRevision, err := store.FinishConnectorRun(
+		ctx, run.ID, domain.ConnectorSuccess, map[string]int{"repos": 4}, "", runValue,
+	)
+	if err != nil {
+		t.Fatalf("FinishConnectorRun: %v", err)
+	}
+	finishValue := revisionNumber(t, finishRevision)
+	if finished.Status != domain.ConnectorSuccess || finished.FinishedAt == nil {
+		t.Fatalf("finished = %+v", finished)
+	}
+	if finished.Counts["repos"] != 4 {
+		t.Fatalf("counts = %v", finished.Counts)
+	}
+
+	if _, _, err := store.CreateConnectorRun(ctx, domain.ConnectorRun{ID: "run_2", Source: "gitlab", Status: domain.ConnectorFailed}); err != nil {
+		t.Fatalf("CreateConnectorRun second: %v", err)
+	}
+	runs, err := store.ListConnectorRuns(ctx, ConnectorRunFilter{Source: "github"})
+	if err != nil || len(runs) != 1 {
+		t.Fatalf("ListConnectorRuns(github) = (%d, %v)", len(runs), err)
+	}
+	runs, err = store.ListConnectorRuns(ctx, ConnectorRunFilter{Status: domain.ConnectorFailed})
+	if err != nil || len(runs) != 1 || runs[0].ID != "run_2" {
+		t.Fatalf("ListConnectorRuns(failed) = (%+v, %v)", runs, err)
+	}
+	if _, err := store.ListConnectorRuns(ctx, ConnectorRunFilter{Status: "done"}); !errors.Is(err, domain.ErrValidation) {
+		t.Fatalf("invalid filter status error = %v, want validation", err)
+	}
+	if _, _, err := store.FinishConnectorRun(ctx, run.ID, "done", nil, "", finishValue); !errors.Is(err, domain.ErrValidation) {
+		t.Fatalf("invalid finish status error = %v, want validation", err)
+	}
+
+	if _, err := store.DeleteConnectorRun(ctx, run.ID, runValue); !errors.Is(err, domain.ErrConflict) {
+		t.Fatalf("stale run delete error = %v, want conflict", err)
+	}
+	if _, err := store.DeleteConnectorRun(ctx, run.ID, finishValue); err != nil {
+		t.Fatalf("DeleteConnectorRun: %v", err)
+	}
+	if _, err := store.GetConnectorRun(ctx, run.ID); !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("GetConnectorRun after delete = %v, want not found", err)
+	}
+}
+
+func TestAuditAndRevisionTrail(t *testing.T) {
+	store := newTestStore(t)
+	ctx := WithActor(testContext(t), "auditor")
+
+	project := mustProject(t, ctx, store, "p1")
+	user, _, err := store.CreateUser(ctx, domain.User{ID: "user_1", Login: "audit-user"}, "")
+	if err != nil {
+		t.Fatalf("CreateUser: %v", err)
+	}
+	note, _, err := store.CreateNote(ctx, domain.Note{ID: "note_1", ProjectID: project.ID, Body: "audited"})
+	if err != nil {
+		t.Fatalf("CreateNote: %v", err)
+	}
+
+	current, err := store.CurrentRevision(ctx)
+	if err != nil {
+		t.Fatalf("CurrentRevision: %v", err)
+	}
+	currentValue := revisionNumber(t, current)
+	if currentValue < note.Revision {
+		t.Fatalf("current revision %d < note revision %d", currentValue, note.Revision)
+	}
+
+	revisions, err := store.ListRevisions(ctx, RevisionFilter{EntityKind: "note", EntityID: note.ID})
+	if err != nil || len(revisions) == 0 {
+		t.Fatalf("ListRevisions(note) = (%d, %v)", len(revisions), err)
+	}
+	if revisions[0].Actor != "auditor" || revisions[0].EntityID != note.ID {
+		t.Fatalf("revision = %+v", revisions[0])
+	}
+	single, err := store.GetRevision(ctx, revisions[0].ID)
+	if err != nil || single.Kind != domain.SyncKindServer {
+		t.Fatalf("GetRevision = (%+v, %v)", single, err)
+	}
+
+	events, err := store.ListAuditEvents(ctx, AuditFilter{Actor: "auditor", EntityKind: "note", EntityID: note.ID})
+	if err != nil || len(events) != 1 {
+		t.Fatalf("ListAuditEvents(note) = (%d, %v)", len(events), err)
+	}
+	if events[0].Action != "note.create" {
+		t.Fatalf("action = %q", events[0].Action)
+	}
+	singleEvent, err := store.GetAuditEvent(ctx, events[0].ID)
+	if err != nil || singleEvent.Revision != note.Revision {
+		t.Fatalf("GetAuditEvent = (%+v, %v)", singleEvent, err)
+	}
+
+	userEvents, err := store.ListAuditEvents(ctx, AuditFilter{EntityKind: "user", EntityID: user.ID})
+	if err != nil || len(userEvents) != 1 {
+		t.Fatalf("ListAuditEvents(user) = (%d, %v)", len(userEvents), err)
+	}
+	if _, leaked := userEvents[0].Detail["passwordHash"]; leaked {
+		t.Fatal("audit detail contains password hash")
+	}
+	if _, leaked := userEvents[0].Detail["password_hash"]; leaked {
+		t.Fatal("audit detail contains password hash")
+	}
+
+	recorded, auditRevision, err := store.RecordAuditEvent(ctx, "backup.create", "backup", "b1", map[string]any{"size": 4})
+	if err != nil {
+		t.Fatalf("RecordAuditEvent: %v", err)
+	}
+	if recorded.Action != "backup.create" || recorded.Actor != "auditor" {
+		t.Fatalf("recorded = %+v", recorded)
+	}
+	if revisionNumber(t, auditRevision) != recorded.Revision {
+		t.Fatal("audit revision mismatch")
+	}
+
+	future := time.Now().Add(time.Hour)
+	events, err = store.ListAuditEvents(ctx, AuditFilter{Since: &future})
+	if err != nil || len(events) != 0 {
+		t.Fatalf("future filter = (%d, %v)", len(events), err)
+	}
+}
+
+func TestPortsStoreContract(t *testing.T) {
+	store := newTestStore(t)
+	ctx := WithActor(testContext(t), "cli")
+	var portStore ports.Store = store
+
+	project := domain.Project{ID: "p1", Name: "Ports"}
+	if err := portStore.PutProject(ctx, project); err != nil {
+		t.Fatalf("PutProject: %v", err)
+	}
+	if _, err := portStore.GetProject(ctx, "p1"); err != nil {
+		t.Fatalf("GetProject: %v", err)
+	}
+	projects, err := portStore.ListProjects(ctx)
+	if err != nil || len(projects) != 1 {
+		t.Fatalf("ListProjects = (%d, %v)", len(projects), err)
+	}
+
+	stateRevision, err := portStore.PutState(ctx, domain.State{ProjectID: "p1", Goal: "ports"})
+	if err != nil {
+		t.Fatalf("PutState: %v", err)
+	}
+	if _, err := portStore.GetState(ctx, "p1"); err != nil {
+		t.Fatalf("GetState: %v", err)
+	}
+
+	noteRevision, err := portStore.AppendNote(ctx, domain.Note{ID: "note_1", ProjectID: "p1", Body: "ports"})
+	if err != nil {
+		t.Fatalf("AppendNote: %v", err)
+	}
+	decisionRevision, err := portStore.AppendDecision(ctx, domain.Decision{ID: "decision_1", ProjectID: "p1", Title: "ports"})
+	if err != nil {
+		t.Fatalf("AppendDecision: %v", err)
+	}
+	attemptRevision, err := portStore.AppendAttempt(ctx, domain.Attempt{ID: "attempt_1", ProjectID: "p1", Title: "ports"})
+	if err != nil {
+		t.Fatalf("AppendAttempt: %v", err)
+	}
+	handoffRevision, err := portStore.AppendHandoff(ctx, domain.Handoff{ID: "handoff_1", ProjectID: "p1", Summary: "ports"})
+	if err != nil {
+		t.Fatalf("AppendHandoff: %v", err)
+	}
+
+	values := []int64{
+		revisionNumber(t, stateRevision), revisionNumber(t, noteRevision),
+		revisionNumber(t, decisionRevision), revisionNumber(t, attemptRevision),
+		revisionNumber(t, handoffRevision),
+	}
+	current, err := portStore.CurrentRevision(ctx)
+	if err != nil {
+		t.Fatalf("CurrentRevision: %v", err)
+	}
+	currentValue := revisionNumber(t, current)
+	for _, value := range values {
+		if value > currentValue {
+			t.Fatalf("recorded revision %d exceeds current %d", value, currentValue)
+		}
+	}
+	if currentValue != values[len(values)-1] {
+		t.Fatalf("current revision = %d, want %d", currentValue, values[len(values)-1])
+	}
+}
+
+func TestAtomicityAndForeignKeys(t *testing.T) {
+	store := newTestStore(t)
+	ctx := WithActor(testContext(t), "member")
+	project := mustProject(t, ctx, store, "p1")
+
+	baseline, err := store.CurrentRevision(ctx)
+	if err != nil {
+		t.Fatalf("CurrentRevision: %v", err)
+	}
+	baselineValue := revisionNumber(t, baseline)
+
+	if _, _, err := store.CreateNote(ctx, domain.Note{ProjectID: "missing", Body: "orphan"}); !errors.Is(err, domain.ErrValidation) {
+		t.Fatalf("missing project error = %v, want validation", err)
+	}
+	after, err := store.CurrentRevision(ctx)
+	if err != nil {
+		t.Fatalf("CurrentRevision: %v", err)
+	}
+	if revisionNumber(t, after) != baselineValue {
+		t.Fatalf("failed FK write advanced revision from %d to %s", baselineValue, after.Value)
+	}
+
+	if _, _, err := store.CreateNote(ctx, domain.Note{ID: "note_1", ProjectID: project.ID, Body: "cascade"}); err != nil {
+		t.Fatalf("CreateNote: %v", err)
+	}
+	if _, _, err := store.CreateDecision(ctx, domain.Decision{ID: "decision_1", ProjectID: project.ID, Title: "cascade"}); err != nil {
+		t.Fatalf("CreateDecision: %v", err)
+	}
+	if _, _, err := store.CreateAttempt(ctx, domain.Attempt{ID: "attempt_1", ProjectID: project.ID, Title: "cascade"}); err != nil {
+		t.Fatalf("CreateAttempt: %v", err)
+	}
+	if _, _, err := store.CreateHandoff(ctx, domain.Handoff{ID: "handoff_1", ProjectID: project.ID, Summary: "cascade"}); err != nil {
+		t.Fatalf("CreateHandoff: %v", err)
+	}
+
+	if _, err := store.DeleteProject(ctx, project.ID, project.Revision); err != nil {
+		t.Fatalf("DeleteProject: %v", err)
+	}
+	for table, countQuery := range map[string]string{
+		"notes":     `SELECT count(*) FROM notes`,
+		"decisions": `SELECT count(*) FROM decisions`,
+		"attempts":  `SELECT count(*) FROM attempts`,
+		"handoffs":  `SELECT count(*) FROM handoffs`,
+	} {
+		var count int
+		if err := store.Pool().QueryRow(ctx, countQuery).Scan(&count); err != nil {
+			t.Fatalf("count %s: %v", table, err)
+		}
+		if count != 0 {
+			t.Fatalf("%s count after cascade = %d", table, count)
+		}
+	}
+}
+
+func TestOpenRejectsInvalidURL(t *testing.T) {
+	if _, err := Open(context.Background(), "", Options{}); !errors.Is(err, domain.ErrValidation) {
+		t.Fatalf("empty URL error = %v, want validation", err)
+	}
+	_, err := Open(context.Background(), "not-a-valid-dsn:", Options{})
+	if err == nil {
+		t.Fatal("expected invalid URL error")
+	}
+	if strings.Contains(err.Error(), "not-a-valid-dsn") {
+		t.Fatalf("error leaked database URL: %v", err)
+	}
+}

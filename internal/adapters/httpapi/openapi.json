@@ -1,0 +1,481 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "LV24 Brain Server API",
+    "version": "0.1.0",
+    "description": "Single-node brain server: authentication, projects, knowledge, search, revisions and SSE notifications.",
+    "license": { "name": "Apache-2.0" }
+  },
+  "servers": [{ "url": "/" }],
+  "security": [{ "bearerAuth": [] }],
+  "components": {
+    "securitySchemes": {
+      "bearerAuth": {
+        "type": "http",
+        "scheme": "bearer",
+        "bearerFormat": "JWT or brain API token"
+      }
+    },
+    "schemas": {
+      "Error": {
+        "type": "object",
+        "required": ["error"],
+        "properties": {
+          "error": {
+            "type": "object",
+            "required": ["code", "message"],
+            "properties": {
+              "code": { "type": "string", "example": "invalid_argument" },
+              "message": { "type": "string" },
+              "currentRevision": { "type": "integer", "format": "int64" },
+              "mergeHint": { "type": "string" }
+            }
+          }
+        }
+      },
+      "User": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "string" },
+          "login": { "type": "string" },
+          "displayName": { "type": "string" },
+          "role": { "type": "string", "enum": ["admin", "member", "viewer"] },
+          "authSource": { "type": "string" },
+          "revision": { "type": "integer", "format": "int64" },
+          "createdAt": { "type": "string", "format": "date-time" },
+          "updatedAt": { "type": "string", "format": "date-time" }
+        }
+      },
+      "Session": {
+        "type": "object",
+        "required": ["accessToken", "refreshToken", "expiresAt", "user"],
+        "properties": {
+          "accessToken": { "type": "string" },
+          "refreshToken": { "type": "string" },
+          "expiresAt": { "type": "string", "format": "date-time" },
+          "user": { "$ref": "#/components/schemas/User" }
+        }
+      },
+      "Project": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "string" },
+          "name": { "type": "string" },
+          "paths": { "type": "array", "items": { "type": "string" } },
+          "aliases": { "type": "array", "items": { "type": "string" } },
+          "kind": { "type": "string", "enum": ["app", "service", "repository", "infra", "other"] },
+          "repoUrl": { "type": "string" },
+          "defaultBranch": { "type": "string" },
+          "revision": { "type": "integer", "format": "int64" },
+          "createdAt": { "type": "string", "format": "date-time" },
+          "updatedAt": { "type": "string", "format": "date-time" }
+        }
+      },
+      "State": {
+        "type": "object",
+        "properties": {
+          "projectId": { "type": "string" },
+          "goal": { "type": "string" },
+          "active": { "type": "array", "items": { "type": "string" } },
+          "blocked": { "type": "array", "items": { "type": "string" } },
+          "nextAction": { "type": "string" },
+          "openQuestions": { "type": "array", "items": { "type": "string" } },
+          "freshUntil": { "type": "string", "format": "date-time" },
+          "updatedAt": { "type": "string", "format": "date-time" },
+          "revision": { "type": "integer", "format": "int64" }
+        }
+      },
+      "Note": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "string" },
+          "projectId": { "type": "string" },
+          "title": { "type": "string" },
+          "body": { "type": "string" },
+          "tags": { "type": "array", "items": { "type": "string" } },
+          "permalink": { "type": "string" },
+          "createdAt": { "type": "string", "format": "date-time" },
+          "updatedAt": { "type": "string", "format": "date-time" },
+          "revision": { "type": "integer", "format": "int64" }
+        }
+      },
+      "Decision": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "string" },
+          "projectId": { "type": "string" },
+          "title": { "type": "string" },
+          "status": { "type": "string", "enum": ["proposed", "accepted", "rejected", "superseded"] },
+          "context": { "type": "string" },
+          "alternatives": { "type": "array", "items": { "type": "string" } },
+          "consequences": { "type": "array", "items": { "type": "string" } },
+          "evidence": { "type": "array", "items": { "type": "string" } },
+          "permalink": { "type": "string" },
+          "createdAt": { "type": "string", "format": "date-time" },
+          "updatedAt": { "type": "string", "format": "date-time" },
+          "revision": { "type": "integer", "format": "int64" }
+        }
+      },
+      "Attempt": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "string" },
+          "projectId": { "type": "string" },
+          "title": { "type": "string" },
+          "hypothesis": { "type": "string" },
+          "result": { "type": "string" },
+          "reason": { "type": "string" },
+          "permalink": { "type": "string" },
+          "createdAt": { "type": "string", "format": "date-time" },
+          "updatedAt": { "type": "string", "format": "date-time" },
+          "revision": { "type": "integer", "format": "int64" }
+        }
+      },
+      "Handoff": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "string" },
+          "projectId": { "type": "string" },
+          "summary": { "type": "string" },
+          "gitContext": { "type": "string" },
+          "nextAction": { "type": "string" },
+          "permalink": { "type": "string" },
+          "createdAt": { "type": "string", "format": "date-time" },
+          "revision": { "type": "integer", "format": "int64" }
+        }
+      },
+      "SearchHit": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "string" },
+          "projectId": { "type": "string" },
+          "kind": { "type": "string" },
+          "title": { "type": "string" },
+          "snippet": { "type": "string" },
+          "score": { "type": "number" }
+        }
+      },
+      "Revision": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "integer", "format": "int64" },
+          "kind": { "type": "string", "enum": ["git", "server"] },
+          "actor": { "type": "string" },
+          "entityKind": { "type": "string" },
+          "entityId": { "type": "string" },
+          "action": { "type": "string" },
+          "detail": { "type": "object", "additionalProperties": true },
+          "createdAt": { "type": "string", "format": "date-time" }
+        }
+      }
+    }
+  },
+  "paths": {
+    "/health": {
+      "get": {
+        "summary": "Process liveness",
+        "security": [],
+        "responses": { "200": { "description": "Alive" } }
+      }
+    },
+    "/ready": {
+      "get": {
+        "summary": "Readiness including store connectivity",
+        "security": [],
+        "responses": {
+          "200": { "description": "Ready" },
+          "503": { "description": "Unavailable", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } }
+        }
+      }
+    },
+    "/version": {
+      "get": {
+        "summary": "Build identity",
+        "security": [],
+        "responses": { "200": { "description": "Version info" } }
+      }
+    },
+    "/openapi.json": {
+      "get": {
+        "summary": "This document",
+        "security": [],
+        "responses": { "200": { "description": "OpenAPI document" } }
+      }
+    },
+    "/v1/auth/login": {
+      "post": {
+        "summary": "Local email/password login",
+        "security": [],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["login", "password"],
+                "properties": { "login": { "type": "string" }, "password": { "type": "string", "format": "password" } }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": { "description": "Session", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Session" } } } },
+          "401": { "description": "Invalid credentials" },
+          "429": { "description": "Rate limited" }
+        }
+      }
+    },
+    "/v1/auth/refresh": {
+      "post": {
+        "summary": "Rotate a refresh token",
+        "security": [],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["refreshToken"],
+                "properties": { "refreshToken": { "type": "string" } }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": { "description": "Session", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Session" } } } },
+          "401": { "description": "Invalid refresh token" }
+        }
+      }
+    },
+    "/v1/auth/logout": {
+      "post": {
+        "summary": "Revoke the current session family",
+        "responses": {
+          "204": { "description": "Revoked" },
+          "401": { "description": "Unauthenticated" }
+        }
+      }
+    },
+    "/v1/auth/me": {
+      "get": {
+        "summary": "Current principal",
+        "responses": {
+          "200": { "description": "Principal" },
+          "401": { "description": "Unauthenticated" }
+        }
+      }
+    },
+    "/v1/auth/oidc/login": {
+      "get": {
+        "summary": "Start OIDC authorization code + PKCE login",
+        "security": [],
+        "responses": {
+          "302": { "description": "Redirect to the identity provider" },
+          "501": { "description": "OIDC is not configured" }
+        }
+      }
+    },
+    "/v1/auth/oidc/callback": {
+      "get": {
+        "summary": "OIDC callback; returns a session",
+        "security": [],
+        "parameters": [
+          { "name": "code", "in": "query", "required": true, "schema": { "type": "string" } },
+          { "name": "state", "in": "query", "required": true, "schema": { "type": "string" } }
+        ],
+        "responses": {
+          "200": { "description": "Session", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Session" } } } },
+          "400": { "description": "Invalid state or code" },
+          "401": { "description": "Identity provider rejected the login" }
+        }
+      }
+    },
+    "/v1/users": {
+      "get": {
+        "summary": "List users (admin)",
+        "responses": { "200": { "description": "Users" }, "403": { "description": "Forbidden" } }
+      },
+      "post": {
+        "summary": "Create a user (admin)",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["login"],
+                "properties": {
+                  "login": { "type": "string" },
+                  "displayName": { "type": "string" },
+                  "password": { "type": "string", "format": "password" },
+                  "role": { "type": "string", "enum": ["admin", "member", "viewer"] },
+                  "authSource": { "type": "string", "enum": ["local", "oidc"] }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": { "description": "Created", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/User" } } } },
+          "400": { "description": "Validation error" },
+          "403": { "description": "Forbidden" }
+        }
+      }
+    },
+    "/v1/users/{id}": {
+      "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }],
+      "get": { "summary": "Get a user (admin)", "responses": { "200": { "description": "User" }, "404": { "description": "Not found" } } },
+      "patch": { "summary": "Update a user (admin)", "responses": { "200": { "description": "Updated" }, "409": { "description": "Revision conflict" } } },
+      "delete": {
+        "summary": "Delete a user (admin)",
+        "parameters": [{ "name": "revision", "in": "query", "schema": { "type": "integer", "format": "int64" } }],
+        "responses": { "204": { "description": "Deleted" }, "409": { "description": "Revision conflict" } }
+      }
+    },
+    "/v1/tokens": {
+      "get": {
+        "summary": "List API tokens for the current user (admin may list all)",
+        "responses": { "200": { "description": "Tokens" } }
+      },
+      "post": {
+        "summary": "Mint a scoped API token; the raw token is returned once",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["name"],
+                "properties": {
+                  "name": { "type": "string" },
+                  "role": { "type": "string", "enum": ["admin", "member", "viewer"] },
+                  "userId": { "type": "string" }
+                }
+              }
+            }
+          }
+        },
+        "responses": { "201": { "description": "Created token" }, "403": { "description": "Forbidden" } }
+      }
+    },
+    "/v1/tokens/{id}": {
+      "delete": {
+        "summary": "Revoke an API token",
+        "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }],
+        "responses": { "204": { "description": "Revoked" }, "404": { "description": "Not found" } }
+      }
+    },
+    "/v1/projects": {
+      "get": {
+        "summary": "List projects",
+        "responses": { "200": { "description": "Projects" } }
+      },
+      "post": {
+        "summary": "Create a project (member or admin)",
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Project" } } } },
+        "responses": { "201": { "description": "Created" }, "403": { "description": "Forbidden" } }
+      }
+    },
+    "/v1/projects/{id}": {
+      "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }],
+      "get": { "summary": "Get a project", "responses": { "200": { "description": "Project" }, "404": { "description": "Not found" } } },
+      "patch": {
+        "summary": "Update a project with optimistic revision",
+        "responses": { "200": { "description": "Updated" }, "409": { "description": "Revision conflict" } }
+      },
+      "delete": {
+        "summary": "Delete a project (admin)",
+        "parameters": [{ "name": "revision", "in": "query", "schema": { "type": "integer", "format": "int64" } }],
+        "responses": { "204": { "description": "Deleted" }, "409": { "description": "Revision conflict" } }
+      }
+    },
+    "/v1/projects/{id}/state": {
+      "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }],
+      "get": { "summary": "Get project state", "responses": { "200": { "description": "State" }, "404": { "description": "Not found" } } },
+      "put": { "summary": "Replace project state (member or admin)", "responses": { "200": { "description": "State" }, "409": { "description": "Revision conflict" } } }
+    },
+    "/v1/projects/{id}/notes": {
+      "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }],
+      "get": { "summary": "List notes", "responses": { "200": { "description": "Notes" } } },
+      "post": { "summary": "Create a note", "responses": { "201": { "description": "Created" }, "403": { "description": "Forbidden" } } }
+    },
+    "/v1/notes/{id}": {
+      "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }],
+      "get": { "summary": "Get a note", "responses": { "200": { "description": "Note" }, "404": { "description": "Not found" } } },
+      "patch": { "summary": "Update a note", "responses": { "200": { "description": "Updated" }, "409": { "description": "Revision conflict" } } },
+      "delete": { "summary": "Delete a note", "responses": { "204": { "description": "Deleted" }, "409": { "description": "Revision conflict" } } }
+    },
+    "/v1/projects/{id}/decisions": {
+      "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }],
+      "get": { "summary": "List decisions", "responses": { "200": { "description": "Decisions" } } },
+      "post": { "summary": "Create a decision", "responses": { "201": { "description": "Created" } } }
+    },
+    "/v1/decisions/{id}": {
+      "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }],
+      "get": { "summary": "Get a decision", "responses": { "200": { "description": "Decision" } } },
+      "patch": { "summary": "Update a decision", "responses": { "200": { "description": "Updated" }, "409": { "description": "Revision conflict" } } },
+      "delete": { "summary": "Delete a decision", "responses": { "204": { "description": "Deleted" } } }
+    },
+    "/v1/projects/{id}/attempts": {
+      "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }],
+      "get": { "summary": "List attempts", "responses": { "200": { "description": "Attempts" } } },
+      "post": { "summary": "Create an attempt", "responses": { "201": { "description": "Created" } } }
+    },
+    "/v1/attempts/{id}": {
+      "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }],
+      "get": { "summary": "Get an attempt", "responses": { "200": { "description": "Attempt" } } },
+      "patch": { "summary": "Update an attempt", "responses": { "200": { "description": "Updated" }, "409": { "description": "Revision conflict" } } },
+      "delete": { "summary": "Delete an attempt", "responses": { "204": { "description": "Deleted" } } }
+    },
+    "/v1/projects/{id}/handoffs": {
+      "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }],
+      "get": { "summary": "List handoffs", "responses": { "200": { "description": "Handoffs" } } },
+      "post": { "summary": "Create an immutable handoff", "responses": { "201": { "description": "Created" } } }
+    },
+    "/v1/handoffs/{id}": {
+      "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }],
+      "get": { "summary": "Get a handoff", "responses": { "200": { "description": "Handoff" } } },
+      "delete": { "summary": "Delete a handoff", "responses": { "204": { "description": "Deleted" } } }
+    },
+    "/v1/search": {
+      "get": {
+        "summary": "Full-text substring search over knowledge",
+        "parameters": [
+          { "name": "q", "in": "query", "required": true, "schema": { "type": "string" } },
+          { "name": "projectId", "in": "query", "schema": { "type": "string" } },
+          { "name": "limit", "in": "query", "schema": { "type": "integer" } }
+        ],
+        "responses": { "200": { "description": "Hits" } }
+      }
+    },
+    "/v1/revisions": {
+      "get": {
+        "summary": "List server revisions",
+        "parameters": [
+          { "name": "after", "in": "query", "schema": { "type": "integer", "format": "int64" } },
+          { "name": "entityKind", "in": "query", "schema": { "type": "string" } },
+          { "name": "entityId", "in": "query", "schema": { "type": "string" } },
+          { "name": "limit", "in": "query", "schema": { "type": "integer" } },
+          { "name": "offset", "in": "query", "schema": { "type": "integer" } }
+        ],
+        "responses": { "200": { "description": "Revisions" } }
+      }
+    },
+    "/v1/events": {
+      "get": {
+        "summary": "Server-sent revision events with heartbeat and Last-Event-ID replay",
+        "parameters": [
+          { "name": "Last-Event-ID", "in": "header", "schema": { "type": "string" } },
+          { "name": "access_token", "in": "query", "description": "Alternative to the Authorization header for EventSource clients", "schema": { "type": "string" } }
+        ],
+        "responses": {
+          "200": {
+            "description": "text/event-stream",
+            "content": { "text/event-stream": { "schema": { "type": "string" } } }
+          },
+          "401": { "description": "Unauthenticated" }
+        }
+      }
+    }
+  }
+}

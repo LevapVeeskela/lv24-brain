@@ -1,0 +1,60 @@
+name: lv24-brain
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: brain
+      POSTGRES_PASSWORD: ${BRAIN_DB_PASSWORD:?set BRAIN_DB_PASSWORD in deploy/.env}
+      POSTGRES_DB: brain
+    volumes:
+      - brain_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U brain -d brain"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+    # Postgres is reachable only on the compose network. Never publish 5432.
+
+  brain-server:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    image: lv24-brain-server:local
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      BRAIN_ADDR: 0.0.0.0:8080
+      BRAIN_JWT_SECRET: ${BRAIN_JWT_SECRET:?set BRAIN_JWT_SECRET in deploy/.env}
+      BRAIN_DATABASE_URL: ${BRAIN_DATABASE_URL:?set BRAIN_DATABASE_URL in deploy/.env}
+      BRAIN_BOOTSTRAP_ADMIN_LOGIN: ${BRAIN_BOOTSTRAP_ADMIN_LOGIN:-}
+      BRAIN_BOOTSTRAP_ADMIN_PASSWORD: ${BRAIN_BOOTSTRAP_ADMIN_PASSWORD:-}
+      BRAIN_OIDC_ISSUER: ${BRAIN_OIDC_ISSUER:-}
+      BRAIN_OIDC_CLIENT_ID: ${BRAIN_OIDC_CLIENT_ID:-}
+      BRAIN_OIDC_CLIENT_SECRET: ${BRAIN_OIDC_CLIENT_SECRET:-}
+      BRAIN_OIDC_REDIRECT_URL: ${BRAIN_OIDC_REDIRECT_URL:-}
+      BRAIN_SERVER_AUTO_UPDATE: ${BRAIN_SERVER_AUTO_UPDATE:-0}
+    ports:
+      - "${BRAIN_BIND_ADDR:-127.0.0.1}:${BRAIN_PORT:-8080}:8080"
+    volumes:
+      - brain_data:/var/lib/lv24-brain
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    init: true
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+volumes:
+  brain_pgdata:
+  brain_data:

@@ -3,14 +3,13 @@ package main
 
 import (
 	"context"
-	"flag"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"os/signal"
 	"syscall"
 
-	"github.com/levapveeskela/lv24-brain/internal/config"
 	"github.com/levapveeskela/lv24-brain/internal/server"
 	"github.com/levapveeskela/lv24-brain/internal/version"
 )
@@ -20,36 +19,32 @@ func main() {
 }
 
 func run(args []string, stdout, stderr io.Writer) int {
-	fs := flag.NewFlagSet("brain-server", flag.ContinueOnError)
-	fs.SetOutput(stderr)
-	defaultAddr := os.Getenv("BRAIN_ADDR")
-	if defaultAddr == "" {
-		defaultAddr = "127.0.0.1:8080"
-	}
-	addr := fs.String("addr", defaultAddr, "listen address")
-	cfgPath := fs.String("config", "", "optional path to brain.yaml")
-	if err := fs.Parse(args); err != nil {
+	cfg, err := server.LoadConfig(args, os.Getenv)
+	if err != nil {
+		fmt.Fprintf(stderr, "brain-server: %v\n", err)
 		return 2
 	}
-	if *cfgPath != "" {
-		cfg, err := config.Load(*cfgPath)
-		if err != nil {
-			fmt.Fprintf(stderr, "brain-server: %v\n", err)
-			return 1
-		}
-		if err := cfg.Validate(); err != nil {
-			fmt.Fprintf(stderr, "brain-server: %v\n", err)
-			return 1
-		}
-		if cfg.Mode != config.ModeServer {
-			fmt.Fprintf(stderr, "brain-server: warning: config mode is %q, expected %q\n", cfg.Mode, config.ModeServer)
-		}
+	logger := slog.New(slog.NewTextHandler(stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	if cfg.Notice != "" {
+		logger.Warn(cfg.Notice)
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	fmt.Fprintf(stdout, "brain-server %s listening on %s\n", version.Version, *addr)
-	if err := server.Run(ctx, *addr); err != nil {
-		fmt.Fprintf(stderr, "brain-server: %v\n", err)
+
+	srv, err := server.New(ctx, cfg, logger)
+	if err != nil {
+		logger.Error("startup failed", "error", err)
+		return 1
+	}
+	if cfg.BootstrapLogin != "" {
+		logger.Info("bootstrap administrator ensured", "login", cfg.BootstrapLogin)
+	}
+	if cfg.OIDC.Issuer != "" {
+		logger.Info("oidc enabled", "issuer", cfg.OIDC.Issuer)
+	}
+	fmt.Fprintf(stdout, "brain-server %s listening on %s\n", version.Version, cfg.Addr)
+	if err := srv.Run(ctx); err != nil {
+		logger.Error("server failed", "error", err)
 		return 1
 	}
 	return 0

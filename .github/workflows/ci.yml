@@ -1,0 +1,55 @@
+name: ci
+
+on:
+  push:
+    branches:
+      - main
+      - develop
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: gofmt
+        run: |
+          unformatted="$(gofmt -l .)"
+          if [ -n "$unformatted" ]; then
+            echo "Unformatted files:"
+            echo "$unformatted"
+            exit 1
+          fi
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: go test
+        run: go test ./...
+
+      - name: build
+        run: |
+          go build -o /tmp/brain ./cmd/brain
+          go build -o /tmp/brain-server ./cmd/brain-server
+
+      - name: node check
+        run: node --check integrations/opencode/brain-handoff.js
+
+      - name: validate compose
+        run: |
+          cd deploy
+          cp .env.example .env
+          sed -i 's/^BRAIN_DB_PASSWORD=$/BRAIN_DB_PASSWORD=ci-password/' .env
+          sed -i 's/^BRAIN_JWT_SECRET=$/BRAIN_JWT_SECRET=ci-only-signing-key-0123456789abcdef/' .env
+          sed -i 's|^BRAIN_DATABASE_URL=.*|BRAIN_DATABASE_URL=postgres://brain:ci-password@postgres:5432/brain?sslmode=disable|' .env
+          docker compose --env-file .env -f docker-compose.yml config >/dev/null
+          rm -f .env
