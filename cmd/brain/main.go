@@ -86,6 +86,8 @@ func runWithInput(args []string, stdin io.Reader, stdout, stderr io.Writer) int 
 		return runDoctor(rest, stdout, stderr)
 	case "open":
 		return runOpen(rest, stdout, stderr)
+	case "project":
+		return runProject(rest, stdout, stderr)
 	case "bootstrap":
 		return runBootstrap(rest, stdout, stderr)
 	case "note":
@@ -142,6 +144,7 @@ Commands:
   init       Create a new brain instance
   doctor     Check engine and data schema compatibility
   open       Open a project context
+  project    Manage the project registry (list, show, set)
   bootstrap  Build agent context for a project
   note       Append a dated note
   decision   Append a decision record
@@ -176,6 +179,14 @@ Server mode authentication:
   BRAIN_SECRET_SERVER_TOKEN takes precedence and disables login/logout for
   that process. A static API token has no refresh token and cannot be
   revoked by brain logout.
+
+Projects:
+  brain project list [--json]
+  brain project show <id> [--json]
+  brain project set <id> [--name <name>] [--path <p>]... [--alias <a>]...
+                    [--kind app|service|repository|infra|other]
+                    [--repo <url>] [--branch <b>]
+                    [--clear-paths] [--clear-aliases] [--json]
 
 Update:
   brain update --check      Check for a newer release
@@ -389,6 +400,274 @@ func valueOr(value, fallback string) string {
 		return fallback
 	}
 	return value
+}
+
+// projectValueFlags lists flags that consume a value, so splitValueFlags can
+// accept the positional project id before or after the flags.
+var projectValueFlags = map[string]bool{
+	"config": true,
+	"name":   true,
+	"path":   true,
+	"alias":  true,
+	"kind":   true,
+	"repo":   true,
+	"branch": true,
+}
+
+func runProject(args []string, stdout, stderr io.Writer) int {
+	if len(args) == 0 {
+		printProjectUsage(stderr)
+		return 2
+	}
+	switch args[0] {
+	case "help", "-h", "--help":
+		printProjectUsage(stdout)
+		return 0
+	case "list":
+		return runProjectList(args[1:], stdout, stderr)
+	case "show":
+		return runProjectShow(args[1:], stdout, stderr)
+	case "set":
+		return runProjectSet(args[1:], stdout, stderr)
+	default:
+		fmt.Fprintf(stderr, "brain project: unknown subcommand %q\n\n", args[0])
+		printProjectUsage(stderr)
+		return 2
+	}
+}
+
+func runProjectList(args []string, stdout, stderr io.Writer) int {
+	fs := newFlagSet("project list", stderr)
+	asJSON := fs.Bool("json", false, "print JSON")
+	cfgPath := configFlag(fs)
+	flags, positional := splitValueFlags(args, projectValueFlags)
+	if err := fs.Parse(flags); err != nil {
+		return 2
+	}
+	if len(positional) > 0 {
+		fmt.Fprintf(stderr, "brain project list: unexpected arguments: %s\n", strings.Join(positional, " "))
+		return 2
+	}
+	useCase, closeRuntime, err := projectRuntime(*cfgPath)
+	if err != nil {
+		return reportError(stderr, "project list", err)
+	}
+	defer closeRuntime()
+	projects, err := useCase.ListProjects(context.Background())
+	if err != nil {
+		return reportError(stderr, "project list", err)
+	}
+	if *asJSON {
+		if projects == nil {
+			projects = []domain.Project{}
+		}
+		if err := writeJSON(stdout, projects); err != nil {
+			return reportError(stderr, "project list", err)
+		}
+		return 0
+	}
+	for _, project := range projects {
+		printProjectLine(stdout, project)
+	}
+	return 0
+}
+
+func runProjectShow(args []string, stdout, stderr io.Writer) int {
+	fs := newFlagSet("project show", stderr)
+	asJSON := fs.Bool("json", false, "print JSON")
+	cfgPath := configFlag(fs)
+	flags, positional := splitValueFlags(args, projectValueFlags)
+	if err := fs.Parse(flags); err != nil {
+		return 2
+	}
+	if len(positional) != 1 {
+		printProjectUsage(stderr)
+		return 2
+	}
+	useCase, closeRuntime, err := projectRuntime(*cfgPath)
+	if err != nil {
+		return reportError(stderr, "project show", err)
+	}
+	defer closeRuntime()
+	project, err := useCase.GetProject(context.Background(), positional[0])
+	if err != nil {
+		if errors.Is(err, domain.ErrNotFound) {
+			fmt.Fprintf(stderr, "brain project show: project %q not found\n", strings.TrimSpace(positional[0]))
+			return 1
+		}
+		return reportError(stderr, "project show", err)
+	}
+	if err := printProject(stdout, project, *asJSON); err != nil {
+		return reportError(stderr, "project show", err)
+	}
+	return 0
+}
+
+func runProjectSet(args []string, stdout, stderr io.Writer) int {
+	fs := newFlagSet("project set", stderr)
+	name := fs.String("name", "", "project display name")
+	kind := fs.String("kind", "", "app, service, repository, infra, or other")
+	repo := fs.String("repo", "", "repository URL")
+	branch := fs.String("branch", "", "default branch")
+	clearPaths := fs.Bool("clear-paths", false, "clear all paths")
+	clearAliases := fs.Bool("clear-aliases", false, "clear all aliases")
+	asJSON := fs.Bool("json", false, "print JSON")
+	var paths, aliases []string
+	fs.Func("path", "add a filesystem path (repeatable)", func(value string) error {
+		paths = append(paths, value)
+		return nil
+	})
+	fs.Func("alias", "add a project alias (repeatable)", func(value string) error {
+		aliases = append(aliases, value)
+		return nil
+	})
+	cfgPath := configFlag(fs)
+	flags, positional := splitValueFlags(args, projectValueFlags)
+	if err := fs.Parse(flags); err != nil {
+		return 2
+	}
+	if len(positional) != 1 {
+		printProjectUsage(stderr)
+		return 2
+	}
+	seen := map[string]bool{}
+	fs.Visit(func(f *flag.Flag) { seen[f.Name] = true })
+	if *clearPaths && seen["path"] {
+		fmt.Fprintln(stderr, "brain project set: --path cannot be combined with --clear-paths")
+		return 2
+	}
+	if *clearAliases && seen["alias"] {
+		fmt.Fprintln(stderr, "brain project set: --alias cannot be combined with --clear-aliases")
+		return 2
+	}
+
+	input := app.ProjectInput{ID: positional[0]}
+	if seen["name"] {
+		value := *name
+		input.Name = &value
+	}
+	if seen["path"] {
+		value := append([]string{}, paths...)
+		input.Paths = &value
+	}
+	if *clearPaths {
+		value := []string{}
+		input.Paths = &value
+	}
+	if seen["alias"] {
+		value := append([]string{}, aliases...)
+		input.Aliases = &value
+	}
+	if *clearAliases {
+		value := []string{}
+		input.Aliases = &value
+	}
+	if seen["kind"] {
+		value := domain.ProjectKind(strings.TrimSpace(*kind))
+		input.Kind = &value
+	}
+	if seen["repo"] {
+		value := strings.TrimSpace(*repo)
+		input.RepoURL = &value
+	}
+	if seen["branch"] {
+		value := strings.TrimSpace(*branch)
+		input.DefaultBranch = &value
+	}
+
+	useCase, closeRuntime, err := projectRuntime(*cfgPath)
+	if err != nil {
+		return reportError(stderr, "project set", err)
+	}
+	defer closeRuntime()
+	project, err := useCase.SaveProject(context.Background(), input)
+	if err != nil {
+		return reportError(stderr, "project set", err)
+	}
+	if err := printProject(stdout, project, *asJSON); err != nil {
+		return reportError(stderr, "project set", err)
+	}
+	return 0
+}
+
+func projectRuntime(cfgPath string) (*app.App, func(), error) {
+	cfg, err := loadRequiredConfig(cfgPath)
+	if err != nil {
+		return nil, func() {}, err
+	}
+	runtime, err := buildRuntime(cfg)
+	if err != nil {
+		return nil, func() {}, err
+	}
+	return runtime.App, func() { _ = runtime.Close() }, nil
+}
+
+func printProject(w io.Writer, project domain.Project, asJSON bool) error {
+	if asJSON {
+		return writeJSON(w, project)
+	}
+	printProjectDetail(w, project)
+	return nil
+}
+
+func printProjectLine(w io.Writer, project domain.Project) {
+	fmt.Fprintf(w, "%s  %s  %s  %s  %s  %s\n",
+		project.ID,
+		valueOr(string(project.Kind), "-"),
+		valueOr(project.Name, "-"),
+		joinValues(project.Paths),
+		valueOr(project.RepoURL, "-"),
+		valueOr(project.DefaultBranch, "-"),
+	)
+}
+
+func printProjectDetail(w io.Writer, project domain.Project) {
+	fmt.Fprintf(w, "id: %s\n", project.ID)
+	fmt.Fprintf(w, "name: %s\n", valueOr(project.Name, "-"))
+	fmt.Fprintf(w, "kind: %s\n", valueOr(string(project.Kind), "-"))
+	fmt.Fprintf(w, "paths: %s\n", joinValues(project.Paths))
+	fmt.Fprintf(w, "aliases: %s\n", joinValues(project.Aliases))
+	fmt.Fprintf(w, "repo: %s\n", valueOr(project.RepoURL, "-"))
+	fmt.Fprintf(w, "branch: %s\n", valueOr(project.DefaultBranch, "-"))
+	if project.CreatedAt.IsZero() {
+		fmt.Fprintln(w, "created_at: unknown")
+	} else {
+		fmt.Fprintf(w, "created_at: %s\n", project.CreatedAt.UTC().Format(time.RFC3339))
+	}
+	if project.UpdatedAt.IsZero() {
+		fmt.Fprintln(w, "updated_at: unknown")
+	} else {
+		fmt.Fprintf(w, "updated_at: %s\n", project.UpdatedAt.UTC().Format(time.RFC3339))
+	}
+}
+
+func joinValues(values []string) string {
+	if len(values) == 0 {
+		return "-"
+	}
+	return strings.Join(values, ", ")
+}
+
+func writeJSON(w io.Writer, value any) error {
+	encoder := json.NewEncoder(w)
+	encoder.SetIndent("", "  ")
+	return encoder.Encode(value)
+}
+
+func printProjectUsage(w io.Writer) {
+	fmt.Fprint(w, `Usage:
+  brain project list [--json]
+  brain project show <id> [--json]
+  brain project set <id> [--name <name>] [--path <p>]... [--alias <a>]...
+                    [--kind app|service|repository|infra|other]
+                    [--repo <url>] [--branch <b>]
+                    [--clear-paths] [--clear-aliases] [--json]
+
+Repeat --path and --alias to replace the stored lists. --clear-paths and
+--clear-aliases store an explicitly empty list and cannot be combined with the
+corresponding repeatable flag. Creating a project without --name uses the id
+as its name. Omitted flags keep their stored values.
+`)
 }
 
 func runBootstrap(args []string, stdout, stderr io.Writer) int {

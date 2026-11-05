@@ -84,7 +84,7 @@ directory.
 Markdown is the source of truth in local and Git modes. `fsstore` uses:
 
 ```text
-registry.json                          project index
+registry.json                          project index (managed by brain project)
 projects/<id>/state.md                 goal, active, blocked, next action, questions
 projects/<id>/notes/YYYY-MM-DD.md      dated note sections
 projects/<id>/decisions/YYYY-MM-DD-<slug>.md
@@ -109,6 +109,7 @@ Domain records: `Project`, `Note`, `Decision`, `Attempt`, `Handoff`, `State`,
 ```text
 brain init       create an instance and write brain.yaml
 brain open       show the active project context
+brain project    list, show, or set registry projects
 brain bootstrap  build bounded agent context
 brain note       append a dated note
 brain decision   append a decision

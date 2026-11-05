@@ -53,3 +53,19 @@ jobs:
           sed -i 's|^BRAIN_DATABASE_URL=.*|BRAIN_DATABASE_URL=postgres://brain:ci-password@postgres:5432/brain?sslmode=disable|' .env
           docker compose --env-file .env -f docker-compose.yml config >/dev/null
           rm -f .env
+
+  race:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: go test -race
+        env:
+          CGO_ENABLED: "1"
+        run: go test -race -count=1 ./...

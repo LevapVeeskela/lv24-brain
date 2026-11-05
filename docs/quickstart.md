@@ -30,6 +30,27 @@ go build -o bin\brain-server.exe .\cmd\brain-server
 Keep brain data outside the source checkout. The paths below are examples; use
 your own directory names and never commit the data directory.
 
+## Project registry
+
+`brain project` manages `registry.json` explicitly; you never need to edit it
+by hand. The same commands work in local, git, and server mode because they go
+through the configured store (filesystem or HTTP API).
+
+```sh
+./bin/brain project set demo --name "Demo" --path ~/src/demo \
+  --kind repository --repo https://example.test/demo.git --branch main \
+  --config ~/brain/brain.yaml
+./bin/brain project list --config ~/brain/brain.yaml
+./bin/brain project show demo --config ~/brain/brain.yaml
+```
+
+Omitted flags keep their stored values, so
+`brain project set demo --branch dev` only changes the branch.
+`--clear-paths` and `--clear-aliases` store an explicitly empty list, and
+`--json` prints the registry record for scripts. Projects are still created
+automatically on first write; `brain project set` just makes the metadata
+explicit.
+
 ## 1. Local mode
 
 Single user, filesystem data, no network.

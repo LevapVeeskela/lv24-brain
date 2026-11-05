@@ -17,7 +17,7 @@ The engine has moved past the initial scaffold. Implemented and tested today:
 
 | Area | State |
 |---|---|
-| CLI | `init`, `open`, `bootstrap`, `note`, `decision`, `attempt`, `handoff`, `status`, `review`, `doctor`, `index [--rebuild]`, `search <query>`, `sync`, `migrate`, `secret`, `update`, `version`, `help`; `login` and `logout` in server mode |
+| CLI | `init`, `open`, `project list`, `project show`, `project set`, `bootstrap`, `note`, `decision`, `attempt`, `handoff`, `status`, `review`, `doctor`, `index [--rebuild]`, `search <query>`, `sync`, `migrate`, `secret`, `update`, `version`, `help`; `login` and `logout` in server mode |
 | Storage | Markdown + YAML frontmatter (`fsstore`), SQLite FTS5 index, `registry.json` project index |
 | Local search | `brain index` refreshes FTS5 from Markdown; `brain index --rebuild` discards and rebuilds it; `brain search` queries it. Both are local/`git` only |
 | Git sync | `fetch`, `pull --rebase`, commit, optional push; read-only `--status`; conflict reporting |

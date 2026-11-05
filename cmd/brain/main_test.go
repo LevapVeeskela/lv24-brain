@@ -1294,3 +1294,193 @@ func TestConfigPathFromArgs(t *testing.T) {
 		}
 	}
 }
+
+type cliRegistryProject struct {
+	ID            string    `json:"id"`
+	Name          string    `json:"name"`
+	Paths         []string  `json:"paths"`
+	Aliases       []string  `json:"aliases"`
+	Kind          string    `json:"kind"`
+	RepoURL       string    `json:"repo_url"`
+	DefaultBranch string    `json:"default_branch"`
+	CreatedAt     time.Time `json:"created_at"`
+	UpdatedAt     time.Time `json:"updated_at"`
+}
+
+type cliRegistry struct {
+	Version  int                  `json:"version"`
+	Projects []cliRegistryProject `json:"projects"`
+}
+
+func readCLIRegistry(t *testing.T, dataDir string) cliRegistry {
+	t.Helper()
+	raw, err := os.ReadFile(filepath.Join(dataDir, "registry.json"))
+	if err != nil {
+		t.Fatalf("read registry: %v", err)
+	}
+	var registry cliRegistry
+	if err := json.Unmarshal(raw, &registry); err != nil {
+		t.Fatalf("parse registry: %v", err)
+	}
+	return registry
+}
+
+func TestProjectCommandWorkflow(t *testing.T) {
+	t.Setenv("BRAIN_CONFIG", "")
+	root := t.TempDir()
+	dataDir := filepath.Join(root, "brain")
+	cfgPath := filepath.Join(dataDir, "brain.yaml")
+	if code, _, stderr := runForTest(t, "init", "--mode", "local", "--data-dir", dataDir); code != 0 {
+		t.Fatalf("init exit code = %d (stderr: %s)", code, stderr)
+	}
+
+	projectPath := filepath.Join(root, "src", "demo")
+	code, stdout, stderr := runForTest(t, "project", "set", "demo",
+		"--name", "Demo",
+		"--path", projectPath,
+		"--kind", "repository",
+		"--repo", "https://example.test/demo.git",
+		"--branch", "main",
+		"--config", cfgPath)
+	if code != 0 {
+		t.Fatalf("project set exit code = %d (stderr: %s)", code, stderr)
+	}
+	for _, want := range []string{"id: demo", "name: Demo", "kind: repository", "paths: " + projectPath} {
+		if !strings.Contains(stdout, want) {
+			t.Fatalf("project set stdout missing %q:\n%s", want, stdout)
+		}
+	}
+
+	registry := readCLIRegistry(t, dataDir)
+	if len(registry.Projects) != 1 {
+		t.Fatalf("registry projects = %+v", registry.Projects)
+	}
+	created := registry.Projects[0]
+	if created.ID != "demo" || created.Name != "Demo" || created.Kind != "repository" {
+		t.Fatalf("registry project = %+v", created)
+	}
+	if len(created.Paths) != 1 || created.Paths[0] != projectPath {
+		t.Fatalf("registry paths = %+v", created.Paths)
+	}
+	if created.RepoURL != "https://example.test/demo.git" || created.DefaultBranch != "main" {
+		t.Fatalf("registry repo metadata = %+v", created)
+	}
+	if created.CreatedAt.IsZero() || created.UpdatedAt.IsZero() {
+		t.Fatalf("registry timestamps = %+v", created)
+	}
+
+	code, stdout, stderr = runForTest(t, "project", "list", "--config", cfgPath)
+	if code != 0 {
+		t.Fatalf("project list exit code = %d (stderr: %s)", code, stderr)
+	}
+	for _, want := range []string{"demo", "repository", "Demo", projectPath, "https://example.test/demo.git", "main"} {
+		if !strings.Contains(stdout, want) {
+			t.Fatalf("project list stdout missing %q:\n%s", want, stdout)
+		}
+	}
+
+	code, stdout, stderr = runForTest(t, "project", "show", "demo", "--config", cfgPath)
+	if code != 0 {
+		t.Fatalf("project show exit code = %d (stderr: %s)", code, stderr)
+	}
+	for _, want := range []string{"id: demo", "name: Demo", "paths: " + projectPath, "repo: https://example.test/demo.git", "branch: main"} {
+		if !strings.Contains(stdout, want) {
+			t.Fatalf("project show stdout missing %q:\n%s", want, stdout)
+		}
+	}
+
+	code, _, stderr = runForTest(t, "project", "set", "demo", "--branch", "dev", "--config", cfgPath)
+	if code != 0 {
+		t.Fatalf("project set branch exit code = %d (stderr: %s)", code, stderr)
+	}
+	updated := readCLIRegistry(t, dataDir).Projects[0]
+	if updated.Name != "Demo" || updated.RepoURL != "https://example.test/demo.git" || updated.DefaultBranch != "dev" {
+		t.Fatalf("partial update lost fields: %+v", updated)
+	}
+	if len(updated.Paths) != 1 || updated.Paths[0] != projectPath {
+		t.Fatalf("partial update lost paths: %+v", updated.Paths)
+	}
+	if !updated.CreatedAt.Equal(created.CreatedAt) {
+		t.Fatalf("CreatedAt = %s, want %s", updated.CreatedAt, created.CreatedAt)
+	}
+
+	code, stdout, stderr = runForTest(t, "project", "list", "--json", "--config", cfgPath)
+	if code != 0 {
+		t.Fatalf("project list --json exit code = %d (stderr: %s)", code, stderr)
+	}
+	var projects []domain.Project
+	if err := json.Unmarshal([]byte(stdout), &projects); err != nil {
+		t.Fatalf("project list --json is not JSON: %v\n%s", err, stdout)
+	}
+	if len(projects) != 1 || projects[0].ID != "demo" || projects[0].Kind != domain.ProjectKindRepository {
+		t.Fatalf("project list --json = %+v", projects)
+	}
+
+	code, stdout, stderr = runForTest(t, "project", "show", "demo", "--json", "--config", cfgPath)
+	if code != 0 {
+		t.Fatalf("project show --json exit code = %d (stderr: %s)", code, stderr)
+	}
+	var shown domain.Project
+	if err := json.Unmarshal([]byte(stdout), &shown); err != nil {
+		t.Fatalf("project show --json is not JSON: %v\n%s", err, stdout)
+	}
+	if shown.ID != "demo" || shown.DefaultBranch != "dev" || shown.Name != "Demo" {
+		t.Fatalf("project show --json = %+v", shown)
+	}
+
+	code, _, stderr = runForTest(t, "project", "show", "missing", "--config", cfgPath)
+	if code != 1 || !strings.Contains(stderr, "not found") {
+		t.Fatalf("project show missing exit code = %d, stderr = %q", code, stderr)
+	}
+
+	code, _, stderr = runForTest(t, "project", "nope")
+	if code != 2 || !strings.Contains(stderr, "unknown subcommand") {
+		t.Fatalf("project nope exit code = %d, stderr = %q", code, stderr)
+	}
+
+	code, _, stderr = runForTest(t, "project", "set", "demo", "--clear-paths", "--config", cfgPath)
+	if code != 0 {
+		t.Fatalf("project set --clear-paths exit code = %d (stderr: %s)", code, stderr)
+	}
+	cleared := readCLIRegistry(t, dataDir).Projects[0]
+	if len(cleared.Paths) != 0 {
+		t.Fatalf("paths were not cleared: %+v", cleared.Paths)
+	}
+	if cleared.Name != "Demo" || cleared.DefaultBranch != "dev" {
+		t.Fatalf("--clear-paths lost other fields: %+v", cleared)
+	}
+
+	code, _, stderr = runForTest(t, "project", "set", "demo",
+		"--path", projectPath, "--clear-paths", "--config", cfgPath)
+	if code != 2 || !strings.Contains(stderr, "cannot be combined") {
+		t.Fatalf("conflicting flags exit code = %d, stderr = %q", code, stderr)
+	}
+
+	code, stdout, stderr = runForTest(t, "help")
+	if code != 0 || !strings.Contains(stdout, "project") {
+		t.Fatalf("help exit code = %d, stdout = %q, stderr = %q", code, stdout, stderr)
+	}
+	code, stdout, stderr = runForTest(t, "project", "--help")
+	if code != 0 || !strings.Contains(stdout, "brain project set") {
+		t.Fatalf("project help exit code = %d, stdout = %q, stderr = %q", code, stdout, stderr)
+	}
+}
+
+func TestProjectSetDefaultsNameToID(t *testing.T) {
+	t.Setenv("BRAIN_CONFIG", "")
+	root := t.TempDir()
+	dataDir := filepath.Join(root, "brain")
+	cfgPath := filepath.Join(dataDir, "brain.yaml")
+	if code, _, stderr := runForTest(t, "init", "--mode", "local", "--data-dir", dataDir); code != 0 {
+		t.Fatalf("init exit code = %d (stderr: %s)", code, stderr)
+	}
+
+	code, _, stderr := runForTest(t, "project", "set", "plain", "--config", cfgPath)
+	if code != 0 {
+		t.Fatalf("project set exit code = %d (stderr: %s)", code, stderr)
+	}
+	project := readCLIRegistry(t, dataDir).Projects[0]
+	if project.Name != "plain" || project.Kind != "other" {
+		t.Fatalf("project = %+v", project)
+	}
+}
