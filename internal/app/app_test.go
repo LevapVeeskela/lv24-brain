@@ -438,11 +438,13 @@ func TestLocalSyncIsUnsupported(t *testing.T) {
 }
 
 type fakeUpdater struct {
-	release   ports.ReleaseInfo
-	checks    int
-	downloads int
-	applies   int
-	channel   string
+	release     ports.ReleaseInfo
+	checks      int
+	downloads   int
+	applies     int
+	rollbacks   int
+	rollbackErr error
+	channel     string
 }
 
 func (f *fakeUpdater) Check(_ context.Context, channel string) (ports.ReleaseInfo, error) {
@@ -461,7 +463,10 @@ func (f *fakeUpdater) Apply(context.Context, string) error {
 	return nil
 }
 
-func (f *fakeUpdater) Rollback(context.Context) error { return nil }
+func (f *fakeUpdater) Rollback(context.Context) error {
+	f.rollbacks++
+	return f.rollbackErr
+}
 
 func TestUpdateUseCase(t *testing.T) {
 	ctx := context.Background()
@@ -519,6 +524,54 @@ func TestUpdateUseCase(t *testing.T) {
 		}
 		if updater.downloads != 0 || updater.applies != 0 || result.Applied {
 			t.Fatalf("calls = %+v, result = %+v", updater, result)
+		}
+	})
+
+	t.Run("rollback restores previous binary without network", func(t *testing.T) {
+		updater := &fakeUpdater{}
+		useCase := app.New(cfg, app.Dependencies{Updater: updater})
+		result, err := useCase.Update(ctx, app.UpdateOptions{Rollback: true})
+		if err != nil {
+			t.Fatalf("Update rollback: %v", err)
+		}
+		if updater.rollbacks != 1 || updater.checks != 0 || updater.downloads != 0 || updater.applies != 0 {
+			t.Fatalf("calls = %+v", updater)
+		}
+		if !result.RolledBack || result.Applied {
+			t.Fatalf("result = %+v", result)
+		}
+	})
+
+	t.Run("rollback rejects check and yes", func(t *testing.T) {
+		updater := &fakeUpdater{}
+		useCase := app.New(cfg, app.Dependencies{Updater: updater})
+		for _, opts := range []app.UpdateOptions{
+			{Rollback: true, Check: true},
+			{Rollback: true, Yes: true},
+		} {
+			if _, err := useCase.Update(ctx, opts); !errors.Is(err, domain.ErrValidation) {
+				t.Fatalf("Update(%+v) error = %v, want validation", opts, err)
+			}
+		}
+		if updater.rollbacks != 0 || updater.checks != 0 {
+			t.Fatalf("calls = %+v", updater)
+		}
+	})
+
+	t.Run("rollback error is reported", func(t *testing.T) {
+		boom := errors.New("no previous binary")
+		updater := &fakeUpdater{rollbackErr: boom}
+		useCase := app.New(cfg, app.Dependencies{Updater: updater})
+		if _, err := useCase.Update(ctx, app.UpdateOptions{Rollback: true}); !errors.Is(err, boom) {
+			t.Fatalf("Update rollback error = %v, want %v", err, boom)
+		}
+	})
+
+	t.Run("rollback without updater is not implemented", func(t *testing.T) {
+		useCase := app.New(cfg, app.Dependencies{})
+		_, err := useCase.Update(ctx, app.UpdateOptions{Rollback: true})
+		if !errors.Is(err, app.ErrNotImplemented) {
+			t.Fatalf("Update error = %v, want ErrNotImplemented", err)
 		}
 	})
 }

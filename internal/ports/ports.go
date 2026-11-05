@@ -111,6 +111,16 @@ type Connector interface {
 	Run(ctx context.Context, opts ConnectorOptions) (domain.ConnectorRun, error)
 }
 
+// ConnectorRunStore persists connector run records for review and audit.
+// Local and Git modes write Markdown under connectors/runs. There is no
+// server-side run store yet: server mode returns a nil ConnectorRunStore.
+type ConnectorRunStore interface {
+	AppendConnectorRun(ctx context.Context, run domain.ConnectorRun) error
+	// ListConnectorRuns returns runs newest first. An empty source means every
+	// source; a limit of zero selects the adapter default.
+	ListConnectorRuns(ctx context.Context, source string, limit int) ([]domain.ConnectorRun, error)
+}
+
 // Credentials are local or OIDC login inputs.
 type Credentials struct {
 	Login    string

@@ -137,8 +137,10 @@ with `BRAIN_IMAP_PASSWORD_KEY`). Dumps are written below the data directory:
 `mail/<account>/<folder>.md`.
 
 `--since <RFC3339>` limits items by update time; `--limit <n>` caps each
-collection. The command prints source, status, counts, and a sanitized error.
-Connector run records are not persisted yet.
+collection. The command prints source, status, counts, and a sanitized error,
+and persists each run as Markdown under `connectors/runs/`. Connectors require
+local or `git` mode; server mode does not run connectors and has no server-side
+run store yet.
 
 ## 2. Git mode
 
@@ -196,7 +198,9 @@ a token in the repository URL.
 
 The HTTP API and the token-authenticated CLI client are implemented. Postgres
 persistence is enabled by `BRAIN_DATABASE_URL` (or `DATABASE_URL`); without it
-the server falls back to an in-memory store and loses data on restart. See
+the server falls back to an in-memory store and loses data on restart. Server
+schema 3 (migrations `0002_auth_tokens.sql` and `0003_auth_revocations.sql`)
+stores API tokens and refresh-token families durably. See
 [deploy.md](deploy.md) for Compose, backups, and the migration gate.
 
 Start the server with an explicit signing key, one bootstrap administrator, and
@@ -245,7 +249,42 @@ Expected responses:
 {"version":"<version>","commit":"<commit>","date":"<date>","go":"<go version>"}
 ```
 
-Authenticate over HTTP and mint an API token for scripts:
+Log in through the CLI (server mode only), then use the stored session:
+
+```sh
+./bin/brain init --mode server --server-url http://127.0.0.1:8080 \
+  --config ~/brain-server.yaml
+printf '%s\n' '<strong password>' | ./bin/brain login \
+  --config ~/brain-server.yaml --login admin --password-stdin
+./bin/brain doctor --config ~/brain-server.yaml
+./bin/brain note --project demo --title "Server note" --body "Server smoke" \
+  --config ~/brain-server.yaml
+./bin/brain logout --config ~/brain-server.yaml
+```
+
+`--login` falls back to `BRAIN_LOGIN`; `--password` falls back to
+`BRAIN_PASSWORD`. Prefer `--password-stdin`, which reads one line from stdin
+instead of taking the password as a `brain login` flag; the pipeline itself may
+still be recorded by shell history. `brain login` stores one JSON credential
+bundle under the OS secret-store key `server-session` (`serverUrl`,
+`accessToken`, `refreshToken`) in a single atomic write, bound to the configured
+`server_url`. The HTTP client refreshes once on `401` and retries. A platform
+secret service must be available; otherwise keep using `BRAIN_TOKEN`.
+`brain logout` checks `GET /v1/auth/me` before rotating anything, revokes the
+JWT session and its refresh family, and clears the bundle. The refresh family
+is revoked immediately; an access JWT already issued stays valid until its
+short TTL. `server-token` remains an explicit static API-token fallback with no
+refresh token and no binding; `server-refresh-token` and `server-auth-url` are
+no longer read, so a legacy unbound JWT pair requires `brain login` again. A
+static API token cannot be revoked by the CLI: logout clears the local entries,
+warns, and exits non-zero.
+
+`BRAIN_TOKEN` still takes precedence over stored credentials: login is refused
+and logout leaves a stored session untouched and exits non-zero. That is the
+path for automation with a static API token. A login-managed bundle stored for
+another server URL is never sent to the configured server, and a mismatched
+binding is refused with both URLs named. The login and token endpoints are also
+available over HTTP for scripts:
 
 ```sh
 curl -fsS -X POST http://127.0.0.1:8080/v1/auth/login \
@@ -261,36 +300,15 @@ curl -fsS -X POST http://127.0.0.1:8080/v1/tokens \
 The login response contains `accessToken`, `refreshToken`, `expiresAt`, and
 `user`. The token response contains the one-time raw `token` value and its
 metadata; store it in the OS secret store or an environment variable, not in a
-repository. Send either token as `Authorization: Bearer <token>`.
+repository. Send either token as `Authorization: Bearer <token>`. A static API
+token can be stored with
+`printf '%s\n' '<token>' | ./bin/brain secret set server-token`.
 
 Other useful endpoints:
 
 - `GET /openapi.json` — OpenAPI 3 document.
 - `GET /v1/projects`, `GET /v1/search?q=...` — authenticated read paths.
 - `GET /v1/events` — SSE revision stream with heartbeat and `Last-Event-ID`.
-
-Point the CLI at the server and supply the token from the login response:
-
-```sh
-./bin/brain init --mode server --server-url http://127.0.0.1:8080 \
-  --config ~/brain-server.yaml
-export BRAIN_TOKEN="<access-token>"
-./bin/brain doctor --config ~/brain-server.yaml
-./bin/brain note --project demo --title "Server note" --body "Server smoke" \
-  --config ~/brain-server.yaml
-```
-
-Instead of an environment variable, store the token in the OS secret store when
-a platform secret service is available:
-
-```sh
-printf '%s\n' '<access-token>' | ./bin/brain secret set server-token
-```
-
-`brain secret set` reads the value from stdin, prints only the secret name, and
-never writes the value to `brain.yaml`. The command itself does not echo the
-value, but the terminal or shell history may record it; use the method your
-environment protects. If no secret service exists, keep using `BRAIN_TOKEN`.
 
 Expected `doctor` output in server mode (revision number varies):
 
@@ -305,13 +323,14 @@ ok: git (not used in server mode)
 
 A successful write prints `note note-<project>-YYYYMMDD-HHMMSS`.
 
-There is no `brain login` command yet; obtain the token through
-`POST /v1/auth/login` or an API token minted at `POST /v1/tokens`.
+The `schema` check reports the data schema from `brain.yaml`; the server
+database schema (`postgres.SchemaVersion`, currently 3) is separate.
+
 `brain sync` is not implemented in server mode — the API is the sync path.
 `brain index` and `brain search` are local-only; use `GET /v1/search?q=...` for
 server-side search. Server-side Markdown import/export is not wired yet.
-`brain doctor` fails the `server` check when the URL is wrong or the token is
-missing/expired.
+`brain doctor` fails the `server` check when the URL is wrong or no usable token
+is stored.
 
 ## Smoke checklist
 
@@ -340,9 +359,10 @@ missing/expired.
   rerun. The engine never discards changes.
 - Server exits with `BRAIN_JWT_SECRET is required` — set a signing key of at
   least 32 bytes.
-- `401` on server requests — set `BRAIN_TOKEN` or run
-  `brain secret set server-token`, then retry. JWT access tokens expire after 15
-  minutes by default; refresh tokens rotate.
+- `401` on server requests — the HTTP client refreshes once automatically, so a
+  repeated `401` means the refresh session is expired or revoked: run
+  `brain login` again (or set `BRAIN_TOKEN` for automation), then retry. Access
+  tokens expire after 15 minutes by default; refresh tokens rotate.
 - `server client is not configured` from `doctor` — the URL is missing or no
   token was found in `BRAIN_TOKEN` / the OS secret store.
 - `local search index is not available` from `search` — run `brain index` (or

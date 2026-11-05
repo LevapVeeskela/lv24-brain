@@ -84,6 +84,10 @@ func (s *Store) Get(ctx context.Context, key string) (string, error) {
 	}
 	value, err := s.backend.Get(ctx, canonical)
 	if err != nil {
+		if isNotFound(err) {
+			// Platform backends already name the key; avoid a doubled prefix.
+			return "", notFound(canonical)
+		}
 		return "", fmt.Errorf("secret %q: %w", canonical, err)
 	}
 	if value == "" {

@@ -8,6 +8,8 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"net"
+	"net/url"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -18,14 +20,38 @@ import (
 	"time"
 
 	"github.com/levapveeskela/lv24-brain/internal/adapters/fsstore"
+	"github.com/levapveeskela/lv24-brain/internal/adapters/httpclient"
+	"github.com/levapveeskela/lv24-brain/internal/adapters/secrets"
 	"github.com/levapveeskela/lv24-brain/internal/app"
 	"github.com/levapveeskela/lv24-brain/internal/bootstrap"
 	"github.com/levapveeskela/lv24-brain/internal/config"
+	"github.com/levapveeskela/lv24-brain/internal/connectors"
 	"github.com/levapveeskela/lv24-brain/internal/domain"
 	"github.com/levapveeskela/lv24-brain/internal/migrate"
 	"github.com/levapveeskela/lv24-brain/internal/ports"
 	"github.com/levapveeskela/lv24-brain/internal/server"
+	"github.com/levapveeskela/lv24-brain/internal/update"
 	"github.com/levapveeskela/lv24-brain/internal/version"
+)
+
+// buildRuntime constructs the CLI composition root. Tests replace it to inject
+// a fake secret store; production always uses the default adapters.
+var buildRuntime = bootstrap.Build
+
+// osSecrets returns the OS secret store without environment shadowing. The
+// environment-token logout path must inspect only what was persisted: with
+// BRAIN_SECRET_SERVER_TOKEN set, the composite store would return the
+// environment value for server-token and mistake it for a stored credential.
+// Tests replace it alongside buildRuntime.
+var osSecrets = func() ports.SecretStore {
+	return secrets.New(secrets.Options{LookupEnv: func(string) (string, bool) { return "", false }})
+}
+
+const (
+	// serverTokenEnv is the legacy static-token environment variable.
+	serverTokenEnv = "BRAIN_TOKEN"
+	// serverSecretTokenEnv is the environment form of the server-token secret.
+	serverSecretTokenEnv = "BRAIN_SECRET_SERVER_TOKEN"
 )
 
 func main() {
@@ -42,6 +68,7 @@ func runWithInput(args []string, stdin io.Reader, stdout, stderr io.Writer) int 
 		return 2
 	}
 	command, rest := args[0], args[1:]
+	maybeDailyUpdateNotice(command, rest, stderr)
 	switch command {
 	case "help", "-h", "--help":
 		printUsage(stdout)
@@ -81,6 +108,10 @@ func runWithInput(args []string, stdin io.Reader, stdout, stderr io.Writer) int 
 		return runMigrate(rest, stdout, stderr)
 	case "secret":
 		return runSecret(rest, stdin, stdout, stderr)
+	case "login":
+		return runLogin(rest, stdin, stdout, stderr)
+	case "logout":
+		return runLogout(rest, stdout, stderr)
 	case "serve":
 		return runServe(rest, stdout, stderr)
 	case "update":
@@ -120,8 +151,10 @@ Commands:
   connector  Run a read-only GitHub, GitLab, or IMAP connector
   migrate    Import a legacy .brain data directory
   secret     Manage OS-backed secrets (set, list, remove)
+  login      Authenticate against a server-mode brain
+  logout     Revoke the server session and clear stored tokens
   serve      Run the HTTP server
-  update     Check for or apply engine updates
+  update     Check for, apply, or roll back engine updates
   version    Print version information
   help       Show this help
 
@@ -129,9 +162,21 @@ Global flags:
   --config <path>   Path to brain.yaml (default: $BRAIN_CONFIG or brain.yaml)
 
 Server mode authentication:
-  Set BRAIN_TOKEN in the environment, or store it in the OS secret store:
+  Store a session with:
+    brain login --login <name> --password-stdin
+  Or use an administrator token from the environment:
+    BRAIN_TOKEN=<token> brain status
+  Or store a static API token in the OS secret store:
     brain secret set server-token
-  The token value is read from stdin; brain login/OIDC is not implemented yet.
+  The token value is read from stdin. BRAIN_TOKEN or
+  BRAIN_SECRET_SERVER_TOKEN takes precedence and disables login/logout for
+  that process. A static API token has no refresh token and cannot be
+  revoked by brain logout.
+
+Update:
+  brain update --check      Check for a newer release
+  brain update --yes        Apply the newest release
+  brain update --rollback   Restore the previous engine binary
 
 Run "brain <command> --help" for command flags.
 `)
@@ -186,6 +231,30 @@ func reportError(w io.Writer, command string, err error) int {
 	return 1
 }
 
+// staticServerTokenFromEnv reports whether a static server token shadows the
+// stored credentials. Both names must disable login and logout.
+func staticServerTokenFromEnv() bool {
+	return strings.TrimSpace(os.Getenv(serverTokenEnv)) != "" ||
+		strings.TrimSpace(os.Getenv(serverSecretTokenEnv)) != ""
+}
+
+// warnPlainHTTPLogin warns when credentials would cross the network without
+// TLS. Loopback hosts are intentionally exempt.
+func warnPlainHTTPLogin(w io.Writer, serverURL string) {
+	parsed, err := url.Parse(strings.TrimSpace(serverURL))
+	if err != nil || parsed.Scheme != "http" {
+		return
+	}
+	host := parsed.Hostname()
+	if host == "" || strings.EqualFold(host, "localhost") {
+		return
+	}
+	if ip := net.ParseIP(host); ip != nil && ip.IsLoopback() {
+		return
+	}
+	fmt.Fprintf(w, "brain login: warning: credentials will be sent over plain HTTP to %s; use HTTPS\n", host)
+}
+
 func runInit(args []string, stdout, stderr io.Writer) int {
 	fs := newFlagSet("init", stderr)
 	mode := fs.String("mode", config.ModeLocal, "install mode: local, git, or server")
@@ -215,7 +284,7 @@ func runInit(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stdout, "data_dir: %s\n", result.DataDir)
 	}
 	if result.Mode == config.ModeServer {
-		fmt.Fprintln(stdout, "next: set BRAIN_TOKEN or run brain secret set server-token")
+		fmt.Fprintf(stdout, "next: run brain login --config %s (or set BRAIN_TOKEN)\n", result.ConfigPath)
 	}
 	return 0
 }
@@ -730,11 +799,20 @@ func runConnectorRun(args []string, stdout, stderr io.Writer) int {
 	if err != nil {
 		return reportError(stderr, "connector run", err)
 	}
+	useCase, err := bootstrap.OpenRunStore(cfg)
+	if err != nil {
+		return reportError(stderr, "connector run", err)
+	}
+	if useCase != nil {
+		connector = connectors.Recording{Inner: connector, Runs: useCase}
+	}
 	runOptions := ports.ConnectorOptions{Since: since, Limit: *limit}
 	if connectorName != "imap" && strings.TrimSpace(*project) != "" {
 		runOptions.Projects = []string{strings.TrimSpace(*project)}
 	}
-	run, err := connector.Run(context.Background(), runOptions)
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	run, err := connector.Run(ctx, runOptions)
 	printConnectorRun(stdout, run)
 	if err != nil {
 		return reportError(stderr, "connector run", err)
@@ -1045,6 +1123,173 @@ func readSecretValue(stdin io.Reader) (string, error) {
 	return value, nil
 }
 
+func runLogin(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
+	fs := newFlagSet("login", stderr)
+	login := fs.String("login", strings.TrimSpace(os.Getenv("BRAIN_LOGIN")), "user login (default: $BRAIN_LOGIN)")
+	password := fs.String("password", "", "password; prefer --password-stdin")
+	passwordStdin := fs.Bool("password-stdin", false, "read the password from one stdin line")
+	cfgPath := configFlag(fs)
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	if fs.NArg() > 0 {
+		fmt.Fprintf(stderr, "brain login: unexpected arguments: %s\n", strings.Join(fs.Args(), " "))
+		return 2
+	}
+	if *passwordStdin && *password != "" {
+		fmt.Fprintln(stderr, "brain login: --password and --password-stdin are mutually exclusive")
+		return 2
+	}
+	secret := *password
+	if *passwordStdin {
+		value, err := readSecretValue(stdin)
+		if err != nil {
+			fmt.Fprintf(stderr, "brain login: %v\n", err)
+			return 1
+		}
+		secret = value
+	} else if secret == "" {
+		secret = os.Getenv("BRAIN_PASSWORD")
+	}
+	if *password != "" {
+		fmt.Fprintln(stderr, "brain login: warning: --password exposes the password in process arguments; prefer --password-stdin")
+	}
+	if strings.TrimSpace(*login) == "" {
+		fmt.Fprintln(stderr, "brain login: --login is required")
+		return 2
+	}
+	if secret == "" {
+		fmt.Fprintln(stderr, "brain login: a password is required; use --password-stdin")
+		return 2
+	}
+	cfg, err := loadRequiredConfig(*cfgPath)
+	if err != nil {
+		return reportError(stderr, "login", err)
+	}
+	if err := cfg.Validate(); err != nil {
+		return reportError(stderr, "login", err)
+	}
+	if cfg.Mode != config.ModeServer {
+		fmt.Fprintln(stderr, "brain login: server mode is required (set mode: server in brain.yaml)")
+		return 1
+	}
+	if strings.TrimSpace(cfg.ServerURL) == "" {
+		fmt.Fprintln(stderr, "brain login: config.server_url is required")
+		return 1
+	}
+	if staticServerTokenFromEnv() {
+		fmt.Fprintln(stderr, "brain login: a static server token is set in the environment (BRAIN_TOKEN or BRAIN_SECRET_SERVER_TOKEN); unset it to log in with a user account")
+		return 1
+	}
+	warnPlainHTTPLogin(stderr, cfg.ServerURL)
+	useCase, err := buildRuntime(cfg)
+	if err != nil {
+		return reportError(stderr, "login", err)
+	}
+	defer func() { _ = useCase.Close() }()
+	result, err := useCase.App.Login(context.Background(), app.LoginOptions{
+		Login:    *login,
+		Password: secret,
+	})
+	if err != nil {
+		if errors.Is(err, httpclient.ErrUnauthorized) {
+			fmt.Fprintln(stderr, "brain login: invalid login or password")
+			return 1
+		}
+		return reportError(stderr, "login", err)
+	}
+	expires := "unknown"
+	if !result.ExpiresAt.IsZero() {
+		expires = result.ExpiresAt.UTC().Format(time.RFC3339)
+	}
+	fmt.Fprintf(stdout, "logged in as %s (%s), expires %s\n", result.User.Login, result.Role, expires)
+	return 0
+}
+
+func runLogout(args []string, stdout, stderr io.Writer) int {
+	fs := newFlagSet("logout", stderr)
+	cfgPath := configFlag(fs)
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	if fs.NArg() > 0 {
+		fmt.Fprintf(stderr, "brain logout: unexpected arguments: %s\n", strings.Join(fs.Args(), " "))
+		return 2
+	}
+	cfg, err := loadRequiredConfig(*cfgPath)
+	if err != nil {
+		return reportError(stderr, "logout", err)
+	}
+	if err := cfg.Validate(); err != nil {
+		return reportError(stderr, "logout", err)
+	}
+	if cfg.Mode != config.ModeServer {
+		fmt.Fprintln(stderr, "brain logout: server mode is required (set mode: server in brain.yaml)")
+		return 1
+	}
+	if strings.TrimSpace(cfg.ServerURL) == "" {
+		fmt.Fprintln(stderr, "brain logout: config.server_url is required")
+		return 1
+	}
+	if staticServerTokenFromEnv() {
+		stored, err := storedCredentials(context.Background(), osSecrets())
+		if err != nil {
+			return reportError(stderr, "logout", err)
+		}
+		if !stored {
+			fmt.Fprintln(stdout, "logged out: a static server token is set in the environment and takes precedence; no stored tokens to clear")
+			return 0
+		}
+		fmt.Fprintln(stderr, "brain logout: warning: a static server token is set in the environment (BRAIN_TOKEN or BRAIN_SECRET_SERVER_TOKEN) and takes precedence; stored tokens were left unchanged. Unset it and rerun to log out stored credentials")
+		return 1
+	}
+	useCase, err := buildRuntime(cfg)
+	if err != nil {
+		return reportError(stderr, "logout", err)
+	}
+	defer func() { _ = useCase.Close() }()
+	if err := useCase.App.Logout(context.Background()); err != nil {
+		switch {
+		case errors.Is(err, httpclient.ErrWrongServer):
+			fmt.Fprintf(stderr, "brain logout: warning: stored credentials belong to a different server; tokens were left unchanged: %v\n", err)
+			return 1
+		case errors.Is(err, httpclient.ErrStaticTokenNotRevoked):
+			if err == httpclient.ErrStaticTokenNotRevoked {
+				fmt.Fprintln(stderr, "brain logout: warning: local tokens were cleared, but a static API token cannot be revoked by this command; revoke the API token on the server")
+			} else {
+				fmt.Fprintf(stderr, "brain logout: warning: a static API token cannot be revoked by this command and local tokens were not fully cleared: %v\n", err)
+			}
+			return 1
+		default:
+			return reportError(stderr, "logout", err)
+		}
+	}
+	fmt.Fprintln(stdout, "logged out")
+	return 0
+}
+
+// storedCredentials reports whether the secret store still holds a session or
+// a static token. The environment-token logout path must not claim success
+// while a previously stored credential remains valid.
+func storedCredentials(ctx context.Context, store ports.SecretStore) (bool, error) {
+	if store == nil {
+		return false, nil
+	}
+	for _, key := range []string{httpclient.SecretSession, httpclient.SecretAccessToken, httpclient.SecretRefreshToken} {
+		value, err := store.Get(ctx, key)
+		if err != nil {
+			if errors.Is(err, domain.ErrNotFound) {
+				continue
+			}
+			return false, fmt.Errorf("read %s: %w", key, err)
+		}
+		if strings.TrimSpace(value) != "" {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
 func runServe(args []string, stdout, stderr io.Writer) int {
 	fs := newFlagSet("serve", stderr)
 	defaultAddr := os.Getenv("BRAIN_ADDR")
@@ -1072,30 +1317,105 @@ func runUpdate(args []string, stdout, stderr io.Writer) int {
 	fs := newFlagSet("update", stderr)
 	check := fs.Bool("check", false, "only check for a newer release")
 	yes := fs.Bool("yes", false, "apply without prompting")
+	rollback := fs.Bool("rollback", false, "restore the previous binary")
 	channel := fs.String("channel", "", "release channel: stable or beta (default: brain.yaml)")
 	cfgPath := configFlag(fs)
 	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	if fs.NArg() > 0 {
+		fmt.Fprintf(stderr, "brain update: unexpected arguments: %s\n", strings.Join(fs.Args(), " "))
+		return 2
+	}
+	if *rollback && strings.TrimSpace(*channel) != "" {
+		fmt.Fprintln(stderr, "brain update: --channel cannot be combined with --rollback")
+		return 2
+	}
+	if *rollback && (*check || *yes) {
+		fmt.Fprintln(stderr, "brain update: --rollback cannot be combined with --check or --yes")
 		return 2
 	}
 	cfg, err := loadConfigOrDefault(*cfgPath)
 	if err != nil {
 		return reportError(stderr, "update", err)
 	}
-	useCase, err := bootstrap.Build(cfg)
+	useCase, err := buildRuntime(cfg)
 	if err != nil {
 		return reportError(stderr, "update", err)
 	}
 	defer func() { _ = useCase.Close() }()
 	result, err := useCase.App.Update(context.Background(), app.UpdateOptions{
-		Check:   *check,
-		Yes:     *yes,
-		Channel: *channel,
+		Check:    *check,
+		Yes:      *yes,
+		Channel:  *channel,
+		Rollback: *rollback,
 	})
 	if err != nil {
 		return reportError(stderr, "update", err)
 	}
+	if result.RolledBack {
+		fmt.Fprintln(stdout, "rolled back to the previous binary")
+		return 0
+	}
 	fmt.Fprintf(stdout, "current: %s\nlatest: %s\napplied: %t\n", result.Current.Version, result.Latest.Version, result.Applied)
 	return 0
+}
+
+// maybeDailyUpdateNotice performs at most one notify-only release lookup per
+// day before a command runs. Every failure is silent: the daily check must
+// never block or change the exit code of the command the user asked for.
+func maybeDailyUpdateNotice(command string, args []string, stderr io.Writer) {
+	switch command {
+	case "serve", "init", "help", "-h", "--help", "version", "-v", "--version", "update":
+		return
+	}
+	cfg, err := loadConfigOrDefault(configPathFromArgs(args))
+	if err != nil {
+		return
+	}
+	channel := strings.ToLower(strings.TrimSpace(cfg.UpdateChannel))
+	if channel == "" {
+		channel = config.ChannelStable
+	}
+	result, err := update.MaybeDailyCheck(context.Background(), update.DailyOptions{
+		Dir:     update.DefaultUpdateDir(runtime.GOOS, os.Getenv),
+		Timeout: 3 * time.Second,
+		Check: func(ctx context.Context) (ports.ReleaseInfo, error) {
+			updater, updaterErr := update.New(update.Options{IgnoreDisabled: true})
+			if updaterErr != nil {
+				return ports.ReleaseInfo{}, updaterErr
+			}
+			return updater.Check(ctx, channel)
+		},
+	})
+	if err != nil || !result.Checked || result.Latest == nil {
+		return
+	}
+	latest := strings.TrimSpace(result.Latest.Version)
+	if latest == "" || update.CompareVersions(latest, version.Version) <= 0 {
+		return
+	}
+	fmt.Fprintf(stderr, "brain %s is available; run: brain update --yes\n", latest)
+}
+
+// configPathFromArgs finds --config before flag parsing so the daily check uses
+// the same configuration as the command that follows.
+func configPathFromArgs(args []string) string {
+	path := os.Getenv("BRAIN_CONFIG")
+	if path == "" {
+		path = config.FileName
+	}
+	for i := 0; i < len(args); i++ {
+		switch {
+		case (args[i] == "--config" || args[i] == "-config") && i+1 < len(args):
+			return args[i+1]
+		case strings.HasPrefix(args[i], "--config="):
+			return strings.TrimPrefix(args[i], "--config=")
+		case strings.HasPrefix(args[i], "-config="):
+			return strings.TrimPrefix(args[i], "-config=")
+		}
+	}
+	return path
 }
 
 // splitValueFlags separates flags from positional arguments so a query may be

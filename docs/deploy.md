@@ -158,10 +158,14 @@ docker compose --env-file .env -f docker-compose.yml up -d brain-server
 
 Before an upgrade, take a backup. The server applies embedded migrations on
 startup; an existing schema with pending migrations refuses to start until
-`BRAIN_DATABASE_BACKUP_CONFIRMED=1` is set. An update must not run while
-migrations or active jobs are in progress. Roll back by restoring the previous
-image digest (and the matching database backup if a migration ran). Data
-directories and Postgres volumes are never deleted by an update.
+`BRAIN_DATABASE_BACKUP_CONFIRMED=1` is set in the server environment. Upgrading
+a schema-1 database to schema 3 (migrations `0002_auth_tokens.sql` and
+`0003_auth_revocations.sql`) is such a migration: back up first, set the
+confirmation variable for the upgrade start, and unset it afterwards if you
+prefer to keep the gate explicit for the next migration. An update must not run
+while migrations or active jobs are in progress. Roll back by restoring the
+previous image digest (and the matching database backup if a migration ran).
+Data directories and Postgres volumes are never deleted by an update.
 
 ## Healthchecks
 
@@ -174,19 +178,56 @@ directories and Postgres volumes are never deleted by an update.
 
 Postgres persistence is wired. With `BRAIN_DATABASE_URL` set, `brain-server`
 opens Postgres, checks schema health, applies embedded migrations, and stores
-users, projects, knowledge records, connector runs, revisions, and audit events
-there. Compose always sets that URL, so this stack is durable.
+users, projects, knowledge records, revisions, API tokens, refresh-token
+families, and audit events there. Compose always sets that URL, so this stack is
+durable.
+
+The server schema is version 3. Migration `0002_auth_tokens.sql` adds the
+`api_tokens` and `refresh_tokens` tables, so API tokens and refresh sessions
+survive a restart; refresh rotation still revokes the whole family when a used
+token is presented again. Migration `0003_auth_revocations.sql` adds durable
+family/session revocation tombstones that are never pruned, so an expired or
+pruned token row cannot resurrect a revoked family or session. Connector runs
+remain a local/`git` feature and are not persisted server-side yet.
 
 Current limits:
 
 - Pending migrations on an existing schema require a backup and
-  `BRAIN_DATABASE_BACKUP_CONFIRMED=1`; migrations are forward-only.
-- API tokens and refresh-token families are process-memory because the current
-  schema has no `api_tokens` / `refresh_tokens` tables. Clients re-authenticate
-  after a restart, and multi-replica deployment is not safe.
-- There is no `brain login` or CLI OIDC flow. Obtain a token from
-  `POST /v1/auth/login` and set `BRAIN_TOKEN` on the client, or use
-  `brain secret set server-token`.
+  `BRAIN_DATABASE_BACKUP_CONFIRMED=1`; migrations are forward-only. Upgrading a
+  schema-1 server to schema 3 therefore needs a backup first.
+- Multi-replica deployment is not supported: the SSE broker and login rate
+  limiter are per-process, so events and throttling are not shared between
+  instances. Durable tokens do not change that.
 - Server auto-update is not implemented; upgrade by replacing the image.
 - There is no browser cookie session flow, so CSRF-safe cookie settings do not
   apply yet.
+
+## Client login
+
+Point the CLI at the deployed server and sign in with a local account:
+
+```sh
+brain init --mode server --server-url https://brain.example.com \
+  --config ~/brain-server.yaml
+printf '%s\n' '<password>' | brain login --config ~/brain-server.yaml \
+  --login admin --password-stdin
+brain status --config ~/brain-server.yaml
+brain logout --config ~/brain-server.yaml
+```
+
+`brain login` is server-mode only and stores one JSON credential bundle under
+the OS secret-store key `server-session` (`serverUrl`, `accessToken`,
+`refreshToken`) in a single atomic write, bound to the configured `server_url`.
+The HTTP client refreshes once on `401` and retries; the bundle is never sent to
+a different server URL, and a mismatched binding is refused with both URLs
+named. `brain logout` inspects `GET /v1/auth/me` before rotating anything,
+revokes the JWT session and its refresh family, and clears the bundle. The
+refresh family is revoked immediately; an access JWT already issued remains
+valid until its short TTL. Use `BRAIN_TOKEN` for automation when you do not
+want stored credentials; it takes precedence: while it is set, `brain login` is
+refused and `brain logout` leaves a stored session untouched and exits
+non-zero. `server-token` remains an explicit static API-token fallback with no
+refresh token and no binding; `server-refresh-token` and `server-auth-url` are
+no longer read, so a legacy unbound JWT pair requires `brain login` again. A
+static API token cannot be revoked by logout: it clears local credentials,
+warns, and exits non-zero.

@@ -169,8 +169,12 @@ func TestGetMissingIsNotFound(t *testing.T) {
 		LookupEnv: lookup(nil),
 		Environ:   environ(nil),
 	})
-	if _, err := store.Get(context.Background(), "github/token"); !errors.Is(err, domain.ErrNotFound) {
+	_, err := store.Get(context.Background(), "github/token")
+	if !errors.Is(err, domain.ErrNotFound) {
 		t.Fatalf("Get missing = %v", err)
+	}
+	if strings.Count(err.Error(), `secret "GITHUB_TOKEN"`) != 1 {
+		t.Fatalf("missing-secret error repeats the key: %v", err)
 	}
 }
 

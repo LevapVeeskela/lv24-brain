@@ -352,6 +352,36 @@ func TestErrorRedaction(t *testing.T) {
 	}
 }
 
+func TestErrorRedactionCoversRequestToken(t *testing.T) {
+	const providerToken = "provider-echoed-token"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer "); got != providerToken {
+			t.Fatalf("authorization header = %q", got)
+		}
+		writeJSON(t, w, http.StatusInternalServerError,
+			`{"error":{"code":"internal","message":"proxy echoed `+providerToken+` as Bearer `+providerToken+`"}}`)
+	}))
+	defer server.Close()
+	client, err := New(Config{
+		BaseURL:       server.URL,
+		TokenProvider: staticProvider{token: providerToken},
+		Timeout:       time.Second,
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	_, err = client.GetProject(context.Background(), "p1")
+	if err == nil {
+		t.Fatal("expected an error")
+	}
+	if strings.Contains(err.Error(), providerToken) {
+		t.Fatalf("error leaked the request token: %v", err)
+	}
+	if !strings.Contains(err.Error(), "***") {
+		t.Fatalf("error did not show a redaction marker: %v", err)
+	}
+}
+
 func TestTokenProvider(t *testing.T) {
 	provider := staticProvider{token: "provider-token"}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

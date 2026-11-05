@@ -2,15 +2,18 @@ package app
 
 import (
 	"context"
+	"fmt"
 	"strings"
 
 	"github.com/levapveeskela/lv24-brain/internal/config"
+	"github.com/levapveeskela/lv24-brain/internal/domain"
 	"github.com/levapveeskela/lv24-brain/internal/version"
 )
 
 // Update checks the release channel and optionally verifies, downloads and
 // applies a newer engine binary. Check-only runs and runs without Yes never
-// change the installed binary.
+// change the installed binary. A rollback restores the previous binary and
+// never queries the network.
 func (a *App) Update(ctx context.Context, opts UpdateOptions) (UpdateResult, error) {
 	if a.deps.Updater == nil {
 		return UpdateResult{}, notImplemented("update")
@@ -25,6 +28,15 @@ func (a *App) Update(ctx context.Context, opts UpdateOptions) (UpdateResult, err
 	current := VersionInfo{Version: version.Version, Channel: a.cfg.UpdateChannel}
 	if current.Channel == "" {
 		current.Channel = config.ChannelStable
+	}
+	if opts.Rollback {
+		if opts.Check || opts.Yes {
+			return UpdateResult{Current: current}, domain.NewValidationError("update", "rollback cannot be combined with --check or --yes")
+		}
+		if err := a.deps.Updater.Rollback(ctx); err != nil {
+			return UpdateResult{Current: current}, fmt.Errorf("rollback update: %w", err)
+		}
+		return UpdateResult{Current: current, RolledBack: true}, nil
 	}
 	release, err := a.deps.Updater.Check(ctx, channel)
 	if err != nil {

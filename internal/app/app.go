@@ -217,13 +217,17 @@ type UpdateOptions struct {
 	Check   bool
 	Yes     bool
 	Channel string
+	// Rollback restores the previous engine binary. It cannot be combined with
+	// Check or Yes because it neither queries nor downloads a release.
+	Rollback bool
 }
 
 // UpdateResult is the updater outcome.
 type UpdateResult struct {
-	Current VersionInfo
-	Latest  VersionInfo
-	Applied bool
+	Current    VersionInfo
+	Latest     VersionInfo
+	Applied    bool
+	RolledBack bool
 }
 
 // VersionInfo is a release identity.

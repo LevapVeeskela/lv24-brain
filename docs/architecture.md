@@ -19,7 +19,7 @@ actually does today and where the remaining gaps are.
 cmd/brain/                 CLI entry point and flag parsing
 cmd/brain-server/          HTTP server entry point
 internal/domain/           entities, value objects, validation errors
-internal/app/              use cases (init, write, open, bootstrap, review, sync, index, search, update, doctor, secret)
+internal/app/              use cases (init, write, open, bootstrap, review, sync, index, search, update, doctor, secret, auth)
 internal/ports/            Store, Index, SyncProvider, SecretStore, AuthProvider, Updater
 internal/bootstrap/        CLI composition root; selects adapters by mode
 internal/config/           brain.yaml load/save/validate
@@ -44,6 +44,7 @@ internal/update/           release check, verify, stage, apply, rollback
 internal/version/          build identity
 templates/                 state, decision, attempt, handoff, AGENTS.md
 installers/windows/        install.ps1 and install.bat
+installers/unix/           install.sh for macOS and Linux
 integrations/opencode/     handoff hook template
 deploy/                    Dockerfile, Compose, environment template, GoReleaser
 docs/                      product, quickstart, install, update, deploy, migration, security
@@ -89,6 +90,7 @@ projects/<id>/notes/YYYY-MM-DD.md      dated note sections
 projects/<id>/decisions/YYYY-MM-DD-<slug>.md
 projects/<id>/attempts/YYYY-MM-DD-<slug>.md
 projects/<id>/handoffs/YYYY-MM-DD-HHMMSS.md
+connectors/runs/<UTC timestamp>-<source>-<run-id>.md
 ```
 
 Every user-facing file carries YAML frontmatter with `project_id`, `kind`,
@@ -120,19 +122,45 @@ brain search     query the local FTS5 index (local/git only)
 brain connector  run a read-only GitHub, GitLab, or IMAP connector
 brain migrate    import a legacy .brain data directory
 brain secret     set, list, or remove OS-backed secrets
+brain login      authenticate against a server-mode brain (local account)
+brain logout     revoke the server session and clear stored tokens
 brain doctor     check config, data/schema/index/git or server reachability
-brain update     check or apply a release
+brain update     check, apply, or roll back a release
 brain serve      run the HTTP server with development defaults
 brain version    print build identity
 ```
 
-Server mode selects the HTTP client at bootstrap. The token comes from
-`BRAIN_TOKEN`, then the OS secret store key `server-token` (stored with
-`brain secret set server-token`, value read from stdin). Missing or invalid
-tokens surface as a failing `server` check in `brain doctor`; there is no
-`brain login` or CLI OIDC flow yet. `brain sync`, `brain index`, and
-`brain search` are not available in server mode: the API is the sync and search
-path (`GET /v1/search`).
+Server mode selects the HTTP client at bootstrap. `brain login --config <path>
+--login <name> --password-stdin` (or `--password`, with `BRAIN_LOGIN` and
+`BRAIN_PASSWORD` as fallbacks) exchanges local credentials at
+`POST /v1/auth/login` and stores one JSON credential bundle under the OS
+secret-store key `server-session` (`serverUrl`, `accessToken`,
+`refreshToken`). A single `Set` keeps binding and token pair atomic, and the
+bundle is bound to the normalized `server_url`; it is never sent to another
+server URL and a mismatched binding is refused with both URLs named. The HTTP
+client reads the access token lazily, refreshes once on `401`, and retries the
+request; refreshes are serialized with a per-user lock whose wait exceeds the
+HTTP timeout, so concurrent `401`s do not burn two refresh tokens.
+`brain logout` inspects `GET /v1/auth/me` before rotating anything, revokes the
+JWT session and its refresh family, and clears the bundle. The refresh family
+is revoked immediately; an access JWT already issued stays valid until its
+short TTL.
+
+`server-token` remains as an explicit static API-token fallback with no refresh
+token and no binding. The old `server-refresh-token` and `server-auth-url` keys
+are no longer read, so a legacy unbound JWT pair requires `brain login` again.
+A static API token cannot be revoked server-side by the CLI: logout clears the
+local entries, warns, and exits non-zero.
+
+`BRAIN_TOKEN` (or an environment-provided `BRAIN_SECRET_SERVER_TOKEN`) takes
+precedence over stored credentials and disables the auth provider for that
+process: `brain login` refuses to run and `brain logout` leaves a stored
+session untouched and exits non-zero. A static API token can still be installed
+with `brain secret set server-token` (value read from stdin). There is no CLI
+OIDC flow yet. Missing or invalid tokens surface as a failing `server` check in
+`brain doctor`. `brain sync`, `brain index`, and `brain search` are not
+available in server mode: the API is the sync and search path
+(`GET /v1/search`).
 
 List-like capabilities are optional Store extensions: an adapter that does not
 implement `ListNotes` / `ListDecisions` / `ListAttempts` / `ListHandoffs` still
@@ -195,10 +223,16 @@ Persistence:
   refuses to start until a backup is taken and
   `BRAIN_DATABASE_BACKUP_CONFIRMED=1` is set. A fresh database migrates
   immediately.
-- The `0001_init.sql` schema has no `api_tokens` or `refresh_tokens` tables, so
-  API tokens and refresh-token families remain in process memory in the bridge.
-  Clients re-authenticate after a restart, and multi-replica deployment remains
-  unsupported.
+- `postgres.SchemaVersion` is 3. Migration `0002_auth_tokens.sql` adds the
+  `api_tokens` and `refresh_tokens` tables, so API tokens and refresh-token
+  families survive restarts. Migration `0003_auth_revocations.sql` adds durable
+  family/session revocation tombstones with no expiry, so pruning expired token
+  rows cannot resurrect a revoked family. `serverstore` converts these records;
+  Postgres performs the writes. Refresh-token rotation still revokes the whole
+  family when a used token is presented again.
+- Multi-replica deployment remains unsupported even with durable tokens: the
+  SSE broker and the login rate limiter are per-process, so events and login
+  throttling are not shared between instances.
 
 `deploy/docker-compose.yml` provisions `brain-server` and Postgres with
 healthchecks and internal-only database networking; Compose supplies
@@ -213,9 +247,12 @@ build `ConnectorRun` values with sanitized errors.
 
 `brain connector run --name github|gitlab|imap` selects one adapter and writes
 Markdown dumps under the data directory (`github/...`, `gitlab/...`,
-`mail/<account>/...`). The command prints the run record (source, status,
-counts, sanitized error) but does not persist `ConnectorRun` records yet.
-Connectors require local or git mode with `data_dir`.
+`mail/<account>/...`). The command also persists each run as Markdown at
+`connectors/runs/<UTC timestamp>-<source>-<run-id>.md`, including status,
+counts, and the sanitized error, in addition to printing the record.
+Re-appending the same run record rewrites the same file, so retries stay
+idempotent. Connectors require local or git mode with `data_dir`; server mode
+rejects them, and there is no server-side connector runner or run store yet.
 
 `internal/adapters/secrets` resolves credentials from
 `BRAIN_SECRET_<NAME>` first and the platform store second: Windows Credential
@@ -233,11 +270,17 @@ the platform cache directory, applies it atomically, and keeps
 `brain(.exe).previous` for rollback. On Windows a detached helper swaps the
 running executable after exit.
 
-`brain update --check|--yes` is wired through `internal/app` and
-`internal/bootstrap`. Remaining gaps: no daily background scheduler, no
-`--rollback` flag (the package method exists), and server auto-update
-(`BRAIN_SERVER_AUTO_UPDATE`) is not implemented — deployments upgrade by
-pulling a new image.
+`brain update --check|--yes|--rollback` is wired through `internal/app` and
+`internal/bootstrap`. `--rollback` restores `brain(.exe).previous` and cannot be
+combined with `--check` or `--yes`. Before ordinary commands the CLI may run a
+notify-only daily check: at most one successful release lookup per 24 hours, a
+3-second timeout, a single-flight lock, and state in `last-check.json` under the
+update directory. The check never downloads or applies anything, prints one
+stderr line when a newer release exists, and is skipped for `serve`, `init`,
+`help`, `version`, and `update`. `BRAIN_NO_UPDATE=1` opts out.
+
+Remaining gap: server auto-update (`BRAIN_SERVER_AUTO_UPDATE`) is not
+implemented — deployments upgrade by pulling a new image.
 
 ## Migration
 
@@ -275,16 +318,14 @@ left untouched and the command exits non-zero.
 
 | Gap | Consequence |
 |---|---|
-| No `BRAIN_DATABASE_URL` means in-memory server | data is lost on restart; use Postgres for durable storage |
-| No `brain login` / CLI OIDC flow | server token must be copied from the API and set via `BRAIN_TOKEN` or `brain secret` |
+| No `BRAIN_DATABASE_URL` means in-memory server | data, including tokens, is lost on restart; use Postgres for durable storage |
+| No CLI OIDC flow | `brain login` supports local accounts only; OIDC is browser-based |
 | `brain sync` not implemented in server mode | API is the only server sync path |
-| API/refresh tokens in process memory | clients re-authenticate after restart; no multi-replica |
-| Connector runs are not persisted | `brain connector run` prints counts and writes Markdown dumps only |
+| Multi-replica deployment unsupported | the SSE broker and login rate limiter are per-process even with durable tokens |
+| No server-side connector runs | connectors require local/git mode; runs persist under `connectors/runs/` only there |
 | CLI search/index are local-only | server mode uses `GET /v1/search`; no local index is built |
 | No server-side Markdown import/export | migrate into Markdown first; server records go through the API |
-| No background update check or `--rollback` flag | updates are manual; restore `.previous` by hand |
 | Server auto-update not implemented | upgrade by pulling a new image; `BRAIN_SERVER_AUTO_UPDATE` is reserved |
-| Windows-only installer | macOS/Linux install release binaries manually |
 
 ## Non-goals v1
 

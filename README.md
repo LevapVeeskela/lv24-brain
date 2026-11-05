@@ -17,38 +17,39 @@ The engine has moved past the initial scaffold. Implemented and tested today:
 
 | Area | State |
 |---|---|
-| CLI, local and Git modes | `init`, `open`, `bootstrap`, `note`, `decision`, `attempt`, `handoff`, `status`, `review`, `doctor`, `index [--rebuild]`, `search <query>`, `sync`, `migrate`, `secret`, `update`, `version`, `help` |
+| CLI | `init`, `open`, `bootstrap`, `note`, `decision`, `attempt`, `handoff`, `status`, `review`, `doctor`, `index [--rebuild]`, `search <query>`, `sync`, `migrate`, `secret`, `update`, `version`, `help`; `login` and `logout` in server mode |
 | Storage | Markdown + YAML frontmatter (`fsstore`), SQLite FTS5 index, `registry.json` project index |
 | Local search | `brain index` refreshes FTS5 from Markdown; `brain index --rebuild` discards and rebuilds it; `brain search` queries it. Both are local/`git` only |
 | Git sync | `fetch`, `pull --rebase`, commit, optional push; read-only `--status`; conflict reporting |
-| HTTP server | Health/readiness/version, OpenAPI JSON, JWT + rotating refresh tokens, API tokens, local admin bootstrap, OIDC (PKCE/state/nonce), roles `admin\|member\|viewer`, SSE revision stream; Postgres when `BRAIN_DATABASE_URL` is set, in-memory fallback otherwise |
-| Server-mode CLI | Token-authenticated HTTP client; token from `BRAIN_TOKEN` or the OS secret store key `server-token`; no `brain login` command |
-| Connectors | GitHub, GitLab, and IMAP adapters plus `brain connector run`; Markdown dumps under the data directory; run records are printed but not persisted |
-| Auto-update | `brain update --check` and `brain update --yes`; release check, SHA-256 verification, staged apply, previous binary kept for manual rollback; GoReleaser release workflow |
-| Installers | Windows PowerShell/BAT installer and optional OpenCode handoff hook |
+| HTTP server | Health/readiness/version, OpenAPI JSON, JWT + rotating refresh tokens, API tokens, durable auth tables (migrations `0002_auth_tokens.sql` and `0003_auth_revocations.sql`, server schema 3), local admin bootstrap, OIDC (PKCE/state/nonce), roles `admin\|member\|viewer`, SSE revision stream; Postgres when `BRAIN_DATABASE_URL` is set, in-memory fallback otherwise |
+| Server-mode CLI | `brain login` / `brain logout`; one atomic OS secret-store bundle `server-session` (server URL, access token, refresh token) bound to the configured `server_url`; `server-token` remains an explicit static API-token fallback; the HTTP client refreshes once on `401` and retries; `BRAIN_TOKEN` overrides stored credentials |
+| Connectors | GitHub, GitLab, and IMAP adapters plus `brain connector run`; Markdown dumps under the data directory and run records in `connectors/runs/` in local/`git` mode; server-side connector runs are not implemented |
+| Auto-update | `brain update --check`, `--yes`, and `--rollback`; notify-only daily check; release check, SHA-256 verification, staged apply, previous binary kept; GoReleaser release workflow |
+| Installers | Windows PowerShell/BAT installer (with optional OpenCode handoff hook) and macOS/Linux bash installer |
 | Migration | `brain migrate` imports legacy `.brain` knowledge (idempotent, dry-run, path validation), registers projects, and sets `schema_version` |
+
+API tokens and refresh-token families are durable in Postgres (migrations
+`0002_auth_tokens.sql` and `0003_auth_revocations.sql`, server schema version 3),
+so they survive restarts and refresh rotation still revokes the whole family on
+reuse. Revocation tombstones have no expiry, so pruning expired token rows
+cannot resurrect a revoked family or session. Without
+`BRAIN_DATABASE_URL`, `brain-server` still falls back to an in-memory store that
+loses all data on restart; migrations run at startup, and an existing schema
+with pending migrations requires `BRAIN_DATABASE_BACKUP_CONFIRMED=1` after a
+backup. Multi-replica deployment remains unsupported even with durable tokens:
+the SSE broker and login rate limiter are per-process.
 
 Known gaps, stated plainly:
 
-- `brain-server` uses Postgres when `BRAIN_DATABASE_URL` (or `DATABASE_URL`) is
-  set. Without a database URL it falls back to an in-memory store that loses
-  data on restart. Migrations run at startup; an existing schema with pending
-  migrations requires `BRAIN_DATABASE_BACKUP_CONFIRMED=1` after a backup.
-- Server mode uses a bearer token. There is no `brain login` or CLI OIDC flow
-  yet: sign in through `POST /v1/auth/login`, then export `BRAIN_TOKEN` or store
-  the token with `brain secret set server-token`.
+- Server auto-update is not implemented; `BRAIN_SERVER_AUTO_UPDATE` is a
+  reserved placeholder and deployments upgrade by replacing the image.
+- `brain connector run` requires local or `git` mode; it persists run records
+  under `connectors/runs/`, but there is no server-side connector runner or
+  server-side run store yet.
 - `brain sync` is not implemented in server mode; the server API is the sync
-  path. `brain index` and `brain search` are local-only; server-mode search uses
+  path.
+- `brain index` and `brain search` are local-only; server-mode search uses
   `GET /v1/search`.
-- API tokens and refresh-token families are process-memory in the server bridge
-  until `api_tokens` / `refresh_tokens` migrations land.
-- `brain connector run` writes Markdown dumps but does not persist
-  `ConnectorRun` records. Connectors require local or Git mode with `data_dir`.
-- Updates are manual (`brain update`); the daily background check is not wired.
-  `brain update --rollback` is not exposed; restore `brain.previous` manually.
-  Server auto-update is not implemented.
-- Only the Windows installer ships. macOS and Linux use release binaries
-  installed manually.
 
 ## Requirements
 
@@ -121,34 +122,70 @@ curl -fsS http://127.0.0.1:8080/version
 The API accepts a JWT access token or an opaque API token (`brain_…`) as
 `Authorization: Bearer <token>`. `GET /openapi.json` describes the surface.
 
-Point the CLI at the server, then supply the token from `POST /v1/auth/login`:
+Point the CLI at the server and log in with the bootstrap administrator (or
+another local account):
 
 ```sh
 ./bin/brain init --mode server --server-url http://127.0.0.1:8080 \
   --config ~/brain-server.yaml
-export BRAIN_TOKEN="<access-token>"
+printf '%s\n' '<admin password>' | ./bin/brain login --config ~/brain-server.yaml \
+  --login admin --password-stdin
 ./bin/brain status --config ~/brain-server.yaml
 ./bin/brain note --project demo --title "First note" --body "Server smoke" \
   --config ~/brain-server.yaml
+./bin/brain logout --config ~/brain-server.yaml
 ```
 
-On a desktop, `brain secret set server-token` reads the token from stdin and
-stores it in the OS secret store instead of the environment. There is no
-`brain login` command yet. See the server-mode caveats above and
+`brain login` is server-mode only. `--login` falls back to `BRAIN_LOGIN` and
+`--password` to `BRAIN_PASSWORD`; prefer `--password-stdin` so the password is
+not passed in the `brain login` arguments. The command stores one JSON
+credential bundle under the OS secret-store key `server-session`
+(`serverUrl`, `accessToken`, `refreshToken`) in a single write, bound to the
+normalized `server_url`. The HTTP client refreshes once on `401` and retries; a
+login-managed bundle is never sent to a different server URL, and a mismatched
+binding is refused with both URLs named. `brain logout` checks
+`GET /v1/auth/me` before rotating anything, revokes the JWT session and its
+refresh family, and clears the bundle. The refresh family is revoked
+immediately; an access JWT that was already issued stays valid until its short
+TTL.
+
+If a static API token is also stored it cannot be revoked by the CLI: logout
+still revokes the login-managed family, clears local credentials, warns, and
+exits non-zero. After logout the refresh family is gone, so no new access token
+can be minted. The old three-key layout is no longer used as a login pair:
+`server-refresh-token` and `server-auth-url` are ignored, and only
+`server-token` remains as an explicit static API-token fallback with no refresh
+and no binding. A legacy unbound JWT pair is not refreshed anymore; run
+`brain login` again.
+
+For automation, `BRAIN_TOKEN` still works and takes precedence over stored
+credentials; while it is set, `brain login` refuses to run and `brain logout`
+leaves a stored session untouched and exits non-zero. A static API token can
+also be stored with
+`printf '%s\n' '<token>' | brain secret set server-token`. See
 [docs/deploy.md](docs/deploy.md) before production use.
 
-## Windows installer
+## Installers
 
-When a release is published, the installer downloads the newest asset on the
-selected channel, verifies its SHA-256, installs under
+When a release is published, the Windows installer downloads the newest asset on
+the selected channel, verifies its SHA-256, installs under
 `%LOCALAPPDATA%\Programs\lv24-brain`, and optionally adds it to `PATH`:
 
 ```powershell
 .\installers\windows\install.ps1 -Mode local -InstallOpenCodeHook
 ```
 
+On macOS and Linux, `installers/unix/install.sh` reads `release.json` or
+`checksums.txt`, verifies SHA-256, installs `brain` under `~/.local/bin`, and
+keeps `brain.previous` for rollback:
+
+```sh
+./installers/unix/install.sh --mode local --yes
+```
+
 Build from source if no release is available yet. Release assets are produced
-by `.github/workflows/release.yml` on `v*` tags.
+by `.github/workflows/release.yml` on `v*` tags. See
+[docs/install.md](docs/install.md) for installer options.
 
 ## Documentation
 

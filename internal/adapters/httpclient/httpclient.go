@@ -18,6 +18,7 @@ import (
 	"net/url"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/levapveeskela/lv24-brain/internal/domain"
@@ -58,6 +59,10 @@ type Config struct {
 	Token string
 	// TokenProvider optionally supplies the token per request.
 	TokenProvider TokenProvider
+	// Refresh obtains a new access token after a 401. When nil, the client
+	// returns the 401 unchanged. The refresher must persist the rotated token
+	// so the next request resolves it through TokenProvider.
+	Refresh func(ctx context.Context) (string, error)
 	// HTTPClient overrides the default client. The caller then owns timeouts.
 	HTTPClient *http.Client
 	// Timeout bounds one request when HTTPClient is nil.
@@ -106,6 +111,8 @@ type Client struct {
 	baseURL    string
 	token      string
 	provider   TokenProvider
+	refresher  func(context.Context) (string, error)
+	refreshMu  sync.Mutex
 	httpClient *http.Client
 	maxBody    int64
 }
@@ -132,9 +139,26 @@ func New(cfg Config) (*Client, error) {
 		baseURL:    baseURL,
 		token:      strings.TrimSpace(cfg.Token),
 		provider:   cfg.TokenProvider,
+		refresher:  cfg.Refresh,
 		httpClient: httpClient,
 		maxBody:    maxBody,
 	}, nil
+}
+
+// SetTokenProvider replaces the per-request token source. Bootstrap uses it
+// after the auth helper is constructed to keep the client's token in sync with
+// the OS secret store.
+func (c *Client) SetTokenProvider(provider TokenProvider) {
+	if c != nil {
+		c.provider = provider
+	}
+}
+
+// SetRefresher replaces the 401 recovery hook.
+func (c *Client) SetRefresher(refresh func(context.Context) (string, error)) {
+	if c != nil {
+		c.refresher = refresh
+	}
 }
 
 // BaseURL returns the normalized server root.
@@ -164,8 +188,27 @@ func normalizeBaseURL(raw string) (string, error) {
 	return strings.TrimRight(parsed.String(), "/"), nil
 }
 
-// do executes one request and decodes a successful JSON response into out.
+// do executes one authenticated request and decodes a successful JSON
+// response into out. A 401 triggers one token refresh and retry when a
+// refresher is configured.
 func (c *Client) do(ctx context.Context, method, path string, query url.Values, body, out any) error {
+	return c.execute(ctx, method, path, query, body, out, "", false, true)
+}
+
+// doAnonymous executes a request without a bearer token. It is used for the
+// login and refresh endpoints, which cannot authenticate with an expired
+// access token.
+func (c *Client) doAnonymous(ctx context.Context, method, path string, query url.Values, body, out any) error {
+	return c.execute(ctx, method, path, query, body, out, "", true, false)
+}
+
+// doWithToken executes a request with an explicit bearer token and never
+// refreshes it.
+func (c *Client) doWithToken(ctx context.Context, method, path string, query url.Values, body, out any, token string) error {
+	return c.execute(ctx, method, path, query, body, out, strings.TrimSpace(token), false, false)
+}
+
+func (c *Client) execute(ctx context.Context, method, path string, query url.Values, body, out any, tokenOverride string, anonymous, allowRefresh bool) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -190,9 +233,16 @@ func (c *Client) do(ctx context.Context, method, path string, query url.Values, 
 	if body != nil {
 		request.Header.Set("Content-Type", "application/json")
 	}
-	token, err := c.bearerToken(ctx)
-	if err != nil {
-		return err
+	token := ""
+	if !anonymous {
+		if tokenOverride != "" {
+			token = tokenOverride
+		} else {
+			token, err = c.bearerToken(ctx)
+			if err != nil {
+				return err
+			}
+		}
 	}
 	if token != "" {
 		request.Header.Set("Authorization", "Bearer "+token)
@@ -200,16 +250,33 @@ func (c *Client) do(ctx context.Context, method, path string, query url.Values, 
 
 	response, err := c.httpClient.Do(request)
 	if err != nil {
-		return c.transportError(ctx, method, path, err)
+		return c.transportError(ctx, method, path, err, token)
 	}
 	defer func() { _ = response.Body.Close() }()
 
 	if response.StatusCode < 200 || response.StatusCode > 299 {
 		payload, readErr := io.ReadAll(io.LimitReader(response.Body, maxErrorBytes+1))
+		var failure error
 		if readErr != nil {
-			return &APIError{StatusCode: response.StatusCode}
+			failure = &APIError{StatusCode: response.StatusCode}
+		} else {
+			failure = c.responseError(method, path, response.StatusCode, payload, token)
 		}
-		return c.responseError(method, path, response.StatusCode, payload)
+		if response.StatusCode == http.StatusUnauthorized && allowRefresh && !anonymous && c.refresher != nil {
+			_ = response.Body.Close()
+			fresh, refreshErr := c.refreshAccessToken(ctx, token)
+			switch {
+			case refreshErr == nil && fresh != "":
+				return c.execute(ctx, method, path, query, body, out, fresh, false, false)
+			case refreshErr != nil && !errors.Is(refreshErr, ErrUnauthorized) && !errors.Is(refreshErr, errNoRefreshToken):
+				// Surface transient refresh failures (5xx, transport) instead
+				// of pretending the original 401 was the whole story. A
+				// credential 401 or a missing refresh token keeps the
+				// original 401.
+				return fmt.Errorf("httpclient: %s %s: refresh after 401 failed: %w", method, path, refreshErr)
+			}
+		}
+		return failure
 	}
 	if out == nil {
 		_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, c.maxBody))
@@ -217,7 +284,7 @@ func (c *Client) do(ctx context.Context, method, path string, query url.Values, 
 	}
 	payload, err := io.ReadAll(io.LimitReader(response.Body, c.maxBody+1))
 	if err != nil {
-		return c.transportError(ctx, method, path, err)
+		return c.transportError(ctx, method, path, err, token)
 	}
 	if int64(len(payload)) > c.maxBody {
 		return fmt.Errorf("httpclient: %s %s: response exceeds %d bytes", method, path, c.maxBody)
@@ -231,6 +298,28 @@ func (c *Client) do(ctx context.Context, method, path string, query url.Values, 
 	return nil
 }
 
+// refreshAccessToken serializes refreshes and reuses a token another goroutine
+// already rotated, so concurrent 401s do not burn two refresh tokens.
+func (c *Client) refreshAccessToken(ctx context.Context, used string) (string, error) {
+	c.refreshMu.Lock()
+	defer c.refreshMu.Unlock()
+	if c.refresher == nil {
+		return "", errors.New("httpclient: no token refresher configured")
+	}
+	if current, err := c.bearerToken(ctx); err == nil && current != "" && current != used {
+		return current, nil
+	}
+	token, err := c.refresher(ctx)
+	if err != nil {
+		return "", fmt.Errorf("httpclient: refresh access token: %w", err)
+	}
+	token = strings.TrimSpace(token)
+	if token == "" {
+		return "", errors.New("httpclient: refresh returned an empty token")
+	}
+	return token, nil
+}
+
 func (c *Client) bearerToken(ctx context.Context) (string, error) {
 	if c.provider != nil {
 		token, err := c.provider.Token(ctx)
@@ -242,7 +331,7 @@ func (c *Client) bearerToken(ctx context.Context) (string, error) {
 	return c.token, nil
 }
 
-func (c *Client) transportError(ctx context.Context, method, path string, err error) error {
+func (c *Client) transportError(ctx context.Context, method, path string, err error, requestToken string) error {
 	var netErr net.Error
 	if errors.As(err, &netErr) && netErr.Timeout() {
 		return fmt.Errorf("httpclient: %s %s: %w", method, path, ErrTimeout)
@@ -253,10 +342,10 @@ func (c *Client) transportError(ctx context.Context, method, path string, err er
 	if errors.Is(err, context.DeadlineExceeded) {
 		return fmt.Errorf("httpclient: %s %s: %w", method, path, ErrTimeout)
 	}
-	return fmt.Errorf("httpclient: %s %s: %s", method, path, c.redact(err.Error()))
+	return fmt.Errorf("httpclient: %s %s: %s", method, path, c.redact(err.Error(), requestToken))
 }
 
-func (c *Client) responseError(method, path string, status int, payload []byte) error {
+func (c *Client) responseError(method, path string, status int, payload []byte, requestToken string) error {
 	var envelope struct {
 		Error struct {
 			Code            string `json:"code"`
@@ -266,10 +355,10 @@ func (c *Client) responseError(method, path string, status int, payload []byte) 
 	}
 	_ = json.Unmarshal(payload, &envelope)
 	code := strings.TrimSpace(envelope.Error.Code)
-	message := c.redact(envelope.Error.Message)
+	message := c.redact(envelope.Error.Message, requestToken)
 	if message == "" {
 		message = strings.TrimSpace(string(payload))
-		message = c.redact(message)
+		message = c.redact(message, requestToken)
 		message = strings.Join(strings.Fields(message), " ")
 		if len(message) > maxErrorBytes {
 			message = message[:maxErrorBytes]
@@ -299,13 +388,19 @@ func (c *Client) responseError(method, path string, status int, payload []byte) 
 	}
 }
 
-// redact removes the configured bearer token and any Bearer credential from
-// text that may reach a terminal or log.
-func (c *Client) redact(text string) string {
+// redact removes the configured bearer token, the token sent with this
+// request, and any Bearer credential from text that may reach a terminal or
+// log. The request token matters when a proxy echoes it back in an error body.
+func (c *Client) redact(text string, requestTokens ...string) string {
 	text = spacePattern.ReplaceAllString(text, " ")
 	text = strings.TrimSpace(text)
 	if c.token != "" {
 		text = strings.ReplaceAll(text, c.token, "***")
+	}
+	for _, token := range requestTokens {
+		if token != "" && token != c.token {
+			text = strings.ReplaceAll(text, token, "***")
+		}
 	}
 	text = bearerPattern.ReplaceAllString(text, "Bearer ***")
 	if len(text) > maxErrorBytes {

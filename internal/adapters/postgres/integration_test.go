@@ -12,6 +12,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/levapveeskela/lv24-brain/internal/auth"
 	"github.com/levapveeskela/lv24-brain/internal/domain"
 	"github.com/levapveeskela/lv24-brain/internal/ports"
 )
@@ -881,5 +882,548 @@ func TestOpenRejectsInvalidURL(t *testing.T) {
 	}
 	if strings.Contains(err.Error(), "not-a-valid-dsn") {
 		t.Fatalf("error leaked database URL: %v", err)
+	}
+}
+
+func TestAPITokensAndRefreshTokens(t *testing.T) {
+	store := newTestStore(t)
+	ctx := testContext(t)
+	user, _, err := store.CreateUser(ctx, domain.User{ID: "user_tokens", Login: "token-user"}, "")
+	if err != nil {
+		t.Fatalf("CreateUser: %v", err)
+	}
+
+	token, err := store.CreateAPIToken(ctx, APITokenRecord{
+		UserID: user.ID, Name: "cli", Role: domain.RoleMember, Prefix: "brain_abc", TokenHash: "hash-a",
+	})
+	if err != nil {
+		t.Fatalf("CreateAPIToken: %v", err)
+	}
+	if token.ID == "" || token.CreatedAt.IsZero() {
+		t.Fatalf("token = %+v", token)
+	}
+	if _, err := store.CreateAPIToken(ctx, APITokenRecord{
+		UserID: user.ID, Name: "dup", Role: domain.RoleMember, TokenHash: "hash-a",
+	}); !errors.Is(err, domain.ErrConflict) {
+		t.Fatalf("duplicate hash error = %v, want conflict", err)
+	}
+	if _, err := store.CreateAPIToken(ctx, APITokenRecord{
+		UserID: "missing", Name: "ghost", Role: domain.RoleMember, TokenHash: "hash-b",
+	}); !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("unknown owner error = %v, want not found", err)
+	}
+
+	found, err := store.FindAPITokenByHash(ctx, "hash-a", time.Now())
+	if err != nil || found.LastUsedAt == nil {
+		t.Fatalf("FindAPITokenByHash = (%+v, %v)", found, err)
+	}
+	tokens, err := store.ListAPITokens(ctx, user.ID)
+	if err != nil || len(tokens) != 1 {
+		t.Fatalf("ListAPITokens = (%d, %v)", len(tokens), err)
+	}
+	if err := store.RevokeAPIToken(ctx, token.ID, time.Now()); err != nil {
+		t.Fatalf("RevokeAPIToken: %v", err)
+	}
+	if err := store.RevokeAPIToken(ctx, token.ID, time.Now()); err != nil {
+		t.Fatalf("repeated RevokeAPIToken: %v", err)
+	}
+	if _, err := store.FindAPITokenByHash(ctx, "hash-a", time.Now()); !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("FindAPITokenByHash after revoke = %v", err)
+	}
+
+	now := time.Now().UTC()
+	refresh := auth.RefreshRecord{
+		SessionID: "sess_1", FamilyID: "fam_1", UserID: user.ID,
+		TokenHash: "refresh-1", IssuedAt: now, ExpiresAt: now.Add(time.Hour),
+	}
+	if err := store.CreateRefresh(ctx, refresh); err != nil {
+		t.Fatalf("CreateRefresh: %v", err)
+	}
+	if err := store.CreateRefresh(ctx, refresh); !errors.Is(err, domain.ErrConflict) {
+		t.Fatalf("duplicate CreateRefresh = %v", err)
+	}
+	consumed, err := store.ConsumeRefresh(ctx, "refresh-1", now)
+	if err != nil || consumed.SessionID != "sess_1" {
+		t.Fatalf("ConsumeRefresh = (%+v, %v)", consumed, err)
+	}
+	if _, err := store.ConsumeRefresh(ctx, "refresh-1", now); !errors.Is(err, auth.ErrRefreshReused) {
+		t.Fatalf("reused ConsumeRefresh = %v", err)
+	}
+
+	second := auth.RefreshRecord{
+		SessionID: "sess_1", FamilyID: "fam_1", UserID: user.ID,
+		TokenHash: "refresh-2", IssuedAt: now, ExpiresAt: now.Add(time.Hour),
+	}
+	if err := store.CreateRefresh(ctx, second); err != nil {
+		t.Fatalf("CreateRefresh(second): %v", err)
+	}
+	if err := store.RevokeSession(ctx, "sess_1", now); err != nil {
+		t.Fatalf("RevokeSession: %v", err)
+	}
+	if _, err := store.ConsumeRefresh(ctx, "refresh-2", now); !errors.Is(err, auth.ErrInvalidRefresh) {
+		t.Fatalf("ConsumeRefresh after session revoke = %v", err)
+	}
+
+	expired := auth.RefreshRecord{
+		SessionID: "sess_2", FamilyID: "fam_2", UserID: user.ID,
+		TokenHash: "refresh-3", IssuedAt: now.Add(-2 * time.Hour), ExpiresAt: now.Add(-time.Hour),
+	}
+	if err := store.CreateRefresh(ctx, expired); err != nil {
+		t.Fatalf("CreateRefresh(expired): %v", err)
+	}
+	if _, err := store.ConsumeRefresh(ctx, "refresh-3", now); !errors.Is(err, auth.ErrInvalidRefresh) {
+		t.Fatalf("ConsumeRefresh expired = %v", err)
+	}
+	if _, err := store.ConsumeRefresh(ctx, "unknown", now); !errors.Is(err, auth.ErrInvalidRefresh) {
+		t.Fatalf("ConsumeRefresh unknown = %v", err)
+	}
+}
+
+func TestCreateRefreshRejectsRevokedFamilyAndSession(t *testing.T) {
+	store := newTestStore(t)
+	ctx := testContext(t)
+	user, _, err := store.CreateUser(ctx, domain.User{ID: "user_revoke", Login: "revoke-user"}, "")
+	if err != nil {
+		t.Fatalf("CreateUser: %v", err)
+	}
+	now := time.Now().UTC()
+	newRecord := func(hash, sessionID, familyID string) auth.RefreshRecord {
+		return auth.RefreshRecord{
+			SessionID: sessionID, FamilyID: familyID, UserID: user.ID,
+			TokenHash: hash, IssuedAt: now, ExpiresAt: now.Add(time.Hour),
+		}
+	}
+
+	// Normal rotation within a live family still succeeds.
+	if err := store.CreateRefresh(ctx, newRecord("rotate-1", "sess_rotate", "fam_rotate")); err != nil {
+		t.Fatalf("CreateRefresh(first): %v", err)
+	}
+	if err := store.CreateRefresh(ctx, newRecord("rotate-2", "sess_rotate", "fam_rotate")); err != nil {
+		t.Fatalf("CreateRefresh(rotation): %v", err)
+	}
+
+	// A revoked family is a durable marker: no new rotation may be issued.
+	if err := store.CreateRefresh(ctx, newRecord("family-first", "sess_family", "fam_revoked")); err != nil {
+		t.Fatalf("CreateRefresh(family): %v", err)
+	}
+	if err := store.RevokeFamily(ctx, "fam_revoked", now); err != nil {
+		t.Fatalf("RevokeFamily: %v", err)
+	}
+	if err := store.CreateRefresh(ctx, newRecord("family-second", "sess_family", "fam_revoked")); !errors.Is(err, auth.ErrInvalidRefresh) {
+		t.Fatalf("CreateRefresh after RevokeFamily = %v, want ErrInvalidRefresh", err)
+	}
+
+	// A revoked session is likewise durable.
+	if err := store.CreateRefresh(ctx, newRecord("session-first", "sess_revoked", "fam_session")); err != nil {
+		t.Fatalf("CreateRefresh(session): %v", err)
+	}
+	if err := store.RevokeSession(ctx, "sess_revoked", now); err != nil {
+		t.Fatalf("RevokeSession: %v", err)
+	}
+	if err := store.CreateRefresh(ctx, newRecord("session-second", "sess_revoked", "fam_session")); !errors.Is(err, auth.ErrInvalidRefresh) {
+		t.Fatalf("CreateRefresh after RevokeSession = %v, want ErrInvalidRefresh", err)
+	}
+
+	// A different live session of the same user is unaffected.
+	if err := store.CreateRefresh(ctx, newRecord("other-session", "sess_other", "fam_other")); err != nil {
+		t.Fatalf("CreateRefresh(other session): %v", err)
+	}
+}
+
+// insertExpiredRefreshRow writes a token that is already expired according to
+// the database clock, independent of any client clock skew.
+func insertExpiredRefreshRow(t *testing.T, ctx context.Context, store *Store, hash, sessionID, familyID, userID string) {
+	t.Helper()
+	if _, err := store.Pool().Exec(ctx, `
+		INSERT INTO refresh_tokens (token_hash, session_id, family_id, user_id, issued_at, expires_at)
+		VALUES ($1, $2, $3, $4, now() - interval '2 hours', now() - interval '1 hour')`,
+		hash, sessionID, familyID, userID); err != nil {
+		t.Fatalf("insert expired refresh row %s: %v", hash, err)
+	}
+}
+
+func TestCreateRefreshPrunesOnlyItsOwnScope(t *testing.T) {
+	store := newTestStore(t)
+	ctx := testContext(t)
+	user, _, err := store.CreateUser(ctx, domain.User{ID: "user_prune", Login: "prune-user"}, "")
+	if err != nil {
+		t.Fatalf("CreateUser: %v", err)
+	}
+	now := time.Now().UTC()
+
+	insertExpiredRefreshRow(t, ctx, store, "prune-stale", "sess_prune", "fam_prune", user.ID)
+	insertExpiredRefreshRow(t, ctx, store, "keep-stale", "sess_keep", "fam_keep", user.ID)
+
+	// Rotating in one scope still succeeds and prunes that scope's expired row.
+	if err := store.CreateRefresh(ctx, auth.RefreshRecord{
+		SessionID: "sess_prune", FamilyID: "fam_prune", UserID: user.ID,
+		TokenHash: "prune-fresh", IssuedAt: now, ExpiresAt: now.Add(time.Hour),
+	}); err != nil {
+		t.Fatalf("CreateRefresh: %v", err)
+	}
+	if _, err := store.ConsumeRefresh(ctx, "prune-fresh", now); err != nil {
+		t.Fatalf("ConsumeRefresh(rotated): %v", err)
+	}
+
+	countRows := func(hash string) int {
+		t.Helper()
+		var count int
+		if err := store.Pool().QueryRow(ctx,
+			`SELECT count(*) FROM refresh_tokens WHERE token_hash = $1`, hash).Scan(&count); err != nil {
+			t.Fatalf("count %s: %v", hash, err)
+		}
+		return count
+	}
+	if count := countRows("prune-stale"); count != 0 {
+		t.Fatalf("expired row in the rotated scope survived: count = %d", count)
+	}
+	if count := countRows("keep-stale"); count != 1 {
+		t.Fatalf("expired row in an unrelated scope was pruned: count = %d", count)
+	}
+}
+
+func TestCreateRefreshDoesNotWaitOnUnrelatedRevocation(t *testing.T) {
+	store := newTestStore(t)
+	ctx := testContext(t)
+	user, _, err := store.CreateUser(ctx, domain.User{ID: "user_contention", Login: "contention-user"}, "")
+	if err != nil {
+		t.Fatalf("CreateUser: %v", err)
+	}
+	now := time.Now().UTC()
+	insertExpiredRefreshRow(t, ctx, store, "held-expired", "sess_held", "fam_held", user.ID)
+
+	// Connection A models an in-flight RevokeFamily for an unrelated scope: it
+	// holds the family advisory lock and the row lock on an expired row.
+	conn, err := store.Pool().Acquire(ctx)
+	if err != nil {
+		t.Fatalf("acquire connection A: %v", err)
+	}
+	defer conn.Release()
+	tx, err := conn.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin connection A: %v", err)
+	}
+	defer func() {
+		rollbackCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = tx.Rollback(rollbackCtx)
+	}()
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, "fam_held"); err != nil {
+		t.Fatalf("lock unrelated family: %v", err)
+	}
+	if _, err := tx.Exec(ctx, `UPDATE refresh_tokens SET revoked_at = now() WHERE family_id = $1`, "fam_held"); err != nil {
+		t.Fatalf("revoke unrelated family: %v", err)
+	}
+
+	// A global prune would block on connection A's row lock. The scoped prune
+	// must complete while the unrelated transaction is still open.
+	rotationCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		done <- store.CreateRefresh(rotationCtx, auth.RefreshRecord{
+			SessionID: "sess_free", FamilyID: "fam_free", UserID: user.ID,
+			TokenHash: "free-rotation", IssuedAt: now, ExpiresAt: now.Add(time.Hour),
+		})
+	}()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("CreateRefresh blocked by an unrelated revocation: %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("CreateRefresh blocked on an unrelated revoked scope")
+	}
+}
+
+func TestRevokeScopeIDsAreTrimmed(t *testing.T) {
+	store := newTestStore(t)
+	ctx := testContext(t)
+	user, _, err := store.CreateUser(ctx, domain.User{ID: "user_trim", Login: "trim-user"}, "")
+	if err != nil {
+		t.Fatalf("CreateUser: %v", err)
+	}
+	now := time.Now().UTC()
+	if err := store.CreateRefresh(ctx, auth.RefreshRecord{
+		SessionID: "sess_trim", FamilyID: "fam_trim", UserID: user.ID,
+		TokenHash: "trim-token", IssuedAt: now, ExpiresAt: now.Add(time.Hour),
+	}); err != nil {
+		t.Fatalf("CreateRefresh: %v", err)
+	}
+
+	if err := store.RevokeFamily(ctx, "  fam_trim\t", now); err != nil {
+		t.Fatalf("RevokeFamily: %v", err)
+	}
+	if err := store.RevokeSession(ctx, "\tsess_trim \n", now); err != nil {
+		t.Fatalf("RevokeSession: %v", err)
+	}
+
+	for _, want := range []struct{ kind, id string }{
+		{"family", "fam_trim"},
+		{"session", "sess_trim"},
+	} {
+		var storedID string
+		if err := store.Pool().QueryRow(ctx,
+			`SELECT scope_id FROM auth_revocations WHERE scope_kind = $1`, want.kind).Scan(&storedID); err != nil {
+			t.Fatalf("read %s tombstone: %v", want.kind, err)
+		}
+		if storedID != want.id {
+			t.Fatalf("%s tombstone scope_id = %q, want %q", want.kind, storedID, want.id)
+		}
+	}
+
+	var revoked bool
+	if err := store.Pool().QueryRow(ctx,
+		`SELECT revoked_at IS NOT NULL FROM refresh_tokens WHERE token_hash = 'trim-token'`).Scan(&revoked); err != nil {
+		t.Fatalf("read trimmed token: %v", err)
+	}
+	if !revoked {
+		t.Fatal("token for the trimmed family was not revoked")
+	}
+}
+
+// insertRefreshRow writes a token directly, bypassing CreateRefresh, to model a
+// rotation that slipped through before the revocation serialization was added.
+func insertRefreshRow(t *testing.T, ctx context.Context, store *Store, hash, sessionID, familyID, userID string, expiresAt time.Time) {
+	t.Helper()
+	if _, err := store.Pool().Exec(ctx, `
+		INSERT INTO refresh_tokens (token_hash, session_id, family_id, user_id, issued_at, expires_at)
+		VALUES ($1, $2, $3, $4, now() - interval '1 hour', $5)`, hash, sessionID, familyID, userID, expiresAt); err != nil {
+		t.Fatalf("insert refresh row %s: %v", hash, err)
+	}
+}
+
+func TestRefreshRevocationsOutliveTokenRows(t *testing.T) {
+	store := newTestStore(t)
+	ctx := testContext(t)
+	user, _, err := store.CreateUser(ctx, domain.User{ID: "user_tombstone", Login: "tombstone-user"}, "")
+	if err != nil {
+		t.Fatalf("CreateUser: %v", err)
+	}
+	now := time.Now().UTC()
+	record := func(hash, sessionID, familyID string) auth.RefreshRecord {
+		return auth.RefreshRecord{
+			SessionID: sessionID, FamilyID: familyID, UserID: user.ID,
+			TokenHash: hash, IssuedAt: now, ExpiresAt: now.Add(time.Hour),
+		}
+	}
+
+	// A family tombstone survives pruning of every marker row.
+	if err := store.CreateRefresh(ctx, record("family-marker", "sess_marker", "fam_marker")); err != nil {
+		t.Fatalf("CreateRefresh(family marker): %v", err)
+	}
+	if err := store.RevokeFamily(ctx, "fam_marker", now); err != nil {
+		t.Fatalf("RevokeFamily: %v", err)
+	}
+	if err := store.RevokeFamily(ctx, "fam_marker", now); err != nil {
+		t.Fatalf("repeated RevokeFamily: %v", err)
+	}
+	if _, err := store.Pool().Exec(ctx, `DELETE FROM refresh_tokens WHERE family_id = $1`, "fam_marker"); err != nil {
+		t.Fatalf("prune family marker rows: %v", err)
+	}
+	if err := store.CreateRefresh(ctx, record("family-after", "sess_marker", "fam_marker")); !errors.Is(err, auth.ErrInvalidRefresh) {
+		t.Fatalf("CreateRefresh after pruned RevokeFamily = %v, want ErrInvalidRefresh", err)
+	}
+	insertRefreshRow(t, ctx, store, "family-slipped", "sess_marker", "fam_marker", user.ID, now.Add(time.Hour))
+	if _, err := store.ConsumeRefresh(ctx, "family-slipped", now); !errors.Is(err, auth.ErrInvalidRefresh) {
+		t.Fatalf("ConsumeRefresh of slipped family token = %v, want ErrInvalidRefresh", err)
+	}
+
+	// A session tombstone has the same guarantees, including for a different
+	// family issued to the same revoked session.
+	if err := store.CreateRefresh(ctx, record("session-marker", "sess_marker_revoked", "fam_session_marker")); err != nil {
+		t.Fatalf("CreateRefresh(session marker): %v", err)
+	}
+	if err := store.RevokeSession(ctx, "sess_marker_revoked", now); err != nil {
+		t.Fatalf("RevokeSession: %v", err)
+	}
+	if _, err := store.Pool().Exec(ctx, `DELETE FROM refresh_tokens WHERE session_id = $1`, "sess_marker_revoked"); err != nil {
+		t.Fatalf("prune session marker rows: %v", err)
+	}
+	if err := store.CreateRefresh(ctx, record("session-after", "sess_marker_revoked", "fam_new_for_session")); !errors.Is(err, auth.ErrInvalidRefresh) {
+		t.Fatalf("CreateRefresh after pruned RevokeSession = %v, want ErrInvalidRefresh", err)
+	}
+	insertRefreshRow(t, ctx, store, "session-slipped", "sess_marker_revoked", "fam_new_for_session", user.ID, now.Add(time.Hour))
+	if _, err := store.ConsumeRefresh(ctx, "session-slipped", now); !errors.Is(err, auth.ErrInvalidRefresh) {
+		t.Fatalf("ConsumeRefresh of slipped session token = %v, want ErrInvalidRefresh", err)
+	}
+
+	var tombstones int
+	if err := store.Pool().QueryRow(ctx, `SELECT count(*) FROM auth_revocations`).Scan(&tombstones); err != nil {
+		t.Fatalf("count revocation tombstones: %v", err)
+	}
+	if tombstones != 2 {
+		t.Fatalf("revocation tombstones = %d, want 2", tombstones)
+	}
+
+	// Expiry is decided by the database clock, not the caller's now value.
+	insertRefreshRow(t, ctx, store, "clock-skew", "sess_clock", "fam_clock", user.ID, time.Now().UTC().Add(-time.Minute))
+	if _, err := store.ConsumeRefresh(ctx, "clock-skew", time.Now().UTC().Add(-time.Hour)); !errors.Is(err, auth.ErrInvalidRefresh) {
+		t.Fatalf("ConsumeRefresh with stale caller clock = %v, want ErrInvalidRefresh", err)
+	}
+
+	// Normal rotation in a live family still works.
+	if err := store.CreateRefresh(ctx, record("rotate-live-1", "sess_live", "fam_live")); err != nil {
+		t.Fatalf("CreateRefresh(live first): %v", err)
+	}
+	if _, err := store.ConsumeRefresh(ctx, "rotate-live-1", now); err != nil {
+		t.Fatalf("ConsumeRefresh(live first): %v", err)
+	}
+	if err := store.CreateRefresh(ctx, record("rotate-live-2", "sess_live", "fam_live")); err != nil {
+		t.Fatalf("CreateRefresh(live rotation): %v", err)
+	}
+	if _, err := store.ConsumeRefresh(ctx, "rotate-live-2", now); err != nil {
+		t.Fatalf("ConsumeRefresh(live rotation): %v", err)
+	}
+}
+
+func waitForRefreshLockWaiter(t *testing.T, ctx context.Context, store *Store, scopeID string) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		var waiting int
+		err := store.Pool().QueryRow(ctx, `
+			SELECT count(*) FROM pg_locks
+			WHERE locktype = 'advisory'
+			  AND NOT granted
+			  AND database = (SELECT oid FROM pg_database WHERE datname = current_database())
+			  AND classid::bigint = ((hashtextextended($1, 0) >> 32) & 4294967295)
+			  AND objid::bigint = (hashtextextended($1, 0) & 4294967295)`,
+			scopeID).Scan(&waiting)
+		if err != nil {
+			t.Fatalf("inspect pg_locks: %v", err)
+		}
+		if waiting > 0 {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("RevokeFamily did not wait on the advisory lock for %q", scopeID)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func TestRevokeFamilySerializesWithInFlightCreate(t *testing.T) {
+	store := newTestStore(t)
+	ctx := testContext(t)
+	user, _, err := store.CreateUser(ctx, domain.User{ID: "user_race", Login: "race-user"}, "")
+	if err != nil {
+		t.Fatalf("CreateUser: %v", err)
+	}
+	now := time.Now().UTC()
+	const familyID = "fam_race"
+	const sessionID = "sess_race"
+	if err := store.CreateRefresh(ctx, auth.RefreshRecord{
+		SessionID: sessionID, FamilyID: familyID, UserID: user.ID,
+		TokenHash: "race-initial", IssuedAt: now, ExpiresAt: now.Add(time.Hour),
+	}); err != nil {
+		t.Fatalf("CreateRefresh(initial): %v", err)
+	}
+
+	// Connection A models an in-flight rotation: it holds the family advisory
+	// lock and inserts a token inside an uncommitted transaction.
+	conn, err := store.Pool().Acquire(ctx)
+	if err != nil {
+		t.Fatalf("acquire connection A: %v", err)
+	}
+	defer conn.Release()
+	tx, err := conn.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin connection A: %v", err)
+	}
+	defer func() {
+		rollbackCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = tx.Rollback(rollbackCtx)
+	}()
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, familyID); err != nil {
+		t.Fatalf("lock family on connection A: %v", err)
+	}
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO refresh_tokens (token_hash, session_id, family_id, user_id, issued_at, expires_at)
+		VALUES ('race-inflight', $1, $2, $3, now(), $4)`,
+		sessionID, familyID, user.ID, now.Add(time.Hour)); err != nil {
+		t.Fatalf("insert in-flight token: %v", err)
+	}
+
+	revoked := make(chan error, 1)
+	go func() {
+		revoked <- store.RevokeFamily(context.Background(), familyID, time.Now().UTC())
+	}()
+
+	// RevokeFamily must wait for the advisory lock before writing the tombstone.
+	waitForRefreshLockWaiter(t, ctx, store, familyID)
+	select {
+	case err := <-revoked:
+		t.Fatalf("RevokeFamily completed while the family lock was held: %v", err)
+	case <-time.After(200 * time.Millisecond):
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatalf("commit connection A: %v", err)
+	}
+	select {
+	case err := <-revoked:
+		if err != nil {
+			t.Fatalf("RevokeFamily after lock release: %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("RevokeFamily did not complete after the family lock was released")
+	}
+
+	var unrevoked int
+	if err := store.Pool().QueryRow(ctx,
+		`SELECT count(*) FROM refresh_tokens WHERE family_id = $1 AND revoked_at IS NULL`, familyID).Scan(&unrevoked); err != nil {
+		t.Fatalf("count unrevoked family tokens: %v", err)
+	}
+	if unrevoked != 0 {
+		t.Fatalf("family has %d unrevoked tokens after RevokeFamily", unrevoked)
+	}
+	if _, err := store.ConsumeRefresh(ctx, "race-inflight", time.Now().UTC()); !errors.Is(err, auth.ErrInvalidRefresh) {
+		t.Fatalf("ConsumeRefresh of in-flight token after RevokeFamily = %v, want ErrInvalidRefresh", err)
+	}
+	if err := store.CreateRefresh(ctx, auth.RefreshRecord{
+		SessionID: sessionID, FamilyID: familyID, UserID: user.ID,
+		TokenHash: "race-successor", IssuedAt: now, ExpiresAt: now.Add(time.Hour),
+	}); !errors.Is(err, auth.ErrInvalidRefresh) {
+		t.Fatalf("CreateRefresh after racing RevokeFamily = %v, want ErrInvalidRefresh", err)
+	}
+}
+
+func TestFindAPITokenIgnoresLastUsedUpdateFailure(t *testing.T) {
+	store := newTestStore(t)
+	ctx := testContext(t)
+	user, _, err := store.CreateUser(ctx, domain.User{ID: "user_usage", Login: "usage-user"}, "")
+	if err != nil {
+		t.Fatalf("CreateUser: %v", err)
+	}
+	if _, err := store.CreateAPIToken(ctx, APITokenRecord{
+		UserID: user.ID, Name: "cli", Role: domain.RoleMember, TokenHash: "hash-usage",
+	}); err != nil {
+		t.Fatalf("CreateAPIToken: %v", err)
+	}
+	if _, err := store.Pool().Exec(ctx, `
+		CREATE FUNCTION reject_last_used() RETURNS trigger AS $$
+		BEGIN
+			IF NEW.last_used_at IS DISTINCT FROM OLD.last_used_at THEN
+				RAISE EXCEPTION 'last_used_at rejected';
+			END IF;
+			RETURN NEW;
+		END
+		$$ LANGUAGE plpgsql`); err != nil {
+		t.Fatalf("create trigger function: %v", err)
+	}
+	if _, err := store.Pool().Exec(ctx, `
+		CREATE TRIGGER reject_last_used_update BEFORE UPDATE ON api_tokens
+		FOR EACH ROW EXECUTE FUNCTION reject_last_used()`); err != nil {
+		t.Fatalf("create trigger: %v", err)
+	}
+
+	found, err := store.FindAPITokenByHash(ctx, "hash-usage", time.Now())
+	if err != nil {
+		t.Fatalf("FindAPITokenByHash with a failing usage update = %v", err)
+	}
+	if found.ID == "" || found.TokenHash != "hash-usage" {
+		t.Fatalf("token = %+v", found)
 	}
 }

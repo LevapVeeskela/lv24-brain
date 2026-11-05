@@ -2,6 +2,7 @@ package bootstrap_test
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -10,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/levapveeskela/lv24-brain/internal/app"
 	"github.com/levapveeskela/lv24-brain/internal/bootstrap"
@@ -196,8 +198,219 @@ func TestServerModeUsesSecretStoreToken(t *testing.T) {
 	if *gotAuth != "Bearer secret-token" {
 		t.Fatalf("Authorization = %q", *gotAuth)
 	}
-	if fake.gets != 1 {
-		t.Fatalf("secret store Get calls = %d, want 1", fake.gets)
+	// Bootstrap reads the stored token once and the auth token provider reads
+	// it again for the request; rotation requires per-request reads.
+	if fake.gets == 0 {
+		t.Fatal("secret store was never read")
+	}
+}
+
+func TestServerModeWiresAuthLogin(t *testing.T) {
+	ctx := context.Background()
+	expires := time.Date(2026, 11, 6, 10, 0, 0, 0, time.UTC)
+	var loginCalls int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.Method != http.MethodPost || r.URL.Path != "/v1/auth/login" {
+			http.NotFound(w, r)
+			return
+		}
+		var body struct {
+			Login    string `json:"login"`
+			Password string `json:"password"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Login != "alice" || body.Password != "secret-pass" {
+			w.WriteHeader(http.StatusUnauthorized)
+			_, _ = w.Write([]byte(`{"error":{"code":"invalid_credentials","message":"invalid credentials"}}`))
+			return
+		}
+		loginCalls++
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"accessToken":  "access-token-1",
+			"refreshToken": "refresh-token-1",
+			"expiresAt":    expires,
+			"user":         domain.User{ID: "user_1", Login: "alice", Role: domain.RoleMember},
+		})
+	}))
+	t.Cleanup(server.Close)
+	t.Setenv("BRAIN_TOKEN", "")
+	t.Setenv("BRAIN_SECRET_SERVER_TOKEN", "")
+	fake := &fakeSecretStore{values: map[string]string{}}
+	cfg := config.Default()
+	cfg.Mode = config.ModeServer
+	cfg.ServerURL = server.URL
+	runtime, err := bootstrap.BuildWithOptions(cfg, bootstrap.Options{Secrets: fake})
+	if err != nil {
+		t.Fatalf("BuildWithOptions: %v", err)
+	}
+	defer func() { _ = runtime.Close() }()
+
+	result, err := runtime.App.Login(ctx, app.LoginOptions{Login: "alice", Password: "secret-pass"})
+	if err != nil {
+		t.Fatalf("Login: %v", err)
+	}
+	if result.User.Login != "alice" || result.Role != domain.RoleMember {
+		t.Fatalf("login result = %+v", result)
+	}
+	if !result.ExpiresAt.Equal(expires) {
+		t.Fatalf("ExpiresAt = %s, want %s", result.ExpiresAt, expires)
+	}
+	if loginCalls != 1 {
+		t.Fatalf("login calls = %d, want 1", loginCalls)
+	}
+	if got := fake.values["server-session"]; got == "" {
+		t.Fatal("login did not store the session bundle")
+	}
+	var bundle struct {
+		ServerURL    string `json:"serverUrl"`
+		AccessToken  string `json:"accessToken"`
+		RefreshToken string `json:"refreshToken"`
+	}
+	if err := json.Unmarshal([]byte(fake.values["server-session"]), &bundle); err != nil {
+		t.Fatalf("stored session bundle is not JSON: %v", err)
+	}
+	if bundle.ServerURL != server.URL || bundle.AccessToken != "access-token-1" || bundle.RefreshToken != "refresh-token-1" {
+		t.Fatalf("stored session bundle = %+v", bundle)
+	}
+	if _, ok := fake.values["server-token"]; ok {
+		t.Fatal("login stored the legacy access key")
+	}
+}
+
+func TestServerModeEnvTokenSkipsAuth(t *testing.T) {
+	ctx := context.Background()
+	server, _ := newServerStub(t, "env-token")
+	t.Setenv("BRAIN_TOKEN", "env-token")
+	fake := &fakeSecretStore{values: map[string]string{}}
+	cfg := config.Default()
+	cfg.Mode = config.ModeServer
+	cfg.ServerURL = server.URL
+	runtime, err := bootstrap.BuildWithOptions(cfg, bootstrap.Options{Secrets: fake})
+	if err != nil {
+		t.Fatalf("BuildWithOptions: %v", err)
+	}
+	defer func() { _ = runtime.Close() }()
+
+	if runtime.Updater == nil {
+		t.Fatal("server runtime has no updater")
+	}
+	if runtime.RunStore != nil {
+		t.Fatal("server runtime must not expose a local connector run store")
+	}
+	_, err = runtime.App.Login(ctx, app.LoginOptions{Login: "alice", Password: "secret-pass"})
+	if !errors.Is(err, app.ErrNotImplemented) {
+		t.Fatalf("Login error = %v, want ErrNotImplemented", err)
+	}
+}
+
+func TestServerModeSecretEnvTokenSkipsAuth(t *testing.T) {
+	ctx := context.Background()
+	server, _ := newServerStub(t, "")
+	t.Setenv("BRAIN_TOKEN", "")
+	t.Setenv("BRAIN_SECRET_SERVER_TOKEN", "env-secret-token")
+	fake := &fakeSecretStore{values: map[string]string{}}
+	cfg := config.Default()
+	cfg.Mode = config.ModeServer
+	cfg.ServerURL = server.URL
+	runtime, err := bootstrap.BuildWithOptions(cfg, bootstrap.Options{Secrets: fake})
+	if err != nil {
+		t.Fatalf("BuildWithOptions: %v", err)
+	}
+	defer func() { _ = runtime.Close() }()
+
+	_, err = runtime.App.Login(ctx, app.LoginOptions{Login: "alice", Password: "secret-pass"})
+	if !errors.Is(err, app.ErrNotImplemented) {
+		t.Fatalf("Login error = %v, want ErrNotImplemented", err)
+	}
+}
+
+func TestLocalModeWiresRunStoreAndUpdater(t *testing.T) {
+	ctx := context.Background()
+	dataDir := filepath.Join(t.TempDir(), "brain")
+	cfgPath := filepath.Join(dataDir, "brain.yaml")
+	initCfg := config.Default()
+	initCfg.Mode = config.ModeLocal
+	initCfg.DataDir = dataDir
+	if _, err := app.New(initCfg, app.Dependencies{}).Init(ctx, app.InitOptions{
+		ConfigPath: cfgPath, Mode: config.ModeLocal, DataDir: dataDir,
+	}); err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+	cfg, err := config.Load(cfgPath)
+	if err != nil {
+		t.Fatalf("config.Load: %v", err)
+	}
+	runtime, err := bootstrap.Build(cfg)
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	defer func() { _ = runtime.Close() }()
+	if runtime.Updater == nil {
+		t.Fatal("local runtime has no updater")
+	}
+	if runtime.RunStore == nil {
+		t.Fatal("local runtime has no connector run store")
+	}
+	run := domain.ConnectorRun{
+		ID:        "run-test",
+		Source:    "github",
+		Status:    domain.ConnectorSuccess,
+		StartedAt: time.Now().UTC(),
+		Counts:    map[string]int{"repos": 1},
+	}
+	if err := runtime.RunStore.AppendConnectorRun(ctx, run); err != nil {
+		t.Fatalf("AppendConnectorRun: %v", err)
+	}
+	runsDir := filepath.Join(dataDir, "connectors", "runs")
+	entries, err := os.ReadDir(runsDir)
+	if err != nil || len(entries) == 0 {
+		t.Fatalf("connector runs not persisted under %s: %v", runsDir, err)
+	}
+}
+
+func TestOpenRunStoreIsIndependentOfGitAndIndex(t *testing.T) {
+	ctx := context.Background()
+	dataDir := filepath.Join(t.TempDir(), "brain")
+	initCfg := config.Default()
+	initCfg.Mode = config.ModeLocal
+	initCfg.DataDir = dataDir
+	if _, err := app.New(initCfg, app.Dependencies{}).Init(ctx, app.InitOptions{
+		ConfigPath: filepath.Join(dataDir, "brain.yaml"), Mode: config.ModeLocal, DataDir: dataDir,
+	}); err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+
+	store, err := bootstrap.OpenRunStore(initCfg)
+	if err != nil {
+		t.Fatalf("OpenRunStore: %v", err)
+	}
+	if store == nil {
+		t.Fatal("initialized local data dir has no run store")
+	}
+	run := domain.ConnectorRun{
+		ID: "run-open", Source: "gitlab", Status: domain.ConnectorSuccess,
+		StartedAt: time.Now().UTC(),
+	}
+	if err := store.AppendConnectorRun(ctx, run); err != nil {
+		t.Fatalf("AppendConnectorRun: %v", err)
+	}
+	runs, err := store.ListConnectorRuns(ctx, "gitlab", 1)
+	if err != nil || len(runs) != 1 || runs[0].ID != run.ID {
+		t.Fatalf("ListConnectorRuns = (%+v, %v)", runs, err)
+	}
+
+	missing := config.Default()
+	missing.Mode = config.ModeLocal
+	missing.DataDir = filepath.Join(t.TempDir(), "missing")
+	if store, err := bootstrap.OpenRunStore(missing); err != nil || store != nil {
+		t.Fatalf("missing dir store = (%v, %v)", store, err)
+	}
+
+	serverCfg := config.Default()
+	serverCfg.Mode = config.ModeServer
+	serverCfg.ServerURL = "https://brain.example.test"
+	if store, err := bootstrap.OpenRunStore(serverCfg); err != nil || store != nil {
+		t.Fatalf("server mode store = (%v, %v)", store, err)
 	}
 }
 

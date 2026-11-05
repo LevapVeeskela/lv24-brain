@@ -261,6 +261,18 @@ func (a *API) withAuth(min domain.Role, allowQueryToken bool, next http.Handler)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		principal, err := a.authenticate(r, allowQueryToken)
 		if err != nil {
+			if !isCredentialError(err) {
+				// A database or adapter failure is not the caller's fault.
+				// Log it with the request id and never echo token material.
+				a.logger.Error("authentication failed",
+					"request_id", requestIDFrom(r.Context()),
+					"method", r.Method,
+					"path", r.URL.Path,
+					"error", err,
+				)
+				writeErrorCode(w, http.StatusInternalServerError, "internal", "internal server error")
+				return
+			}
 			writeAuthError(w)
 			return
 		}
@@ -272,6 +284,14 @@ func (a *API) withAuth(min domain.Role, allowQueryToken bool, next http.Handler)
 		ctx = context.WithValue(ctx, actorContextKey{}, principal.User.Login)
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
+}
+
+// isCredentialError reports failures that legitimately mean the presented
+// credential is unusable. Everything else is an infrastructure failure.
+func isCredentialError(err error) bool {
+	return errors.Is(err, auth.ErrInvalidToken) ||
+		errors.Is(err, auth.ErrInvalidCredentials) ||
+		errors.Is(err, auth.ErrInvalidRefresh)
 }
 
 func (a *API) authenticate(r *http.Request, allowQueryToken bool) (auth.Principal, error) {

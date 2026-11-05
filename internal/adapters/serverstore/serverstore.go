@@ -12,9 +12,9 @@
 //   - Search: postgres.Store has no full-text/substring search.
 //   - Ascending revision listings: postgres.RevisionFilter cannot express
 //     ascending order, which SSE replay requires.
-//   - API tokens and refresh-token rotations: the 0001_init.sql schema has no
-//     api_tokens or refresh_tokens tables. They are kept in process memory
-//     until that migration lands; see the sessions file for consequences.
+//
+// API tokens and refresh-token rotations are persisted by postgres.Store
+// (migration 0002_auth_tokens.sql) and only converted here.
 //
 // The revisions table has no action column, so RevisionRecord.Action is always
 // empty for this store. Handlers and SSE clients must rely on EntityKind and
@@ -27,12 +27,9 @@ package serverstore
 import (
 	"context"
 	"errors"
-	"sync"
-	"time"
 
 	"github.com/levapveeskela/lv24-brain/internal/adapters/httpapi"
 	"github.com/levapveeskela/lv24-brain/internal/adapters/postgres"
-	"github.com/levapveeskela/lv24-brain/internal/auth"
 	"github.com/levapveeskela/lv24-brain/internal/domain"
 )
 
@@ -41,11 +38,6 @@ var _ httpapi.Store = (*Store)(nil)
 // Store implements httpapi.Store on top of a postgres.Store.
 type Store struct {
 	pg *postgres.Store
-
-	mu        sync.Mutex
-	apiTokens map[string]httpapi.APITokenRecord
-	refresh   map[string]auth.RefreshRecord
-	now       func() time.Time
 }
 
 // New wraps a migrated postgres.Store. The caller owns the pool and must close
@@ -57,12 +49,7 @@ func New(pg *postgres.Store) (*Store, error) {
 	if pg.Pool() == nil {
 		return nil, errors.New("serverstore: postgres store has no connection pool")
 	}
-	return &Store{
-		pg:        pg,
-		apiTokens: make(map[string]httpapi.APITokenRecord),
-		refresh:   make(map[string]auth.RefreshRecord),
-		now:       time.Now,
-	}, nil
+	return &Store{pg: pg}, nil
 }
 
 // Postgres exposes the wrapped store for health checks and connector runners.

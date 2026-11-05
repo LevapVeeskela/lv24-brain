@@ -16,8 +16,10 @@ repository.
 
 ## Requirements
 
-- Windows 10/11 with PowerShell 5.1 or newer.
-- Git for Windows only for `git` mode.
+- Windows 10/11 with PowerShell 5.1 or newer; macOS or a current Linux
+  distribution with bash 3.2+ and `curl`.
+- Git only for `git` mode.
+- `sha256sum`, `shasum`, or `openssl` on macOS/Linux for checksum verification.
 - Go 1.27+ only when building from source.
 - An OpenCode installation only if you want the optional handoff hook.
 
@@ -75,9 +77,12 @@ Server mode:
 ```
 
 The installer writes `server_url` to `brain.yaml` and never creates or stores a
-credential. After installation, obtain a token from `POST /v1/auth/login` (or
-mint an API token), then either export `BRAIN_TOKEN` or store the token with
-`brain secret set server-token`. There is no `brain login` or OIDC CLI flow yet.
+credential. After installation, sign in with
+`printf '%s\n' '<password>' | brain login --config <brain.yaml> --login <user> --password-stdin`.
+The command stores the rotating tokens in the OS secret store. Exporting
+`BRAIN_TOKEN` or storing a static API token with
+`brain secret set server-token` remains supported for automation. OIDC is
+browser-based; there is no CLI OIDC flow yet.
 
 Local and Git modes write a `data_dir`; server mode writes only `server_url`.
 
@@ -98,6 +103,75 @@ Local and Git modes write a `data_dir`; server mode writes only `server_url`.
 | `-NoPath` | Do not modify the user `PATH`. |
 | `-SkipChecksum` | Explicitly skip checksum verification (not recommended). |
 | `-Yes` | Non-interactive; defaults to `local` when `-Mode` is omitted. |
+
+## macOS and Linux installer
+
+From a checkout of this repository:
+
+```sh
+bash installers/unix/install.sh --mode local --yes
+```
+
+The script requires bash 3.2 or newer (the macOS default), `curl`, and one of
+`sha256sum`, `shasum`, or `openssl`. It runs as the current user and never uses
+`sudo`.
+
+The installer:
+
+1. Resolves the newest release on the selected channel (or `--version`).
+2. Reads `release.json` and selects the `linux`/`darwin` `amd64`/`arm64` CLI
+   asset, falling back to `checksums.txt` when the manifest is absent.
+3. Downloads over HTTPS from `github.com` or `objects.githubusercontent.com`
+   and verifies SHA-256 before installing.
+4. Installs `brain` to `~/.local/bin` (override with `--dir`), keeps the
+   previous binary as `brain.previous`, and prints a `PATH` hint.
+5. With `--yes` and `--mode`, runs `brain init`.
+
+Options:
+
+| Option | Meaning |
+|---|---|
+| `--version vX.Y.Z` | Exact release. |
+| `--channel stable\|beta` | Release channel. Default `stable`. |
+| `--dir <path>` | Binary directory. Default `~/.local/bin`. |
+| `--mode local\|git\|server` | Run `brain init` after install when `--yes` is set. |
+| `--data-dir <path>` | Data directory for `local`/`git`. |
+| `--server-url <url>` | Server URL for `server` (HTTPS only). |
+| `--config <path>` | `brain.yaml` path. |
+| `--yes` | Run the init step without prompting. |
+| `--no-path-hint` | Do not print PATH instructions. |
+| `--help` | Show usage. |
+
+Set a read-only `GITHUB_TOKEN` to raise GitHub API rate limits; the script
+sends it only as a request header and never prints or stores it. Re-running the
+installer is safe: an identical installed binary is left untouched and keeps
+its `brain.previous` rollback copy.
+
+Git mode does not clone. Point `--data-dir` at an existing clone of the private
+data repository (default `~/brain-data`), or clone it first.
+
+Verification:
+
+```sh
+~/.local/bin/brain version
+~/.local/bin/brain doctor --config ~/brain/brain.yaml
+```
+
+Server mode prints the next step:
+
+```sh
+brain login --config ~/brain/brain.yaml
+```
+
+Rollback and uninstall:
+
+```sh
+mv ~/.local/bin/brain.previous ~/.local/bin/brain   # rollback
+rm ~/.local/bin/brain ~/.local/bin/brain.previous   # uninstall
+```
+
+Remove the `PATH` line and delete the data directory only after you have backed
+it up.
 
 ## Manual install
 

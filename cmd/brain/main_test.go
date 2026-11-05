@@ -3,19 +3,33 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/levapveeskela/lv24-brain/internal/adapters/httpclient"
 	"github.com/levapveeskela/lv24-brain/internal/adapters/sqliteindex"
+	"github.com/levapveeskela/lv24-brain/internal/app"
+	"github.com/levapveeskela/lv24-brain/internal/bootstrap"
 	"github.com/levapveeskela/lv24-brain/internal/config"
+	"github.com/levapveeskela/lv24-brain/internal/domain"
 	"github.com/levapveeskela/lv24-brain/internal/ports"
 	"github.com/levapveeskela/lv24-brain/internal/version"
 )
+
+func TestMain(m *testing.M) {
+	// CLI tests must never reach the release endpoint or write the user's
+	// update state. Tests that need the daily check can clear this variable.
+	_ = os.Setenv("BRAIN_NO_UPDATE", "1")
+	os.Exit(m.Run())
+}
 
 func runForTest(t *testing.T, args ...string) (int, string, string) {
 	t.Helper()
@@ -29,6 +43,412 @@ func runWithInputForTest(t *testing.T, stdin string, args ...string) (int, strin
 	var stdout, stderr bytes.Buffer
 	code := runWithInput(args, strings.NewReader(stdin), &stdout, &stderr)
 	return code, stdout.String(), stderr.String()
+}
+
+const (
+	testAccessToken  = "cli-access-token"
+	testRefreshToken = "cli-refresh-token"
+)
+
+type cliSecretStore struct {
+	mu     sync.Mutex
+	values map[string]string
+}
+
+func newCLISecretStore() *cliSecretStore {
+	return &cliSecretStore{values: map[string]string{}}
+}
+
+func (s *cliSecretStore) Get(_ context.Context, key string) (string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	value, ok := s.values[key]
+	if !ok {
+		return "", domain.ErrNotFound
+	}
+	return value, nil
+}
+
+func (s *cliSecretStore) Set(_ context.Context, key, value string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.values[key] = value
+	return nil
+}
+
+func (s *cliSecretStore) Delete(_ context.Context, key string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.values, key)
+	return nil
+}
+
+func (s *cliSecretStore) Names(context.Context) ([]string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	names := make([]string, 0, len(s.values))
+	for name := range s.values {
+		names = append(names, name)
+	}
+	return names, nil
+}
+
+func (s *cliSecretStore) lookup(key string) (string, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	value, ok := s.values[key]
+	return value, ok
+}
+
+func (s *cliSecretStore) reset() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.values = map[string]string{}
+}
+
+func useSecretStore(t *testing.T, store ports.SecretStore) {
+	t.Helper()
+	previous := buildRuntime
+	buildRuntime = func(cfg config.BrainConfig) (*bootstrap.Runtime, error) {
+		return bootstrap.BuildWithOptions(cfg, bootstrap.Options{Secrets: store})
+	}
+	previousOS := osSecrets
+	osSecrets = func() ports.SecretStore { return store }
+	t.Cleanup(func() {
+		buildRuntime = previous
+		osSecrets = previousOS
+	})
+}
+
+// storedSession mirrors the CLI-facing part of the httpclient session bundle.
+type storedSession struct {
+	ServerURL    string `json:"serverUrl"`
+	AccessToken  string `json:"accessToken"`
+	RefreshToken string `json:"refreshToken"`
+}
+
+func storeSession(t *testing.T, store *cliSecretStore, serverURL, access, refresh string) {
+	t.Helper()
+	raw, err := json.Marshal(storedSession{ServerURL: serverURL, AccessToken: access, RefreshToken: refresh})
+	if err != nil {
+		t.Fatalf("marshal session: %v", err)
+	}
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	store.values[httpclient.SecretSession] = string(raw)
+}
+
+func lookupSession(t *testing.T, store *cliSecretStore) (storedSession, bool) {
+	t.Helper()
+	raw, ok := store.lookup(httpclient.SecretSession)
+	if !ok {
+		return storedSession{}, false
+	}
+	var session storedSession
+	if err := json.Unmarshal([]byte(raw), &session); err != nil {
+		t.Fatalf("stored session is not JSON: %v", err)
+	}
+	return session, true
+}
+
+func writeServerConfig(t *testing.T, serverURL string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "brain.yaml")
+	cfg := config.Default()
+	cfg.Mode = config.ModeServer
+	cfg.ServerURL = serverURL
+	if err := config.Save(path, cfg); err != nil {
+		t.Fatalf("save config: %v", err)
+	}
+	return path
+}
+
+func newAuthServer(t *testing.T, wantLogin, wantPassword string) *httptest.Server {
+	t.Helper()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/auth/login":
+			var body struct {
+				Login    string `json:"login"`
+				Password string `json:"password"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Login != wantLogin || body.Password != wantPassword {
+				w.WriteHeader(http.StatusUnauthorized)
+				_, _ = w.Write([]byte(`{"error":{"code":"invalid_credentials","message":"invalid credentials"}}`))
+				return
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"accessToken":  testAccessToken,
+				"refreshToken": testRefreshToken,
+				"expiresAt":    time.Date(2026, 11, 6, 10, 0, 0, 0, time.UTC),
+				"user":         map[string]any{"id": "user_1", "login": wantLogin, "role": "member"},
+			})
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/auth/me":
+			if r.Header.Get("Authorization") != "Bearer "+testAccessToken {
+				w.WriteHeader(http.StatusUnauthorized)
+				_, _ = w.Write([]byte(`{"error":{"code":"unauthorized","message":"authentication required"}}`))
+				return
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"user":       map[string]any{"id": "user_1", "login": wantLogin, "role": "member"},
+				"authSource": "jwt",
+			})
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/auth/logout":
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(server.Close)
+	return server
+}
+
+var _ ports.SecretStore = (*cliSecretStore)(nil)
+
+func TestLoginCommand(t *testing.T) {
+	t.Setenv("BRAIN_TOKEN", "")
+	t.Setenv("BRAIN_LOGIN", "")
+	t.Setenv("BRAIN_PASSWORD", "")
+	server := newAuthServer(t, "alice", "s3cret")
+	cfgPath := writeServerConfig(t, server.URL)
+	store := newCLISecretStore()
+	useSecretStore(t, store)
+
+	code, stdout, stderr := runForTest(t, "login", "--config", cfgPath, "--login", "alice", "--password", "s3cret")
+	if code != 0 {
+		t.Fatalf("login exit code = %d (stderr: %s)", code, stderr)
+	}
+	for _, want := range []string{"logged in as alice", "member", "expires 2026-11-06T10:00:00Z"} {
+		if !strings.Contains(stdout, want) {
+			t.Fatalf("login stdout missing %q:\n%s", want, stdout)
+		}
+	}
+	if !strings.Contains(stderr, "--password-stdin") {
+		t.Fatalf("login stderr missing the argv warning: %q", stderr)
+	}
+	session, ok := lookupSession(t, store)
+	if !ok {
+		t.Fatal("login did not store a session bundle")
+	}
+	if session.ServerURL != server.URL || session.AccessToken != testAccessToken || session.RefreshToken != testRefreshToken {
+		t.Fatalf("stored session = %+v", session)
+	}
+	if _, ok := store.lookup(httpclient.SecretAccessToken); ok {
+		t.Fatal("login stored the legacy access key")
+	}
+	if _, ok := store.lookup(httpclient.SecretRefreshToken); ok {
+		t.Fatal("login stored the legacy refresh key")
+	}
+	if combined := stdout + stderr; strings.Contains(combined, "s3cret") ||
+		strings.Contains(combined, testAccessToken) || strings.Contains(combined, testRefreshToken) {
+		t.Fatalf("login output leaked a credential: %q", combined)
+	}
+
+	store.reset()
+	code, _, stderr = runForTest(t, "login", "--config", cfgPath, "--login", "alice", "--password", "wrong")
+	if code == 0 {
+		t.Fatal("login with a wrong password succeeded")
+	}
+	if !strings.Contains(stderr, "brain login:") {
+		t.Fatalf("wrong password stderr = %q", stderr)
+	}
+	if _, ok := store.lookup(httpclient.SecretSession); ok {
+		t.Fatal("failed login stored a session bundle")
+	}
+
+	code, stdout, stderr = runWithInputForTest(t, "s3cret\n", "login", "--config", cfgPath, "--login", "alice", "--password-stdin")
+	if code != 0 || !strings.Contains(stdout, "logged in as alice") {
+		t.Fatalf("password-stdin login exit code = %d, stdout = %q (stderr: %s)", code, stdout, stderr)
+	}
+
+	code, _, _ = runForTest(t, "login", "--config", cfgPath, "--login", "alice", "--password", "x", "--password-stdin")
+	if code != 2 {
+		t.Fatalf("conflicting password flags exit code = %d, want 2", code)
+	}
+}
+
+func TestLoginUsageErrorsExitTwo(t *testing.T) {
+	t.Setenv("BRAIN_TOKEN", "")
+	t.Setenv("BRAIN_SECRET_SERVER_TOKEN", "")
+	t.Setenv("BRAIN_LOGIN", "")
+	t.Setenv("BRAIN_PASSWORD", "")
+	cfgPath := writeServerConfig(t, "http://127.0.0.1:1")
+
+	code, _, stderr := runForTest(t, "login", "--config", cfgPath, "--password", "x")
+	if code != 2 || !strings.Contains(stderr, "--login is required") {
+		t.Fatalf("missing login exit code = %d, stderr = %q", code, stderr)
+	}
+	code, _, stderr = runForTest(t, "login", "--config", cfgPath, "--login", "alice", "--password", "x", "extra")
+	if code != 2 || !strings.Contains(stderr, "unexpected arguments") {
+		t.Fatalf("positional arguments exit code = %d, stderr = %q", code, stderr)
+	}
+	code, _, stderr = runForTest(t, "login", "--config", cfgPath, "--login", "alice")
+	if code != 2 || !strings.Contains(stderr, "password is required") {
+		t.Fatalf("missing password exit code = %d, stderr = %q", code, stderr)
+	}
+}
+
+func TestLogoutStaticTokenWarnsAndClearsLocalTokens(t *testing.T) {
+	t.Setenv("BRAIN_TOKEN", "")
+	t.Setenv("BRAIN_SECRET_SERVER_TOKEN", "")
+	var logoutCalls int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/auth/me":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"user":       map[string]any{"id": "user_1", "login": "alice", "role": "member"},
+				"authSource": "api_token",
+			})
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/auth/logout":
+			logoutCalls++
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(server.Close)
+	cfgPath := writeServerConfig(t, server.URL)
+	store := newCLISecretStore()
+	store.values[httpclient.SecretAccessToken] = "static-api-token"
+	store.values[httpclient.SecretRefreshToken] = "static-refresh"
+	useSecretStore(t, store)
+
+	code, _, stderr := runForTest(t, "logout", "--config", cfgPath)
+	if code != 1 {
+		t.Fatalf("logout exit code = %d, want 1", code)
+	}
+	if !strings.Contains(stderr, "static API token") || !strings.Contains(stderr, "local tokens were cleared") {
+		t.Fatalf("logout stderr = %q", stderr)
+	}
+	if logoutCalls != 0 {
+		t.Fatalf("logout endpoint called %d times for a static token", logoutCalls)
+	}
+	if _, ok := store.lookup(httpclient.SecretAccessToken); ok {
+		t.Fatal("logout kept the access token")
+	}
+	if _, ok := store.lookup(httpclient.SecretRefreshToken); ok {
+		t.Fatal("logout kept the refresh token")
+	}
+	if _, ok := store.lookup(httpclient.SecretSession); ok {
+		t.Fatal("logout kept the session bundle")
+	}
+}
+
+func TestWarnPlainHTTPLogin(t *testing.T) {
+	var warning bytes.Buffer
+	warnPlainHTTPLogin(&warning, "http://brain.example.test")
+	if !strings.Contains(warning.String(), "plain HTTP") {
+		t.Fatalf("warning = %q", warning.String())
+	}
+	for _, safe := range []string{"http://localhost:8080", "http://127.0.0.1:8080", "http://[::1]:8080"} {
+		warning.Reset()
+		warnPlainHTTPLogin(&warning, safe)
+		if warning.Len() != 0 {
+			t.Fatalf("%s produced a warning: %q", safe, warning.String())
+		}
+	}
+}
+
+func TestLoginRefusesSecretEnvToken(t *testing.T) {
+	t.Setenv("BRAIN_TOKEN", "")
+	t.Setenv("BRAIN_SECRET_SERVER_TOKEN", "env-secret-token")
+	t.Setenv("BRAIN_LOGIN", "")
+	t.Setenv("BRAIN_PASSWORD", "")
+	cfgPath := writeServerConfig(t, "http://127.0.0.1:1")
+
+	code, _, stderr := runForTest(t, "login", "--config", cfgPath, "--login", "alice", "--password", "x")
+	if code != 1 || !strings.Contains(stderr, "BRAIN_SECRET_SERVER_TOKEN") {
+		t.Fatalf("login exit code = %d, stderr = %q", code, stderr)
+	}
+}
+
+func TestLogoutEnvTokenWarnsWhenStoredTokensExist(t *testing.T) {
+	t.Setenv("BRAIN_TOKEN", "")
+	t.Setenv("BRAIN_SECRET_SERVER_TOKEN", "env-secret-token")
+	cfgPath := writeServerConfig(t, "http://127.0.0.1:1")
+	store := newCLISecretStore()
+	storeSession(t, store, "http://127.0.0.1:1", testAccessToken, testRefreshToken)
+	useSecretStore(t, store)
+
+	code, stdout, stderr := runForTest(t, "logout", "--config", cfgPath)
+	if code != 1 {
+		t.Fatalf("logout exit code = %d, want 1 (stdout: %q)", code, stdout)
+	}
+	if !strings.Contains(stderr, "left unchanged") || !strings.Contains(stderr, "Unset it and rerun") {
+		t.Fatalf("logout stderr = %q", stderr)
+	}
+	if strings.Contains(stdout, "logged out") {
+		t.Fatalf("env-token logout claimed success: %q", stdout)
+	}
+	if _, ok := store.lookup(httpclient.SecretSession); !ok {
+		t.Fatal("logout cleared the session bundle despite an env-provided static token")
+	}
+}
+
+func TestLogoutEnvTokenWithoutStoredTokensSucceeds(t *testing.T) {
+	t.Setenv("BRAIN_TOKEN", "env-token")
+	t.Setenv("BRAIN_SECRET_SERVER_TOKEN", "")
+	cfgPath := writeServerConfig(t, "http://127.0.0.1:1")
+	useSecretStore(t, newCLISecretStore())
+
+	code, stdout, stderr := runForTest(t, "logout", "--config", cfgPath)
+	if code != 0 {
+		t.Fatalf("logout exit code = %d (stderr: %s)", code, stderr)
+	}
+	if !strings.Contains(stdout, "static server token") {
+		t.Fatalf("logout stdout = %q", stdout)
+	}
+}
+
+func TestLogoutCommandClearsStoredTokens(t *testing.T) {
+	t.Setenv("BRAIN_TOKEN", "")
+	server := newAuthServer(t, "alice", "s3cret")
+	cfgPath := writeServerConfig(t, server.URL)
+	store := newCLISecretStore()
+	storeSession(t, store, server.URL, testAccessToken, testRefreshToken)
+	useSecretStore(t, store)
+
+	code, stdout, stderr := runForTest(t, "logout", "--config", cfgPath)
+	if code != 0 {
+		t.Fatalf("logout exit code = %d (stderr: %s)", code, stderr)
+	}
+	if !strings.Contains(stdout, "logged out") {
+		t.Fatalf("logout stdout = %q", stdout)
+	}
+	if _, ok := store.lookup(httpclient.SecretSession); ok {
+		t.Fatal("logout kept the session bundle")
+	}
+	if _, ok := store.lookup(httpclient.SecretAccessToken); ok {
+		t.Fatal("logout kept the legacy access token")
+	}
+
+	code, stdout, stderr = runForTest(t, "logout", "--config", cfgPath)
+	if code != 0 || !strings.Contains(stdout, "logged out") {
+		t.Fatalf("second logout exit code = %d, stdout = %q (stderr: %s)", code, stdout, stderr)
+	}
+}
+
+func TestUpdateRollbackValidation(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "brain.yaml")
+	cfg := config.Default()
+	cfg.DataDir = filepath.Join(t.TempDir(), "brain")
+	if err := config.Save(path, cfg); err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range [][]string{
+		{"update", "--rollback", "--yes", "--config", path},
+		{"update", "--rollback", "--check", "--config", path},
+	} {
+		code, _, stderr := runForTest(t, args...)
+		if code != 2 {
+			t.Fatalf("%v exit code = %d, want 2", args, code)
+		}
+		if !strings.Contains(stderr, "rollback cannot be combined") {
+			t.Fatalf("%v stderr = %q", args, stderr)
+		}
+	}
 }
 
 func TestVersionCommand(t *testing.T) {
@@ -46,10 +466,13 @@ func TestHelpCommand(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("exit code = %d, want 0", code)
 	}
-	for _, command := range []string{"init", "doctor", "note", "sync", "index", "search", "connector", "migrate", "secret", "serve", "update"} {
+	for _, command := range []string{"init", "doctor", "note", "sync", "index", "search", "connector", "migrate", "secret", "login", "logout", "serve", "update"} {
 		if !strings.Contains(stdout, command) {
 			t.Fatalf("help output missing command %q", command)
 		}
+	}
+	if !strings.Contains(stdout, "--rollback") {
+		t.Fatalf("help output missing --rollback:\n%s", stdout)
 	}
 }
 
@@ -412,6 +835,10 @@ func TestConnectorRunCLI(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(dataDir, "github", "acme", "widgets.md")); err != nil {
 		t.Fatalf("connector dump missing: %v", err)
 	}
+	runs, err := os.ReadDir(filepath.Join(dataDir, "connectors", "runs"))
+	if err != nil || len(runs) == 0 {
+		t.Fatalf("connector run record missing: %v", err)
+	}
 
 	code, _, _ = runForTest(t, "connector")
 	if code != 2 {
@@ -541,5 +968,165 @@ legacy goal
 	code, _, stderr = runForTest(t, "migrate", "--data-dir", target)
 	if code != 2 || !strings.Contains(stderr, "--from is required") {
 		t.Fatalf("missing --from exit code = %d, stderr = %q", code, stderr)
+	}
+}
+
+type fakeUpdater struct {
+	release ports.ReleaseInfo
+	err     error
+	checked string
+}
+
+func (f *fakeUpdater) Check(_ context.Context, channel string) (ports.ReleaseInfo, error) {
+	f.checked = channel
+	return f.release, f.err
+}
+
+func (f *fakeUpdater) Download(context.Context, ports.ReleaseInfo) (string, error) { return "", nil }
+
+func (f *fakeUpdater) Apply(context.Context, string) error { return nil }
+
+func (f *fakeUpdater) Rollback(context.Context) error { return nil }
+
+func TestUpdateUsesRuntimeSeamAndValidatesArgs(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "brain.yaml")
+	cfg := config.Default()
+	cfg.DataDir = filepath.Join(t.TempDir(), "brain")
+	if err := config.Save(path, cfg); err != nil {
+		t.Fatal(err)
+	}
+	updater := &fakeUpdater{release: ports.ReleaseInfo{Version: "9.9.9", Channel: config.ChannelStable}}
+	previous := buildRuntime
+	buildRuntime = func(cfg config.BrainConfig) (*bootstrap.Runtime, error) {
+		return &bootstrap.Runtime{App: app.New(cfg, app.Dependencies{Updater: updater})}, nil
+	}
+	t.Cleanup(func() { buildRuntime = previous })
+
+	code, stdout, stderr := runForTest(t, "update", "--check", "--config", path)
+	if code != 0 {
+		t.Fatalf("update --check exit code = %d (stderr: %s)", code, stderr)
+	}
+	if !strings.Contains(stdout, "latest: 9.9.9") || !strings.Contains(stdout, "applied: false") {
+		t.Fatalf("update stdout = %q", stdout)
+	}
+	if updater.checked != config.ChannelStable {
+		t.Fatalf("checked channel = %q", updater.checked)
+	}
+
+	code, _, stderr = runForTest(t, "update", "extra", "--config", path)
+	if code != 2 || !strings.Contains(stderr, "unexpected arguments") {
+		t.Fatalf("positional update exit code = %d, stderr = %q", code, stderr)
+	}
+	code, _, stderr = runForTest(t, "update", "--rollback", "--channel", "beta", "--config", path)
+	if code != 2 || !strings.Contains(stderr, "--channel cannot be combined") {
+		t.Fatalf("channel+rollback exit code = %d, stderr = %q", code, stderr)
+	}
+}
+
+type cliDeleteFailStore struct {
+	*cliSecretStore
+	failKey string
+}
+
+func (s *cliDeleteFailStore) Delete(ctx context.Context, key string) error {
+	if key == s.failKey {
+		return errors.New("keychain locked")
+	}
+	return s.cliSecretStore.Delete(ctx, key)
+}
+
+func newStaticTokenServer(t *testing.T) *httptest.Server {
+	t.Helper()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.Method == http.MethodGet && r.URL.Path == "/v1/auth/me" {
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"user":       map[string]any{"id": "user_1", "login": "alice", "role": "member"},
+				"authSource": "api_token",
+			})
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	t.Cleanup(server.Close)
+	return server
+}
+
+func TestLogoutStaticTokenCleanupFailureIsReported(t *testing.T) {
+	t.Setenv("BRAIN_TOKEN", "")
+	t.Setenv("BRAIN_SECRET_SERVER_TOKEN", "")
+	cfgPath := writeServerConfig(t, newStaticTokenServer(t).URL)
+	store := &cliDeleteFailStore{cliSecretStore: newCLISecretStore(), failKey: httpclient.SecretAccessToken}
+	store.values[httpclient.SecretAccessToken] = "static-api-token"
+	useSecretStore(t, store)
+
+	code, _, stderr := runForTest(t, "logout", "--config", cfgPath)
+	if code != 1 {
+		t.Fatalf("logout exit code = %d, want 1", code)
+	}
+	if !strings.Contains(stderr, "not fully cleared") {
+		t.Fatalf("logout stderr = %q, want a cleanup failure", stderr)
+	}
+	if strings.Contains(stderr, "local tokens were cleared") {
+		t.Fatalf("logout claimed the failed cleanup succeeded: %q", stderr)
+	}
+}
+
+func TestLogoutWrongServerLeavesTokens(t *testing.T) {
+	t.Setenv("BRAIN_TOKEN", "")
+	t.Setenv("BRAIN_SECRET_SERVER_TOKEN", "")
+	cfgPath := writeServerConfig(t, "https://server-b.example.test")
+	store := newCLISecretStore()
+	storeSession(t, store, "https://server-a.example.test", testAccessToken, testRefreshToken)
+	useSecretStore(t, store)
+
+	code, _, stderr := runForTest(t, "logout", "--config", cfgPath)
+	if code != 1 {
+		t.Fatalf("logout exit code = %d, want 1", code)
+	}
+	if !strings.Contains(stderr, "different server") || !strings.Contains(stderr, "server-a.example.test") {
+		t.Fatalf("logout stderr = %q", stderr)
+	}
+	if _, ok := lookupSession(t, store); !ok {
+		t.Fatal("logout cleared server A's session bundle")
+	}
+}
+
+func TestLoginInvalidPasswordMessage(t *testing.T) {
+	t.Setenv("BRAIN_TOKEN", "")
+	t.Setenv("BRAIN_SECRET_SERVER_TOKEN", "")
+	t.Setenv("BRAIN_LOGIN", "")
+	t.Setenv("BRAIN_PASSWORD", "")
+	cfgPath := writeServerConfig(t, newAuthServer(t, "alice", "s3cret").URL)
+	useSecretStore(t, newCLISecretStore())
+
+	code, _, stderr := runForTest(t, "login", "--config", cfgPath, "--login", "alice", "--password", "wrong")
+	if code != 1 {
+		t.Fatalf("login exit code = %d, want 1", code)
+	}
+	if !strings.Contains(stderr, "invalid login or password") {
+		t.Fatalf("login stderr = %q", stderr)
+	}
+	if strings.Contains(stderr, "authentication required") {
+		t.Fatalf("login reported a generic auth error: %q", stderr)
+	}
+}
+
+func TestConfigPathFromArgs(t *testing.T) {
+	t.Setenv("BRAIN_CONFIG", "")
+	tests := []struct {
+		args []string
+		want string
+	}{
+		{[]string{"note", "--config", "a.yaml"}, "a.yaml"},
+		{[]string{"note", "--config=b.yaml"}, "b.yaml"},
+		{[]string{"note", "-config", "c.yaml"}, "c.yaml"},
+		{[]string{"note", "-config=d.yaml"}, "d.yaml"},
+		{[]string{"note"}, config.FileName},
+	}
+	for _, test := range tests {
+		if got := configPathFromArgs(test.args); got != test.want {
+			t.Fatalf("configPathFromArgs(%v) = %q, want %q", test.args, got, test.want)
+		}
 	}
 }

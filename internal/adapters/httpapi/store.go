@@ -222,7 +222,12 @@ func (b authBridge) AuthenticateAPIToken(ctx context.Context, rawToken string) (
 	}
 	user, err := b.store.GetUser(ctx, record.UserID)
 	if err != nil {
-		return domain.User{}, auth.ErrInvalidToken
+		if errors.Is(err, domain.ErrNotFound) {
+			return domain.User{}, auth.ErrInvalidToken
+		}
+		// Database failures must surface as infrastructure errors, not as a
+		// rejected credential.
+		return domain.User{}, err
 	}
 	principal := user.User
 	// A token can narrow but never raise its owner's current privilege.

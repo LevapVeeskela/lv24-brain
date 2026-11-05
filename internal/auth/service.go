@@ -166,6 +166,13 @@ func (s *Service) Login(ctx context.Context, credentials ports.Credentials) (por
 }
 
 // Refresh rotates a refresh token and returns a fresh session.
+//
+// Credential failures (unknown, expired, reused, or malformed tokens) map to
+// ErrInvalidRefresh. Infrastructure failures (database or user-directory
+// errors) propagate so the HTTP layer can answer 500 instead of blaming the
+// caller's credentials. When reuse is detected, a failed family revocation is
+// returned as an infrastructure error with the reuse signal preserved in the
+// message.
 func (s *Service) Refresh(ctx context.Context, refreshToken string) (ports.Session, error) {
 	raw := strings.TrimSpace(refreshToken)
 	if raw == "" {
@@ -174,16 +181,36 @@ func (s *Service) Refresh(ctx context.Context, refreshToken string) (ports.Sessi
 	now := s.now().UTC()
 	record, err := s.sessions.ConsumeRefresh(ctx, HashToken(raw), now)
 	if err != nil {
-		if errors.Is(err, ErrRefreshReused) && record.FamilyID != "" {
-			_ = s.sessions.RevokeFamily(ctx, record.FamilyID, now)
+		if errors.Is(err, ErrRefreshReused) {
+			if record.FamilyID != "" {
+				if revokeErr := s.sessions.RevokeFamily(ctx, record.FamilyID, now); revokeErr != nil {
+					return ports.Session{}, fmt.Errorf("revoke family after refresh token reuse: %w", revokeErr)
+				}
+			}
+			return ports.Session{}, ErrInvalidRefresh
 		}
-		return ports.Session{}, ErrInvalidRefresh
+		if isInvalidRefreshError(err) {
+			return ports.Session{}, ErrInvalidRefresh
+		}
+		return ports.Session{}, fmt.Errorf("consume refresh token: %w", err)
 	}
 	user, err := s.users.FindUser(ctx, record.UserID)
 	if err != nil {
-		return ports.Session{}, ErrInvalidRefresh
+		if isInvalidRefreshError(err) {
+			return ports.Session{}, ErrInvalidRefresh
+		}
+		return ports.Session{}, fmt.Errorf("load refresh user: %w", err)
 	}
 	return s.issueSession(ctx, user, record.FamilyID)
+}
+
+// isInvalidRefreshError reports whether err is an explicit credential sentinel
+// from the session store. Domain errors (validation, not found) are not
+// credential failures: they can come from the database and must propagate as
+// infrastructure errors so the HTTP layer answers 500.
+func isInvalidRefreshError(err error) bool {
+	return errors.Is(err, ErrInvalidRefresh) ||
+		errors.Is(err, ErrRefreshReused)
 }
 
 // Logout revokes one refresh session.
@@ -236,14 +263,19 @@ func (s *Service) AuthenticateJWT(_ context.Context, accessToken string) (Princi
 	}, nil
 }
 
-// AuthenticateAPIToken validates a scoped API token.
+// AuthenticateAPIToken validates a scoped API token. An unknown token is a
+// credential failure; infrastructure failures propagate so the HTTP layer can
+// answer 500 instead of blaming the caller's credentials.
 func (s *Service) AuthenticateAPIToken(ctx context.Context, rawToken string) (domain.User, error) {
 	if s.apiTokens == nil || strings.TrimSpace(rawToken) == "" {
 		return domain.User{}, ErrInvalidToken
 	}
 	user, err := s.apiTokens.AuthenticateAPIToken(ctx, strings.TrimSpace(rawToken))
 	if err != nil {
-		return domain.User{}, ErrInvalidToken
+		if errors.Is(err, domain.ErrNotFound) {
+			return domain.User{}, ErrInvalidToken
+		}
+		return domain.User{}, fmt.Errorf("authenticate api token: %w", err)
 	}
 	return user, nil
 }

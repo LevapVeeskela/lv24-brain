@@ -22,22 +22,31 @@ semantic-version ordering, not upload time.
 brain update --check
 brain update --yes
 brain update --yes --channel beta
+brain update --rollback
 ```
 
 `brain update --check` only reports. `brain update --yes` downloads, verifies,
 and applies when a newer release exists. A plain `brain update` without
 `--check` or `--yes` behaves like a check and does not change the binary.
+`brain update --rollback` restores the previous binary; it cannot be combined
+with `--check` or `--yes`.
 
 The updater package honors any truthy `BRAIN_NO_UPDATE` value (`1`, `true`,
-`yes`, `on`) for background checks:
+`yes`, `on`) for the daily background check:
 
 ```powershell
 $env:BRAIN_NO_UPDATE = '1'
 ```
 
-No background scheduler ships yet. The CLI wires the updater's
-`IgnoreDisabled` option, so explicit `brain update` runs always proceed. The
-updater never mutates the brain data repository.
+The CLI runs the daily background check before ordinary commands (not `serve`,
+`init`, `help`, `version`, or an explicit `update`). It is notify-only: at
+most one release lookup per 24 hours, a 3-second timeout, a single-flight lock
+file, and no download or apply. A failed lookup records only its attempt time
+and backs off for 30 minutes before retrying. A newer release prints one line
+to stderr and never changes the exit code. State lives in `last-check.json`
+inside the update directory; explicit `brain update` runs ignore
+`BRAIN_NO_UPDATE` and always proceed. The updater never mutates the brain data
+repository.
 
 ## Download locations
 
@@ -103,8 +112,8 @@ future cosign/Sigstore verification step; v1 verifies SHA-256 only.
   exits. The update takes effect on the next start.
 - Rollback restores `brain(.exe).previous` and keeps that copy for retries.
 
-Until the CLI exposes `brain update --rollback`, restore manually after
-stopping the process:
+`brain update --rollback` performs the restore. If the CLI itself cannot start
+after a bad update, restore manually while the process is stopped:
 
 ```powershell
 Stop-Process -Name brain -ErrorAction SilentlyContinue
@@ -153,6 +162,6 @@ tar.gz archives, apply, rollback, `BRAIN_NO_UPDATE`, and version ordering.
 
 The updater package and the `brain update` command are wired, and release
 artifacts are produced by CI. `--check` reports; `--yes` verifies and applies a
-newer release. There is no background scheduler and no `--rollback` flag yet;
-manual `.previous` restoration remains the supported rollback path. Server
-auto-update is not implemented.
+newer release; `--rollback` restores the previous binary. The daily background
+check is notify-only and runs before ordinary CLI commands. Server auto-update
+is not implemented.

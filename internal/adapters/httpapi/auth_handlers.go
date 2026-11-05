@@ -74,10 +74,23 @@ func (a *API) refresh(w http.ResponseWriter, r *http.Request) {
 	}
 	session, err := a.auth.Refresh(r.Context(), body.RefreshToken)
 	if err != nil {
-		writeErrorCode(w, http.StatusUnauthorized, "invalid_refresh", "refresh token is invalid")
+		// Only credential failures are the caller's fault. Infrastructure
+		// failures must not be reported as a bad refresh token.
+		if isRefreshCredentialError(err) {
+			writeErrorCode(w, http.StatusUnauthorized, "invalid_refresh", "refresh token is invalid")
+			return
+		}
+		a.writeError(w, r, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, newSessionResponse(session))
+}
+
+// isRefreshCredentialError reports whether a refresh failure is a bad
+// credential rather than an unavailable backend.
+func isRefreshCredentialError(err error) bool {
+	return errors.Is(err, auth.ErrInvalidRefresh) ||
+		errors.Is(err, auth.ErrRefreshReused)
 }
 
 func (a *API) logout(w http.ResponseWriter, r *http.Request) {

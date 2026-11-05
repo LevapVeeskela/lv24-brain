@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -674,4 +675,185 @@ func frameRevision(frame string) int64 {
 		return value
 	}
 	return 0
+}
+
+type failingAPITokenAuthenticator struct {
+	err error
+}
+
+func (f failingAPITokenAuthenticator) AuthenticateAPIToken(context.Context, string) (domain.User, error) {
+	return domain.User{}, f.err
+}
+
+func TestAuthInfrastructureFailureReturnsInternalServerError(t *testing.T) {
+	ts, api, store := newTestServer(t, nil)
+	signer, err := auth.NewSigner(auth.SignerConfig{
+		Secret:   []byte(strings.Repeat("k", 32)),
+		Issuer:   "test-issuer",
+		Audience: "test-audience",
+		TTL:      5 * time.Minute,
+	})
+	if err != nil {
+		t.Fatalf("NewSigner: %v", err)
+	}
+	service, err := auth.NewService(auth.ServiceConfig{
+		Signer:         signer,
+		Users:          authBridge{store: store},
+		Sessions:       store,
+		APITokens:      failingAPITokenAuthenticator{err: errors.New("database unavailable")},
+		RefreshTTL:     time.Hour,
+		PasswordParams: fastArgon,
+	})
+	if err != nil {
+		t.Fatalf("NewService: %v", err)
+	}
+	api.auth = service
+
+	resp, payload := jsonRequest(t, http.MethodGet, ts.URL+"/v1/projects", nil, "brain_infra_token")
+	requireStatus(t, resp, payload, http.StatusInternalServerError)
+	if strings.Contains(string(payload), "brain_infra_token") {
+		t.Fatalf("error response leaked the token: %s", payload)
+	}
+}
+
+// failingUserStore lets a test fail one lookup while embedding the rest of the
+// Store interface.
+type failingUserStore struct {
+	Store
+	findErr error
+	userErr error
+}
+
+func (f failingUserStore) FindAPITokenByHash(context.Context, string, time.Time) (APITokenRecord, error) {
+	if f.findErr != nil {
+		return APITokenRecord{}, f.findErr
+	}
+	return APITokenRecord{ID: "token_1", UserID: "user_1", Role: domain.RoleMember}, nil
+}
+
+func (f failingUserStore) GetUser(context.Context, string) (UserRecord, error) {
+	return UserRecord{}, f.userErr
+}
+
+func TestAuthBridgePropagatesInfrastructureErrors(t *testing.T) {
+	infra := errors.New("database unavailable")
+	for name, store := range map[string]failingUserStore{
+		"token lookup": {findErr: infra},
+		"user lookup":  {userErr: infra},
+	} {
+		t.Run(name, func(t *testing.T) {
+			bridge := authBridge{store: store}
+			_, err := bridge.AuthenticateAPIToken(context.Background(), "brain_token")
+			if err == nil || errors.Is(err, auth.ErrInvalidToken) {
+				t.Fatalf("error = %v, want the infrastructure error", err)
+			}
+			if !errors.Is(err, infra) {
+				t.Fatalf("error = %v, want the wrapped infrastructure error", err)
+			}
+		})
+	}
+}
+
+func TestAuthBridgeUnknownTokenIsInvalid(t *testing.T) {
+	bridge := authBridge{store: failingUserStore{findErr: domain.ErrNotFound}}
+	if _, err := bridge.AuthenticateAPIToken(context.Background(), "brain_token"); !errors.Is(err, auth.ErrInvalidToken) {
+		t.Fatalf("error = %v, want ErrInvalidToken", err)
+	}
+}
+
+type failingSessionStore struct {
+	*MemoryStore
+	consumeErr error
+	revokeErr  error
+}
+
+func (s *failingSessionStore) ConsumeRefresh(ctx context.Context, tokenHash string, now time.Time) (auth.RefreshRecord, error) {
+	if s.consumeErr != nil {
+		return auth.RefreshRecord{}, s.consumeErr
+	}
+	return s.MemoryStore.ConsumeRefresh(ctx, tokenHash, now)
+}
+
+func (s *failingSessionStore) RevokeFamily(ctx context.Context, familyID string, now time.Time) error {
+	if s.revokeErr != nil {
+		return s.revokeErr
+	}
+	return s.MemoryStore.RevokeFamily(ctx, familyID, now)
+}
+
+func newServerWithStore(t *testing.T, store Store, logger *slog.Logger) *httptest.Server {
+	t.Helper()
+	cfg := testConfig()
+	if logger != nil {
+		cfg.Logger = logger
+	}
+	api, err := New(cfg, store)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	ts := httptest.NewServer(api.Handler())
+	t.Cleanup(func() {
+		ts.Close()
+		api.Close()
+	})
+	return ts
+}
+
+func seedAdmin(t *testing.T, store Store) {
+	t.Helper()
+	hash, err := auth.HashPassword(adminPassword, fastArgon)
+	if err != nil {
+		t.Fatalf("hash admin password: %v", err)
+	}
+	if _, _, err := store.CreateUser(context.Background(), domain.User{
+		Login:       adminLogin,
+		DisplayName: "Administrator",
+		Role:        domain.RoleAdmin,
+		AuthSource:  "local",
+	}, hash); err != nil {
+		t.Fatalf("create admin: %v", err)
+	}
+}
+
+func TestRefreshInfrastructureErrorIsInternal(t *testing.T) {
+	store := &failingSessionStore{MemoryStore: NewMemoryStore(), consumeErr: errors.New("db down")}
+	ts := newServerWithStore(t, store, nil)
+
+	resp, payload := jsonRequest(t, http.MethodPost, ts.URL+"/v1/auth/refresh", map[string]string{
+		"refreshToken": "whatever",
+	}, "")
+	requireStatus(t, resp, payload, http.StatusInternalServerError)
+	if strings.Contains(string(payload), "db down") {
+		t.Fatalf("infrastructure detail leaked to the client: %s", payload)
+	}
+}
+
+func TestRefreshReuseRevocationFailureIsInternalAndLogged(t *testing.T) {
+	var logs bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&logs, nil))
+	store := &failingSessionStore{MemoryStore: NewMemoryStore(), revokeErr: errors.New("db down")}
+	seedAdmin(t, store)
+	ts := newServerWithStore(t, store, logger)
+
+	first := loginAs(t, ts.URL, adminLogin, adminPassword)
+	resp, payload := jsonRequest(t, http.MethodPost, ts.URL+"/v1/auth/refresh", map[string]string{
+		"refreshToken": first.RefreshToken,
+	}, "")
+	requireStatus(t, resp, payload, http.StatusOK)
+
+	// Reusing the rotated token triggers family revocation, which fails.
+	resp, payload = jsonRequest(t, http.MethodPost, ts.URL+"/v1/auth/refresh", map[string]string{
+		"refreshToken": first.RefreshToken,
+	}, "")
+	requireStatus(t, resp, payload, http.StatusInternalServerError)
+	if strings.Contains(string(payload), "db down") {
+		t.Fatalf("infrastructure detail leaked to the client: %s", payload)
+	}
+	logged := logs.String()
+	if !strings.Contains(logged, "request_id") {
+		t.Fatalf("log has no request id: %s", logged)
+	}
+	if !strings.Contains(logged, "reuse") {
+		t.Fatalf("log does not preserve the reuse signal: %s", logged)
+	}
 }

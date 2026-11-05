@@ -41,23 +41,30 @@ type MemoryStore struct {
 	handoffs  map[string]HandoffRecord
 
 	refresh map[string]auth.RefreshRecord
+	// revokedSessions and revokedFamilies mirror the durable PostgreSQL
+	// auth_revocations tombstones so a logout racing an in-flight refresh
+	// cannot leave a usable token behind in the no-database dev server.
+	revokedSessions map[string]struct{}
+	revokedFamilies map[string]struct{}
 }
 
 // NewMemoryStore returns an empty in-memory store.
 func NewMemoryStore() *MemoryStore {
 	return &MemoryStore{
-		now:        time.Now,
-		users:      make(map[string]UserRecord),
-		userLogins: make(map[string]string),
-		userOIDC:   make(map[string]string),
-		apiTokens:  make(map[string]APITokenRecord),
-		projects:   make(map[string]ProjectRecord),
-		states:     make(map[string]StateRecord),
-		notes:      make(map[string]NoteRecord),
-		decisions:  make(map[string]DecisionRecord),
-		attempts:   make(map[string]AttemptRecord),
-		handoffs:   make(map[string]HandoffRecord),
-		refresh:    make(map[string]auth.RefreshRecord),
+		now:             time.Now,
+		users:           make(map[string]UserRecord),
+		userLogins:      make(map[string]string),
+		userOIDC:        make(map[string]string),
+		apiTokens:       make(map[string]APITokenRecord),
+		projects:        make(map[string]ProjectRecord),
+		states:          make(map[string]StateRecord),
+		notes:           make(map[string]NoteRecord),
+		decisions:       make(map[string]DecisionRecord),
+		attempts:        make(map[string]AttemptRecord),
+		handoffs:        make(map[string]HandoffRecord),
+		refresh:         make(map[string]auth.RefreshRecord),
+		revokedSessions: make(map[string]struct{}),
+		revokedFamilies: make(map[string]struct{}),
 	}
 }
 
@@ -285,6 +292,17 @@ func (m *MemoryStore) DeleteUser(ctx context.Context, id string, expected int64)
 	delete(m.userLogins, strings.ToLower(current.Login))
 	if current.OIDCIssuer != "" || current.OIDCSubject != "" {
 		delete(m.userOIDC, current.OIDCIssuer+"\x00"+current.OIDCSubject)
+	}
+	// A deleted user cannot refresh, so drop its tokens and the tombstones
+	// attributable through them. Tombstones for scopes that never stored a row
+	// cannot be attributed and are kept; their ids are random and never reused.
+	for hash, record := range m.refresh {
+		if record.UserID != id {
+			continue
+		}
+		delete(m.refresh, hash)
+		delete(m.revokedSessions, record.SessionID)
+		delete(m.revokedFamilies, record.FamilyID)
 	}
 	return revision, nil
 }
@@ -1101,13 +1119,17 @@ func (m *MemoryStore) ListRevisions(_ context.Context, filter RevisionFilter) ([
 	return page(records, filter.Limit, filter.Offset), nil
 }
 
-// CreateRefresh stores a refresh token hash.
+// CreateRefresh stores a refresh token hash. A token for a tombstoned session
+// or family is rejected just like the PostgreSQL store rejects it.
 func (m *MemoryStore) CreateRefresh(_ context.Context, record auth.RefreshRecord) error {
 	if record.TokenHash == "" || record.SessionID == "" || record.UserID == "" {
 		return domain.NewValidationError("refresh", "session, user and hash are required")
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if m.refreshScopeRevokedLocked(record.FamilyID, record.SessionID) {
+		return auth.ErrInvalidRefresh
+	}
 	now := m.nowUTC()
 	for hash, existing := range m.refresh {
 		if existing.ExpiresAt.Before(now) {
@@ -1129,7 +1151,8 @@ func (m *MemoryStore) ConsumeRefresh(_ context.Context, tokenHash string, now ti
 	if !ok {
 		return auth.RefreshRecord{}, auth.ErrInvalidRefresh
 	}
-	if record.RevokedAt != nil || !record.ExpiresAt.After(now) {
+	if m.refreshScopeRevokedLocked(record.FamilyID, record.SessionID) ||
+		record.RevokedAt != nil || !record.ExpiresAt.After(now) {
 		return record, auth.ErrInvalidRefresh
 	}
 	if record.UsedAt != nil {
@@ -1141,10 +1164,16 @@ func (m *MemoryStore) ConsumeRefresh(_ context.Context, tokenHash string, now ti
 	return record, nil
 }
 
-// RevokeSession revokes every token issued for one session.
+// RevokeSession revokes every token issued for one session and records a
+// session tombstone.
 func (m *MemoryStore) RevokeSession(_ context.Context, sessionID string, now time.Time) error {
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" {
+		return nil
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	m.revokedSessions[sessionID] = struct{}{}
 	at := now.UTC()
 	for hash, record := range m.refresh {
 		if record.SessionID == sessionID && record.RevokedAt == nil {
@@ -1155,10 +1184,16 @@ func (m *MemoryStore) RevokeSession(_ context.Context, sessionID string, now tim
 	return nil
 }
 
-// RevokeFamily revokes every rotated token of one login family.
+// RevokeFamily revokes every rotated token of one login family and records a
+// family tombstone.
 func (m *MemoryStore) RevokeFamily(_ context.Context, familyID string, now time.Time) error {
+	familyID = strings.TrimSpace(familyID)
+	if familyID == "" {
+		return nil
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	m.revokedFamilies[familyID] = struct{}{}
 	at := now.UTC()
 	for hash, record := range m.refresh {
 		if record.FamilyID == familyID && record.RevokedAt == nil {
@@ -1167,6 +1202,18 @@ func (m *MemoryStore) RevokeFamily(_ context.Context, familyID string, now time.
 		}
 	}
 	return nil
+}
+
+// refreshScopeRevokedLocked reports whether a session or family tombstone
+// exists. The caller must hold m.mu.
+func (m *MemoryStore) refreshScopeRevokedLocked(familyID, sessionID string) bool {
+	if _, ok := m.revokedFamilies[familyID]; ok {
+		return true
+	}
+	if _, ok := m.revokedSessions[sessionID]; ok {
+		return true
+	}
+	return false
 }
 
 func normalizeProject(project domain.Project) (domain.Project, error) {

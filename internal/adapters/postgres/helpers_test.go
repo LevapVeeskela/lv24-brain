@@ -46,6 +46,40 @@ func TestLoadMigrations(t *testing.T) {
 	if len(migrations[0].Checksum) != 64 {
 		t.Fatalf("checksum length = %d, want 64", len(migrations[0].Checksum))
 	}
+
+	var authSQL, revocationSQL string
+	for _, migration := range migrations {
+		switch migration.Version {
+		case 2:
+			authSQL = migration.SQL
+		case 3:
+			revocationSQL = migration.SQL
+		}
+	}
+	if authSQL == "" {
+		t.Fatal("migration 2 (auth tokens) is missing")
+	}
+	for _, table := range []string{"api_tokens", "refresh_tokens"} {
+		if !strings.Contains(authSQL, "CREATE TABLE IF NOT EXISTS "+table) {
+			t.Errorf("migration 2 SQL is missing table %s", table)
+		}
+	}
+	if !strings.Contains(authSQL, "api_tokens_hash_uidx") {
+		t.Error("migration 2 is missing the unique API-token hash index")
+	}
+
+	if revocationSQL == "" {
+		t.Fatal("migration 3 (auth revocations) is missing")
+	}
+	for _, fragment := range []string{
+		"CREATE TABLE IF NOT EXISTS auth_revocations",
+		"PRIMARY KEY (scope_kind, scope_id)",
+		"scope_kind IN ('family', 'session')",
+	} {
+		if !strings.Contains(revocationSQL, fragment) {
+			t.Errorf("migration 3 SQL is missing %q", fragment)
+		}
+	}
 }
 
 func TestParseMigrationName(t *testing.T) {
