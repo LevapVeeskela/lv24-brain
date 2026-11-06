@@ -53,14 +53,18 @@ archives:
       - brain
     formats:
       - binary
-    name_template: 'brain_{{ .Version }}_{{ .Os }}_{{ .Arch }}{{ .Ext }}'
+    # format binary appends the platform extension (.exe) itself; .Ext is a
+    # build-only template field.
+    name_template: 'brain_{{ .Version }}_{{ .Os }}_{{ .Arch }}'
 
   - id: brain-server
     ids:
       - brain-server
     formats:
       - binary
-    name_template: 'brain-server_{{ .Version }}_{{ .Os }}_{{ .Arch }}{{ .Ext }}'
+    # format binary appends the platform extension (.exe) itself; .Ext is a
+    # build-only template field.
+    name_template: 'brain-server_{{ .Version }}_{{ .Os }}_{{ .Arch }}'
 
 checksum:
   name_template: checksums.txt
