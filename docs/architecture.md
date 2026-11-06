@@ -47,7 +47,7 @@ installers/windows/        install.ps1 and install.bat
 installers/unix/           install.sh for macOS and Linux
 integrations/opencode/     handoff hook template
 deploy/                    Dockerfile, Compose, environment template, GoReleaser
-docs/                      product, quickstart, install, update, deploy, migration, security
+docs/                      product, quickstart, install, update, deploy, migration, security, runbook
 ```
 
 Module path: see `go.mod` (`github.com/<owner>/lv24-brain`). Go 1.27.
@@ -339,10 +339,16 @@ left untouched and the command exits non-zero.
 - `go test ./...`, `go vet ./...`, `gofmt -l .`.
 - Adapter tests use temporary directories; Postgres integration tests require a
   database DSN; server/client tests use `httptest`.
-- `.github/workflows/ci.yml` runs formatting, vet, tests, builds, JS syntax
-  check, and Compose config validation.
+- `.github/workflows/ci.yml` (GitHub-hosted `ubuntu-latest` only, actions
+  pinned by commit SHA, superseded runs cancelled, docs-only changes skipped)
+  runs three jobs: `test` (gofmt, vet, tests, builds, JS syntax check, Compose
+  config validation), `postgres` (integration tests against a
+  `postgres:16-alpine` service container, with a guard that fails if they
+  were skipped), and `race` (`go test -race`, pushes only).
 - `.github/workflows/release.yml` runs GoReleaser on `v*` tags, writes
-  `checksums.txt` and `release.json`, and publishes a GitHub release.
+  `checksums.txt` and `release.json`, signs the manifest into
+  `release.json.sig`, and creates a GitHub release; it never overwrites an
+  existing one.
 
 ## Known gaps
 

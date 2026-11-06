@@ -205,6 +205,8 @@ Update:
   brain update --check      Check for a newer release
   brain update --yes        Apply the newest release
   brain update --rollback   Restore the previous engine binary
+  brain update --channel stable|beta --check
+                            Check a specific release channel (default: brain.yaml)
 
 Run "brain <command> --help" for command flags.
 `)

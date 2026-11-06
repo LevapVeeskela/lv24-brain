@@ -189,11 +189,21 @@ script is a thin shell wrapper around the same release assets.
 - Daily background check; disable with `BRAIN_NO_UPDATE=1`.
 - Download to `%LOCALAPPDATA%\lv24-brain\updates` (or platform equivalent).
 - Verify SHA-256 and optional cosign/Sigstore signature.
+  Status: implemented as a required Ed25519 detached signature
+  (`release.json.sig`) over the manifest, checked against keys embedded in the
+  binary. cosign/Sigstore is not used. See `docs/update.md` (Signatures).
 - Windows: helper replaces binary after process exit; keep previous binary for
   rollback. Unix: atomic rename; same rollback.
 - `brain doctor` reports engine/data schema compatibility.
 - Server auto-update is opt-in (`BRAIN_SERVER_AUTO_UPDATE=1`); default is
   notify-only. Docker images pinned by digest; rollback to previous digest.
+  Status: server auto-update is planned; not implemented in v1.
+  `BRAIN_SERVER_AUTO_UPDATE` is a placeholder variable with no effect. Server
+  upgrades replace the image.
+  Status: `deploy/Dockerfile` and `deploy/docker-compose.yml` pin images by tag
+  (`golang:1.27-alpine`, `alpine:3.22`, `postgres:17-alpine`; the server image is
+  built locally as `lv24-brain-server:local`). Digest pinning is a
+  deployment-time recommendation; the repository does not enforce it.
 - Update never mutates the private data repo automatically.
 - Release manifest `release.json`: version, channel, assets, checksums,
   min engine/schema version, signature metadata.
@@ -203,6 +213,8 @@ script is a thin shell wrapper around the same release assets.
 - GitHub Releases + GoReleaser.
 - Windows/macOS/Linux, amd64/arm64.
 - `checksums.txt`, `release.json`, optional signature.
+  Status: `release.json.sig` is published with every release and is required
+  by the updater (see the status note under Auto-update).
 - Public CI: GitHub Actions only within free allowance; no paid runners or
   storage add-ons.
 
@@ -229,6 +241,7 @@ script is a thin shell wrapper around the same release assets.
 - Secret scan; no personal paths/data in public repo.
 - Docs: README quickstart for all three modes, architecture, security, update,
   migration, team runbook.
+  Status: the team runbook is `docs/runbook.md`.
 - Public repo CI green; private data repo only secret scan (no build).
 
 ## 11. Migration from current `.brain`

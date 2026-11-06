@@ -361,6 +361,31 @@ database schema (`postgres.SchemaVersion`, currently 5) is separate.
 `brain doctor` fails the `server` check when the URL is wrong or no usable token
 is stored.
 
+## Command flags
+
+Flags that the mode sections do not show. Every value below is a flag defined
+in `cmd/brain`; run `brain <command> --help` for the full list. Each command
+also accepts `--config <path>`.
+
+| Command | Flags and defaults |
+|---|---|
+| `brain open [path\|id]` | `--project <id\|alias>`; `--budget <runes>` (default 4000) caps the summary; `--brief` prints only the project and state fields (no git or graph sections) |
+| `brain bootstrap [path\|id]` | `--project <id\|alias>`; `--budget <runes>` (default 4000) |
+| `brain note [text]` | `--project`, `--title`, `--body`, `--tags a,b`. Positional text becomes the body and the title is its first line (at most 80 characters). Do not combine positional text with `--body`. |
+| `brain decision [title]` | `--project`, `--title`, `--status proposed\|accepted\|rejected\|superseded` (default `proposed`), `--context <text>`, `--alternatives <a,b>`, `--consequences <a,b>`, `--evidence <a,b>`. The last three are comma-separated lists. |
+| `brain attempt [title]` | `--project`, `--title`, `--hypothesis <text>` (what was expected), `--result <text>` (what happened), `--reason <text>` (why it failed) |
+| `brain handoff [summary]` | `--project`, `--summary`, `--next <text>` (next action), `--git-context <text>` (default: read from the project checkout), `--no-git` (record no git context) |
+| `brain journal` | `--project`, `--user`, `--event <name>` (for example `note`, `decision`, `attempt`, `handoff`, `commit`), `--since <duration>` (for example `24h`), `--limit <n>` (default 20). Local and git mode. |
+| `brain event commit` | `--project <id>`, `--repo <path>` (default `.`), `--quiet` (print nothing on success; used by the hook). Local and git mode. |
+| `brain search <query>` | `--project <id>`, `--limit <n>` (default 20) |
+| `brain sync` | `--status` (read-only divergence and conflict report), `--push` (push after committing) |
+| `brain index` | `--rebuild` (delete the local index and rebuild it from Markdown) |
+
+Positional text is joined with spaces. Flags may appear before or after it.
+
+Day-to-day use, sync, hooks, server operations, upgrades, and incident
+steps are in the [team runbook](runbook.md).
+
 ## Agent usage
 
 Agents call the engine directly; no wrapper script is needed.

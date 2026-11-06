@@ -5,18 +5,31 @@ on:
     branches:
       - main
       - develop
+    paths-ignore:
+      - "docs/**"
+      - "**/*.md"
+      - "LICENSE"
   pull_request:
+    paths-ignore:
+      - "docs/**"
+      - "**/*.md"
+      - "LICENSE"
 
 permissions:
   contents: read
 
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   test:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
           go-version-file: go.mod
           cache: true
@@ -54,13 +67,51 @@ jobs:
           docker compose --env-file .env -f docker-compose.yml config >/dev/null
           rm -f .env
 
+  postgres:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    if: github.event_name == 'push' || github.event_name == 'pull_request'
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_PASSWORD: ci-password
+          POSTGRES_DB: brain
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d brain"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      BRAIN_TEST_DATABASE_URL: postgres://postgres:ci-password@localhost:5432/brain?sslmode=disable
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: integration tests
+        run: go test -count=1 -p 1 ./internal/adapters/postgres ./internal/adapters/serverstore ./internal/server
+
+      - name: guard against skipped integration tests
+        shell: bash
+        run: |
+          set -o pipefail
+          go test -count=1 -run TestMigrateIsIdempotent -v ./internal/adapters/postgres | tee /tmp/guard.txt
+          grep -q -- "--- PASS: TestMigrateIsIdempotent" /tmp/guard.txt
+
   race:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 15
+    if: github.event_name == 'push'
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
           go-version-file: go.mod
           cache: true

@@ -196,8 +196,9 @@ Current limits, stated plainly:
 ## Supply chain and releases
 
 - Dependencies are pinned in `go.mod`; new dependencies need justification.
-- CI runs `gofmt`, `go vet`, `go test ./...`, both builds, a JavaScript syntax
-  check, and Compose config validation.
+- CI jobs: `gofmt`, `go vet`, `go test`, builds, a Node syntax check, Compose
+  config validation, `race` (push only), and Postgres integration tests (run
+  against a service container).
 - Release artifacts are built on GitHub-hosted free-tier runners and published
   as GitHub Releases with `checksums.txt`, `release.json`, and
   `release.json.sig`. Existing releases are never overwritten.

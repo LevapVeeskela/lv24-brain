@@ -1,0 +1,501 @@
+# Team runbook
+
+This runbook covers daily use, git-mode sync, hooks, server operations,
+upgrades, database migrations, legacy import and rollback, and incident
+checklists. It describes the behaviour of this repository. Flag-level
+reference is in [quickstart.md](quickstart.md#command-flags). Installation and
+deployment details are in [install.md](install.md), [deploy.md](deploy.md),
+and [update.md](update.md).
+
+Placeholders: `~/brain-data` is an example data directory (the private data
+repository in git mode), `<data-dir>` is the brain data directory of any
+instance, and `https://brain.example.test` is an example server URL. Replace
+them with your own values. Never commit the data directory or put secrets in
+examples.
+
+## 1. Daily use (agents and humans)
+
+### Set the default instance
+
+Once per machine, point the CLI at the data directory's `brain.yaml`:
+
+```sh
+brain config use ~/brain-data/brain.yaml
+brain config show
+brain config clear          # remove the pointer
+```
+
+The config is resolved in this order: `--config`, `$BRAIN_CONFIG`,
+`./brain.yaml`, then the pointer set by `brain config use`.
+
+### Open a project
+
+```sh
+cd <path-to-project-checkout>
+brain open .
+brain open --brief .
+brain bootstrap demo
+```
+
+`brain open` prints the bootstrap pack, a `## Git` section, and a `## Graphs`
+section. `--brief` prints only the project and state fields. The selector is an
+id, an alias, or a path. Without one, the project is resolved from the working
+directory: the longest registered path containing it, else the single
+registered project under it. Use `brain project list` to see the registry.
+Projects are created on first write; `brain project set` makes their metadata
+explicit.
+
+### Write records
+
+```sh
+brain note "Fixed the cache warmup"
+brain decision "Adopt the Go engine" --status accepted \
+  --context "Single binary for all platforms" \
+  --alternatives "keep the PowerShell wrapper,rewrite in Rust" \
+  --consequences "Legacy scripts are retired"
+brain attempt "Pin the old driver" --hypothesis "Old driver is compatible" \
+  --result "Startup fails" --reason "Driver removed the flag"
+brain handoff "Session summary" --next "Run the migration dry run"
+```
+
+- Positional text is the body for `note`, and the title for `decision` and
+  `attempt`. A `note` title is the first line of its text, at most 80
+  characters. Do not combine positional text with `--title` or `--body`.
+- `--alternatives`, `--consequences`, and `--evidence` are comma-separated
+  lists. Text with commas must go into `--context` or the body.
+- `brain handoff` records git context read from the project checkout. Use
+  `--no-git` to skip it or `--git-context` to supply it.
+- Records are Markdown files. In git mode they are shared with everyone who
+  can read the data repository. Do not write secrets, tokens, or personal data
+  into records.
+
+### Journal and search
+
+```sh
+brain journal --since 24h --limit 50
+brain journal --project demo --event decision
+brain search "cache warmup" --project demo --limit 10
+brain index                 # refresh the local index after Markdown changed outside the CLI
+```
+
+- `brain journal` shows the per-user activity file `journal/<user>.jsonl`,
+  newest first. It works in local and git mode.
+- `brain search` queries the local FTS5 index in local and git mode and calls
+  `GET /v1/search` in server mode.
+- Writes made through the CLI update the local index. Markdown changed by a
+  pull or by hand needs `brain index` (or `brain index --rebuild` to rebuild it
+  from Markdown).
+
+### Session routine for agents
+
+1. `brain open .` at the start, and `brain sync` first in git mode.
+2. Record decisions and failed attempts when they happen, not at the end.
+3. `brain handoff "<summary>" --next "<next action>"` at the end.
+4. In git mode, run `brain sync --push` after the handoff (see section 2).
+
+## 2. Git-mode sync routine
+
+The data repository is private and holds the shared brain. The sync commands
+are available in git mode only; server mode uses the API instead.
+
+```sh
+brain sync --status --config ~/brain-data/brain.yaml   # read-only: ahead, behind, changed, conflicts
+brain sync --config ~/brain-data/brain.yaml            # commit local changes, then pull (rebase)
+brain sync --config ~/brain-data/brain.yaml --push     # the same, then push
+brain index --config ~/brain-data/brain.yaml           # after pulled Markdown changed
+```
+
+What `brain sync` does, in order:
+
+1. Stops with an error and changes nothing if conflicts are already reported.
+2. Commits local changes when the working tree is dirty. The message is
+   `brain sync: <timestamp>`.
+3. Fetches and rebases onto the upstream branch.
+4. Pushes only with `--push`.
+
+It never force-pushes and never resolves conflicts automatically.
+`--status` never changes anything.
+
+### Conflicts
+
+`brain sync --status` lists conflicting paths as `conflict: <path>` lines.
+`brain sync` refuses to run while they exist, and reports
+`unresolved conflicts in <paths>`.
+
+To resolve:
+
+1. Inspect the repository: `git -C ~/brain-data status`.
+2. Edit the conflicting Markdown files by hand. Keep the content that is still
+   correct. When both sides hold different knowledge, keep both as separate
+   records (for example with `brain note`).
+3. Stage the files with `git add`. Then finish the rebase with
+   `git rebase --continue`, or with `git commit` if no rebase is in progress.
+4. Run `brain sync --status` until it reports no conflicts, then `brain sync --push`.
+
+Do not use `git reset --hard`, do not take one side of a whole directory with
+`--ours` or `--theirs`, and do not force-push. If a conflict cannot be resolved
+safely, stop and ask the maintainer. While a rebase is still in progress,
+`git rebase --abort` returns the branch to its state before the rebase.
+
+## 3. Hooks
+
+The git hook records each commit in the journal. It is installed per clone, in
+the repository's hooks directory (`.git/hooks` in a normal clone), and is not
+committed.
+
+```sh
+brain hooks install --repo <path-to-project-checkout> --config ~/brain-data/brain.yaml
+brain hooks status --repo <path-to-project-checkout>
+brain hooks uninstall --repo <path-to-project-checkout>
+```
+
+- `install` flags: `--repo <path>` (default `.`), `--force`, and
+  `--config <brain.yaml>`. The config path is recorded in the hook. Without
+  `--config`, it falls back to `$BRAIN_CONFIG`, and if that is unset the path
+  is omitted.
+- `status` and `uninstall` accept `--repo <path>`.
+- The hook runs `brain event commit --quiet --repo <top-level>`.
+- A post-commit hook that was not written by lv24-brain is not overwritten
+  unless `--force` is given. With `--force` it is moved to a numbered
+  `post-commit.lv24-brain-backup` file. Existing backups are never overwritten.
+- Hook activity is read with `brain journal --event commit`.
+
+## 4. Server-mode operations
+
+Server mode runs `brain-server` with PostgreSQL (`BRAIN_DATABASE_URL`). The
+in-memory store used when that variable is unset loses data and tokens on
+restart. It is for development only. Environment variables are listed in
+[deploy.md](deploy.md#environment).
+
+### Roles
+
+| Role | Can do |
+|---|---|
+| `viewer` | read projects, state, notes, decisions, attempts, handoffs, search, revisions, own tokens, connector run records |
+| `member` | everything a viewer can, plus create and update projects and project state, create notes, decisions, attempts and handoffs, and update or delete records they own |
+| `admin` | everything a member can, plus manage users, delete projects, read the audit log, run connectors, and revoke other users' tokens |
+
+Ownership rules:
+
+- A member may update or delete only the notes, decisions, and attempts they
+  created, and delete only the handoffs they created. The owner is the creating
+  user id, shown as `createdBy`.
+- Projects and project state are shared and member-writable.
+- Records with an unknown owner (created before ownership tracking) are
+  admin-only.
+- Connector runs are created by admins only (`POST /v1/connectors/run`).
+
+Users are managed through the API, not the CLI, and only admins may call these
+endpoints: `GET /v1/users`, `POST /v1/users`, `GET /v1/users/{id}`,
+`PATCH /v1/users/{id}` (display name, role, auth source, with a `revision`),
+and `DELETE /v1/users/{id}?revision=<n>`. Request fields are in
+`GET /openapi.json`.
+
+The first administrator can be created at startup with
+`BRAIN_BOOTSTRAP_ADMIN_LOGIN` and `BRAIN_BOOTSTRAP_ADMIN_PASSWORD`. Set both or
+neither; the password must pass the server's password policy. The account is
+created once. On later starts an existing login is ignored, so the password
+variable is not needed after the first successful start. Remove it from the
+environment after that start.
+
+### Login and logout (clients)
+
+```sh
+brain init --mode server --server-url https://brain.example.test --config ~/brain-server.yaml
+printf '%s\n' '<password>' | brain login --config ~/brain-server.yaml \
+  --login <login> --password-stdin
+brain status --config ~/brain-server.yaml
+brain logout --config ~/brain-server.yaml
+```
+
+- `--password-stdin` reads one line from stdin. `BRAIN_PASSWORD` can be used
+  instead of the flag, and `BRAIN_LOGIN` supplies the login when `--login` is
+  omitted.
+- `brain login` stores one credential bundle in the OS secret store, bound to
+  the normalized server URL. It is never sent to another server.
+- `brain login` warns when the URL is plain `http` and the host is not
+  loopback. Use HTTPS for any shared server.
+- `brain logout` revokes the session and its refresh-token family, then clears
+  the stored bundle. An access token already issued stays valid until it
+  expires (`BRAIN_ACCESS_TTL`, 15 minutes by default).
+
+### Static tokens and BRAIN_TOKEN
+
+- `BRAIN_TOKEN` (or `BRAIN_SECRET_SERVER_TOKEN`) is a static API token from the
+  environment. It is intended for automation, not for a personal machine.
+- While it is set, it takes precedence over stored credentials. `brain login`
+  is refused, and `brain logout` leaves a stored session untouched and exits
+  non-zero.
+- A static token can be stored with `brain secret set server-token` (the value
+  is read from stdin) and removed with `brain secret remove server-token`.
+- A static API token has no refresh token and cannot be revoked by
+  `brain logout`. Revoke it on the server (see the incident checklist in
+  section 8).
+
+### API tokens
+
+API tokens (prefix `brain_`) are created and revoked through the API:
+
+- `POST /v1/tokens` with `name`, `role`, and `userId` (admins may mint for
+  other users). The token role cannot exceed the role of the owner or of the
+  caller. The plaintext is returned once; only a hash is stored.
+- `GET /v1/tokens` lists the caller's tokens. Admins may pass `userId`, or
+  `all=true` to list every token.
+- `DELETE /v1/tokens/{id}` revokes a token. Only the owner or an admin may do it.
+
+### Audit log
+
+Security events are kept in an audit log that only admins can read:
+
+```sh
+curl -sS -H "Authorization: Bearer $BRAIN_TOKEN" \
+  "https://brain.example.test/v1/audit?action=auth.refresh.reused&limit=100"
+```
+
+`GET /v1/audit` (admin only) filters by `actor`, `action`, `entityKind`,
+`entityId`, `since` and `until` (RFC 3339), with `limit` (default 50, maximum
+500) and `offset`. The response is `{"items": [...]}`.
+
+Recorded actions:
+
+| Action | Meaning |
+|---|---|
+| `auth.login.succeeded`, `auth.login.failed`, `auth.login.rate_limited` | local password logins |
+| `auth.logout` | session logout |
+| `auth.refresh.reused` | a rotated refresh token was presented again |
+| `auth.oidc.login`, `auth.oidc.linked`, `auth.oidc.signup`, `auth.oidc.refused` | OIDC sign-in outcomes |
+| `auth.token.created`, `auth.token.revoked` | API token lifecycle |
+
+Audit records carry the actor, the entity, and the client address in the
+`client` detail field. They never contain passwords or tokens. Writes are
+best-effort: a failed audit write is logged and does not fail the request.
+Viewers and members never see these events.
+
+### Proxies and rate limits
+
+- Behind a reverse proxy, set `BRAIN_TRUSTED_PROXIES` to the proxy addresses,
+  as comma-separated IPs or CIDRs. Only from those peers is `X-Forwarded-For`
+  honoured, and it is walked from the right so spoofed left-hand entries are
+  ignored. Empty means the header is ignored. In that case every client shares
+  the proxy's address for rate limiting.
+- Under Compose the peer is the Docker network gateway, for example
+  `172.16.0.0/12` (see [deploy.md](deploy.md)).
+- `BRAIN_LOGIN_RATE_LIMIT` sets the attempts per minute allowed per client
+  address and, separately, per account.
+
+### OIDC
+
+OIDC uses a browser flow (`GET /v1/auth/oidc/login` and the callback). There is
+no CLI OIDC flow. Settings: `BRAIN_OIDC_ISSUER`, `BRAIN_OIDC_CLIENT_ID`,
+`BRAIN_OIDC_CLIENT_SECRET`, `BRAIN_OIDC_REDIRECT_URL`, `BRAIN_OIDC_SCOPES`,
+`BRAIN_OIDC_GROUPS_CLAIM`, `BRAIN_OIDC_GROUP_ROLES` (`group=role` pairs),
+`BRAIN_OIDC_DEFAULT_ROLE`, and `BRAIN_OIDC_ALLOW_SIGNUP`.
+
+Account linking rules, stated plainly:
+
+- A first OIDC login is linked to an existing local account only when the
+  provider asserts `email_verified` and the verified email equals the account
+  login.
+- Admin accounts are never linked implicitly.
+- An unverified email is never used as the login.
+- Every other collision is refused with `403` and audited as
+  `auth.oidc.refused`. Linking is audited as `auth.oidc.linked`.
+
+## 5. Upgrades
+
+### Client binary
+
+```sh
+brain update --check                    # report only
+brain update --check --channel beta     # check a named channel
+brain update --yes                      # verify and apply the newest release
+brain update --rollback                 # restore brain(.exe).previous
+```
+
+- `--channel` takes `stable` or `beta`; the default comes from `brain.yaml`.
+  It cannot be combined with `--rollback`. `--rollback` cannot be combined
+  with `--check` or `--yes`.
+- `--check` reports only. `--yes` downloads, verifies the signature and the
+  SHA-256 checksum, and replaces the `brain` executable. On Windows the
+  replacement happens after the process exits, so the new version takes effect
+  on the next start.
+- The updater never changes the data repository.
+- Before ordinary commands the CLI performs a notify-only daily check. Set
+  `BRAIN_NO_UPDATE=1` to disable it.
+
+### Signed manifests
+
+Each release publishes `release.json` and `release.json.sig`. The updater
+accepts a release only when the signature verifies against a key embedded in
+the binary (`trustedReleaseKeys` in `internal/update/signature.go`). An unsigned
+release, a release signed by another key, or a tampered manifest is skipped. A
+build with no embedded key refuses to update. The installers verify
+`checksums.txt` only. See [update.md](update.md#signatures).
+
+### Release signing setup (maintainer, once)
+
+```sh
+go run ./internal/tools/releasesign keygen -out <path-outside-the-repo>/release-signing.key
+```
+
+- `keygen` creates the file (it must not already exist) with the base64 private
+  seed, and prints the public key.
+- Add the public key to `trustedReleaseKeys` and commit it. A public key is not
+  a secret.
+- Store the seed as the `BRAIN_RELEASE_SIGNING_KEY` Actions secret, for example
+  `gh secret set BRAIN_RELEASE_SIGNING_KEY < <path-outside-the-repo>/release-signing.key`.
+  Then keep an offline backup and delete the file.
+- The release workflow fails when the secret is missing. The signing step
+  (`releasesign sign -in release.json -out release.json.sig`) reads the seed from
+  `BRAIN_RELEASE_SIGNING_KEY` and refuses to sign unless the matching public key
+  is embedded in the build. `--allow-unembedded` exists for testing only and must
+  not be used for a release.
+- Verify a manifest locally with
+  `go run ./internal/tools/releasesign verify -in release.json -sig release.json.sig`
+  (add `-pub <base64>` to check against a specific key).
+
+### Key rotation
+
+The updater accepts every key in `trustedReleaseKeys`, so rotation does not
+break installed binaries:
+
+1. Run `keygen` for the new key pair.
+2. Add the new public key next to the old one and release a binary. Sign that
+   release with the old key, which is still the active secret.
+3. Once users are on that release, replace the `BRAIN_RELEASE_SIGNING_KEY`
+   secret with the new seed.
+4. Sign later releases with the new key.
+5. In a later release, remove the old public key. Releases signed only by the
+   old key are then refused by binaries built from that release.
+
+## 6. Database migrations and the upgrade gate
+
+- Server schema version: **5** (`SchemaVersion` in
+  `internal/adapters/postgres/postgres.go`). Migrations are embedded from
+  `internal/adapters/postgres/migrations/`, from `0001_init.sql` to
+  `0005_knowledge_owner.sql`.
+- On startup the server applies embedded migrations to an empty database.
+- For an existing schema with pending migrations, the server refuses to start
+  unless `BRAIN_DATABASE_BACKUP_CONFIRMED=1` is set. The message names the
+  pending versions.
+- Migrations are forward-only. There are no down-migrations. Rollback means
+  restoring a backup and running the previous image.
+
+Gate procedure for an upgrade:
+
+1. Confirm that no migration or long-running job is in progress.
+2. Take a backup with `pg_dump -Fc` as described in
+   [deploy.md](deploy.md#backup). Store it outside the Docker volumes.
+   Check that it is readable with `pg_restore --list <dump-file>`.
+3. Start the new server with `BRAIN_DATABASE_BACKUP_CONFIRMED=1` set in its
+   environment.
+4. Check `GET /ready`, and run `brain doctor --config <path>` and check the
+   `server` line.
+5. Remove `BRAIN_DATABASE_BACKUP_CONFIRMED` from the environment. Leaving it set
+   would let a later migration run without the gate.
+
+Rollback after a failed upgrade: start the previous image (tag or digest) and
+restore the backup taken in step 2, following [deploy.md](deploy.md#restore).
+
+## 7. Legacy migration and rollback
+
+Use this only for a legacy `.brain` directory. For the overall plan see
+[migration.md](migration.md).
+
+```sh
+brain migrate --from <legacy-dir> --data-dir <data-dir> --dry-run
+brain migrate --from <legacy-dir> --data-dir <data-dir>
+brain migrate --rollback latest --data-dir <data-dir>
+brain migrate --rollback <manifest.json> --data-dir <data-dir> [--dry-run]
+```
+
+- `--from` is required for an import. `--data-dir` names the target, or
+  `--config` can name a `brain.yaml` that holds it. `--rollback` cannot be
+  combined with `--from`.
+- Always run `--dry-run` first. It reports created, unchanged, conflicting and
+  failed files without writing.
+- The import is idempotent. It never overwrites a target file whose content
+  differs. Conflicts and failures make the command exit non-zero.
+- A successful import writes `schema_version: 1` to the target configuration.
+- Each import writes a backup manifest under `<data-dir>/backups/`
+  (`migrate-*`). `--rollback latest` picks the newest one. A manifest is
+  accepted only for the target directory it was written for.
+- Mail, connectors, the journal, legacy registry metadata, and global
+  conventions are not imported.
+- Keep the legacy directory read-only until the new engine has passed the
+  parity checks.
+
+## 8. Incident checklists
+
+### Lost or leaked API token
+
+Applies to `brain_` API tokens, the static `server-token` secret, and
+`BRAIN_TOKEN` values. The server stores only hashes, so the listing never shows
+a token value.
+
+1. Find the token id with `GET /v1/tokens` (as the owner) or
+   `GET /v1/tokens?all=true` (as an admin).
+2. Revoke it: `DELETE /v1/tokens/{id}` (owner or admin).
+3. Confirm the revocation: `GET /v1/audit?action=auth.token.revoked` (admin).
+4. Check for unexpected mints during the exposure window:
+   `GET /v1/audit?action=auth.token.created&since=<RFC 3339 time>`.
+5. Issue a replacement with `POST /v1/tokens` and give it to the owner through
+   a channel that is not this repository or a chat log.
+6. On each client, run `brain secret remove server-token` and
+   `brain secret set server-token`. For automation, update the `BRAIN_TOKEN`
+   value in the secret store of the job.
+7. If the leaked value cannot be matched to a token id, revoke every token of
+   that owner from the list and reissue them.
+
+A leaked JWT access token stays valid until it expires (15 minutes by default),
+so run `brain logout` on the affected client to revoke its session family.
+
+### Refresh-token reuse alert
+
+The event `auth.refresh.reused` means a refresh token that had already been
+rotated was presented again. The server treats this as a leak and revokes the
+whole token family (`ErrRefreshReused`). The user must sign in again.
+
+1. Pull the events around the alert:
+   `GET /v1/audit?action=auth.refresh.reused&since=<RFC 3339 time>`, and the
+   `auth.login.*` and `auth.oidc.*` events in the same window.
+2. Compare the `client` detail with the usual addresses for the account. The
+   reuse event itself has no actor, so correlate by time and by the login events.
+3. Ask the account owner whether they signed in from that client. If not,
+   treat the account as compromised.
+4. Review what the account wrote during the window with `GET /v1/audit?actor=<user-id>`.
+5. The v1 API has no password-change and no revoke-all-sessions endpoint. For a
+   compromised account, remove it with `DELETE /v1/users/{id}?revision=<n>`
+   and create a new one with `POST /v1/users`, using a new password.
+
+### Suspected release signing-key leak
+
+Treat any exposure of `BRAIN_RELEASE_SIGNING_KEY`, its offline backup, or its
+file as a compromise.
+
+1. Stop signing. Remove or replace the `BRAIN_RELEASE_SIGNING_KEY` secret.
+2. Find releases published after the suspected exposure. Remove any that are
+   not authentic, with the GitHub UI or `gh release delete`. The release
+   workflow never overwrites an existing release, so this step is manual.
+3. Generate a new key pair (section 5). Build a release whose
+   `trustedReleaseKeys` contains only the new key, and sign it with the new seed.
+4. Limit of this procedure: installed binaries still trust the leaked key until
+   they are replaced. The updater cannot revoke a key remotely, so an attacker
+   with the seed can publish a manifest that those binaries accept. The new
+   binary reaches users only by a manual download and install. Publish the
+   checksums (`checksums.txt`) with it, and tell users to reinstall.
+5. Server images are built from source and are not affected by the updater.
+   Rebuild them with the new code if the leak touched the build pipeline.
+6. Record the incident and the cut-over date in the private data repository
+   with `brain decision` or `brain note`. Do not record the seed or any value
+   from it.
+
+### Data repository conflict
+
+Follow section 2, Conflicts. Summary:
+
+1. `brain sync --status` lists the conflicting paths.
+2. Resolve them by hand in the data repository, then finish the rebase or commit.
+3. `brain sync --status` must report no conflicts.
+4. `brain sync --push`, then `brain index` on each machine that pulled changes.
+5. Never force-push and never discard the other side's changes without reviewing them.

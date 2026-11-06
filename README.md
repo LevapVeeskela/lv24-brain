@@ -198,6 +198,7 @@ by `.github/workflows/release.yml` on `v*` tags. See
 - [Server deploy](docs/deploy.md)
 - [Migration from the legacy Company Brain](docs/migration.md)
 - [Architecture](docs/architecture.md)
+- [Team runbook](docs/runbook.md)
 - [Security and privacy](docs/security.md)
 - [Product design](docs/product-design.md)
 
