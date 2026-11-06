@@ -29,7 +29,6 @@ import (
 	"github.com/levapveeskela/lv24-brain/internal/app"
 	"github.com/levapveeskela/lv24-brain/internal/bootstrap"
 	"github.com/levapveeskela/lv24-brain/internal/config"
-	"github.com/levapveeskela/lv24-brain/internal/connectors"
 	"github.com/levapveeskela/lv24-brain/internal/domain"
 	"github.com/levapveeskela/lv24-brain/internal/gitinfo"
 	"github.com/levapveeskela/lv24-brain/internal/migrate"
@@ -117,6 +116,10 @@ func runWithInput(args []string, stdin io.Reader, stdout, stderr io.Writer) int 
 		return runHooks(rest, stdout, stderr)
 	case "config":
 		return runConfig(rest, stdout, stderr)
+	case "discover":
+		return runDiscover(rest, stdout, stderr)
+	case "graphs":
+		return runGraphs(rest, stdout, stderr)
 	case "connector":
 		return runConnector(rest, stdout, stderr)
 	case "migrate":
@@ -168,6 +171,8 @@ Commands:
   event      Record an external event, e.g. "event commit" from a git hook
   hooks      Install, remove or inspect the git post-commit journal hook
   config     Set or show the default brain.yaml (config use <path> | show | clear)
+  discover   Find git checkouts under --root and register new projects (--apply)
+  graphs     Refresh graphify/codegraph indexes of registered projects
   connector  Run a read-only GitHub, GitLab, or IMAP connector
   migrate    Import a legacy .brain data directory; --rollback reverts an import
   secret     Manage OS-backed secrets (set, list, remove)
@@ -1151,6 +1156,9 @@ func runConnectorRun(args []string, stdout, stderr io.Writer) int {
 	fs := newFlagSet("connector run", stderr)
 	name := fs.String("name", "", "github, gitlab, or imap")
 	project := fs.String("project", "", "configured repository/project filter (ignored for imap)")
+	account := fs.String("account", "", "imap account id from connectors/mail.json")
+	all := fs.Bool("all", false, "run github, gitlab and every connectors/mail.json account (local/git)")
+	days := fs.Int("days", 0, "only items updated in the last N days (alternative to --since)")
 	sinceRaw := fs.String("since", "", "only items updated at or after this RFC3339 time")
 	limit := fs.Int("limit", 0, "per-collection item limit (0 uses the connector default)")
 	cfgPath := configFlag(fs)
@@ -1162,8 +1170,12 @@ func runConnectorRun(args []string, stdout, stderr io.Writer) int {
 		return 2
 	}
 	connectorName := strings.ToLower(strings.TrimSpace(*name))
-	switch connectorName {
-	case "github", "gitlab", "imap":
+	switch {
+	case *all && connectorName != "":
+		fmt.Fprintln(stderr, "brain connector run: pass either --all or --name")
+		return 2
+	case *all:
+	case connectorName == "github", connectorName == "gitlab", connectorName == "imap":
 	default:
 		if connectorName == "" {
 			fmt.Fprintln(stderr, "brain connector run: --name is required")
@@ -1176,7 +1188,15 @@ func runConnectorRun(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "brain connector run: --limit must not be negative")
 		return 2
 	}
+	if *days < 0 || (*days > 0 && strings.TrimSpace(*sinceRaw) != "") {
+		fmt.Fprintln(stderr, "brain connector run: --days must be positive and cannot be combined with --since")
+		return 2
+	}
 	var since *time.Time
+	if *days > 0 {
+		cutoff := time.Now().UTC().AddDate(0, 0, -*days)
+		since = &cutoff
+	}
 	if raw := strings.TrimSpace(*sinceRaw); raw != "" {
 		parsed, err := time.Parse(time.RFC3339Nano, raw)
 		if err != nil {
@@ -1199,6 +1219,10 @@ func runConnectorRun(args []string, stdout, stderr io.Writer) int {
 	defer stop()
 
 	if cfg.Mode == config.ModeServer {
+		if *all || *account != "" {
+			fmt.Fprintln(stderr, "brain connector run: --all and --account need local or git mode (the server is configured by environment)")
+			return 2
+		}
 		run, err := bootstrap.RunServerConnector(ctx, cfg, opts, since)
 		printConnectorRun(stdout, run)
 		if err != nil {
@@ -1210,27 +1234,11 @@ func runConnectorRun(args []string, stdout, stderr io.Writer) int {
 		return 0
 	}
 
-	connector, err := bootstrap.BuildConnector(cfg, opts, bootstrap.Options{})
+	plans, err := planLocalConnectors(ctx, cfg, connectorName, strings.TrimSpace(*project), strings.TrimSpace(*account), *all, *limit)
 	if err != nil {
 		return reportError(stderr, "connector run", err)
 	}
-	useCase, err := bootstrap.OpenRunStore(cfg)
-	if err != nil {
-		return reportError(stderr, "connector run", err)
-	}
-	if useCase != nil {
-		connector = connectors.Recording{Inner: connector, Runs: useCase}
-	}
-	runOptions := ports.ConnectorOptions{Since: since, Limit: *limit}
-	if connectorName != "imap" && strings.TrimSpace(*project) != "" {
-		runOptions.Projects = []string{strings.TrimSpace(*project)}
-	}
-	run, err := connector.Run(ctx, runOptions)
-	printConnectorRun(stdout, run)
-	if err != nil {
-		return reportError(stderr, "connector run", err)
-	}
-	if run.Status != domain.ConnectorSuccess {
+	if !runLocalConnectors(ctx, cfg, plans, since, stdout, stderr) {
 		return 1
 	}
 	return 0
@@ -1259,12 +1267,23 @@ func printConnectorRun(w io.Writer, run domain.ConnectorRun) {
 func printConnectorUsage(w io.Writer) {
 	fmt.Fprint(w, `Usage:
   brain connector run --name github|gitlab|imap [flags]
+  brain connector run --all [--days N]
 
 Flags:
   --project <value>   GitHub owner/repository or GitLab project filter; ignored for imap
+  --account <id>      IMAP account from connectors/mail.json (password key imap/<id>/password)
+  --all               github + gitlab + every mail.json account, one after another
+  --days <n>          Only collect items updated in the last n days
   --since <RFC3339>   Only collect items updated at or after this time
   --limit <n>         Per-collection item limit (0 uses the connector default)
   --config <path>     Path to brain.yaml
+
+Targets (local/git) default to the brain data: GitHub repositories from
+registered projects' repo URLs, GitLab projects from repo URLs and the
+"gitlab"/"origin" remotes of their checkouts, and IMAP accounts from
+connectors/mail.json. Without a github/token secret the GitHub token is read
+from "gh auth token" when the GitHub CLI is signed in. The environment below
+overrides these defaults.
 
 Environment:
   GitHub: BRAIN_GITHUB_REPOS (comma-separated owner/repository),

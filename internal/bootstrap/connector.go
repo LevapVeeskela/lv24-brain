@@ -17,6 +17,10 @@ type ConnectorOptions struct {
 	Name    string
 	Project string
 	Limit   int
+	// Data-derived targets; see connectorbuild.Options.
+	Repos          []string
+	GitLabProjects []string
+	IMAP           *connectorbuild.IMAPAccount
 }
 
 // BuildConnector selects a read-only connector and points its Markdown sink at
@@ -39,11 +43,14 @@ func BuildConnector(cfg config.BrainConfig, opts ConnectorOptions, buildOpts Opt
 		projects = append(projects, project)
 	}
 	return connectorbuild.Build(connectorbuild.Options{
-		Name:      opts.Name,
-		Projects:  projects,
-		Limit:     opts.Limit,
-		Secrets:   selectSecrets(buildOpts),
-		Sink:      sink,
-		StatePath: filepath.Join(dataDir, "connectors", "mail-state.json"),
+		Name:           opts.Name,
+		Projects:       projects,
+		Limit:          opts.Limit,
+		Secrets:        withGHTokenFallback(selectSecrets(buildOpts)),
+		Sink:           sink,
+		StatePath:      filepath.Join(dataDir, "connectors", "mail-state.json"),
+		Repos:          opts.Repos,
+		GitLabProjects: opts.GitLabProjects,
+		IMAP:           opts.IMAP,
 	})
 }

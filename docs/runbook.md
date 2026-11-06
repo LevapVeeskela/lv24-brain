@@ -160,6 +160,40 @@ brain hooks uninstall --repo <path-to-project-checkout>
   `post-commit.lv24-brain-backup` file. Existing backups are never overwritten.
 - Hook activity is read with `brain journal --event commit`.
 
+## 3a. Connectors, code graphs, and project discovery
+
+Local and git modes take connector targets from the brain data, so a scheduled
+refresh needs no environment variables:
+
+```sh
+brain connector run --all --days 7          # github, gitlab, every mail account
+brain connector run --name imap --account <id> --days 2
+brain graphs --changed-only                 # graphify update / codegraph sync
+brain graphs --dry-run                      # show what would run
+brain discover --root <workspace>           # dry run: list new checkouts
+brain discover --root <workspace> --apply   # register the new ones
+```
+
+- GitHub repositories come from registered projects' `repo_url`; GitLab
+  projects from `repo_url` and the `gitlab`/`origin` remotes of registered
+  checkouts; mail accounts from `<data-dir>/connectors/mail.json` (account id,
+  host, port, username, folders; folder names may be stored in IMAP modified
+  UTF-7). `BRAIN_GITHUB_REPOS`, `BRAIN_GITLAB_PROJECTS` and `BRAIN_IMAP_*`
+  still override these defaults.
+- Secrets: `gitlab/token`, `imap/<account>/password` in the OS store
+  (`brain secret set <name>` reads stdin). Without `github/token`, the token
+  is read from `gh auth token` at run time when the GitHub CLI is signed in;
+  it is never stored.
+- Each run is bounded to five minutes and a failing account does not stop the
+  others; the command exits 1 if any run failed.
+- `brain graphs` runs `graphify` and `codegraph` only where their indexes
+  already exist (`--init` creates missing ones), skips missing tools, and logs
+  tool output to `<user cache dir>/lv24-brain/graphs.log`, outside the data
+  repository.
+- `brain discover` scans only the immediate children of `--root` (a `.git`
+  directory or file, or `main/.git`), never modifies existing projects, and
+  reports id conflicts instead of registering them.
+
 ## 4. Server-mode operations
 
 Server mode runs `brain-server` with PostgreSQL (`BRAIN_DATABASE_URL`). The
