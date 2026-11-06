@@ -29,7 +29,19 @@ func TestMain(m *testing.M) {
 	// CLI tests must never reach the release endpoint or write the user's
 	// update state. Tests that need the daily check can clear this variable.
 	_ = os.Setenv("BRAIN_NO_UPDATE", "1")
-	os.Exit(m.Run())
+	// Never resolve the developer's real default config (`brain config use`)
+	// or BRAIN_CONFIG: a flagless command in a test would write to live data.
+	isolated, err := os.MkdirTemp("", "brain-cli-test-home-")
+	if err != nil {
+		panic(err)
+	}
+	for _, name := range []string{"APPDATA", "XDG_CONFIG_HOME", "HOME"} {
+		_ = os.Setenv(name, isolated)
+	}
+	_ = os.Unsetenv("BRAIN_CONFIG")
+	code := m.Run()
+	_ = os.RemoveAll(isolated)
+	os.Exit(code)
 }
 
 func runForTest(t *testing.T, args ...string) (int, string, string) {
@@ -600,6 +612,16 @@ func TestLocalWorkflowCLI(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("open exit code = %d (stderr: %s)", code, stderr)
 	}
+	for _, want := range []string{"# demo — bootstrap", "Use SQLite", "## Git", "(not a repository)", "## Graphs", "(none)"} {
+		if !strings.Contains(stdout, want) {
+			t.Fatalf("open stdout missing %q:\n%s", want, stdout)
+		}
+	}
+
+	code, stdout, stderr = runForTest(t, "open", "--brief", "--config", cfgPath, "demo")
+	if code != 0 {
+		t.Fatalf("open --brief exit code = %d (stderr: %s)", code, stderr)
+	}
 	for _, want := range []string{"project: demo (demo)", "goal: not set", "state_updated: "} {
 		if !strings.Contains(stdout, want) {
 			t.Fatalf("open stdout missing %q:\n%s", want, stdout)
@@ -997,7 +1019,7 @@ legacy goal
 	if cfg.SchemaVersion != 1 || cfg.Mode != config.ModeLocal || cfg.DataDir != target {
 		t.Fatalf("migrated config = %+v", cfg)
 	}
-	code, stdout, stderr = runForTest(t, "open", "--project", "demo", "--config", filepath.Join(target, "brain.yaml"))
+	code, stdout, stderr = runForTest(t, "open", "--brief", "--project", "demo", "--config", filepath.Join(target, "brain.yaml"))
 	if code != 0 {
 		t.Fatalf("open after migrate exit code = %d (stderr: %s)", code, stderr)
 	}

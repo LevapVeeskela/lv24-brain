@@ -68,6 +68,11 @@ func (a *App) resolveProject(ctx context.Context, projectID string) (domain.Proj
 		case 1:
 			return projects[0], nil
 		default:
+			// Like the legacy tool, pick the project registered for the
+			// working directory before asking for --project.
+			if resolved, err := a.ResolveSelector(ctx, ""); err == nil {
+				return resolved.Project, nil
+			}
 			ids := make([]string, 0, len(projects))
 			for _, project := range projects {
 				ids = append(ids, project.ID)

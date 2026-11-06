@@ -31,6 +31,7 @@ import (
 	"github.com/levapveeskela/lv24-brain/internal/config"
 	"github.com/levapveeskela/lv24-brain/internal/connectors"
 	"github.com/levapveeskela/lv24-brain/internal/domain"
+	"github.com/levapveeskela/lv24-brain/internal/gitinfo"
 	"github.com/levapveeskela/lv24-brain/internal/migrate"
 	"github.com/levapveeskela/lv24-brain/internal/ports"
 	"github.com/levapveeskela/lv24-brain/internal/server"
@@ -112,6 +113,10 @@ func runWithInput(args []string, stdin io.Reader, stdout, stderr io.Writer) int 
 		return runJournal(rest, stdout, stderr)
 	case "event":
 		return runEvent(rest, stdout, stderr)
+	case "hooks":
+		return runHooks(rest, stdout, stderr)
+	case "config":
+		return runConfig(rest, stdout, stderr)
 	case "connector":
 		return runConnector(rest, stdout, stderr)
 	case "migrate":
@@ -161,6 +166,8 @@ Commands:
   search     Search notes, decisions, attempts and handoffs
   journal    Show the per-user activity journal (local/git)
   event      Record an external event, e.g. "event commit" from a git hook
+  hooks      Install, remove or inspect the git post-commit journal hook
+  config     Set or show the default brain.yaml (config use <path> | show | clear)
   connector  Run a read-only GitHub, GitLab, or IMAP connector
   migrate    Import a legacy .brain data directory; --rollback reverts an import
   secret     Manage OS-backed secrets (set, list, remove)
@@ -210,11 +217,7 @@ func newFlagSet(name string, stderr io.Writer) *flag.FlagSet {
 }
 
 func configFlag(fs *flag.FlagSet) *string {
-	defaultPath := os.Getenv("BRAIN_CONFIG")
-	if defaultPath == "" {
-		defaultPath = config.FileName
-	}
-	return fs.String("config", defaultPath, "path to brain.yaml")
+	return fs.String("config", defaultConfigPath(), "path to brain.yaml (default: $BRAIN_CONFIG, ./brain.yaml, then `brain config use`)")
 }
 
 func initConfigFlag(fs *flag.FlagSet) *string {
@@ -344,10 +347,21 @@ func runDoctor(args []string, stdout, stderr io.Writer) int {
 
 func runOpen(args []string, stdout, stderr io.Writer) int {
 	fs := newFlagSet("open", stderr)
-	project := fs.String("project", "", "project id")
+	project := fs.String("project", "", "project id or alias")
+	budget := fs.Int("budget", app.DefaultBootstrapBudget, "summary size budget in runes")
+	brief := fs.Bool("brief", false, "print only the project and state fields")
 	cfgPath := configFlag(fs)
-	if err := fs.Parse(args); err != nil {
+	positional, err := parseInterspersed(fs, args)
+	if err != nil {
 		return 2
+	}
+	if len(positional) > 1 {
+		fmt.Fprintf(stderr, "brain open: unexpected arguments: %s\n", strings.Join(positional[1:], " "))
+		return 2
+	}
+	selector := ""
+	if len(positional) == 1 {
+		selector = positional[0]
 	}
 	cfg, err := loadRequiredConfig(*cfgPath)
 	if err != nil {
@@ -358,11 +372,25 @@ func runOpen(args []string, stdout, stderr io.Writer) int {
 		return reportError(stderr, "open", err)
 	}
 	defer func() { _ = useCase.Close() }()
-	result, err := useCase.App.Open(context.Background(), app.OpenOptions{ProjectID: *project})
+	ctx := context.Background()
+	target, err := resolveTarget(ctx, useCase.App, *project, selector)
 	if err != nil {
 		return reportError(stderr, "open", err)
 	}
-	printOpenResult(stdout, result)
+	if *brief {
+		result, err := useCase.App.Open(ctx, app.OpenOptions{ProjectID: target.Project.ID})
+		if err != nil {
+			return reportError(stderr, "open", err)
+		}
+		printOpenResult(stdout, result)
+		return 0
+	}
+	result, err := useCase.App.Bootstrap(ctx, app.BootstrapOptions{ProjectID: target.Project.ID, Budget: *budget})
+	if err != nil {
+		return reportError(stderr, "open", err)
+	}
+	printSummary(stdout, result.Summary)
+	printGitAndGraphs(ctx, stdout, target)
 	return 0
 }
 
@@ -700,10 +728,15 @@ as its name. Omitted flags keep their stored values.
 
 func runBootstrap(args []string, stdout, stderr io.Writer) int {
 	fs := newFlagSet("bootstrap", stderr)
-	project := fs.String("project", "", "project id")
+	project := fs.String("project", "", "project id or alias")
 	budget := fs.Int("budget", app.DefaultBootstrapBudget, "summary size budget in runes")
 	cfgPath := configFlag(fs)
-	if err := fs.Parse(args); err != nil {
+	positional, err := parseInterspersed(fs, args)
+	if err != nil {
+		return 2
+	}
+	if len(positional) > 1 {
+		fmt.Fprintf(stderr, "brain bootstrap: unexpected arguments: %s\n", strings.Join(positional[1:], " "))
 		return 2
 	}
 	cfg, err := loadRequiredConfig(*cfgPath)
@@ -715,8 +748,16 @@ func runBootstrap(args []string, stdout, stderr io.Writer) int {
 		return reportError(stderr, "bootstrap", err)
 	}
 	defer func() { _ = useCase.Close() }()
+	selector := ""
+	if len(positional) == 1 {
+		selector = positional[0]
+	}
+	target, err := resolveTarget(context.Background(), useCase.App, *project, selector)
+	if err != nil {
+		return reportError(stderr, "bootstrap", err)
+	}
 	result, err := useCase.App.Bootstrap(context.Background(), app.BootstrapOptions{
-		ProjectID: *project,
+		ProjectID: target.Project.ID,
 		Budget:    *budget,
 	})
 	if err != nil {
@@ -740,8 +781,19 @@ func runNote(args []string, stdout, stderr io.Writer) int {
 	body := fs.String("body", "", "note body in Markdown")
 	tags := fs.String("tags", "", "comma-separated tags")
 	cfgPath := configFlag(fs)
-	if err := fs.Parse(args); err != nil {
+	positional, err := parseInterspersed(fs, args)
+	if err != nil {
 		return 2
+	}
+	if text := strings.TrimSpace(strings.Join(positional, " ")); text != "" {
+		if *body != "" {
+			fmt.Fprintln(stderr, "brain note: pass the text either positionally or with --body, not both")
+			return 2
+		}
+		*body = text
+		if *title == "" {
+			*title = splitTitle(text)
+		}
 	}
 	cfg, err := loadRequiredConfig(*cfgPath)
 	if err != nil {
@@ -775,8 +827,16 @@ func runDecision(args []string, stdout, stderr io.Writer) int {
 	consequences := fs.String("consequences", "", "consequences")
 	evidence := fs.String("evidence", "", "supporting evidence")
 	cfgPath := configFlag(fs)
-	if err := fs.Parse(args); err != nil {
+	positional, err := parseInterspersed(fs, args)
+	if err != nil {
 		return 2
+	}
+	if text := strings.TrimSpace(strings.Join(positional, " ")); text != "" {
+		if *title != "" {
+			fmt.Fprintln(stderr, "brain decision: pass the title either positionally or with --title, not both")
+			return 2
+		}
+		*title = text
 	}
 	cfg, err := loadRequiredConfig(*cfgPath)
 	if err != nil {
@@ -811,8 +871,16 @@ func runAttempt(args []string, stdout, stderr io.Writer) int {
 	resultText := fs.String("result", "", "what happened")
 	reason := fs.String("reason", "", "why it failed")
 	cfgPath := configFlag(fs)
-	if err := fs.Parse(args); err != nil {
+	positional, err := parseInterspersed(fs, args)
+	if err != nil {
 		return 2
+	}
+	if text := strings.TrimSpace(strings.Join(positional, " ")); text != "" {
+		if *title != "" {
+			fmt.Fprintln(stderr, "brain attempt: pass the title either positionally or with --title, not both")
+			return 2
+		}
+		*title = text
 	}
 	cfg, err := loadRequiredConfig(*cfgPath)
 	if err != nil {
@@ -842,10 +910,19 @@ func runHandoff(args []string, stdout, stderr io.Writer) int {
 	project := fs.String("project", "", "project id")
 	summary := fs.String("summary", "", "handoff summary")
 	next := fs.String("next", "", "next action")
-	gitContext := fs.String("git-context", "", "git context for the handoff")
+	gitContext := fs.String("git-context", "", "git context for the handoff (default: read from the project checkout)")
+	noGit := fs.Bool("no-git", false, "do not record git context")
 	cfgPath := configFlag(fs)
-	if err := fs.Parse(args); err != nil {
+	positional, err := parseInterspersed(fs, args)
+	if err != nil {
 		return 2
+	}
+	if text := strings.TrimSpace(strings.Join(positional, " ")); text != "" {
+		if *summary != "" {
+			fmt.Fprintln(stderr, "brain handoff: pass the summary either positionally or with --summary, not both")
+			return 2
+		}
+		*summary = text
 	}
 	cfg, err := loadRequiredConfig(*cfgPath)
 	if err != nil {
@@ -856,7 +933,16 @@ func runHandoff(args []string, stdout, stderr io.Writer) int {
 		return reportError(stderr, "handoff", err)
 	}
 	defer func() { _ = useCase.Close() }()
-	result, err := useCase.App.Handoff(context.Background(), app.HandoffInput{
+	ctx := context.Background()
+	target, err := resolveTarget(ctx, useCase.App, *project, "")
+	if err != nil {
+		return reportError(stderr, "handoff", err)
+	}
+	*project = target.Project.ID
+	if *gitContext == "" && !*noGit {
+		*gitContext = gitinfo.Read(ctx, gitDir(target)).Context()
+	}
+	result, err := useCase.App.Handoff(ctx, app.HandoffInput{
 		ProjectID:  *project,
 		Summary:    *summary,
 		GitContext: *gitContext,
@@ -1908,7 +1994,7 @@ func runUpdate(args []string, stdout, stderr io.Writer) int {
 // never block or change the exit code of the command the user asked for.
 func maybeDailyUpdateNotice(command string, args []string, stderr io.Writer) {
 	switch command {
-	case "serve", "init", "help", "-h", "--help", "version", "-v", "--version", "update", "event":
+	case "serve", "init", "help", "-h", "--help", "version", "-v", "--version", "update", "event", "hooks", "config":
 		return
 	}
 	cfg, err := loadConfigOrDefault(configPathFromArgs(args))
@@ -1943,10 +2029,7 @@ func maybeDailyUpdateNotice(command string, args []string, stderr io.Writer) {
 // configPathFromArgs finds --config before flag parsing so the daily check uses
 // the same configuration as the command that follows.
 func configPathFromArgs(args []string) string {
-	path := os.Getenv("BRAIN_CONFIG")
-	if path == "" {
-		path = config.FileName
-	}
+	path := defaultConfigPath()
 	for i := 0; i < len(args); i++ {
 		switch {
 		case (args[i] == "--config" || args[i] == "-config") && i+1 < len(args):

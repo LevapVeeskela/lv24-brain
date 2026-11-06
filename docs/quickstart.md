@@ -361,6 +361,28 @@ database schema (`postgres.SchemaVersion`, currently 5) is separate.
 `brain doctor` fails the `server` check when the URL is wrong or no usable token
 is stored.
 
+## Agent usage
+
+Agents call the engine directly; no wrapper script is needed.
+
+```sh
+brain config use /path/to/lv24-brain-data/brain.yaml   # once per machine
+cd /path/to/some/registered/repo
+brain open .                  # bootstrap pack, ## Git, ## Graphs
+brain note "Fixed the cache warmup"
+brain decision "Adopt the Go engine"
+brain attempt "Pinning the old driver"
+brain handoff "Session summary"   # git context is captured automatically
+brain hooks install           # record every commit in journal/<user>.jsonl
+```
+
+Without `--project`, commands resolve the project like the legacy
+`brain.ps1`: an id or alias, else the longest registered path containing the
+working directory (or the given path), else the single registered project
+under it. Flags may follow positional text. The default config is found in
+this order: `--config`, `$BRAIN_CONFIG`, `./brain.yaml`, then the pointer set
+by `brain config use` (stored under the OS user config directory).
+
 ## Smoke checklist
 
 | Check | Command | Pass condition |

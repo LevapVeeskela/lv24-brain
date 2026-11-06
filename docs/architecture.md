@@ -108,7 +108,7 @@ Domain records: `Project`, `Note`, `Decision`, `Attempt`, `Handoff`, `State`,
 
 ```text
 brain init       create an instance and write brain.yaml
-brain open       show the active project context
+brain open       [path|id] bootstrap pack + ## Git + ## Graphs (--brief: state only)
 brain project    list, show, or set registry projects
 brain bootstrap  build bounded agent context
 brain note       append a dated note
@@ -122,6 +122,8 @@ brain index      refresh the local FTS5 index, or --rebuild it (local/git only)
 brain search     query the local FTS5 index (local/git), or GET /v1/search (server)
 brain journal    show journal/<user>.jsonl activity, newest first (local/git)
 brain event      record an external event; `event commit` reads git for a post-commit hook
+brain hooks      install|uninstall|status the post-commit journal hook
+brain config     use <brain.yaml> | show | clear the user default config
 brain connector  run a read-only GitHub, GitLab, or IMAP connector
 brain migrate    import a legacy .brain data directory
 brain secret     set, list, or remove OS-backed secrets
