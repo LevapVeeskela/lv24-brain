@@ -201,7 +201,7 @@ Server mode authentication:
 Projects:
   brain project list [--json]
   brain project show <id> [--json]
-  brain project set <id> [--name <name>] [--path <p>]... [--alias <a>]...
+  brain project set <id> [--name <name>] [--path <p>]... [--add-path <p>]... [--alias <a>]...
                     [--kind app|service|repository|infra|other]
                     [--repo <url>] [--branch <b>]
                     [--clear-paths] [--clear-aliases] [--json]
@@ -446,13 +446,14 @@ func valueOr(value, fallback string) string {
 // projectValueFlags lists flags that consume a value, so splitValueFlags can
 // accept the positional project id before or after the flags.
 var projectValueFlags = map[string]bool{
-	"config": true,
-	"name":   true,
-	"path":   true,
-	"alias":  true,
-	"kind":   true,
-	"repo":   true,
-	"branch": true,
+	"config":   true,
+	"name":     true,
+	"path":     true,
+	"add-path": true,
+	"alias":    true,
+	"kind":     true,
+	"repo":     true,
+	"branch":   true,
 }
 
 func runProject(args []string, stdout, stderr io.Writer) int {
@@ -556,7 +557,16 @@ func runProjectSet(args []string, stdout, stderr io.Writer) int {
 	var paths, aliases []string
 	seenPaths := map[string]bool{}
 	seenAliases := map[string]bool{}
-	fs.Func("path", "add a filesystem path (repeatable)", func(value string) error {
+	var addPaths []string
+	fs.Func("add-path", "append a filesystem path to the existing list (repeatable)", func(value string) error {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			return errors.New("must not be empty")
+		}
+		addPaths = append(addPaths, value)
+		return nil
+	})
+	fs.Func("path", "set the filesystem paths, replacing the stored list (repeatable; see --add-path)", func(value string) error {
 		value = strings.TrimSpace(value)
 		if value == "" {
 			return errors.New("must not be empty")
@@ -643,6 +653,29 @@ func runProjectSet(args []string, stdout, stderr io.Writer) int {
 		return reportError(stderr, "project set", err)
 	}
 	defer closeRuntime()
+	if len(addPaths) > 0 {
+		if *clearPaths {
+			fmt.Fprintln(stderr, "brain project set: --add-path cannot be combined with --clear-paths")
+			return 2
+		}
+		// Start from --path when given, else from the stored list, and
+		// append the new paths once each.
+		base := paths
+		if !seen["path"] {
+			if existing, err := useCase.GetProject(context.Background(), input.ID); err == nil {
+				base = existing.Paths
+			} else if !errors.Is(err, domain.ErrNotFound) {
+				return reportError(stderr, "project set", err)
+			}
+		}
+		merged := append([]string{}, base...)
+		for _, path := range addPaths {
+			if !containsString(merged, path) {
+				merged = append(merged, path)
+			}
+		}
+		input.Paths = &merged
+	}
 	project, err := useCase.SaveProject(context.Background(), input)
 	if err != nil {
 		return reportError(stderr, "project set", err)
@@ -721,12 +754,13 @@ func printProjectUsage(w io.Writer) {
 	fmt.Fprint(w, `Usage:
   brain project list [--json]
   brain project show <id> [--json]
-  brain project set <id> [--name <name>] [--path <p>]... [--alias <a>]...
+  brain project set <id> [--name <name>] [--path <p>]... [--add-path <p>]... [--alias <a>]...
                     [--kind app|service|repository|infra|other]
                     [--repo <url>] [--branch <b>]
                     [--clear-paths] [--clear-aliases] [--json]
 
-Repeat --path and --alias to replace the stored lists. --clear-paths and
+Repeat --path and --alias to replace the stored lists; --add-path appends to the
+stored paths (one checkout per machine, e.g. Windows and macOS). --clear-paths and
 --clear-aliases store an explicitly empty list and cannot be combined with the
 corresponding repeatable flag. Creating a project without --name uses the id
 as its name. Omitted flags keep their stored values.
@@ -2104,4 +2138,13 @@ func splitList(value string) []string {
 		}
 	}
 	return result
+}
+
+func containsString(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
 }

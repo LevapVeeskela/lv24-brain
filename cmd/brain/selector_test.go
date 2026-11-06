@@ -113,3 +113,33 @@ func TestConfigUseMakesFlaglessCommandsWork(t *testing.T) {
 		t.Fatal("config clear failed")
 	}
 }
+
+func TestProjectSetAddPathKeepsExistingPaths(t *testing.T) {
+	t.Setenv("BRAIN_CONFIG", "")
+	dataDir := filepath.Join(t.TempDir(), "brain")
+	cfgPath := filepath.Join(dataDir, "brain.yaml")
+	if code, _, stderr := runForTest(t, "init", "--mode", "local", "--data-dir", dataDir); code != 0 {
+		t.Fatalf("init: %s", stderr)
+	}
+	existing := t.TempDir()
+	other := filepath.Join(t.TempDir(), "elsewhere-on-another-machine")
+	if code, _, stderr := runForTest(t, "project", "set", "p", "--path", other, "--config", cfgPath); code != 0 {
+		t.Fatalf("set: %s", stderr)
+	}
+	if code, _, stderr := runForTest(t, "project", "set", "p", "--add-path", existing, "--add-path", other, "--config", cfgPath); code != 0 {
+		t.Fatalf("add-path: %s", stderr)
+	}
+	code, stdout, _ := runForTest(t, "project", "show", "p", "--json", "--config", cfgPath)
+	if code != 0 || !strings.Contains(stdout, "elsewhere-on-another-machine") || strings.Count(stdout, "elsewhere-on-another-machine") != 1 {
+		t.Fatalf("paths after add-path = %s", stdout)
+	}
+	// Opening by id uses the path that exists on this machine, not the
+	// first one listed.
+	code, stdout, _ = runForTest(t, "open", "p", "--config", cfgPath)
+	if code != 0 || strings.Contains(stdout, "elsewhere-on-another-machine") {
+		t.Fatalf("open p = %d %s", code, stdout)
+	}
+	if code, _, _ := runForTest(t, "project", "set", "p", "--add-path", existing, "--clear-paths", "--config", cfgPath); code != 2 {
+		t.Fatal("--add-path with --clear-paths accepted")
+	}
+}

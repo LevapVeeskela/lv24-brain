@@ -88,13 +88,24 @@ func (a *App) ResolveSelector(ctx context.Context, selector string) (Resolved, e
 	}
 }
 
+// firstPath returns the first registered path that exists on this machine
+// (projects list one checkout per machine, e.g. a Windows and a macOS path),
+// falling back to the first non-empty path.
 func firstPath(project domain.Project) string {
+	fallback := ""
 	for _, path := range project.Paths {
-		if strings.TrimSpace(path) != "" {
-			return cleanPath(path)
+		if strings.TrimSpace(path) == "" {
+			continue
+		}
+		clean := cleanPath(path)
+		if info, err := os.Stat(clean); err == nil && info.IsDir() {
+			return clean
+		}
+		if fallback == "" {
+			fallback = clean
 		}
 	}
-	return ""
+	return fallback
 }
 
 func cleanPath(path string) string {
