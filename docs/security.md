@@ -100,15 +100,20 @@ Implemented in `internal/adapters/httpapi` and `internal/auth`:
 - Argon2id password hashes with per-password salts and constant-time
   verification; failed logins use a dummy hash to equalize timing.
 - HS256 JWT access tokens with issuer, audience, expiry, not-before, and
-  allowed-method validation; 15-minute default TTL.
+  allowed-method validation; 15-minute default TTL. Every request also checks
+  the session/family revocation tombstones and reloads the user, so logout,
+  refresh-token reuse, deletion and role changes take effect immediately.
 - Rotating refresh tokens stored as SHA-256 hashes; reuse revokes the token
   family. In a Postgres deployment they are persisted by migrations
-  `0002_auth_tokens.sql` and `0003_auth_revocations.sql` (server schema 5), so
+  `0002_auth_tokens.sql` and `0003_auth_revocations.sql` (server schema 6), so
   restarts do not invalidate sessions. Revocation tombstones have no expiry, so
   pruning expired token rows cannot resurrect a revoked family or session.
 - Opaque API tokens with the `brain_` prefix, stored as SHA-256 hashes in the
   `api_tokens` table added by the same migration, with role and owner checks
-  when minted.
+  when minted. Tokens may carry an optional expiry (`expiresInDays` or
+  `expiresAt` at mint time, migration `0006_api_token_expiry.sql`); an expired
+  token is rejected exactly like a revoked one. Tokens without an expiry live
+  until revoked.
 - OIDC authorization code with PKCE, `state`, and `nonce`; issuer metadata is
   discovered over HTTPS (plain `http` is accepted only for loopback issuers)
   and ID tokens are verified. The `state` is also bound to the starting
@@ -158,7 +163,7 @@ Current limits, stated plainly:
   applies embedded migrations on startup; startup logs redact the database URL.
 - An existing Postgres schema with pending migrations refuses to start until a
   backup is taken and `BRAIN_DATABASE_BACKUP_CONFIRMED=1` is set. Migrations are
-  forward-only; every upgrade (currently to schema 5) is gated this way.
+  forward-only; every upgrade (currently to schema 6) is gated this way.
 - API tokens and refresh-token families are durable in Postgres (migrations
   `0002_auth_tokens.sql` and `0003_auth_revocations.sql`), so restart no longer
   forces re-authentication.

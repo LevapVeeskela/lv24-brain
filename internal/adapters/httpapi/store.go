@@ -61,6 +61,7 @@ type APITokenRecord struct {
 	Prefix     string      `json:"prefix"`
 	TokenHash  string      `json:"-"`
 	CreatedAt  time.Time   `json:"createdAt"`
+	ExpiresAt  *time.Time  `json:"expiresAt,omitempty"`
 	LastUsedAt *time.Time  `json:"lastUsedAt,omitempty"`
 	RevokedAt  *time.Time  `json:"revokedAt,omitempty"`
 }

@@ -273,6 +273,12 @@ API tokens (prefix `brain_`) are created and revoked through the API:
 - `POST /v1/tokens` with `name`, `role`, and `userId` (admins may mint for
   other users). The token role cannot exceed the role of the owner or of the
   caller. The plaintext is returned once; only a hash is stored.
+- Set an expiry with `expiresInDays` (1 to 3650) or `expiresAt` (RFC 3339, in
+  the future, at most 10 years away); not both. Without either, the token never
+  expires until revoked. For automation, recommend `expiresInDays` (for example
+  `90`) so a leaked or abandoned token stops working on its own. An expired token
+  is rejected like a revoked one, and the response `apiToken.expiresAt` shows the
+  expiry instant.
 - `GET /v1/tokens` lists the caller's tokens. Admins may pass `userId`, or
   `all=true` to list every token.
 - `DELETE /v1/tokens/{id}` revokes a token. Only the owner or an admin may do it.
@@ -404,10 +410,10 @@ break installed binaries:
 
 ## 6. Database migrations and the upgrade gate
 
-- Server schema version: **5** (`SchemaVersion` in
+- Server schema version: **6** (`SchemaVersion` in
   `internal/adapters/postgres/postgres.go`). Migrations are embedded from
   `internal/adapters/postgres/migrations/`, from `0001_init.sql` to
-  `0005_knowledge_owner.sql`.
+  `0006_api_token_expiry.sql`.
 - On startup the server applies embedded migrations to an empty database.
 - For an existing schema with pending migrations, the server refuses to start
   unless `BRAIN_DATABASE_BACKUP_CONFIRMED=1` is set. The message names the
@@ -481,8 +487,9 @@ a token value.
 7. If the leaked value cannot be matched to a token id, revoke every token of
    that owner from the list and reissue them.
 
-A leaked JWT access token stays valid until it expires (15 minutes by default),
-so run `brain logout` on the affected client to revoke its session family.
+A leaked JWT access token is cut off as soon as its session is revoked: run
+`brain logout` on the affected client (or delete/demote the user), and the
+server rejects that session's access tokens on the next request.
 
 ### Refresh-token reuse alert
 

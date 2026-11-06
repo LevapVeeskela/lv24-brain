@@ -397,12 +397,16 @@ func (m *MemoryStore) RevokeAPIToken(_ context.Context, id string, now time.Time
 	return nil
 }
 
-// FindAPITokenByHash resolves an active token and records its last use.
+// FindAPITokenByHash resolves an active token and records its last use. A
+// revoked or expired token (ExpiresAt <= now) is reported as not found.
 func (m *MemoryStore) FindAPITokenByHash(_ context.Context, hash string, now time.Time) (APITokenRecord, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	for id, record := range m.apiTokens {
 		if record.TokenHash != hash || record.RevokedAt != nil {
+			continue
+		}
+		if record.ExpiresAt != nil && !record.ExpiresAt.After(now) {
 			continue
 		}
 		at := now.UTC()
@@ -1480,4 +1484,17 @@ func (m *MemoryStore) ListAuditEvents(_ context.Context, filter AuditFilter) ([]
 		out = out[:limit]
 	}
 	return out, nil
+}
+
+// IsRevoked reports whether an access token's family or session was revoked.
+func (m *MemoryStore) IsRevoked(_ context.Context, familyID, sessionID string) (bool, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if _, ok := m.revokedFamilies[strings.TrimSpace(familyID)]; ok && strings.TrimSpace(familyID) != "" {
+		return true, nil
+	}
+	if _, ok := m.revokedSessions[strings.TrimSpace(sessionID)]; ok && strings.TrimSpace(sessionID) != "" {
+		return true, nil
+	}
+	return false, nil
 }

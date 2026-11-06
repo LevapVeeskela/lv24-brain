@@ -23,6 +23,7 @@ func toHTTPAPIToken(record postgres.APITokenRecord) httpapi.APITokenRecord {
 		Prefix:     record.Prefix,
 		TokenHash:  record.TokenHash,
 		CreatedAt:  record.CreatedAt,
+		ExpiresAt:  record.ExpiresAt,
 		LastUsedAt: record.LastUsedAt,
 		RevokedAt:  record.RevokedAt,
 	}
@@ -37,6 +38,7 @@ func fromHTTPAPIToken(record httpapi.APITokenRecord) postgres.APITokenRecord {
 		Prefix:     record.Prefix,
 		TokenHash:  record.TokenHash,
 		CreatedAt:  record.CreatedAt,
+		ExpiresAt:  record.ExpiresAt,
 		LastUsedAt: record.LastUsedAt,
 		RevokedAt:  record.RevokedAt,
 	}
@@ -107,4 +109,10 @@ func (s *Store) RevokeSession(ctx context.Context, sessionID string, now time.Ti
 // RevokeFamily revokes every rotated token of one login family.
 func (s *Store) RevokeFamily(ctx context.Context, familyID string, now time.Time) error {
 	return mapError(s.pg.RevokeFamily(ctx, familyID, now))
+}
+
+// IsRevoked reports whether an access token's family or session was revoked.
+func (s *Store) IsRevoked(ctx context.Context, familyID, sessionID string) (bool, error) {
+	revoked, err := s.pg.IsRevoked(ctx, familyID, sessionID)
+	return revoked, mapError(err)
 }

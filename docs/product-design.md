@@ -200,10 +200,11 @@ script is a thin shell wrapper around the same release assets.
   Status: server auto-update is planned; not implemented in v1.
   `BRAIN_SERVER_AUTO_UPDATE` is a placeholder variable with no effect. Server
   upgrades replace the image.
-  Status: `deploy/Dockerfile` and `deploy/docker-compose.yml` pin images by tag
-  (`golang:1.27-alpine`, `alpine:3.22`, `postgres:17-alpine`; the server image is
-  built locally as `lv24-brain-server:local`). Digest pinning is a
-  deployment-time recommendation; the repository does not enforce it.
+  Status: base images are pinned by digest in `deploy/` (`golang:1.27-alpine`,
+  `alpine:3.22` in `deploy/Dockerfile`; `postgres:17-alpine` in
+  `deploy/docker-compose.yml`), keeping the readable tag next to the
+  multi-arch index digest. The server image is built locally as
+  `lv24-brain-server:local`. See `docs/deploy.md` "Updating pinned images".
 - Update never mutates the private data repo automatically.
 - Release manifest `release.json`: version, channel, assets, checksums,
   min engine/schema version, signature metadata.

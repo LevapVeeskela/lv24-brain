@@ -372,13 +372,19 @@
                 "properties": {
                   "name": { "type": "string" },
                   "role": { "type": "string", "enum": ["admin", "member", "viewer"] },
-                  "userId": { "type": "string" }
+                  "userId": { "type": "string" },
+                  "expiresInDays": { "type": "integer", "minimum": 1, "maximum": 3650, "description": "Optional lifetime in days from now. Omit both expiry fields for a token that never expires." },
+                  "expiresAt": { "type": "string", "format": "date-time", "description": "Optional RFC 3339 expiry instant. Must be in the future and at most 10 years away. Cannot be combined with expiresInDays." }
                 }
               }
             }
           }
         },
-        "responses": { "201": { "description": "Created token" }, "403": { "description": "Forbidden" } }
+        "responses": {
+          "201": { "description": "Created token. The response is {token, apiToken}; apiToken.expiresAt is present only when the token expires." },
+          "400": { "description": "Validation error, for example both expiry fields set or an expiry out of range" },
+          "403": { "description": "Forbidden" }
+        }
       }
     },
     "/v1/tokens/{id}": {

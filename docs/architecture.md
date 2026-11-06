@@ -231,7 +231,7 @@ Persistence:
   refuses to start until a backup is taken and
   `BRAIN_DATABASE_BACKUP_CONFIRMED=1` is set. A fresh database migrates
   immediately.
-- `postgres.SchemaVersion` is 5. Migration `0002_auth_tokens.sql` adds the
+- `postgres.SchemaVersion` is 6. Migration `0002_auth_tokens.sql` adds the
   `api_tokens` and `refresh_tokens` tables, so API tokens and refresh-token
   families survive restarts. Migration `0003_auth_revocations.sql` adds durable
   family/session revocation tombstones with no expiry, so pruning expired token
@@ -245,6 +245,9 @@ Persistence:
   refresh-token reuse, API-token lifecycle, OIDC linking) be stored without a
   revision, so they never appear in `/v1/revisions` or SSE; admins read them
   with `GET /v1/audit`.
+- Migration `0006_api_token_expiry.sql` adds the nullable `api_tokens.expires_at`.
+  NULL means the token never expires. Once reached, an expired token is not
+  found by `FindAPITokenByHash`, exactly like a revoked token.
 - The authenticated login is attached to the request context through
   `ports.WithActor`, which both the HTTP layer and the Postgres adapter use, so
   every revision and audit row records who made the change.

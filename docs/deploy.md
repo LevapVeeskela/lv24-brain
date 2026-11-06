@@ -161,13 +161,36 @@ docker compose --env-file .env -f docker-compose.yml up -d brain-server
 Before an upgrade, take a backup. The server applies embedded migrations on
 startup; an existing schema with pending migrations refuses to start until
 `BRAIN_DATABASE_BACKUP_CONFIRMED=1` is set in the server environment. Upgrading
-a database to schema 5 (migrations `0002_auth_tokens.sql` through
-`0005_knowledge_owner.sql`) is such a migration: back up first, set the
+a database to schema 6 (migrations `0002_auth_tokens.sql` through
+`0006_api_token_expiry.sql`) is such a migration: back up first, set the
 confirmation variable for the upgrade start, and unset it afterwards if you
 prefer to keep the gate explicit for the next migration. An update must not run
 while migrations or active jobs are in progress. Roll back by restoring the
 previous image digest (and the matching database backup if a migration ran).
 Data directories and Postgres volumes are never deleted by an update.
+
+## Updating pinned images
+
+The base images in `deploy/Dockerfile` and `deploy/docker-compose.yml` are
+pinned by the digest of the multi-arch index (amd64 and arm64), written next to
+the readable tag, for example `alpine:3.22@sha256:<digest>`. To refresh a
+digest, read the top-level `Digest:` line of the index:
+
+```sh
+docker buildx imagetools inspect alpine:3.22
+docker buildx imagetools inspect golang:1.27-alpine
+docker buildx imagetools inspect postgres:17-alpine
+```
+
+Replace the digest in the matching `FROM` or `image:` line, keeping the tag.
+Dependabot and Renovate are not configured, because they require paid or
+extra hosted services; digests are refreshed manually. After bumping a digest,
+re-run the build and compose validation before deploying:
+
+```sh
+docker build -f deploy/Dockerfile -t lv24-brain-server:digest-check .
+docker compose --env-file deploy/.env -f deploy/docker-compose.yml config >/dev/null
+```
 
 ## Healthchecks
 
@@ -198,7 +221,7 @@ Current limits:
 
 - Pending migrations on an existing schema require a backup and
   `BRAIN_DATABASE_BACKUP_CONFIRMED=1`; migrations are forward-only. Upgrading a
-  server to schema 5 therefore needs a backup first.
+  server to schema 6 therefore needs a backup first.
 - Multi-replica deployment is not supported: the SSE broker and login rate
   limiter are per-process, so events and throttling are not shared between
   instances. Durable tokens do not change that.
@@ -226,8 +249,8 @@ The HTTP client refreshes once on `401` and retries; the bundle is never sent to
 a different server URL, and a mismatched binding is refused with both URLs
 named. `brain logout` inspects `GET /v1/auth/me` before rotating anything,
 revokes the JWT session and its refresh family, and clears the bundle. The
-refresh family is revoked immediately; an access JWT already issued remains
-valid until its short TTL. Use `BRAIN_TOKEN` for automation when you do not
+refresh family and every access JWT of that session are revoked immediately:
+the server checks the session tombstone on each request. Use `BRAIN_TOKEN` for automation when you do not
 want stored credentials; it takes precedence: while it is set, `brain login` is
 refused and `brain logout` leaves a stored session untouched and exits
 non-zero. `server-token` remains an explicit static API-token fallback with no

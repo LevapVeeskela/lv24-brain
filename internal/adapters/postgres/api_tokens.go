@@ -21,11 +21,12 @@ type APITokenRecord struct {
 	Prefix     string
 	TokenHash  string
 	CreatedAt  time.Time
+	ExpiresAt  *time.Time
 	LastUsedAt *time.Time
 	RevokedAt  *time.Time
 }
 
-const apiTokenColumns = `id, user_id, name, prefix, token_hash, role, created_at, last_used_at, revoked_at`
+const apiTokenColumns = `id, user_id, name, prefix, token_hash, role, created_at, expires_at, last_used_at, revoked_at`
 
 // CreateAPIToken validates and stores a hashed API token. A user id that does
 // not exist is reported as domain.ErrNotFound, matching the in-memory adapter
@@ -61,10 +62,11 @@ func (s *Store) CreateAPIToken(ctx context.Context, token APITokenRecord) (APITo
 	}
 
 	record, err := scanAPIToken(s.pool.QueryRow(ctx, `
-		INSERT INTO api_tokens (id, user_id, name, prefix, token_hash, role, created_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7)
+		INSERT INTO api_tokens (id, user_id, name, prefix, token_hash, role, created_at, expires_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
 		RETURNING `+apiTokenColumns,
 		token.ID, token.UserID, token.Name, token.Prefix, token.TokenHash, string(token.Role), token.CreatedAt,
+		databaseTimePtr(token.ExpiresAt),
 	))
 	if err != nil {
 		return APITokenRecord{}, mapPgError("insert api token", err)
@@ -137,24 +139,27 @@ func (s *Store) RevokeAPIToken(ctx context.Context, id string, now time.Time) er
 
 // FindAPITokenByHash resolves an active token and records its last use. The
 // lookup and the last-used update are separate statements: a failure to record
-// usage must not reject an otherwise valid token. An absent or revoked token
-// is reported as domain.ErrNotFound.
+// usage must not reject an otherwise valid token. An absent, revoked or expired
+// token (expires_at <= now) is reported as domain.ErrNotFound.
 func (s *Store) FindAPITokenByHash(ctx context.Context, hash string, now time.Time) (APITokenRecord, error) {
 	if err := ctx.Err(); err != nil {
 		return APITokenRecord{}, err
 	}
+	nowDB := databaseTime(now)
 	record, err := scanAPIToken(s.pool.QueryRow(ctx,
-		`SELECT `+apiTokenColumns+` FROM api_tokens WHERE token_hash = $1 AND revoked_at IS NULL`, hash))
+		`SELECT `+apiTokenColumns+` FROM api_tokens
+		WHERE token_hash = $1 AND revoked_at IS NULL AND (expires_at IS NULL OR expires_at > $2)`, hash, nowDB))
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return APITokenRecord{}, domain.ErrNotFound
 		}
 		return APITokenRecord{}, mapPgError("find api token", err)
 	}
-	usedAt := databaseTime(now)
+	usedAt := nowDB
 	// Best effort: usage telemetry must never turn a valid token into a 401.
 	if _, updateErr := s.pool.Exec(ctx,
-		`UPDATE api_tokens SET last_used_at = $2 WHERE token_hash = $1 AND revoked_at IS NULL`, hash, usedAt); updateErr == nil {
+		`UPDATE api_tokens SET last_used_at = $2 WHERE token_hash = $1 AND revoked_at IS NULL AND (expires_at IS NULL OR expires_at > $2)`,
+		hash, usedAt); updateErr == nil {
 		record.LastUsedAt = &usedAt
 	}
 	return record, nil
@@ -167,7 +172,7 @@ func scanAPIToken(row rowScanner) (APITokenRecord, error) {
 	)
 	err := row.Scan(
 		&record.ID, &record.UserID, &record.Name, &record.Prefix, &record.TokenHash,
-		&role, &record.CreatedAt, &record.LastUsedAt, &record.RevokedAt,
+		&role, &record.CreatedAt, &record.ExpiresAt, &record.LastUsedAt, &record.RevokedAt,
 	)
 	if err != nil {
 		return APITokenRecord{}, err

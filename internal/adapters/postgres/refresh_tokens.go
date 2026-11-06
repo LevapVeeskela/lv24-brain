@@ -281,3 +281,23 @@ func databaseTimePtr(value *time.Time) *time.Time {
 	normalized := databaseTime(*value)
 	return &normalized
 }
+
+// IsRevoked reports whether the family or session of an access token has a
+// revocation tombstone (auth.RevocationChecker). Empty ids never match.
+func (s *Store) IsRevoked(ctx context.Context, familyID, sessionID string) (bool, error) {
+	familyID, sessionID = strings.TrimSpace(familyID), strings.TrimSpace(sessionID)
+	if familyID == "" && sessionID == "" {
+		return false, nil
+	}
+	var revoked bool
+	err := s.pool.QueryRow(ctx, `
+		SELECT EXISTS (
+			SELECT 1 FROM auth_revocations
+			WHERE (scope_kind = 'family' AND scope_id = $1 AND $1 <> '')
+			   OR (scope_kind = 'session' AND scope_id = $2 AND $2 <> '')
+		)`, familyID, sessionID).Scan(&revoked)
+	if err != nil {
+		return false, mapPgError("check access token revocation", err)
+	}
+	return revoked, nil
+}

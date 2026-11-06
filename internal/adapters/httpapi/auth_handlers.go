@@ -342,6 +342,46 @@ type createTokenRequest struct {
 	Name   string      `json:"name"`
 	Role   domain.Role `json:"role"`
 	UserID string      `json:"userId"`
+	// ExpiresInDays and ExpiresAt are optional and mutually exclusive. Neither
+	// set means the token never expires.
+	ExpiresInDays *int    `json:"expiresInDays,omitempty"`
+	ExpiresAt     *string `json:"expiresAt,omitempty"`
+}
+
+const (
+	maxTokenExpiryDays  = 3650
+	maxTokenExpiryYears = 10
+)
+
+// resolveTokenExpiry validates the optional expiry fields of a token request
+// and returns the expiry instant, or nil for a token that never expires.
+func resolveTokenExpiry(body createTokenRequest, now time.Time) (*time.Time, error) {
+	if body.ExpiresInDays != nil && body.ExpiresAt != nil {
+		return nil, domain.NewValidationError("token.expiresAt", "set either expiresInDays or expiresAt, not both")
+	}
+	if body.ExpiresInDays != nil {
+		days := *body.ExpiresInDays
+		if days < 1 || days > maxTokenExpiryDays {
+			return nil, domain.NewValidationError("token.expiresInDays", "must be between 1 and 3650")
+		}
+		expiry := now.AddDate(0, 0, days)
+		return &expiry, nil
+	}
+	if body.ExpiresAt != nil {
+		parsed, err := time.Parse(time.RFC3339, strings.TrimSpace(*body.ExpiresAt))
+		if err != nil {
+			return nil, domain.NewValidationError("token.expiresAt", "must be an RFC 3339 timestamp")
+		}
+		expiry := parsed.UTC()
+		if !expiry.After(now) {
+			return nil, domain.NewValidationError("token.expiresAt", "must be in the future")
+		}
+		if expiry.After(now.AddDate(maxTokenExpiryYears, 0, 0)) {
+			return nil, domain.NewValidationError("token.expiresAt", "must be at most 10 years from now")
+		}
+		return &expiry, nil
+	}
+	return nil, nil
 }
 
 type createTokenResponse struct {
@@ -390,6 +430,12 @@ func (a *API) createToken(w http.ResponseWriter, r *http.Request) {
 		writeErrorCode(w, http.StatusForbidden, "forbidden", "token role exceeds the owner's role")
 		return
 	}
+	now := a.cfg.Now().UTC()
+	expiresAt, err := resolveTokenExpiry(body, now)
+	if err != nil {
+		a.writeError(w, r, err)
+		return
+	}
 	raw, hash, display, err := auth.GenerateToken(a.cfg.TokenPrefix, 32)
 	if err != nil {
 		a.writeError(w, r, err)
@@ -401,15 +447,23 @@ func (a *API) createToken(w http.ResponseWriter, r *http.Request) {
 		Role:      role,
 		Prefix:    display,
 		TokenHash: hash,
-		CreatedAt: a.cfg.Now().UTC(),
+		CreatedAt: now,
+		ExpiresAt: expiresAt,
 	})
 	if err != nil {
 		a.writeError(w, r, err)
 		return
 	}
+	var auditExpiry any
+	if record.ExpiresAt != nil {
+		auditExpiry = record.ExpiresAt.UTC().Format(time.RFC3339)
+	}
 	a.audit(r, "", SecurityEvent{
 		Action: AuditAPITokenCreated, EntityKind: auditEntityAPIToken, EntityID: record.ID,
-		Detail: map[string]any{"owner": record.UserID, "role": string(record.Role), "name": record.Name},
+		Detail: map[string]any{
+			"owner": record.UserID, "role": string(record.Role), "name": record.Name,
+			"expires_at": auditExpiry,
+		},
 	})
 	writeJSON(w, http.StatusCreated, createTokenResponse{Token: raw, APIToken: record})
 }

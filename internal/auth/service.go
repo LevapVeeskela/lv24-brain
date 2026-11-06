@@ -48,6 +48,14 @@ type SessionStore interface {
 	RevokeFamily(ctx context.Context, familyID string, now time.Time) error
 }
 
+// RevocationChecker is implemented by session stores that can tell whether a
+// session or token family was revoked (logout, refresh-token reuse). When the
+// configured SessionStore implements it, access tokens of a revoked session
+// stop working immediately instead of living until they expire.
+type RevocationChecker interface {
+	IsRevoked(ctx context.Context, familyID, sessionID string) (bool, error)
+}
+
 // OIDCClaims are the provider assertions the server trusts after ID-token
 // verification.
 type OIDCClaims struct {
@@ -246,7 +254,7 @@ func (s *Service) Principal(ctx context.Context, accessToken string) (domain.Use
 }
 
 // AuthenticateJWT validates an access token without a database round-trip.
-func (s *Service) AuthenticateJWT(_ context.Context, accessToken string) (Principal, error) {
+func (s *Service) AuthenticateJWT(ctx context.Context, accessToken string) (Principal, error) {
 	claims, err := s.signer.Parse(strings.TrimSpace(accessToken))
 	if err != nil {
 		return Principal{}, ErrInvalidToken
@@ -255,14 +263,40 @@ func (s *Service) AuthenticateJWT(_ context.Context, accessToken string) (Princi
 	if err != nil {
 		return Principal{}, ErrInvalidToken
 	}
+	user := domain.User{
+		ID:          claims.Subject,
+		Login:       claims.Login,
+		DisplayName: claims.DisplayName,
+		Role:        role,
+		AuthSource:  "jwt",
+	}
+	// A logged-out session or a family revoked after refresh-token reuse must
+	// not keep working until the access token expires.
+	if checker, ok := s.sessions.(RevocationChecker); ok {
+		revoked, err := checker.IsRevoked(ctx, claims.FamilyID, claims.SessionID)
+		if err != nil {
+			return Principal{}, fmt.Errorf("check access token revocation: %w", err)
+		}
+		if revoked {
+			return Principal{}, ErrInvalidToken
+		}
+	}
+	// The stored user is authoritative: a deleted user is rejected and a
+	// role change applies at once instead of after the token's TTL.
+	if s.users != nil {
+		current, err := s.users.FindUser(ctx, claims.Subject)
+		if errors.Is(err, domain.ErrNotFound) {
+			return Principal{}, ErrInvalidToken
+		}
+		if err != nil {
+			return Principal{}, fmt.Errorf("load access token user: %w", err)
+		}
+		user.Login = current.Login
+		user.DisplayName = current.DisplayName
+		user.Role = current.Role
+	}
 	return Principal{
-		User: domain.User{
-			ID:          claims.Subject,
-			Login:       claims.Login,
-			DisplayName: claims.DisplayName,
-			Role:        role,
-			AuthSource:  "jwt",
-		},
+		User:       user,
 		SessionID:  claims.SessionID,
 		FamilyID:   claims.FamilyID,
 		ExpiresAt:  claims.ExpiresAt.Time,
