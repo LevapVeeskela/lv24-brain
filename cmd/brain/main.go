@@ -217,7 +217,7 @@ func newFlagSet(name string, stderr io.Writer) *flag.FlagSet {
 }
 
 func configFlag(fs *flag.FlagSet) *string {
-	return fs.String("config", defaultConfigPath(), "path to brain.yaml (default: $BRAIN_CONFIG, ./brain.yaml, then `brain config use`)")
+	return fs.String("config", defaultConfigPath(), "path to brain.yaml (default: $BRAIN_CONFIG, ./brain.yaml, then the brain config use pointer)")
 }
 
 func initConfigFlag(fs *flag.FlagSet) *string {
