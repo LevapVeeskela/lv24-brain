@@ -205,6 +205,12 @@ type Store interface {
 	CurrentRevision(ctx context.Context) (domain.SyncRevision, error)
 	ListRevisions(ctx context.Context, filter RevisionFilter) ([]RevisionRecord, error)
 
+	// RecordSecurityEvent appends an audit event with no revision; it must not
+	// appear in ListRevisions or the event stream.
+	RecordSecurityEvent(ctx context.Context, event SecurityEvent) error
+	// ListAuditEvents returns audit events (entity and security) newest first.
+	ListAuditEvents(ctx context.Context, filter AuditFilter) ([]AuditEvent, error)
+
 	CreateConnectorRun(ctx context.Context, run domain.ConnectorRun) (ConnectorRunRecord, domain.SyncRevision, error)
 	FinishConnectorRun(ctx context.Context, id string, status domain.ConnectorStatus, counts map[string]int, errorMessage string, expected int64) (ConnectorRunRecord, domain.SyncRevision, error)
 	GetConnectorRun(ctx context.Context, id string) (ConnectorRunRecord, error)

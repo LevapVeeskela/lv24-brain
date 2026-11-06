@@ -13,14 +13,28 @@ import (
 // DefaultSearchLimit is used when a search does not set a limit.
 const DefaultSearchLimit = 20
 
-// Search queries the local FTS5 index. Server mode search is not wired.
+// Searcher runs a full-text search against a remote server. Server mode uses
+// it for brain search through GET /v1/search.
+type Searcher interface {
+	Search(ctx context.Context, query ports.Query) ([]ports.Hit, error)
+}
+
+// Search queries the local FTS5 index in local and git mode, and the server
+// search endpoint in server mode.
 func (a *App) Search(ctx context.Context, text, projectID string, limit int) ([]ports.Hit, error) {
 	if a.cfg.Mode == config.ModeServer {
-		return nil, fmt.Errorf("%w: search uses the local index; server search is not wired", domain.ErrUnsupported)
+		if a.deps.Searcher == nil {
+			return nil, fmt.Errorf("%w: server search client is not available", domain.ErrUnsupported)
+		}
+		return a.search(ctx, text, projectID, limit, a.deps.Searcher.Search)
 	}
 	if a.deps.Index == nil {
 		return nil, fmt.Errorf("%w: local search index is not available", domain.ErrUnsupported)
 	}
+	return a.search(ctx, text, projectID, limit, a.deps.Index.Search)
+}
+
+func (a *App) search(ctx context.Context, text, projectID string, limit int, run func(context.Context, ports.Query) ([]ports.Hit, error)) ([]ports.Hit, error) {
 	text = strings.TrimSpace(text)
 	if text == "" {
 		return nil, domain.NewValidationError("search.query", "is required")
@@ -31,7 +45,7 @@ func (a *App) Search(ctx context.Context, text, projectID string, limit int) ([]
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	return a.deps.Index.Search(ctx, ports.Query{
+	return run(ctx, ports.Query{
 		Text:      text,
 		ProjectID: strings.TrimSpace(projectID),
 		Limit:     limit,

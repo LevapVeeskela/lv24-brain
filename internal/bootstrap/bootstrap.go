@@ -12,6 +12,7 @@ import (
 	"github.com/levapveeskela/lv24-brain/internal/adapters/fsstore"
 	"github.com/levapveeskela/lv24-brain/internal/adapters/gitstore"
 	"github.com/levapveeskela/lv24-brain/internal/adapters/httpclient"
+	"github.com/levapveeskela/lv24-brain/internal/adapters/journal"
 	"github.com/levapveeskela/lv24-brain/internal/adapters/secrets"
 	"github.com/levapveeskela/lv24-brain/internal/adapters/sqliteindex"
 	"github.com/levapveeskela/lv24-brain/internal/app"
@@ -76,6 +77,7 @@ func BuildWithOptions(cfg config.BrainConfig, opts Options) (*Runtime, error) {
 			runStore = store
 			index = openedIndex
 			deps.Index = index
+			deps.Journal = journal.New(cfg.DataDir)
 		}
 		if cfg.Mode == config.ModeGit && store != nil {
 			sync, syncErr := gitstore.Open(cfg.DataDir, gitstore.Options{})
@@ -95,6 +97,9 @@ func BuildWithOptions(cfg config.BrainConfig, opts Options) (*Runtime, error) {
 			})
 			if clientErr == nil {
 				deps.Store = client
+				// Search runs on the server through GET /v1/search; the
+				// local index is not built in server mode.
+				deps.Searcher = client
 				// BRAIN_TOKEN and an environment-provided
 				// BRAIN_SECRET_SERVER_TOKEN pin the client to a static token
 				// and win over stored credentials. Login would be confusing

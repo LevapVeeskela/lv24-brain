@@ -1257,6 +1257,38 @@ func (s *cliDeleteFailStore) Delete(ctx context.Context, key string) error {
 	return s.cliSecretStore.Delete(ctx, key)
 }
 
+func TestSearchServerModeCLI(t *testing.T) {
+	const token = "brain_server_search_test"
+	var gotQuery string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/search" || r.Method != http.MethodGet {
+			http.NotFound(w, r)
+			return
+		}
+		if gotToken := r.Header.Get("Authorization"); gotToken != "Bearer "+token {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		gotQuery = r.URL.Query().Get("q") + "|" + r.URL.Query().Get("projectId")
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"items":[{"ID":"note-1","ProjectID":"demo","Kind":"note","Title":"Release","Snippet":"ship it","Score":1}]}`)
+	}))
+	t.Cleanup(server.Close)
+	t.Setenv("BRAIN_TOKEN", token)
+
+	cfgPath := writeServerConfig(t, server.URL)
+	code, stdout, stderr := runForTest(t, "search", "release", "--project", "demo", "--config", cfgPath)
+	if code != 0 {
+		t.Fatalf("search exit code = %d (stderr: %s)", code, stderr)
+	}
+	if gotQuery != "release|demo" {
+		t.Fatalf("server query = %q, want release|demo", gotQuery)
+	}
+	if !strings.Contains(stdout, "note/demo/Release") || !strings.Contains(stdout, "ship it") {
+		t.Fatalf("stdout = %q", stdout)
+	}
+}
+
 func newStaticTokenServer(t *testing.T) *httptest.Server {
 	t.Helper()
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

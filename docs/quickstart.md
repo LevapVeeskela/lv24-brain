@@ -125,8 +125,8 @@ the CLI (including a migration import) needs an explicit reindex:
 
 `brain index` upserts every project, state, note, decision, attempt, and handoff
 into the local index. `brain index --rebuild` first deletes `index/brain.db`
-(and its sidecar files), then rebuilds from Markdown. Both commands are local
-and `git` mode only.
+(and its sidecar files), then rebuilds from Markdown. `brain index` is local and
+`git` mode only; `brain search` also works in server mode.
 
 `brain search` prints one block per hit:
 
@@ -135,9 +135,9 @@ note/demo/First note
   <snippet>
 ```
 
-Server mode does not use the local index. Its search path is
-`GET /v1/search?q=...`; the CLI `brain search` and `brain index` commands
-return an unsupported-mode error there.
+Server mode does not use the local index. `brain search` there calls
+`GET /v1/search?q=...` on the configured server; `brain index` returns an
+unsupported-mode error.
 
 ### Connectors
 
@@ -227,8 +227,9 @@ a token in the repository URL.
 The HTTP API and the token-authenticated CLI client are implemented. Postgres
 persistence is enabled by `BRAIN_DATABASE_URL` (or `DATABASE_URL`); without it
 the server falls back to an in-memory store and loses data on restart. Server
-schema 3 (migrations `0002_auth_tokens.sql` and `0003_auth_revocations.sql`)
-stores API tokens and refresh-token families durably. See
+schema 4 (migrations `0002_auth_tokens.sql`, `0003_auth_revocations.sql`, and
+`0004_security_audit.sql`) stores API tokens, refresh-token families, and the
+security audit log durably. See
 [deploy.md](deploy.md) for Compose, backups, and the migration gate.
 
 Start the server with an explicit signing key, one bootstrap administrator, and
@@ -352,11 +353,11 @@ ok: git (not used in server mode)
 A successful write prints `note note-<project>-YYYYMMDD-HHMMSS`.
 
 The `schema` check reports the data schema from `brain.yaml`; the server
-database schema (`postgres.SchemaVersion`, currently 3) is separate.
+database schema (`postgres.SchemaVersion`, currently 4) is separate.
 
 `brain sync` is not implemented in server mode — the API is the sync path.
-`brain index` and `brain search` are local-only; use `GET /v1/search?q=...` for
-server-side search. Server-side Markdown import/export is not wired yet.
+`brain index` is local-only; `brain search` works in server mode through
+`GET /v1/search?q=...`. Server-side Markdown import/export is not wired yet.
 `brain doctor` fails the `server` check when the URL is wrong or no usable token
 is stored.
 
@@ -395,7 +396,7 @@ is stored.
   token was found in `BRAIN_TOKEN` / the OS secret store.
 - `local search index is not available` from `search` — run `brain index` (or
   `brain index --rebuild`) against the configured data directory.
-- `search uses the local index; server search is not wired` — the CLI search
-  command is local-only; use `GET /v1/search?q=...` in server mode.
+- `index is local-only in server mode` — `brain index` runs only in local or
+  `git` mode; in server mode `brain search` calls `GET /v1/search?q=...`.
 - `sync in server mode: not implemented` — server mode does not use Git sync;
   reads and writes go through the HTTP API.

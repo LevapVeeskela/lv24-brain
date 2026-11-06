@@ -52,10 +52,7 @@ func (a *App) Note(ctx context.Context, input NoteInput) (NoteResult, error) {
 
 func (a *App) finishNote(ctx context.Context, note domain.Note, revision domain.SyncRevision) (NoteResult, error) {
 	result := NoteResult{Note: note, Revision: revision}
-	if err := a.upsertIndex(ctx, noteDocument(note)); err != nil {
-		return result, fmt.Errorf("note %s was written but the search index update failed: %w", note.ID, err)
-	}
-	return result, nil
+	return result, a.afterWrite(ctx, JournalNote, note.ProjectID, note.ID, note.Title, noteDocument(note))
 }
 
 // Decision appends a decision record and indexes it for search.
@@ -96,10 +93,7 @@ func (a *App) Decision(ctx context.Context, input DecisionInput) (DecisionResult
 		return DecisionResult{}, err
 	}
 	result := DecisionResult{Decision: decision, Revision: revision}
-	if err := a.upsertIndex(ctx, decisionDocument(decision)); err != nil {
-		return result, fmt.Errorf("decision %s was written but the search index update failed: %w", decision.ID, err)
-	}
-	return result, nil
+	return result, a.afterWrite(ctx, JournalDecision, decision.ProjectID, decision.ID, decision.Title, decisionDocument(decision))
 }
 
 // Attempt appends an attempt record and indexes it for search.
@@ -134,10 +128,7 @@ func (a *App) Attempt(ctx context.Context, input AttemptInput) (AttemptResult, e
 		return AttemptResult{}, err
 	}
 	result := AttemptResult{Attempt: attempt, Revision: revision}
-	if err := a.upsertIndex(ctx, attemptDocument(attempt)); err != nil {
-		return result, fmt.Errorf("attempt %s was written but the search index update failed: %w", attempt.ID, err)
-	}
-	return result, nil
+	return result, a.afterWrite(ctx, JournalAttempt, attempt.ProjectID, attempt.ID, attempt.Title, attemptDocument(attempt))
 }
 
 // Handoff appends a session handoff and indexes it for search.
@@ -170,8 +161,5 @@ func (a *App) Handoff(ctx context.Context, input HandoffInput) (HandoffResult, e
 		return HandoffResult{}, err
 	}
 	result := HandoffResult{Handoff: handoff, Revision: revision}
-	if err := a.upsertIndex(ctx, handoffDocument(handoff)); err != nil {
-		return result, fmt.Errorf("handoff %s was written but the search index update failed: %w", handoff.ID, err)
-	}
-	return result, nil
+	return result, a.afterWrite(ctx, JournalHandoff, handoff.ProjectID, handoff.ID, handoff.Summary, handoffDocument(handoff))
 }

@@ -221,32 +221,69 @@ and sets `schema_version: 1` in the target `brain.yaml`.
 
 ## Rollback
 
-The source directory is never modified, so the legacy `.brain` remains the
-fallback until the imported copy is verified.
+Every non-dry-run `brain migrate` first writes a backup, then the import, then
+a manifest:
 
-- If the target is a Git repository and nothing was committed:
+```text
+<data-dir>/backups/migrate-<UTC yyyymmddThhmmssZ>/
+  manifest.json          created files with SHA-256, pre-run state of registry and config
+  registry.json.before   copy of registry.json, only when it existed before the run
+  brain.yaml.before      copy of the config, only when it existed before the run
+```
 
-  ```powershell
-  git -C $brainData status --short
-  git -C $brainData clean -fd -- projects
-  ```
+The manifest is written even when the import reports conflicts or failures, so
+files it created can still be reverted. `backups/` is ignored by the data
+repository's `.gitignore`.
 
-  Review the dry-run output first: `clean -fd` removes untracked files. If the
-  target already had tracked files, conflicts prevented overwriting them, so
-  they do not need to be restored.
+Revert the newest import, or a specific one:
 
-- If the target is not under Git, restore the pre-import backup of the target,
-  or remove only the project directories listed as created in the report. Do
-  not delete the whole target directory if it contains other data.
+```powershell
+brain migrate --rollback latest --data-dir $brainData
+brain migrate --rollback $brainData\backups\migrate-20261106T103000Z\manifest.json --config $brainData\brain.yaml
+brain migrate --rollback latest --data-dir $brainData --dry-run
+```
 
+`--rollback` cannot be combined with `--from`. Add `--data-dir` or `--config`
+to resolve the target; with an explicit manifest the target must match the one
+recorded in it.
+
+Rollback rules:
+
+- A file created by the import is deleted only when its bytes still match the
+  hash in the manifest. A file that was edited afterwards is kept and reported
+  as `modified since migration`.
+- A created file that is already gone is reported as `already removed`.
+- `registry.json` and `brain.yaml` are restored from the `.before` copy only
+  when they still hold the content the import wrote. If they changed since, they
+  are left alone and reported.
+- Project directories are removed only when the import created them and they are
+  empty by then.
+- Every manifest path is validated before anything changes. Absolute paths,
+  `..`, paths outside `projects/<id>/`, and a manifest outside
+  `<target>/backups/` are rejected.
+- The legacy `.brain` source is never read or written during rollback, and
+  `backups/` itself is kept.
+
+Exit codes for `--rollback`: `0` everything was reverted (or a dry run found
+nothing blocking), `1` at least one file was kept as modified or skipped, `2`
+usage error.
+
+A config file that lies outside the target directory is never touched by
+rollback. It is reported as `skipped`; revert it by hand.
+
+Imports made before the manifest existed have no `backups/` entry. For those,
+use the manual steps:
+
+- If the target is a Git repository and nothing was committed, review
+  `git -C $brainData status --short`, then `git -C $brainData clean -fd -- projects`.
+  `clean -fd` removes untracked files, so run the dry-run first.
 - If the import was committed, revert the import commit:
+  `git -C $brainData revert <import-commit>`.
+- Otherwise remove only the project directories listed as created in the report.
+  Do not delete the whole target directory if it contains other data.
 
-  ```powershell
-  git -C $brainData revert <import-commit>
-  ```
-
-- Do not delete the legacy `.brain` directory until the new engine has passed
-  the verification above and any required soak period.
+Do not delete the legacy `.brain` directory until the new engine has passed the
+verification above and any required soak period.
 
 ## Command behavior
 
@@ -257,12 +294,13 @@ fallback until the imported copy is verified.
 | `--from <legacy-dir>` | Required legacy `.brain` data directory. |
 | `--data-dir <target-dir>` | Target data directory. When omitted, `data_dir` comes from `brain.yaml`. |
 | `--config <path>` | Optional `brain.yaml` path, used to resolve the target and updated after a successful run. |
-| `--dry-run` | Parse and report without writing anything. |
+| `--dry-run` | Parse and report without writing anything. With `--rollback`, report the revert plan without changing files. |
+| `--rollback <manifest.json \| latest>` | Revert a previous import using its manifest. Cannot be combined with `--from`. See [Rollback](#rollback). |
 
 Exit codes:
 
 - `0`: every file was created or already unchanged.
-- `1`: at least one conflict or failed file, or a fatal validation/I/O error.
+- `1`: at least one conflict or failed file, or a fatal validation/I/O error. With `--rollback`: at least one file was kept because it changed after the import.
 - `2`: usage error, such as a missing `--from` or an unknown flag.
 
 After a successful non-dry run, the CLI:

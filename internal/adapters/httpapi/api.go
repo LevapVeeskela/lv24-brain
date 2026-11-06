@@ -16,6 +16,7 @@ import (
 
 	"github.com/levapveeskela/lv24-brain/internal/auth"
 	"github.com/levapveeskela/lv24-brain/internal/domain"
+	"github.com/levapveeskela/lv24-brain/internal/ports"
 	"github.com/levapveeskela/lv24-brain/internal/version"
 )
 
@@ -234,6 +235,7 @@ func (a *API) routes() {
 
 	a.authed("GET /v1/search", a.search, domain.RoleViewer, false)
 	a.authed("GET /v1/revisions", a.listRevisions, domain.RoleViewer, false)
+	a.authed("GET /v1/audit", a.listAudit, domain.RoleAdmin, false)
 
 	a.authed("POST /v1/connectors/run", a.runConnector, domain.RoleAdmin, false)
 	a.authed("GET /v1/connectors/runs", a.listConnectorRuns, domain.RoleViewer, false)
@@ -307,7 +309,7 @@ func (a *API) withAuth(min domain.Role, allowTicket bool, next http.Handler) htt
 			return
 		}
 		ctx := context.WithValue(r.Context(), principalContextKey{}, principal)
-		ctx = context.WithValue(ctx, actorContextKey{}, principal.User.Login)
+		ctx = ports.WithActor(ctx, principal.User.Login)
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
 }

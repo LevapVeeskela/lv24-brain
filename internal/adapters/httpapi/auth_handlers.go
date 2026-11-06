@@ -1,7 +1,6 @@
 package httpapi
 
 import (
-	"context"
 	"crypto/subtle"
 	"errors"
 	"fmt"
@@ -53,18 +52,24 @@ func (a *API) login(w http.ResponseWriter, r *http.Request) {
 	// A second budget per account stops one login being brute-forced from
 	// many addresses.
 	if !a.accountLimit.allow(strings.ToLower(strings.TrimSpace(body.Login))) {
+		a.audit(r, strings.TrimSpace(body.Login), SecurityEvent{Action: AuditLoginRateLimited, EntityKind: auditEntityUser})
 		writeLoginRateLimited(w)
 		return
 	}
 	session, err := a.auth.Login(r.Context(), ports.Credentials{Login: body.Login, Password: body.Password})
 	if err != nil {
 		if errors.Is(err, auth.ErrInvalidCredentials) {
+			a.audit(r, strings.TrimSpace(body.Login), SecurityEvent{Action: AuditLoginFailed, EntityKind: auditEntityUser})
 			writeErrorCode(w, http.StatusUnauthorized, "invalid_credentials", "invalid login or password")
 			return
 		}
 		a.writeError(w, r, err)
 		return
 	}
+	a.audit(r, session.User.Login, SecurityEvent{
+		Action: AuditLoginSucceeded, EntityKind: auditEntityUser, EntityID: session.User.ID,
+		Detail: map[string]any{"method": "password"},
+	})
 	writeJSON(w, http.StatusOK, newSessionResponse(session))
 }
 
@@ -80,6 +85,11 @@ func (a *API) refresh(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		// Only credential failures are the caller's fault. Infrastructure
 		// failures must not be reported as a bad refresh token.
+		if errors.Is(err, auth.ErrRefreshReused) {
+			// Reuse of a rotated refresh token means it leaked; the auth
+			// service revokes the family. Record it for admins.
+			a.audit(r, "", SecurityEvent{Action: AuditRefreshReused, EntityKind: auditEntityUser})
+		}
 		if isRefreshCredentialError(err) {
 			writeErrorCode(w, http.StatusUnauthorized, "invalid_refresh", "refresh token is invalid")
 			return
@@ -113,6 +123,7 @@ func (a *API) logout(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	a.audit(r, "", SecurityEvent{Action: AuditLogout, EntityKind: auditEntityUser, EntityID: principal.User.ID})
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -245,7 +256,7 @@ func (a *API) oidcCallback(w http.ResponseWriter, r *http.Request) {
 		writeErrorCode(w, http.StatusUnauthorized, "oidc_rejected", "identity provider rejected the login")
 		return
 	}
-	user, err := a.resolveOIDCUser(r.Context(), claims)
+	user, err := a.resolveOIDCUser(r, claims)
 	if err != nil {
 		a.writeError(w, r, err)
 		return
@@ -258,12 +269,20 @@ func (a *API) oidcCallback(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, newSessionResponse(session))
 }
 
-func (a *API) resolveOIDCUser(ctx context.Context, claims auth.OIDCClaims) (domain.User, error) {
+func (a *API) resolveOIDCUser(r *http.Request, claims auth.OIDCClaims) (domain.User, error) {
+	ctx := r.Context()
+	oidcDetail := map[string]any{"issuer": claims.Issuer, "subject": claims.Subject}
+	refuse := func(reason string, err error) (domain.User, error) {
+		detail := map[string]any{"issuer": claims.Issuer, "subject": claims.Subject, "reason": reason}
+		a.audit(r, claims.Login, SecurityEvent{Action: AuditOIDCRefused, EntityKind: auditEntityUser, Detail: detail})
+		return domain.User{}, err
+	}
 	if claims.Issuer == "" || claims.Subject == "" {
 		return domain.User{}, domain.NewValidationError("oidc.subject", "issuer and subject are required")
 	}
 	record, err := a.store.GetUserByOIDC(ctx, claims.Issuer, claims.Subject)
 	if err == nil {
+		a.audit(r, record.User.Login, SecurityEvent{Action: AuditOIDCLogin, EntityKind: auditEntityUser, EntityID: record.ID, Detail: oidcDetail})
 		return record.User, nil
 	}
 	if !errors.Is(err, domain.ErrNotFound) {
@@ -273,7 +292,7 @@ func (a *API) resolveOIDCUser(ctx context.Context, claims auth.OIDCClaims) (doma
 	switch {
 	case err == nil:
 		if record.OIDCIssuer != "" || record.OIDCSubject != "" {
-			return domain.User{}, domain.NewValidationError("oidc.subject", "account is linked to another identity provider")
+			return refuse("linked_to_other_identity", domain.NewValidationError("oidc.subject", "account is linked to another identity provider"))
 		}
 		// Auto-linking an existing local account is an account takeover risk:
 		// only a provider-verified email that equals the login may link, and
@@ -281,22 +300,23 @@ func (a *API) resolveOIDCUser(ctx context.Context, claims auth.OIDCClaims) (doma
 		if !claims.EmailVerified || claims.Email == "" || !strings.EqualFold(claims.Email, record.Login) {
 			a.logger.Warn("oidc login matches an existing account without a verified email; refusing to link",
 				"request_id", requestIDFrom(ctx), "user_id", record.ID)
-			return domain.User{}, auth.ErrForbidden
+			return refuse("unverified_email", auth.ErrForbidden)
 		}
 		if record.Role == domain.RoleAdmin {
 			a.logger.Warn("oidc login matches an admin account; refusing to link implicitly",
 				"request_id", requestIDFrom(ctx), "user_id", record.ID)
-			return domain.User{}, auth.ErrForbidden
+			return refuse("admin_account", auth.ErrForbidden)
 		}
 		if _, err := a.store.SetUserOIDC(ctx, record.ID, claims.Issuer, claims.Subject); err != nil {
 			return domain.User{}, err
 		}
+		a.audit(r, record.User.Login, SecurityEvent{Action: AuditOIDCLinked, EntityKind: auditEntityUser, EntityID: record.ID, Detail: oidcDetail})
 		return record.User, nil
 	case !errors.Is(err, domain.ErrNotFound):
 		return domain.User{}, err
 	}
 	if !a.cfg.OIDCAllowSignup {
-		return domain.User{}, auth.ErrForbidden
+		return refuse("signup_disabled", auth.ErrForbidden)
 	}
 	role := claims.Role
 	if !role.Valid() {
@@ -314,6 +334,7 @@ func (a *API) resolveOIDCUser(ctx context.Context, claims auth.OIDCClaims) (doma
 	if _, err := a.store.SetUserOIDC(ctx, created.ID, claims.Issuer, claims.Subject); err != nil {
 		return domain.User{}, err
 	}
+	a.audit(r, created.User.Login, SecurityEvent{Action: AuditOIDCSignup, EntityKind: auditEntityUser, EntityID: created.ID, Detail: oidcDetail})
 	return created.User, nil
 }
 
@@ -386,6 +407,10 @@ func (a *API) createToken(w http.ResponseWriter, r *http.Request) {
 		a.writeError(w, r, err)
 		return
 	}
+	a.audit(r, "", SecurityEvent{
+		Action: AuditAPITokenCreated, EntityKind: auditEntityAPIToken, EntityID: record.ID,
+		Detail: map[string]any{"owner": record.UserID, "role": string(record.Role), "name": record.Name},
+	})
 	writeJSON(w, http.StatusCreated, createTokenResponse{Token: raw, APIToken: record})
 }
 
@@ -425,6 +450,10 @@ func (a *API) revokeToken(w http.ResponseWriter, r *http.Request) {
 		a.writeError(w, r, err)
 		return
 	}
+	a.audit(r, "", SecurityEvent{
+		Action: AuditAPITokenRevoked, EntityKind: auditEntityAPIToken, EntityID: record.ID,
+		Detail: map[string]any{"owner": record.UserID},
+	})
 	w.WriteHeader(http.StatusNoContent)
 }
 

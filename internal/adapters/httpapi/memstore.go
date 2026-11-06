@@ -43,6 +43,11 @@ type MemoryStore struct {
 
 	connectorRuns map[string]ConnectorRunRecord
 
+	// audit holds security events only (bounded); the in-memory store is a
+	// development fallback and does not mirror entity audit rows.
+	audit       []AuditEvent
+	auditNextID int64
+
 	refresh map[string]auth.RefreshRecord
 	// revokedSessions and revokedFamilies mirror the durable PostgreSQL
 	// auth_revocations tombstones so a logout racing an in-flight refresh
@@ -1421,10 +1426,58 @@ func snippet(body, needle string, max int) string {
 	return strings.TrimSpace(body[start:end])
 }
 
-// actorContextKey carries the acting principal for revision audit rows.
-type actorContextKey struct{}
-
 func actorFromContext(ctx context.Context) string {
-	actor, _ := ctx.Value(actorContextKey{}).(string)
-	return actor
+	return ports.ActorFromContext(ctx)
+}
+
+// RecordSecurityEvent appends a security audit event (bounded ring).
+func (m *MemoryStore) RecordSecurityEvent(ctx context.Context, event SecurityEvent) error {
+	if strings.TrimSpace(event.Action) == "" {
+		return domain.NewValidationError("audit.action", "is required")
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.auditNextID++
+	m.audit = append(m.audit, AuditEvent{
+		ID:         m.auditNextID,
+		Actor:      actorFromContext(ctx),
+		Action:     event.Action,
+		EntityKind: event.EntityKind,
+		EntityID:   event.EntityID,
+		Detail:     event.Detail,
+		CreatedAt:  m.now().UTC(),
+	})
+	if overflow := len(m.audit) - maxMemoryAuditEvents; overflow > 0 {
+		m.audit = append([]AuditEvent(nil), m.audit[overflow:]...)
+	}
+	return nil
+}
+
+// ListAuditEvents lists recorded security events newest first.
+func (m *MemoryStore) ListAuditEvents(_ context.Context, filter AuditFilter) ([]AuditEvent, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	out := make([]AuditEvent, 0)
+	for i := len(m.audit) - 1; i >= 0; i-- {
+		event := m.audit[i]
+		switch {
+		case filter.Actor != "" && event.Actor != filter.Actor,
+			filter.Action != "" && event.Action != filter.Action,
+			filter.EntityKind != "" && event.EntityKind != filter.EntityKind,
+			filter.EntityID != "" && event.EntityID != filter.EntityID,
+			filter.Since != nil && event.CreatedAt.Before(*filter.Since),
+			filter.Until != nil && !event.CreatedAt.Before(*filter.Until):
+			continue
+		}
+		out = append(out, event)
+	}
+	offset := max(filter.Offset, 0)
+	if offset >= len(out) {
+		return []AuditEvent{}, nil
+	}
+	out = out[offset:]
+	if limit := clampAuditLimit(filter.Limit); len(out) > limit {
+		out = out[:limit]
+	}
+	return out, nil
 }

@@ -36,7 +36,7 @@ const (
 	// PostgreSQL integration tests. When it is unset those tests skip.
 	TestDatabaseURLEnv = "BRAIN_TEST_DATABASE_URL"
 	// SchemaVersion is the newest server schema this engine understands.
-	SchemaVersion = 3
+	SchemaVersion = 4
 
 	defaultApplicationName = "lv24-brain-server"
 	defaultListLimit       = 50
@@ -185,21 +185,16 @@ type rowScanner interface {
 	Scan(dest ...any) error
 }
 
-type actorContextKey struct{}
-
 // WithActor attaches the acting principal to a context. Mutations copy it into
-// audit_events; storage methods never log it.
+// audit_events; storage methods never log it. It shares ports' context key with
+// the HTTP layer, so the authenticated login reaches every revision row.
 func WithActor(ctx context.Context, actor string) context.Context {
-	if actor == "" {
-		return ctx
-	}
-	return context.WithValue(ctx, actorContextKey{}, actor)
+	return ports.WithActor(ctx, actor)
 }
 
 // ActorFromContext returns the actor stored by WithActor, or an empty string.
 func ActorFromContext(ctx context.Context) string {
-	actor, _ := ctx.Value(actorContextKey{}).(string)
-	return actor
+	return ports.ActorFromContext(ctx)
 }
 
 // RevisionValue converts a server SyncRevision into its numeric value.

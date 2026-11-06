@@ -108,6 +108,10 @@ func runWithInput(args []string, stdin io.Reader, stdout, stderr io.Writer) int 
 		return runIndex(rest, stdout, stderr)
 	case "search":
 		return runSearch(rest, stdout, stderr)
+	case "journal":
+		return runJournal(rest, stdout, stderr)
+	case "event":
+		return runEvent(rest, stdout, stderr)
 	case "connector":
 		return runConnector(rest, stdout, stderr)
 	case "migrate":
@@ -154,9 +158,11 @@ Commands:
   review     Build a review report
   sync       Pull, commit, and push brain data
   index      Rebuild or refresh the local search index
-  search     Search the local index
+  search     Search notes, decisions, attempts and handoffs
+  journal    Show the per-user activity journal (local/git)
+  event      Record an external event, e.g. "event commit" from a git hook
   connector  Run a read-only GitHub, GitLab, or IMAP connector
-  migrate    Import a legacy .brain data directory
+  migrate    Import a legacy .brain data directory; --rollback reverts an import
   secret     Manage OS-backed secrets (set, list, remove)
   login      Authenticate against a server-mode brain
   logout     Revoke the server session and clear stored tokens
@@ -1200,6 +1206,7 @@ func runMigrate(args []string, stdout, stderr io.Writer) int {
 	from := fs.String("from", "", "legacy .brain data directory")
 	dataDir := fs.String("data-dir", "", "target data directory")
 	dryRun := fs.Bool("dry-run", false, "report without writing")
+	rollback := fs.String("rollback", "", "revert a migration: <manifest.json> or latest")
 	cfgPath := initConfigFlag(fs)
 	if err := fs.Parse(args); err != nil {
 		return 2
@@ -1208,13 +1215,70 @@ func runMigrate(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "brain migrate: unexpected arguments: %s\n", strings.Join(fs.Args(), " "))
 		return 2
 	}
+	setFlags := map[string]bool{}
+	fs.Visit(func(f *flag.Flag) { setFlags[f.Name] = true })
+	if setFlags["rollback"] {
+		if setFlags["from"] {
+			fmt.Fprintln(stderr, "brain migrate: --rollback cannot be combined with --from")
+			return 2
+		}
+		if strings.TrimSpace(*rollback) == "" {
+			fmt.Fprintln(stderr, "brain migrate: --rollback requires a manifest path or latest")
+			return 2
+		}
+		return runMigrateRollback(*rollback, *dataDir, *cfgPath, *dryRun, stdout, stderr)
+	}
 	if strings.TrimSpace(*from) == "" {
 		fmt.Fprintln(stderr, "brain migrate: --from is required")
 		return 2
 	}
 
-	target := strings.TrimSpace(*dataDir)
-	configPath := strings.TrimSpace(*cfgPath)
+	target, configPath, err := resolveMigrateTarget(*dataDir, *cfgPath)
+	if err != nil {
+		return reportError(stderr, "migrate", err)
+	}
+	opts := migrate.Options{
+		SourceDir: *from,
+		TargetDir: target,
+		DryRun:    *dryRun,
+	}
+	var backup *migrate.Backup
+	if !*dryRun {
+		backup, err = migrate.BeginBackup(opts, configPath, time.Now())
+		if err != nil {
+			return reportError(stderr, "migrate", err)
+		}
+	}
+
+	result, runErr := migrate.Run(context.Background(), opts)
+	printMigrateResult(stdout, result)
+	if runErr == nil && !*dryRun {
+		runErr = finishMigratedTargets(result, configPath)
+	}
+	if backup != nil {
+		manifestPath, manifestErr := backup.Finish(result)
+		if manifestErr != nil {
+			manifestErr = fmt.Errorf("write rollback manifest: %w", manifestErr)
+			if runErr == nil {
+				runErr = manifestErr
+			} else {
+				fmt.Fprintf(stderr, "brain migrate: %v\n", manifestErr)
+			}
+		} else {
+			fmt.Fprintf(stdout, "manifest  %s\n", manifestPath)
+		}
+	}
+	if runErr != nil {
+		return reportError(stderr, "migrate", runErr)
+	}
+	return 0
+}
+
+// resolveMigrateTarget returns the target data directory and the config path
+// for migrate. Without --data-dir the data directory comes from brain.yaml.
+func resolveMigrateTarget(dataDir, cfgPath string) (string, string, error) {
+	target := strings.TrimSpace(dataDir)
+	configPath := strings.TrimSpace(cfgPath)
 	if target == "" {
 		loadPath := configPath
 		if loadPath == "" {
@@ -1222,7 +1286,7 @@ func runMigrate(args []string, stdout, stderr io.Writer) int {
 		}
 		cfg, err := config.Load(loadPath)
 		if err != nil {
-			return reportError(stderr, "migrate", err)
+			return "", "", err
 		}
 		target = strings.TrimSpace(cfg.DataDir)
 		if configPath == "" {
@@ -1230,32 +1294,89 @@ func runMigrate(args []string, stdout, stderr io.Writer) int {
 		}
 	}
 	if target == "" {
-		fmt.Fprintln(stderr, "brain migrate: target data directory is required; pass --data-dir or set data_dir in brain.yaml")
-		return 1
-	}
-
-	result, runErr := migrate.Run(context.Background(), migrate.Options{
-		SourceDir: *from,
-		TargetDir: target,
-		DryRun:    *dryRun,
-	})
-	printMigrateResult(stdout, result)
-	if runErr != nil {
-		return reportError(stderr, "migrate", runErr)
-	}
-	if *dryRun {
-		return 0
-	}
-	if err := registerMigratedProjects(result.TargetDir, result.SourceDir, result); err != nil {
-		return reportError(stderr, "migrate", err)
+		return "", "", fmt.Errorf("target data directory is required; pass --data-dir or set data_dir in brain.yaml")
 	}
 	if configPath == "" {
-		configPath = filepath.Join(result.TargetDir, config.FileName)
+		configPath = filepath.Join(target, config.FileName)
 	}
-	if err := setMigratedSchema(configPath, result.TargetDir); err != nil {
+	return target, configPath, nil
+}
+
+// finishMigratedTargets updates the registry and the config after a successful import.
+func finishMigratedTargets(result migrate.Result, configPath string) error {
+	if err := registerMigratedProjects(result.TargetDir, result.SourceDir, result); err != nil {
+		return err
+	}
+	return setMigratedSchema(configPath, result.TargetDir)
+}
+
+// runMigrateRollback reverts a migration. spec is a manifest path or "latest".
+// Exit code 1 means some files were kept because they changed after migration.
+func runMigrateRollback(spec, dataDir, cfgPath string, dryRun bool, stdout, stderr io.Writer) int {
+	manifestPath := strings.TrimSpace(spec)
+	flagsGiven := strings.TrimSpace(dataDir) != "" || strings.TrimSpace(cfgPath) != ""
+	if manifestPath == "latest" {
+		target, _, err := resolveMigrateTarget(dataDir, cfgPath)
+		if err != nil {
+			return reportError(stderr, "migrate", err)
+		}
+		manifestPath, err = migrate.FindLatestManifest(target)
+		if err != nil {
+			return reportError(stderr, "migrate", err)
+		}
+	} else if flagsGiven {
+		manifest, err := migrate.LoadManifest(manifestPath)
+		if err != nil {
+			return reportError(stderr, "migrate", err)
+		}
+		target, _, err := resolveMigrateTarget(dataDir, cfgPath)
+		if err != nil {
+			return reportError(stderr, "migrate", err)
+		}
+		if !samePathForMigrate(target, manifest.TargetDir) {
+			return reportError(stderr, "migrate", fmt.Errorf("manifest belongs to %s, not %s", manifest.TargetDir, target))
+		}
+	}
+	result, err := migrate.Rollback(context.Background(), migrate.RollbackOptions{
+		ManifestPath: manifestPath,
+		DryRun:       dryRun,
+	})
+	if err != nil {
 		return reportError(stderr, "migrate", err)
 	}
+	printRollbackResult(stdout, result)
+	if result.Skipped > 0 {
+		return 1
+	}
 	return 0
+}
+
+func samePathForMigrate(a, b string) bool {
+	absA, errA := filepath.Abs(a)
+	absB, errB := filepath.Abs(b)
+	if errA != nil || errB != nil {
+		return false
+	}
+	if runtime.GOOS == "windows" {
+		return strings.EqualFold(absA, absB)
+	}
+	return absA == absB
+}
+
+func printRollbackResult(w io.Writer, result migrate.RollbackResult) {
+	fmt.Fprintf(w, "manifest  %s\n", result.ManifestPath)
+	fmt.Fprintf(w, "target    %s\n", result.TargetDir)
+	if result.DryRun {
+		fmt.Fprintln(w, "dry run: nothing was changed")
+	}
+	for _, entry := range result.Entries {
+		detail := entry.Path
+		if entry.Detail != "" {
+			detail += ": " + entry.Detail
+		}
+		fmt.Fprintf(w, "%s: %s\n", entry.Status, detail)
+	}
+	fmt.Fprintf(w, "skipped   %d\n", result.Skipped)
 }
 
 // legacyRegistryEntry is the subset of the legacy .brain registry.json used to
@@ -1787,7 +1908,7 @@ func runUpdate(args []string, stdout, stderr io.Writer) int {
 // never block or change the exit code of the command the user asked for.
 func maybeDailyUpdateNotice(command string, args []string, stderr io.Writer) {
 	switch command {
-	case "serve", "init", "help", "-h", "--help", "version", "-v", "--version", "update":
+	case "serve", "init", "help", "-h", "--help", "version", "-v", "--version", "update", "event":
 		return
 	}
 	cfg, err := loadConfigOrDefault(configPathFromArgs(args))

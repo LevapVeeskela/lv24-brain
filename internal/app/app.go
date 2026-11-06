@@ -33,8 +33,14 @@ const DefaultBootstrapBudget = 4000
 
 // Dependencies are adapter implementations selected at bootstrap.
 type Dependencies struct {
-	Store   ports.Store
-	Index   ports.Index
+	Store ports.Store
+	Index ports.Index
+	// Searcher runs search against the server in server mode, where no local
+	// index is built. Index stays nil there.
+	Searcher Searcher
+	// Journal records per-user activity in local and git modes; nil in
+	// server mode.
+	Journal ports.Journal
 	Sync    ports.SyncProvider
 	Secrets ports.SecretStore
 	Auth    ports.AuthProvider

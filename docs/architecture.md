@@ -119,7 +119,9 @@ brain status     show mode, paths, schema, engine version
 brain review     report state age, questions, evidence, attempts
 brain sync       commit, rebase, optional push, or --status (local/git only)
 brain index      refresh the local FTS5 index, or --rebuild it (local/git only)
-brain search     query the local FTS5 index (local/git only)
+brain search     query the local FTS5 index (local/git), or GET /v1/search (server)
+brain journal    show journal/<user>.jsonl activity, newest first (local/git)
+brain event      record an external event; `event commit` reads git for a post-commit hook
 brain connector  run a read-only GitHub, GitLab, or IMAP connector
 brain migrate    import a legacy .brain data directory
 brain secret     set, list, or remove OS-backed secrets
@@ -160,9 +162,9 @@ process: `brain login` refuses to run and `brain logout` leaves a stored
 session untouched and exits non-zero. A static API token can still be installed
 with `brain secret set server-token` (value read from stdin). There is no CLI
 OIDC flow yet. Missing or invalid tokens surface as a failing `server` check in
-`brain doctor`. `brain sync`, `brain index`, and `brain search` are not
-available in server mode: the API is the sync and search path
-(`GET /v1/search`).
+`brain doctor`. `brain sync` and `brain index` are not available in server
+mode: the API is the sync path. `brain search` works in server mode through
+`GET /v1/search`.
 
 List-like capabilities are optional Store extensions: an adapter that does not
 implement `ListNotes` / `ListDecisions` / `ListAttempts` / `ListHandoffs` still
@@ -227,13 +229,25 @@ Persistence:
   refuses to start until a backup is taken and
   `BRAIN_DATABASE_BACKUP_CONFIRMED=1` is set. A fresh database migrates
   immediately.
-- `postgres.SchemaVersion` is 3. Migration `0002_auth_tokens.sql` adds the
+- `postgres.SchemaVersion` is 4. Migration `0002_auth_tokens.sql` adds the
   `api_tokens` and `refresh_tokens` tables, so API tokens and refresh-token
   families survive restarts. Migration `0003_auth_revocations.sql` adds durable
   family/session revocation tombstones with no expiry, so pruning expired token
   rows cannot resurrect a revoked family. `serverstore` converts these records;
   Postgres performs the writes. Refresh-token rotation still revokes the whole
-  family when a used token is presented again.
+  family when a used token is presented again. Migration
+  `0004_security_audit.sql` lets security audit events (logins, logouts,
+  refresh-token reuse, API-token lifecycle, OIDC linking) be stored without a
+  revision, so they never appear in `/v1/revisions` or SSE; admins read them
+  with `GET /v1/audit`.
+- The authenticated login is attached to the request context through
+  `ports.WithActor`, which both the HTTP layer and the Postgres adapter use, so
+  every revision and audit row records who made the change.
+- Local and git modes append per-user activity to `journal/<user>.jsonl`
+  (`brain.yaml` `user`, else the OS account name): one line per note,
+  decision, attempt, handoff, and recorded commit. Each user writes only their
+  own file, so git-mode writers never conflict on it; the format is the legacy
+  tool's flat JSON Lines and legacy lines (with a BOM) remain readable.
 - Multi-replica deployment remains unsupported even with durable tokens: the
   SSE broker and the login rate limiter are per-process, so events and login
   throttling are not shared between instances.
@@ -334,7 +348,7 @@ left untouched and the command exits non-zero.
 | `brain sync` not implemented in server mode | API is the only server sync path |
 | Multi-replica deployment unsupported | the SSE broker and login rate limiter are per-process even with durable tokens |
 | Server-side connector dumps are not persisted | run records and per-run Markdown export are available; bulk GitHub/GitLab/IMAP Markdown dumps are discarded in server mode |
-| CLI search/index are local-only | server mode uses `GET /v1/search`; no local index is built |
+| CLI index is local-only | `brain search` in server mode uses `GET /v1/search`; no local index is built |
 | No server-side Markdown import/export | migrate into Markdown first; server records go through the API |
 | Server auto-update not implemented | upgrade by pulling a new image; `BRAIN_SERVER_AUTO_UPDATE` is reserved |
 

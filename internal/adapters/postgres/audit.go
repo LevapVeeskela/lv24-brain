@@ -11,7 +11,8 @@ import (
 	"github.com/levapveeskela/lv24-brain/internal/domain"
 )
 
-const auditColumns = `id, revision, actor, action, entity_kind, entity_id, detail, created_at`
+// revision is NULL for security events (migration 0004); it scans as 0.
+const auditColumns = `id, COALESCE(revision, 0), actor, action, entity_kind, entity_id, detail, created_at`
 
 // AuditEvent is one append-only audit record.
 type AuditEvent struct {
@@ -74,6 +75,32 @@ func (s *Store) RecordAuditEvent(ctx context.Context, action, entityKind, entity
 		return AuditEvent{}, domain.SyncRevision{}, err
 	}
 	return event, revision, nil
+}
+
+// RecordSecurityEvent appends an audit event without a revision, so it never
+// reaches the viewer-readable revision stream or SSE. Use it for
+// authentication and credential lifecycle events. Detail must not contain
+// secrets, tokens, or passwords.
+func (s *Store) RecordSecurityEvent(ctx context.Context, action, entityKind, entityID string, detail map[string]any) (AuditEvent, error) {
+	action = strings.TrimSpace(action)
+	if action == "" {
+		return AuditEvent{}, domain.NewValidationError("audit.action", "is required")
+	}
+	raw, err := marshalJSON(detail)
+	if err != nil {
+		return AuditEvent{}, err
+	}
+	var id int64
+	err = s.pool.QueryRow(ctx,
+		`INSERT INTO audit_events (revision, actor, action, entity_kind, entity_id, detail, created_at)
+		 VALUES (NULL, $1, $2, $3, $4, $5, $6)
+		 RETURNING id`,
+		ActorFromContext(ctx), action, entityKind, entityID, raw, s.nowUTC(),
+	).Scan(&id)
+	if err != nil {
+		return AuditEvent{}, mapPgError("insert security event", err)
+	}
+	return getAuditEvent(ctx, s.pool, id)
 }
 
 // GetAuditEvent loads one audit event.

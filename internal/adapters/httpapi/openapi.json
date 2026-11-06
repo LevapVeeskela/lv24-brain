@@ -471,6 +471,26 @@
         "responses": { "200": { "description": "Hits" } }
       }
     },
+    "/v1/audit": {
+      "get": {
+        "summary": "Audit log (admin): entity changes and security events such as logins, token lifecycle and OIDC linking",
+        "parameters": [
+          { "name": "actor", "in": "query", "schema": { "type": "string" } },
+          { "name": "action", "in": "query", "schema": { "type": "string" } },
+          { "name": "entityKind", "in": "query", "schema": { "type": "string" } },
+          { "name": "entityId", "in": "query", "schema": { "type": "string" } },
+          { "name": "since", "in": "query", "schema": { "type": "string", "format": "date-time" } },
+          { "name": "until", "in": "query", "schema": { "type": "string", "format": "date-time" } },
+          { "name": "limit", "in": "query", "schema": { "type": "integer" } },
+          { "name": "offset", "in": "query", "schema": { "type": "integer" } }
+        ],
+        "responses": {
+          "200": { "description": "Audit events, newest first" },
+          "400": { "description": "Invalid filter" },
+          "403": { "description": "Admin role required" }
+        }
+      }
+    },
     "/v1/revisions": {
       "get": {
         "summary": "List server revisions",

@@ -512,3 +512,40 @@ func (s *Store) DeleteConnectorRun(ctx context.Context, id string, expected int6
 	revision, err := s.pg.DeleteConnectorRun(ctx, id, expected)
 	return revision, mapError(err)
 }
+
+// RecordSecurityEvent appends a security audit event without a revision.
+func (s *Store) RecordSecurityEvent(ctx context.Context, event httpapi.SecurityEvent) error {
+	_, err := s.pg.RecordSecurityEvent(ctx, event.Action, event.EntityKind, event.EntityID, event.Detail)
+	return mapError(err)
+}
+
+// ListAuditEvents lists entity and security audit events newest first.
+func (s *Store) ListAuditEvents(ctx context.Context, filter httpapi.AuditFilter) ([]httpapi.AuditEvent, error) {
+	records, err := s.pg.ListAuditEvents(ctx, postgres.AuditFilter{
+		Actor:      filter.Actor,
+		Action:     filter.Action,
+		EntityKind: filter.EntityKind,
+		EntityID:   filter.EntityID,
+		Since:      filter.Since,
+		Until:      filter.Until,
+		Limit:      filter.Limit,
+		Offset:     filter.Offset,
+	})
+	if err != nil {
+		return nil, mapError(err)
+	}
+	out := make([]httpapi.AuditEvent, 0, len(records))
+	for _, record := range records {
+		out = append(out, httpapi.AuditEvent{
+			ID:         record.ID,
+			Revision:   record.Revision,
+			Actor:      record.Actor,
+			Action:     record.Action,
+			EntityKind: record.EntityKind,
+			EntityID:   record.EntityID,
+			Detail:     record.Detail,
+			CreatedAt:  record.CreatedAt,
+		})
+	}
+	return out, nil
+}

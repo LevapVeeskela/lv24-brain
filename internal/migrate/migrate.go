@@ -72,6 +72,8 @@ type FileResult struct {
 	TargetPath string `json:"target_path,omitempty"`
 	Status     Status `json:"status"`
 	Error      string `json:"error,omitempty"`
+	// SHA256 is the hex hash of the bytes written for a created file.
+	SHA256 string `json:"sha256,omitempty"`
 }
 
 // Result is the deterministic report of one migration run.
@@ -310,19 +312,19 @@ func storeFile(targetRoot, targetRel string, content []byte, projectID, kind, so
 		return
 	}
 	if dryRun {
-		result.created(projectID, kind, sourceRel, targetRel)
+		result.created(projectID, kind, sourceRel, targetRel, sha256Hex(content))
 		return
 	}
 	if err := writeFileAtomic(targetPath, content); err != nil {
 		result.fail(projectID, kind, sourceRel, targetRel, err.Error())
 		return
 	}
-	result.created(projectID, kind, sourceRel, targetRel)
+	result.created(projectID, kind, sourceRel, targetRel, sha256Hex(content))
 }
 
-func (r *Result) created(projectID, kind, sourceRel, targetRel string) {
+func (r *Result) created(projectID, kind, sourceRel, targetRel, sha string) {
 	r.Created++
-	r.Files = append(r.Files, FileResult{ProjectID: projectID, Kind: kind, SourcePath: sourceRel, TargetPath: targetRel, Status: StatusCreated})
+	r.Files = append(r.Files, FileResult{ProjectID: projectID, Kind: kind, SourcePath: sourceRel, TargetPath: targetRel, Status: StatusCreated, SHA256: sha})
 }
 
 func (r *Result) unchanged(projectID, kind, sourceRel, targetRel string) {
