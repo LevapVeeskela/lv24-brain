@@ -9,7 +9,9 @@ before:
 builds:
   - id: brain
     main: ./cmd/brain
-    binary: 'brain_{{ .Version }}_{{ .Os }}_{{ .Arch }}{{ .Ext }}'
+    # GoReleaser appends .exe for windows itself; adding .Ext here produced
+    # .exe.exe files in v0.1.1.
+    binary: 'brain_{{ .Version }}_{{ .Os }}_{{ .Arch }}'
     env:
       - CGO_ENABLED=0
     goos:
@@ -29,7 +31,9 @@ builds:
 
   - id: brain-server
     main: ./cmd/brain-server
-    binary: 'brain-server_{{ .Version }}_{{ .Os }}_{{ .Arch }}{{ .Ext }}'
+    # GoReleaser appends .exe for windows itself; adding .Ext here produced
+    # .exe.exe files in v0.1.1.
+    binary: 'brain-server_{{ .Version }}_{{ .Os }}_{{ .Arch }}'
     env:
       - CGO_ENABLED=0
     goos:

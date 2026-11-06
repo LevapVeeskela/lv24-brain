@@ -89,6 +89,16 @@ jobs:
           if not assets:
               raise SystemExit("no brain release assets found in checksums.txt")
 
+          # Every manifest asset must be a file that is about to be uploaded,
+          # and every uploaded binary must be in the manifest (v0.1.1 shipped
+          # .exe.exe files while the manifest pointed at .exe).
+          files = set(os.listdir("release-assets"))
+          named = {asset["name"] for asset in assets}
+          missing = sorted(name for name in named if name not in files)
+          stray = sorted(f for f in files if re.match(r"^(brain|brain-server)_", f) and f not in named)
+          if missing or stray:
+              raise SystemExit(f"release assets do not match the manifest: missing={missing} unreferenced={stray}")
+
           manifest = {
               "version": version,
               "channel": channel,
