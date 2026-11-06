@@ -43,6 +43,19 @@ func newConnectorRunner(store httpapi.Store, secretStore ports.SecretStore, time
 	return &connectorRunner{store: store, secretStore: secretStore, timeout: timeout, logger: logger}
 }
 
+// runConnector executes one connector, converting a connector panic into a
+// failed run record so the attempt is still persisted and auditable instead of
+// only being swallowed (or killing the HTTP connection) by net/http.
+func (r *connectorRunner) runConnector(ctx context.Context, connector ports.Connector, source string, opts ports.ConnectorOptions) (run domain.ConnectorRun, runErr error) {
+	defer func() {
+		if rec := recover(); rec != nil {
+			runErr = fmt.Errorf("connector panicked: %v", rec)
+			run = connectors.FinishRun(connectors.NewRun(source, time.Now()), nil, runErr, time.Now())
+		}
+	}()
+	return connector.Run(ctx, opts)
+}
+
 // Run executes one connector. A failed/partial connector result is returned as
 // a completed run record (status and sanitized error on the record); only build
 // and persistence failures are returned as errors.
@@ -73,11 +86,8 @@ func (r *connectorRunner) Run(ctx context.Context, req httpapi.ConnectorRunReque
 	defer cancel()
 
 	started := time.Now()
-	run, runErr := connector.Run(runCtx, ports.ConnectorOptions{
-		Projects: req.Projects,
-		Since:    req.Since,
-		Limit:    req.Limit,
-	})
+	opts := ports.ConnectorOptions{Projects: req.Projects, Since: req.Since, Limit: req.Limit}
+	run, runErr := r.runConnector(runCtx, connector, name, opts)
 	if run.ID == "" {
 		if runErr != nil {
 			return run, runErr

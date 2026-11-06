@@ -24,14 +24,14 @@ func (s RunStore) AppendConnectorRun(ctx context.Context, run domain.ConnectorRu
 	if s.Store == nil {
 		return nil
 	}
-	record, _, err := s.Store.CreateConnectorRun(ctx, run)
+	record, rev, err := s.Store.CreateConnectorRun(ctx, run)
 	if err != nil {
 		return err
 	}
-	if run.Status == domain.ConnectorRunning || run.FinishedAt == nil {
+	if run.Status == domain.ConnectorRunning {
 		return nil
 	}
-	_, _, err = s.Store.FinishConnectorRun(ctx, record.ID, run.Status, run.Counts, run.Error, 0)
+	_, _, err = s.Store.FinishConnectorRun(ctx, record.ID, run.Status, run.Counts, run.Error, revisionValue(rev))
 	return err
 }
 

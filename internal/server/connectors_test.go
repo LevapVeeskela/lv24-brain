@@ -33,6 +33,14 @@ func (s staticSecrets) Names(context.Context) ([]string, error) {
 	return names, nil
 }
 
+// panickingSecrets makes a connector panic while resolving its token mid-run,
+// exercising the runConnector recover path (the record must still persist).
+type panickingSecrets struct{ staticSecrets }
+
+func (panickingSecrets) Get(context.Context, string) (string, error) {
+	panic("connector secret boom")
+}
+
 func TestConnectorRunnerGitHubPersistsRun(t *testing.T) {
 	const token = "ghp_server_connector_test"
 	githubServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -154,6 +162,23 @@ func TestConnectorRunnerPersistsSanitizedUpstreamFailure(t *testing.T) {
 	record, err := store.GetConnectorRun(t.Context(), run.ID)
 	if err != nil || record.Error != run.Error || record.Status != run.Status {
 		t.Fatalf("persisted failure = %+v, %v", record, err)
+	}
+}
+
+func TestConnectorRunnerPersistsPanicAsFailedRun(t *testing.T) {
+	t.Setenv("BRAIN_GITHUB_REPOS", "acme/widgets")
+	store := httpapi.NewMemoryStore()
+	runner := newConnectorRunner(store, panickingSecrets{}, time.Second, nil)
+	run, err := runner.Run(t.Context(), httpapi.ConnectorRunRequest{Name: "github"})
+	if err == nil || !strings.Contains(err.Error(), "panicked") {
+		t.Fatalf("Run error = %v", err)
+	}
+	if run.ID == "" || run.Status != domain.ConnectorFailed || !strings.Contains(run.Error, "panicked") {
+		t.Fatalf("panic run = %+v", run)
+	}
+	record, err := store.GetConnectorRun(t.Context(), run.ID)
+	if err != nil || record.Status != domain.ConnectorFailed || record.FinishedAt == nil {
+		t.Fatalf("persisted panic record = %+v, %v", record, err)
 	}
 }
 
