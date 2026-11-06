@@ -1,8 +1,9 @@
 # Update
 
 The updater is implemented in `internal/update` and satisfies
-`ports.Updater`. It checks GitHub Releases, validates `release.json`, verifies
-SHA-256, stages the download, replaces the binary atomically, and keeps the
+`ports.Updater`. It checks GitHub Releases, verifies the Ed25519 signature of
+`release.json`, validates it, verifies the artifact SHA-256 from the signed
+manifest, stages the download, replaces the binary atomically, and keeps the
 previous binary for rollback.
 
 ## Channels
@@ -86,9 +87,41 @@ Each GitHub release must contain `release.json`:
 ```
 
 `kind` is `cli` for the engine and `server` for `brain-server`; the updater
-never replaces the CLI with a server asset. `checksums_url` is an optional
-fallback when an asset omits `sha256`. `signature` metadata is reserved for a
-future cosign/Sigstore verification step; v1 verifies SHA-256 only.
+never replaces the CLI with a server asset. Every asset must carry `sha256`:
+the updater trusts checksums only from the signed manifest and ignores
+`checksums_url`, `checksums.txt`, and GitHub asset digests, which come from the
+same release unsigned. The inline `signature` field is reserved and ignored.
+
+## Signatures
+
+Each release publishes `release.json.sig` next to `release.json`: a base64
+Ed25519 signature over the domain prefix `lv24-brain release manifest v1`
+plus a newline, followed by the exact `release.json` bytes. The updater accepts a release only
+if the signature verifies against a public key embedded in the running binary
+(`trustedReleaseKeys` in `internal/update/signature.go`); an unsigned release,
+a signature by any other key, or a tampered manifest is skipped, and a build
+with no embedded key refuses to update. Listing several keys allows rotation:
+ship a binary trusting old and new keys before signing with the new one.
+
+Maintainer setup (one time, local, $0):
+
+```sh
+go run ./internal/tools/releasesign keygen -out <path outside the repo>
+```
+
+`keygen` writes only the private seed to a new file and prints only the public
+key. Add the public key to `trustedReleaseKeys`, store the seed as the
+`BRAIN_RELEASE_SIGNING_KEY` Actions secret (for example
+`gh secret set BRAIN_RELEASE_SIGNING_KEY < <file>`), then keep an offline
+backup and delete the file. Verify a downloaded release manually with:
+
+```sh
+go run ./internal/tools/releasesign verify -in release.json -sig release.json.sig
+```
+
+The installers still verify artifacts against `checksums.txt` only; verify the
+signature manually for a first install when the download channel is not
+trusted.
 
 ## Safety rules
 
@@ -144,7 +177,10 @@ migrations only run on startup after the backup/health gate.
 
 `.github/workflows/release.yml` runs on `v*` tags, builds Windows/macOS/Linux
 `amd64`/`arm64` binaries with GoReleaser, writes `checksums.txt`, generates
-`release.json`, and publishes the files with the GitHub CLI. Only GitHub-hosted
+`release.json`, signs it into `release.json.sig` (the signing step fails when
+`BRAIN_RELEASE_SIGNING_KEY` is missing or its public key is not embedded), and
+publishes the files with the GitHub CLI. Releases are immutable: the workflow
+refuses to touch a tag that already has a release. Only GitHub-hosted
 free-tier `ubuntu-latest` runners and the free GitHub Releases storage are used.
 No paid runners, storage add-ons, or third-party services are configured.
 
@@ -155,7 +191,9 @@ go test ./internal/update
 ```
 
 The tests use `httptest` for GitHub API and asset responses; they cover stable
-and beta selection, checksum fallback and mismatch, staged downloads, zip and
+and beta selection, signature checks (unsigned, untrusted key, tampered,
+fallback past a bad release), signed-checksum enforcement and mismatch, staged
+downloads, zip and
 tar.gz archives, apply, rollback, `BRAIN_NO_UPDATE`, and version ordering.
 
 ## Current status

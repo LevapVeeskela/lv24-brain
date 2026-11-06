@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"crypto/ed25519"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -39,8 +40,12 @@ type fixtureRelease struct {
 	Prerelease bool
 	NoManifest bool
 	Checksums  bool
-	Assets     []fixtureAsset
-	Published  time.Time
+	// Unsigned omits release.json.sig; BadSignature serves a signature by an
+	// untrusted key.
+	Unsigned     bool
+	BadSignature bool
+	Assets       []fixtureAsset
+	Published    time.Time
 }
 
 func (r fixtureRelease) tag() string {
@@ -56,6 +61,12 @@ func (r fixtureRelease) published() time.Time {
 	}
 	return time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
 }
+
+// testReleaseKey signs fixture manifests; testUpdater trusts its public half.
+var testReleaseKey = ed25519.NewKeyFromSeed(bytes.Repeat([]byte{7}, ed25519.SeedSize))
+
+// untrustedReleaseKey produces well-formed signatures nobody trusts.
+var untrustedReleaseKey = ed25519.NewKeyFromSeed(bytes.Repeat([]byte{9}, ed25519.SeedSize))
 
 func newFixtureServer(t *testing.T, releases []fixtureRelease) *httptest.Server {
 	t.Helper()
@@ -87,6 +98,12 @@ func newFixtureServer(t *testing.T, releases []fixtureRelease) *httptest.Server 
 					Name:               ManifestAssetName,
 					BrowserDownloadURL: baseURL + "/releases/" + fixture.tag() + "/" + ManifestAssetName,
 				})
+				if !fixture.Unsigned {
+					item.Assets = append(item.Assets, asset{
+						Name:               SignatureAssetName,
+						BrowserDownloadURL: baseURL + "/releases/" + fixture.tag() + "/" + SignatureAssetName,
+					})
+				}
 			}
 			for _, fixtureAsset := range fixture.Assets {
 				item.Assets = append(item.Assets, asset{
@@ -103,8 +120,26 @@ func newFixtureServer(t *testing.T, releases []fixtureRelease) *httptest.Server 
 	for _, fixture := range releases {
 		fixture := fixture
 		if !fixture.NoManifest {
+			// The manifest is rendered per request because baseURL is only
+			// known once the server starts; signing the same bytes that are
+			// served keeps the signature valid.
+			render := func() []byte {
+				raw, err := json.Marshal(manifestFor(baseURL, fixture))
+				if err != nil {
+					t.Errorf("marshal manifest: %v", err)
+				}
+				return raw
+			}
 			mux.HandleFunc("/releases/"+fixture.tag()+"/"+ManifestAssetName, func(w http.ResponseWriter, _ *http.Request) {
-				writeJSON(t, w, manifestFor(baseURL, fixture))
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write(render())
+			})
+			mux.HandleFunc("/releases/"+fixture.tag()+"/"+SignatureAssetName, func(w http.ResponseWriter, _ *http.Request) {
+				key := testReleaseKey
+				if fixture.BadSignature {
+					key = untrustedReleaseKey
+				}
+				_, _ = w.Write(SignManifest(render(), key))
 			})
 		}
 		if fixture.Checksums {
@@ -184,6 +219,7 @@ func testUpdater(t *testing.T, serverURL string, options ...func(*Options)) *Upd
 		CurrentVersion: "1.0.0",
 		UpdateDir:      t.TempDir(),
 		Getenv:         func(string) string { return "" },
+		TrustedKeys:    []ed25519.PublicKey{testReleaseKey.Public().(ed25519.PublicKey)},
 	}
 	for _, apply := range options {
 		apply(&opts)
@@ -286,38 +322,6 @@ func TestCheckDisabledByEnvironment(t *testing.T) {
 	})
 	if _, err := explicit.Check(context.Background(), ChannelStable); err != nil {
 		t.Fatalf("explicit Check() error = %v", err)
-	}
-}
-
-func TestCheckUsesChecksumsFallback(t *testing.T) {
-	fixture := stableFixture("1.2.0")
-	fixture.Checksums = true
-	fixture.Assets[0].NoSHA = true
-	server := newFixtureServer(t, []fixtureRelease{fixture})
-	updater := testUpdater(t, server.URL)
-
-	release, err := updater.Check(context.Background(), ChannelStable)
-	if err != nil {
-		t.Fatalf("Check() error = %v", err)
-	}
-	if release.SHA256 != sha256Hex(fixture.Assets[0].Body) {
-		t.Fatalf("Check() sha = %q, want checksum fallback", release.SHA256)
-	}
-}
-
-func TestCheckUsesGitHubDigestFallback(t *testing.T) {
-	fixture := stableFixture("1.2.0")
-	fixture.Assets[0].NoSHA = true
-	fixture.Assets[0].Digest = "sha256:" + sha256Hex(fixture.Assets[0].Body)
-	server := newFixtureServer(t, []fixtureRelease{fixture})
-	updater := testUpdater(t, server.URL)
-
-	release, err := updater.Check(context.Background(), ChannelStable)
-	if err != nil {
-		t.Fatalf("Check() error = %v", err)
-	}
-	if release.SHA256 != sha256Hex(fixture.Assets[0].Body) {
-		t.Fatalf("Check() sha = %q, want GitHub digest fallback", release.SHA256)
 	}
 }
 
@@ -565,17 +569,6 @@ func TestManifestValidationAndAssetSelection(t *testing.T) {
 	invalid.Assets = []ManifestAsset{{OS: "windows", Arch: "amd64", URL: "https://example.com/brain", SHA256: "not-a-checksum"}}
 	if err := invalid.Validate(); err == nil {
 		t.Fatal("Validate() error = nil, want invalid checksum error")
-	}
-}
-
-func TestParseChecksums(t *testing.T) {
-	digest := sha256Hex([]byte("brain"))
-	sums := parseChecksums([]byte(digest + "  brain.exe\n" + digest + " *brain-server.exe\nbad line\n"))
-	if sums["brain.exe"] != digest {
-		t.Fatalf("brain.exe = %q, want %q", sums["brain.exe"], digest)
-	}
-	if sums["brain-server.exe"] != digest {
-		t.Fatalf("brain-server.exe = %q, want %q", sums["brain-server.exe"], digest)
 	}
 }
 

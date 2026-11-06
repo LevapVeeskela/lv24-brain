@@ -35,8 +35,9 @@ type ManifestAsset struct {
 	Size   int64  `json:"size,omitempty"`
 }
 
-// Signature carries optional detached signature metadata. The v1 updater
-// verifies SHA-256 only; signature verification is a forward-compatible hook.
+// Signature is reserved inline signature metadata. The updater ignores it and
+// instead requires the detached release.json.sig asset (see signature.go),
+// because an inline signature cannot cover the bytes that contain it.
 type Signature struct {
 	Type  string `json:"type,omitempty"`
 	URL   string `json:"url,omitempty"`
@@ -148,28 +149,4 @@ func validSHA256(value string) bool {
 	}
 	_, err := hex.DecodeString(value)
 	return err == nil
-}
-
-func parseChecksums(raw []byte) map[string]string {
-	sums := make(map[string]string)
-	for _, line := range strings.Split(string(raw), "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" || strings.HasPrefix(line, "#") {
-			continue
-		}
-		fields := strings.Fields(line)
-		if len(fields) < 2 {
-			continue
-		}
-		digest := normalizeSHA256(fields[0])
-		if !validSHA256(digest) {
-			continue
-		}
-		name := strings.TrimPrefix(strings.Join(fields[1:], " "), "*")
-		if name == "" {
-			continue
-		}
-		sums[name] = digest
-	}
-	return sums
 }

@@ -3,7 +3,6 @@ package update
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -36,7 +35,10 @@ func (u *Updater) listReleases(ctx context.Context) ([]githubRelease, error) {
 	return releases, nil
 }
 
-func (u *Updater) fetchManifest(ctx context.Context, rawURL string) (Manifest, error) {
+// fetchSignedManifest downloads release.json and its detached signature from
+// the same release and parses the manifest only after the signature verifies
+// over the exact downloaded bytes.
+func (u *Updater) fetchSignedManifest(ctx context.Context, rawURL string, assets []githubAsset) (Manifest, error) {
 	rawURL = strings.TrimSpace(rawURL)
 	if rawURL == "" {
 		return Manifest{}, ErrNoManifest
@@ -44,26 +46,25 @@ func (u *Updater) fetchManifest(ctx context.Context, rawURL string) (Manifest, e
 	if err := validateArtifactURL(rawURL); err != nil {
 		return Manifest{}, fmt.Errorf("update: manifest url: %w", err)
 	}
-	var payload json.RawMessage
-	if err := u.getJSON(ctx, rawURL, &payload, MaxManifestBytes); err != nil {
+	sigAsset, ok := assetNamed(assets, SignatureAssetName)
+	if !ok || strings.TrimSpace(sigAsset.BrowserDownloadURL) == "" {
+		return Manifest{}, ErrUnsigned
+	}
+	if err := validateArtifactURL(sigAsset.BrowserDownloadURL); err != nil {
+		return Manifest{}, fmt.Errorf("update: signature url: %w", err)
+	}
+	payload, err := u.getBytes(ctx, rawURL, MaxManifestBytes)
+	if err != nil {
+		return Manifest{}, err
+	}
+	signature, err := u.getBytes(ctx, sigAsset.BrowserDownloadURL, maxSignatureBytes)
+	if err != nil {
+		return Manifest{}, err
+	}
+	if err := VerifyManifestSignature(payload, signature, u.keys); err != nil {
 		return Manifest{}, err
 	}
 	return ParseManifest(payload)
-}
-
-func (u *Updater) fetchChecksums(ctx context.Context, rawURL string) (map[string]string, error) {
-	rawURL = strings.TrimSpace(rawURL)
-	if rawURL == "" {
-		return nil, errors.New("update: checksums url is empty")
-	}
-	if err := validateArtifactURL(rawURL); err != nil {
-		return nil, fmt.Errorf("update: checksums url: %w", err)
-	}
-	raw, err := u.getBytes(ctx, rawURL, MaxManifestBytes)
-	if err != nil {
-		return nil, err
-	}
-	return parseChecksums(raw), nil
 }
 
 func (u *Updater) getJSON(ctx context.Context, rawURL string, dst any, limit int64) error {
@@ -104,25 +105,4 @@ func (u *Updater) getBytes(ctx context.Context, rawURL string, limit int64) ([]b
 		return nil, fmt.Errorf("update: response from %s exceeds %d bytes", rawURL, limit)
 	}
 	return raw, nil
-}
-
-// parseGitHubDigest accepts the modern GitHub asset digest form
-// "sha256:<hex>" and plain hexadecimal values.
-func parseGitHubDigest(value string) string {
-	value = strings.TrimSpace(value)
-	if value == "" {
-		return ""
-	}
-	if idx := strings.IndexByte(value, ':'); idx >= 0 {
-		algorithm := strings.ToLower(strings.TrimSpace(value[:idx]))
-		if algorithm != "sha256" {
-			return ""
-		}
-		value = value[idx+1:]
-	}
-	digest := normalizeSHA256(value)
-	if !validSHA256(digest) {
-		return ""
-	}
-	return digest
 }

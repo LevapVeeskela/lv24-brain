@@ -165,15 +165,20 @@ Current limits, stated plainly:
 - Release checks and downloads use HTTPS only.
 - The manifest version must match the git tag, and its channel must match the
   GitHub prerelease flag.
-- Every artifact is verified by SHA-256 before apply; missing manifest or
+- `release.json` must carry a valid detached Ed25519 signature
+  (`release.json.sig`) from a key embedded in the binary; unsigned or
+  untrusted releases are skipped. Every artifact is verified by the SHA-256
+  from the signed manifest before apply; missing manifest, signature, or
   checksum fails closed.
 - Manifest, response, and download sizes are capped; downloads are capped at
   256 MiB.
 - Apply stages the binary and keeps `brain(.exe).previous`; a failed replacement
   leaves the current binary untouched.
 - The updater never mutates the brain data repository.
-- Signature metadata is reserved for a future cosign/Sigstore step. v1 verifies
-  checksums only; do not describe an artifact as signature-verified yet.
+- The signing seed exists only in the `BRAIN_RELEASE_SIGNING_KEY` Actions
+  secret (and an offline backup); it is exposed to the signing step alone.
+  Installers verify `checksums.txt` only, so a first install is
+  checksum-verified, while every subsequent self-update is signature-verified.
 
 ## Supply chain and releases
 
@@ -181,7 +186,8 @@ Current limits, stated plainly:
 - CI runs `gofmt`, `go vet`, `go test ./...`, both builds, a JavaScript syntax
   check, and Compose config validation.
 - Release artifacts are built on GitHub-hosted free-tier runners and published
-  as GitHub Releases with `checksums.txt` and `release.json`.
+  as GitHub Releases with `checksums.txt`, `release.json`, and
+  `release.json.sig`. Existing releases are never overwritten.
 - Run a secret scan before committing to the private data repository. The
   importer does not redact credentials because it cannot guess which text is
   knowledge and which is a secret; review every match.

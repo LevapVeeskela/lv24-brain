@@ -99,6 +99,25 @@ jobs:
           PY
           ls -l release-assets
 
+      # The signing seed is exposed to this step only. `sign` refuses keys
+      # that are not embedded in internal/update/signature.go, so a release
+      # can never be published with a signature installed binaries reject.
+      - name: Sign release manifest
+        env:
+          BRAIN_RELEASE_SIGNING_KEY: ${{ secrets.BRAIN_RELEASE_SIGNING_KEY }}
+        run: |
+          set -euo pipefail
+          if [ -z "${BRAIN_RELEASE_SIGNING_KEY}" ]; then
+            echo "BRAIN_RELEASE_SIGNING_KEY secret is not set; refusing to publish an unsigned release" >&2
+            exit 1
+          fi
+          go run ./internal/tools/releasesign sign \
+            -in release-assets/release.json \
+            -out release-assets/release.json.sig
+          go run ./internal/tools/releasesign verify \
+            -in release-assets/release.json \
+            -sig release-assets/release.json.sig
+
       - name: Publish GitHub release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -109,11 +128,13 @@ jobs:
           case "$TAG" in
             *-*) prerelease_args=(--prerelease) ;;
           esac
+          # Releases are immutable: never replace assets of an existing tag;
+          # cut a new tag instead.
           if gh release view "$TAG" >/dev/null 2>&1; then
-            gh release upload "$TAG" release-assets/* --clobber
-          else
-            gh release create "$TAG" release-assets/* \
-              --title "$TAG" \
-              --generate-notes \
-              "${prerelease_args[@]}"
+            echo "release $TAG already exists; refusing to overwrite its assets" >&2
+            exit 1
           fi
+          gh release create "$TAG" release-assets/* \
+            --title "$TAG" \
+            --generate-notes \
+            "${prerelease_args[@]}"

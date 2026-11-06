@@ -4,12 +4,14 @@
 //
 // The updater is deliberately conservative: it never mutates brain data, it
 // accepts only HTTPS release URLs (plain HTTP is allowed for loopback test
-// servers), and every downloaded artifact is verified against the manifest
-// checksum before it can be applied.
+// servers), the release manifest must carry a valid Ed25519 signature from a
+// key embedded in this build, and every downloaded artifact is verified
+// against the signed manifest checksum before it can be applied.
 package update
 
 import (
 	"context"
+	"crypto/ed25519"
 	"errors"
 	"fmt"
 	"net/http"
@@ -78,6 +80,9 @@ type Options struct {
 	// IgnoreDisabled lets an explicit `brain update` run even when
 	// BRAIN_NO_UPDATE is set. Background checks leave it false.
 	IgnoreDisabled bool
+	// TrustedKeys overrides the release public keys embedded in the build
+	// (tests only). Nil uses DefaultTrustedKeys.
+	TrustedKeys []ed25519.PublicKey
 }
 
 // Updater checks, verifies, stages and replaces the engine binary. It
@@ -94,6 +99,7 @@ type Updater struct {
 	now        func() time.Time
 	getenv     func(string) string
 	ignoreOff  bool
+	keys       []ed25519.PublicKey
 }
 
 var _ ports.Updater = (*Updater)(nil)
@@ -138,6 +144,14 @@ func New(opts Options) (*Updater, error) {
 	if updateDir == "" {
 		updateDir = DefaultUpdateDir(goos, getenv)
 	}
+	keys := opts.TrustedKeys
+	if keys == nil {
+		embedded, err := DefaultTrustedKeys()
+		if err != nil {
+			return nil, err
+		}
+		keys = embedded
+	}
 	client := opts.HTTPClient
 	if client == nil {
 		client = &http.Client{
@@ -157,6 +171,7 @@ func New(opts Options) (*Updater, error) {
 		now:        now,
 		getenv:     getenv,
 		ignoreOff:  opts.IgnoreDisabled,
+		keys:       keys,
 	}, nil
 }
 
@@ -172,6 +187,9 @@ func (u *Updater) Check(ctx context.Context, channel string) (ports.ReleaseInfo,
 	}
 	if !u.ignoreOff && envTruthy(u.getenv(EnvNoUpdate)) {
 		return ports.ReleaseInfo{}, ErrDisabled
+	}
+	if len(u.keys) == 0 {
+		return ports.ReleaseInfo{}, ErrNoTrustedKeys
 	}
 
 	releases, err := u.listReleases(ctx)
@@ -211,7 +229,7 @@ func (u *Updater) Check(ctx context.Context, channel string) (ports.ReleaseInfo,
 			continue
 		}
 
-		manifest, err := u.fetchManifest(ctx, asset.BrowserDownloadURL)
+		manifest, err := u.fetchSignedManifest(ctx, asset.BrowserDownloadURL, release.Assets)
 		if err != nil {
 			lastErr = err
 			continue
@@ -238,23 +256,9 @@ func (u *Updater) Check(ctx context.Context, channel string) (ports.ReleaseInfo,
 		if err != nil {
 			return ports.ReleaseInfo{}, err
 		}
+		// Only the signed manifest is trusted for checksums; GitHub asset
+		// digests and checksums.txt come from the same release unsigned.
 		artifact.SHA256 = normalizeSHA256(artifact.SHA256)
-		if artifact.SHA256 == "" {
-			for _, releaseAsset := range release.Assets {
-				if strings.EqualFold(releaseAsset.Name, artifact.Name) {
-					artifact.SHA256 = parseGitHubDigest(releaseAsset.Digest)
-					break
-				}
-			}
-		}
-		if artifact.SHA256 == "" && manifest.ChecksumsURL != "" {
-			sums, err := u.fetchChecksums(ctx, manifest.ChecksumsURL)
-			if err != nil {
-				lastErr = err
-				continue
-			}
-			artifact.SHA256 = sums[artifact.Name]
-		}
 		if !validSHA256(artifact.SHA256) {
 			lastErr = fmt.Errorf("%w: release %s has no valid checksum for %s/%s",
 				ErrChecksum, manifest.Version, u.goos, u.goarch)
