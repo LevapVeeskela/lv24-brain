@@ -90,7 +90,7 @@ func printGitAndGraphs(ctx context.Context, w io.Writer, resolved app.Resolved) 
 			fmt.Fprintln(w, line)
 		}
 	}
-	roots := resolved.Project.Paths
+	roots := app.LocalPaths(resolved.Project.Paths)
 	if len(roots) == 0 && resolved.Path != "" {
 		roots = []string{resolved.Path}
 	}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/levapveeskela/lv24-brain/internal/app"
 	"io"
 	"os"
 	"os/exec"
@@ -128,11 +129,7 @@ func runGraphs(args []string, stdout, stderr io.Writer) int {
 // refresh updates the graph indexes of one project.
 func (r *graphsRunner) refresh(project domain.Project, changedOnly, initMissing bool) {
 	var paths []string
-	for _, path := range project.Paths {
-		path = strings.TrimSpace(path)
-		if path == "" {
-			continue
-		}
+	for _, path := range app.LocalPaths(project.Paths) {
 		if info, err := os.Stat(path); err == nil && info.IsDir() {
 			paths = append(paths, path)
 		}

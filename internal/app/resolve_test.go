@@ -70,3 +70,45 @@ func TestResolveSelectorMatchesLegacyRules(t *testing.T) {
 		t.Fatalf("Note without project = %+v, %v", note.Note, err)
 	}
 }
+
+func TestForeignOSPathsAreIgnored(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	store, err := fsstore.New(filepath.Join(root, "data"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	local := filepath.Join(root, "work", "alpha")
+	if err := os.MkdirAll(local, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// A path that is absolute on the other operating system only.
+	foreign := `C:\0project\beta`
+	if filepath.IsAbs(foreign) {
+		foreign = "/Users/someone/Projects/beta"
+	}
+	for _, project := range []domain.Project{
+		{ID: "alpha", Name: "alpha", Kind: domain.ProjectKindApp, Paths: []string{foreign + "-alpha", local}},
+		{ID: "beta", Name: "beta", Kind: domain.ProjectKindApp, Paths: []string{foreign}},
+		{ID: "gamma", Name: "gamma", Kind: domain.ProjectKindApp, Paths: []string{foreign + "-gamma"}},
+	} {
+		if err := store.PutProject(ctx, project); err != nil {
+			t.Fatal(err)
+		}
+	}
+	a := app.New(config.Default(), app.Dependencies{Store: store})
+	// From inside the local checkout the foreign paths must not make the
+	// directory look like a parent of beta and gamma.
+	got, err := a.ResolveSelector(ctx, local)
+	if err != nil || got.Project.ID != "alpha" || got.Path != local {
+		t.Fatalf("resolve local = %+v, %v", got, err)
+	}
+	// By id, the local checkout wins over the foreign first entry.
+	got, err = a.ResolveSelector(ctx, "alpha")
+	if err != nil || got.Path != local {
+		t.Fatalf("resolve id = %+v, %v", got, err)
+	}
+	if paths := app.LocalPaths([]string{foreign, local, ""}); len(paths) != 1 || paths[0] != local {
+		t.Fatalf("LocalPaths = %v", paths)
+	}
+}

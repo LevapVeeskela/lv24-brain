@@ -52,9 +52,9 @@ func (a *App) ResolveSelector(ctx context.Context, selector string) (Resolved, e
 	var best domain.Project
 	bestPath := ""
 	for _, project := range projects {
-		for _, raw := range project.Paths {
+		for _, raw := range LocalPaths(project.Paths) {
 			candidate := normalizePath(raw)
-			if raw == "" || !pathWithin(full, candidate) {
+			if !pathWithin(full, candidate) {
 				continue
 			}
 			if len(candidate) > len(bestPath) {
@@ -68,9 +68,9 @@ func (a *App) ResolveSelector(ctx context.Context, selector string) (Resolved, e
 
 	var children []domain.Project
 	for _, project := range projects {
-		for _, raw := range project.Paths {
+		for _, raw := range LocalPaths(project.Paths) {
 			candidate := normalizePath(raw)
-			if raw != "" && candidate != full && pathWithin(candidate, full) {
+			if candidate != full && pathWithin(candidate, full) {
 				children = append(children, project)
 				break
 			}
@@ -93,10 +93,7 @@ func (a *App) ResolveSelector(ctx context.Context, selector string) (Resolved, e
 // falling back to the first non-empty path.
 func firstPath(project domain.Project) string {
 	fallback := ""
-	for _, path := range project.Paths {
-		if strings.TrimSpace(path) == "" {
-			continue
-		}
+	for _, path := range LocalPaths(project.Paths) {
 		clean := cleanPath(path)
 		if info, err := os.Stat(clean); err == nil && info.IsDir() {
 			return clean
@@ -141,4 +138,20 @@ func containsFold(values []string, want string) bool {
 		}
 	}
 	return false
+}
+
+// LocalPaths keeps the registered paths that are absolute on this operating
+// system. A project lists one checkout per machine, so a Windows path
+// ("C:\\0project\\x") is not absolute on macOS and a macOS path ("/Users/x")
+// is not absolute on Windows; treating them as relative would join them to
+// the working directory and produce bogus matches.
+func LocalPaths(paths []string) []string {
+	out := make([]string, 0, len(paths))
+	for _, path := range paths {
+		path = strings.TrimSpace(path)
+		if path != "" && filepath.IsAbs(filepath.FromSlash(path)) {
+			out = append(out, path)
+		}
+	}
+	return out
 }
