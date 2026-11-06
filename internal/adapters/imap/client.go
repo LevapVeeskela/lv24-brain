@@ -52,12 +52,6 @@ func DialTLS(ctx context.Context, address, username, password string, tlsConfig 
 	if err != nil {
 		return nil, fmt.Errorf("imap address: %w", err)
 	}
-	dialer := &net.Dialer{Timeout: 30 * time.Second}
-	conn, err := dialer.DialContext(ctx, "tcp", address)
-	if err != nil {
-		return nil, fmt.Errorf("connect imap: %w", err)
-	}
-
 	config := &tls.Config{}
 	if tlsConfig != nil {
 		config = tlsConfig.Clone()
@@ -68,20 +62,39 @@ func DialTLS(ctx context.Context, address, username, password string, tlsConfig 
 	if config.MinVersion == 0 {
 		config.MinVersion = tls.VersionTLS12
 	}
-	tlsConn := tls.Client(conn, config)
-	if err := tlsConn.HandshakeContext(ctx); err != nil {
-		_ = conn.Close()
-		return nil, fmt.Errorf("imap tls handshake: %w", err)
+	// Use the library's dial path and queue LOGIN right away instead of
+	// waiting for the greeting first: some servers (observed with mail.ru)
+	// intermittently never answer a LOGIN sent after an explicit greeting
+	// wait, which hung runs until the context deadline.
+	dialer := &net.Dialer{Timeout: 30 * time.Second}
+	if deadline, ok := ctx.Deadline(); ok {
+		dialer.Deadline = deadline
 	}
-
-	client := imapclient.New(tlsConn, &imapclient.Options{TLSConfig: config, Dialer: dialer})
+	type dialResult struct {
+		client *imapclient.Client
+		err    error
+	}
+	dialed := make(chan dialResult, 1)
+	go func() {
+		client, err := imapclient.DialTLS(address, &imapclient.Options{TLSConfig: config, Dialer: dialer})
+		dialed <- dialResult{client: client, err: err}
+	}()
+	var client *imapclient.Client
+	select {
+	case result := <-dialed:
+		if result.err != nil {
+			return nil, fmt.Errorf("connect imap: %w", result.err)
+		}
+		client = result.client
+	case <-ctx.Done():
+		go func() {
+			if result := <-dialed; result.client != nil {
+				_ = result.client.Close()
+			}
+		}()
+		return nil, fmt.Errorf("connect imap: %w", ctx.Err())
+	}
 	session := &realSession{client: client}
-	if _, err := await(ctx, client, func() (struct{}, error) {
-		return struct{}{}, client.WaitGreeting()
-	}); err != nil {
-		_ = client.Close()
-		return nil, fmt.Errorf("imap greeting: %w", err)
-	}
 	if _, err := await(ctx, client, func() (struct{}, error) {
 		return struct{}{}, client.Login(username, password).Wait()
 	}); err != nil {
