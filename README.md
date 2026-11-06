@@ -138,9 +138,10 @@ printf '%s\n' '<admin password>' | ./bin/brain login --config ~/brain-server.yam
 ./bin/brain logout --config ~/brain-server.yaml
 ```
 
-`brain login` is server-mode only. `--login` falls back to `BRAIN_LOGIN` and
-`--password` to `BRAIN_PASSWORD`; prefer `--password-stdin` so the password is
-not passed in the `brain login` arguments. The command stores one JSON
+`brain login` is server-mode only. `--login` falls back to `BRAIN_LOGIN`; the
+password is read from stdin with `--password-stdin` or from `BRAIN_PASSWORD`.
+There is no `--password` flag, so the password never appears in the
+`brain login` arguments. The command stores one JSON
 credential bundle under the OS secret-store key `server-session`
 (`serverUrl`, `accessToken`, `refreshToken`) in a single write, bound to the
 normalized `server_url`. The HTTP client refreshes once on `401` and retries; a

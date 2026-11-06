@@ -2,6 +2,7 @@ package gitlab
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -165,6 +166,43 @@ func TestGitLabRunWritesDeterministicMarkdown(t *testing.T) {
 	secondContent, _ := sink.file("gitlab/acme/widgets.md")
 	if secondContent != content {
 		t.Fatalf("markdown is not deterministic:\n%s\n---\n%s", content, secondContent)
+	}
+}
+
+func TestGitLabBaseURLSchemeValidation(t *testing.T) {
+	cases := []struct {
+		name    string
+		baseURL string
+		wantErr bool
+	}{
+		{name: "https public host", baseURL: "https://gitlab.com/api/v4", wantErr: false},
+		{name: "https custom host", baseURL: "https://gitlab.example.internal/api/v4", wantErr: false},
+		{name: "http ipv4 loopback", baseURL: "http://127.0.0.1:8080", wantErr: false},
+		{name: "http localhost", baseURL: "http://localhost:8080", wantErr: false},
+		{name: "http ipv6 loopback", baseURL: "http://[::1]:8080", wantErr: false},
+		{name: "http non-loopback rejected", baseURL: "http://example.com", wantErr: true},
+		{name: "http private address rejected", baseURL: "http://10.0.0.5", wantErr: true},
+		{name: "ftp scheme rejected", baseURL: "ftp://gitlab.com", wantErr: true},
+		{name: "file scheme rejected", baseURL: "file:///tmp/api", wantErr: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := New(Config{
+				BaseURL:  tc.baseURL,
+				Projects: []string{"acme/widgets"},
+				Secrets:  fakeSecrets{value: testToken},
+			})
+			if !tc.wantErr {
+				if err != nil {
+					t.Fatalf("New(%q) error = %v", tc.baseURL, err)
+				}
+				return
+			}
+			var validationErr *domain.ValidationError
+			if !errors.As(err, &validationErr) || validationErr.Field != "gitlab.baseURL" {
+				t.Fatalf("New(%q) error = %v, want gitlab.baseURL validation error", tc.baseURL, err)
+			}
+		})
 	}
 }
 

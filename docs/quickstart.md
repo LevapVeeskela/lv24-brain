@@ -290,9 +290,9 @@ printf '%s\n' '<strong password>' | ./bin/brain login \
 ./bin/brain logout --config ~/brain-server.yaml
 ```
 
-`--login` falls back to `BRAIN_LOGIN`; `--password` falls back to
-`BRAIN_PASSWORD`. Prefer `--password-stdin`, which reads one line from stdin
-instead of taking the password as a `brain login` flag; the pipeline itself may
+`--login` falls back to `BRAIN_LOGIN`; without `--password-stdin` the password
+comes from `BRAIN_PASSWORD`. `--password-stdin` reads one line from stdin, and
+there is no `--password` flag; the pipeline itself may
 still be recorded by shell history. `brain login` stores one JSON credential
 bundle under the OS secret-store key `server-session` (`serverUrl`,
 `accessToken`, `refreshToken`) in a single atomic write, bound to the configured

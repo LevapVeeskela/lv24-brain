@@ -2,9 +2,9 @@ package httpapi
 
 import (
 	"context"
+	"crypto/subtle"
 	"errors"
 	"fmt"
-	"net"
 	"net/http"
 	"strings"
 	"sync"
@@ -38,10 +38,8 @@ type meResponse struct {
 }
 
 func (a *API) login(w http.ResponseWriter, r *http.Request) {
-	client := clientHost(r)
-	if !a.limit.allow(client) {
-		w.Header().Set("Retry-After", "60")
-		writeErrorCode(w, http.StatusTooManyRequests, "rate_limited", "too many login attempts")
+	if !a.limit.allow(clientIP(r, a.cfg.TrustedProxies)) {
+		writeLoginRateLimited(w)
 		return
 	}
 	var body struct {
@@ -50,6 +48,12 @@ func (a *API) login(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := a.decodeJSON(w, r, &body); err != nil {
 		a.writeError(w, r, err)
+		return
+	}
+	// A second budget per account stops one login being brute-forced from
+	// many addresses.
+	if !a.accountLimit.allow(strings.ToLower(strings.TrimSpace(body.Login))) {
+		writeLoginRateLimited(w)
 		return
 	}
 	session, err := a.auth.Login(r.Context(), ports.Credentials{Login: body.Login, Password: body.Password})
@@ -202,6 +206,9 @@ func (a *API) oidcLogin(w http.ResponseWriter, r *http.Request) {
 		writeErrorCode(w, http.StatusTooManyRequests, "rate_limited", "too many pending OIDC logins")
 		return
 	}
+	// Bind the flow to this browser so a callback URL carrying someone else's
+	// state and code (login CSRF) is rejected.
+	http.SetCookie(w, oidcStateCookie(r, state, int(oidcFlowTTL/time.Second)))
 	http.Redirect(w, r, a.cfg.OIDC.AuthCodeURL(state, nonce, verifier), http.StatusFound)
 }
 
@@ -221,6 +228,12 @@ func (a *API) oidcCallback(w http.ResponseWriter, r *http.Request) {
 		writeErrorCode(w, http.StatusBadRequest, "invalid_request", "state and code are required")
 		return
 	}
+	bound, err := r.Cookie(oidcStateCookieName)
+	if err != nil || subtle.ConstantTimeCompare([]byte(bound.Value), []byte(state)) != 1 {
+		writeErrorCode(w, http.StatusBadRequest, "invalid_state", "authorization state does not belong to this browser")
+		return
+	}
+	http.SetCookie(w, oidcStateCookie(r, "", -1))
 	flow, ok := a.flows.pop(state)
 	if !ok {
 		writeErrorCode(w, http.StatusBadRequest, "invalid_state", "authorization state is unknown or expired")
@@ -261,6 +274,19 @@ func (a *API) resolveOIDCUser(ctx context.Context, claims auth.OIDCClaims) (doma
 	case err == nil:
 		if record.OIDCIssuer != "" || record.OIDCSubject != "" {
 			return domain.User{}, domain.NewValidationError("oidc.subject", "account is linked to another identity provider")
+		}
+		// Auto-linking an existing local account is an account takeover risk:
+		// only a provider-verified email that equals the login may link, and
+		// admin accounts are never linked implicitly.
+		if !claims.EmailVerified || claims.Email == "" || !strings.EqualFold(claims.Email, record.Login) {
+			a.logger.Warn("oidc login matches an existing account without a verified email; refusing to link",
+				"request_id", requestIDFrom(ctx), "user_id", record.ID)
+			return domain.User{}, auth.ErrForbidden
+		}
+		if record.Role == domain.RoleAdmin {
+			a.logger.Warn("oidc login matches an admin account; refusing to link implicitly",
+				"request_id", requestIDFrom(ctx), "user_id", record.ID)
+			return domain.User{}, auth.ErrForbidden
 		}
 		if _, err := a.store.SetUserOIDC(ctx, record.ID, claims.Issuer, claims.Subject); err != nil {
 			return domain.User{}, err
@@ -402,12 +428,33 @@ func (a *API) revokeToken(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-func clientHost(r *http.Request) string {
-	host, _, err := net.SplitHostPort(strings.TrimSpace(r.RemoteAddr))
-	if err != nil {
-		return strings.TrimSpace(r.RemoteAddr)
+var _ = fmt.Sprintf
+
+const (
+	// oidcFlowTTL bounds how long an OIDC login may stay pending.
+	oidcFlowTTL = 10 * time.Minute
+	// oidcStateCookieName binds a pending OIDC flow to the browser that
+	// started it.
+	oidcStateCookieName = "brain_oidc_state"
+)
+
+// oidcStateCookie builds the flow-binding cookie; maxAge < 0 deletes it. The
+// cookie is Secure when the request arrived over TLS directly or through a
+// proxy that reports https.
+func oidcStateCookie(r *http.Request, value string, maxAge int) *http.Cookie {
+	secure := r.TLS != nil || strings.EqualFold(strings.TrimSpace(r.Header.Get("X-Forwarded-Proto")), "https")
+	return &http.Cookie{
+		Name:     oidcStateCookieName,
+		Value:    value,
+		Path:     "/v1/auth/oidc",
+		MaxAge:   maxAge,
+		HttpOnly: true,
+		Secure:   secure,
+		SameSite: http.SameSiteLaxMode,
 	}
-	return host
 }
 
-var _ = fmt.Sprintf
+func writeLoginRateLimited(w http.ResponseWriter) {
+	w.Header().Set("Retry-After", "60")
+	writeErrorCode(w, http.StatusTooManyRequests, "rate_limited", "too many login attempts")
+}

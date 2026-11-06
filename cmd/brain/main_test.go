@@ -216,7 +216,7 @@ func TestLoginCommand(t *testing.T) {
 	store := newCLISecretStore()
 	useSecretStore(t, store)
 
-	code, stdout, stderr := runForTest(t, "login", "--config", cfgPath, "--login", "alice", "--password", "s3cret")
+	code, stdout, stderr := runWithInputForTest(t, "s3cret\n", "login", "--config", cfgPath, "--login", "alice", "--password-stdin")
 	if code != 0 {
 		t.Fatalf("login exit code = %d (stderr: %s)", code, stderr)
 	}
@@ -224,9 +224,6 @@ func TestLoginCommand(t *testing.T) {
 		if !strings.Contains(stdout, want) {
 			t.Fatalf("login stdout missing %q:\n%s", want, stdout)
 		}
-	}
-	if !strings.Contains(stderr, "--password-stdin") {
-		t.Fatalf("login stderr missing the argv warning: %q", stderr)
 	}
 	session, ok := lookupSession(t, store)
 	if !ok {
@@ -247,7 +244,7 @@ func TestLoginCommand(t *testing.T) {
 	}
 
 	store.reset()
-	code, _, stderr = runForTest(t, "login", "--config", cfgPath, "--login", "alice", "--password", "wrong")
+	code, _, stderr = runWithInputForTest(t, "wrong\n", "login", "--config", cfgPath, "--login", "alice", "--password-stdin")
 	if code == 0 {
 		t.Fatal("login with a wrong password succeeded")
 	}
@@ -263,9 +260,18 @@ func TestLoginCommand(t *testing.T) {
 		t.Fatalf("password-stdin login exit code = %d, stdout = %q (stderr: %s)", code, stdout, stderr)
 	}
 
-	code, _, _ = runForTest(t, "login", "--config", cfgPath, "--login", "alice", "--password", "x", "--password-stdin")
-	if code != 2 {
-		t.Fatalf("conflicting password flags exit code = %d, want 2", code)
+}
+
+func TestLoginRejectsPasswordFlag(t *testing.T) {
+	t.Setenv("BRAIN_TOKEN", "")
+	t.Setenv("BRAIN_SECRET_SERVER_TOKEN", "")
+	t.Setenv("BRAIN_LOGIN", "")
+	t.Setenv("BRAIN_PASSWORD", "")
+	cfgPath := writeServerConfig(t, "http://127.0.0.1:1")
+
+	code, _, stderr := runForTest(t, "login", "--config", cfgPath, "--login", "alice", "--password", "x")
+	if code != 2 || !strings.Contains(stderr, "-password") {
+		t.Fatalf("--password exit code = %d, stderr = %q; want exit 2 with unknown-flag error", code, stderr)
 	}
 }
 
@@ -276,11 +282,11 @@ func TestLoginUsageErrorsExitTwo(t *testing.T) {
 	t.Setenv("BRAIN_PASSWORD", "")
 	cfgPath := writeServerConfig(t, "http://127.0.0.1:1")
 
-	code, _, stderr := runForTest(t, "login", "--config", cfgPath, "--password", "x")
+	code, _, stderr := runWithInputForTest(t, "x\n", "login", "--config", cfgPath, "--password-stdin")
 	if code != 2 || !strings.Contains(stderr, "--login is required") {
 		t.Fatalf("missing login exit code = %d, stderr = %q", code, stderr)
 	}
-	code, _, stderr = runForTest(t, "login", "--config", cfgPath, "--login", "alice", "--password", "x", "extra")
+	code, _, stderr = runForTest(t, "login", "--config", cfgPath, "--login", "alice", "--password-stdin", "extra")
 	if code != 2 || !strings.Contains(stderr, "unexpected arguments") {
 		t.Fatalf("positional arguments exit code = %d, stderr = %q", code, stderr)
 	}
@@ -359,7 +365,7 @@ func TestLoginRefusesSecretEnvToken(t *testing.T) {
 	t.Setenv("BRAIN_PASSWORD", "")
 	cfgPath := writeServerConfig(t, "http://127.0.0.1:1")
 
-	code, _, stderr := runForTest(t, "login", "--config", cfgPath, "--login", "alice", "--password", "x")
+	code, _, stderr := runWithInputForTest(t, "x\n", "login", "--config", cfgPath, "--login", "alice", "--password-stdin")
 	if code != 1 || !strings.Contains(stderr, "BRAIN_SECRET_SERVER_TOKEN") {
 		t.Fatalf("login exit code = %d, stderr = %q", code, stderr)
 	}
@@ -1316,7 +1322,7 @@ func TestLoginInvalidPasswordMessage(t *testing.T) {
 	cfgPath := writeServerConfig(t, newAuthServer(t, "alice", "s3cret").URL)
 	useSecretStore(t, newCLISecretStore())
 
-	code, _, stderr := runForTest(t, "login", "--config", cfgPath, "--login", "alice", "--password", "wrong")
+	code, _, stderr := runWithInputForTest(t, "wrong\n", "login", "--config", cfgPath, "--login", "alice", "--password-stdin")
 	if code != 1 {
 		t.Fatalf("login exit code = %d, want 1", code)
 	}

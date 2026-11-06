@@ -96,6 +96,7 @@ func New(ctx context.Context, cfg Config, logger *slog.Logger) (*Server, error) 
 		SSEHeartbeat:    cfg.SSEHeartbeat,
 		SSERetry:        cfg.SSERetry,
 		LoginRateLimit:  cfg.LoginRateLimit,
+		TrustedProxies:  cfg.TrustedProxies,
 		PasswordParams:  cfg.PasswordParams,
 		OIDC:            provider,
 		OIDCAllowSignup: cfg.OIDCAllowSignup,

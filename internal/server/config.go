@@ -7,12 +7,14 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"net/netip"
 	"net/url"
 	"os"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/levapveeskela/lv24-brain/internal/adapters/httpapi"
 	"github.com/levapveeskela/lv24-brain/internal/adapters/oidc"
 	"github.com/levapveeskela/lv24-brain/internal/auth"
 	brainconfig "github.com/levapveeskela/lv24-brain/internal/config"
@@ -43,6 +45,9 @@ type Config struct {
 	SSERetry        time.Duration
 	ShutdownTimeout time.Duration
 	LoginRateLimit  int
+	// TrustedProxies lists reverse proxies (BRAIN_TRUSTED_PROXIES) whose
+	// X-Forwarded-For is used to attribute login attempts to clients.
+	TrustedProxies []netip.Prefix
 	// ConnectorTimeout bounds one server-side connector run.
 	ConnectorTimeout time.Duration
 
@@ -199,9 +204,8 @@ func validateOIDC(cfg oidc.Config) error {
 	if strings.TrimSpace(cfg.Issuer) == "" {
 		return nil
 	}
-	issuer, err := url.Parse(cfg.Issuer)
-	if err != nil || (issuer.Scheme != "https" && issuer.Scheme != "http") || issuer.Host == "" {
-		return errors.New("server: BRAIN_OIDC_ISSUER must be an absolute http(s) URL")
+	if err := oidc.ValidateIssuerURL(cfg.Issuer); err != nil {
+		return fmt.Errorf("server: BRAIN_OIDC_ISSUER: %w", err)
 	}
 	if strings.TrimSpace(cfg.ClientID) == "" {
 		return errors.New("server: BRAIN_OIDC_CLIENT_ID is required when OIDC is enabled")
@@ -301,6 +305,9 @@ func applyEnvironment(cfg *Config, getenv func(string) string) error {
 		return err
 	}
 	cfg.LoginRateLimit = rateLimit
+	if cfg.TrustedProxies, err = httpapi.ParseTrustedProxies(getenv("BRAIN_TRUSTED_PROXIES")); err != nil {
+		return fmt.Errorf("server: BRAIN_TRUSTED_PROXIES: %w", err)
+	}
 	if cfg.ConnectorTimeout, err = envDuration(getenv, "BRAIN_CONNECTOR_TIMEOUT", cfg.ConnectorTimeout); err != nil {
 		return err
 	}

@@ -2,6 +2,7 @@ package github
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -175,6 +176,43 @@ func TestGitHubRunWritesDeterministicMarkdown(t *testing.T) {
 	}
 	if secondRun.Counts["pull_requests"] != 1 {
 		t.Fatalf("second counts = %#v", secondRun.Counts)
+	}
+}
+
+func TestGitHubBaseURLSchemeValidation(t *testing.T) {
+	cases := []struct {
+		name    string
+		baseURL string
+		wantErr bool
+	}{
+		{name: "https public host", baseURL: "https://api.github.com", wantErr: false},
+		{name: "https custom host", baseURL: "https://github.example.internal/api/v3", wantErr: false},
+		{name: "http ipv4 loopback", baseURL: "http://127.0.0.1:8080", wantErr: false},
+		{name: "http localhost", baseURL: "http://localhost:8080", wantErr: false},
+		{name: "http ipv6 loopback", baseURL: "http://[::1]:8080", wantErr: false},
+		{name: "http non-loopback rejected", baseURL: "http://example.com", wantErr: true},
+		{name: "http private address rejected", baseURL: "http://10.0.0.5", wantErr: true},
+		{name: "ftp scheme rejected", baseURL: "ftp://api.github.com", wantErr: true},
+		{name: "file scheme rejected", baseURL: "file:///tmp/api", wantErr: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := New(Config{
+				BaseURL: tc.baseURL,
+				Repos:   []string{"acme/widgets"},
+				Secrets: fakeSecrets{value: testToken},
+			})
+			if !tc.wantErr {
+				if err != nil {
+					t.Fatalf("New(%q) error = %v", tc.baseURL, err)
+				}
+				return
+			}
+			var validationErr *domain.ValidationError
+			if !errors.As(err, &validationErr) || validationErr.Field != "github.baseURL" {
+				t.Fatalf("New(%q) error = %v, want github.baseURL validation error", tc.baseURL, err)
+			}
+		})
 	}
 }
 

@@ -132,8 +132,9 @@ brain version    print build identity
 ```
 
 Server mode selects the HTTP client at bootstrap. `brain login --config <path>
---login <name> --password-stdin` (or `--password`, with `BRAIN_LOGIN` and
-`BRAIN_PASSWORD` as fallbacks) exchanges local credentials at
+--login <name> --password-stdin` (or `BRAIN_PASSWORD` without the flag, with
+`BRAIN_LOGIN` as the login fallback; there is no `--password` flag) exchanges
+local credentials at
 `POST /v1/auth/login` and stores one JSON credential bundle under the OS
 secret-store key `server-session` (`serverUrl`, `accessToken`,
 `refreshToken`). A single `Set` keeps binding and token pair atomic, and the
@@ -198,7 +199,9 @@ Implemented surface:
 - API token management at `/v1/tokens`.
 - Projects, state, notes, decisions, attempts, handoffs, search, and revisions.
 - `GET /v1/events` SSE with `retry`, `ready`, revision events, heartbeat, and
-  `Last-Event-ID` replay.
+  `Last-Event-ID` replay. Authenticate with the `Authorization` header, or with
+  a single-use one-minute ticket from `POST /v1/events/ticket` passed as
+  `?ticket=` for EventSource clients.
 
 Authentication and roles:
 

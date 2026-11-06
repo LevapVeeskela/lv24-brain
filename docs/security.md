@@ -110,17 +110,33 @@ Implemented in `internal/adapters/httpapi` and `internal/auth`:
   `api_tokens` table added by the same migration, with role and owner checks
   when minted.
 - OIDC authorization code with PKCE, `state`, and `nonce`; issuer metadata is
-  discovered over HTTPS and ID tokens are verified.
+  discovered over HTTPS (plain `http` is accepted only for loopback issuers)
+  and ID tokens are verified. The `state` is also bound to the starting
+  browser by an HttpOnly, SameSite=Lax cookie, so a callback URL carrying
+  another user's code is rejected (login CSRF).
+- OIDC account linking: a first OIDC login is linked to an existing local
+  account only when the provider asserts `email_verified` and the verified
+  email equals the account login. Admin accounts are never linked implicitly,
+  and an unverified email is never used as the login. Every other collision
+  is refused with `403`.
 - Server-side authorization on every route. `viewer` reads, `member` writes,
   `admin` manages users and destructive operations. Connector execution is
   admin-only (`POST /v1/connectors/run`); viewers may list, read and export run
   records. The runner is bounded by `BRAIN_CONNECTOR_TIMEOUT` and uses the same
   environment/OS secret store as the CLI.
-- Login rate limiting, bounded request bodies, request timeouts, recovery from
+- Login rate limiting per client address and, separately, per account
+  (`BRAIN_LOGIN_RATE_LIMIT` attempts per minute each). Behind a reverse proxy
+  set `BRAIN_TRUSTED_PROXIES`; only then is `X-Forwarded-For` honoured, walked
+  from the right so spoofed left-hand entries are ignored.
+- Connector base URLs (GitHub, GitLab) must be `https`; plain `http` is
+  accepted only for loopback hosts. `brain login` has no `--password` flag.
+- Bounded request bodies, request timeouts, recovery from
   panics, and security headers (`nosniff`, `DENY`, `no-referrer`, no-store,
   restrictive permissions policy).
-- SSE accepts a bearer token in the header; the query-token path is limited to
-  the event stream for clients that cannot set headers.
+- SSE accepts a bearer token in the header. Clients that cannot set headers
+  (EventSource) obtain a single-use ticket from `POST /v1/events/ticket`
+  (valid one minute) and pass it as `?ticket=`; access and API tokens are
+  never accepted in the URL.
 
 Current limits, stated plainly:
 

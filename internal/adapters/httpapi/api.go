@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"net/netip"
 	"runtime"
 	"strings"
 	"sync"
@@ -28,16 +29,19 @@ type BuildInfo struct {
 
 // Config configures the HTTP API.
 type Config struct {
-	Secret          []byte
-	Issuer          string
-	Audience        string
-	AccessTTL       time.Duration
-	RefreshTTL      time.Duration
-	TokenPrefix     string
-	MaxBodyBytes    int64
-	SSEHeartbeat    time.Duration
-	SSERetry        time.Duration
-	LoginRateLimit  int
+	Secret         []byte
+	Issuer         string
+	Audience       string
+	AccessTTL      time.Duration
+	RefreshTTL     time.Duration
+	TokenPrefix    string
+	MaxBodyBytes   int64
+	SSEHeartbeat   time.Duration
+	SSERetry       time.Duration
+	LoginRateLimit int
+	// TrustedProxies are peers whose X-Forwarded-For is honoured when
+	// attributing requests to clients for rate limiting.
+	TrustedProxies  []netip.Prefix
 	PasswordParams  auth.Argon2Params
 	OIDC            auth.OIDCProvider
 	OIDCAllowSignup bool
@@ -57,6 +61,9 @@ type API struct {
 	mux    *http.ServeMux
 	logger *slog.Logger
 	limit  *loginLimiter
+	// accountLimit bounds login attempts per account across all clients.
+	accountLimit *loginLimiter
+	sseTickets   *sseTickets
 
 	handlerOnce sync.Once
 	handler     http.Handler
@@ -137,16 +144,18 @@ func New(cfg Config, store Store) (*API, error) {
 		return nil, fmt.Errorf("httpapi: %w", err)
 	}
 	api := &API{
-		cfg:    cfg,
-		store:  store,
-		auth:   service,
-		broker: newBroker(),
-		mux:    http.NewServeMux(),
-		logger: cfg.Logger,
-		limit:  newLoginLimiter(cfg.LoginRateLimit, time.Minute, cfg.Now),
+		cfg:          cfg,
+		store:        store,
+		auth:         service,
+		broker:       newBroker(),
+		mux:          http.NewServeMux(),
+		logger:       cfg.Logger,
+		limit:        newLoginLimiter(cfg.LoginRateLimit, time.Minute, cfg.Now),
+		accountLimit: newLoginLimiter(cfg.LoginRateLimit, time.Minute, cfg.Now),
+		sseTickets:   newSSETickets(cfg.Now),
 	}
 	if cfg.OIDC != nil {
-		api.flows = newFlowStore(cfg.Now, 10*time.Minute, 1024)
+		api.flows = newFlowStore(cfg.Now, oidcFlowTTL, 1024)
 	}
 	api.routes()
 	return api, nil
@@ -231,11 +240,15 @@ func (a *API) routes() {
 	a.authed("GET /v1/connectors/runs/{id}/markdown", a.exportConnectorRun, domain.RoleViewer, false)
 	a.authed("GET /v1/connectors/runs/{id}", a.getConnectorRun, domain.RoleViewer, false)
 
+	a.authed("POST /v1/events/ticket", a.createEventTicket, domain.RoleViewer, false)
 	a.authed("GET /v1/events", a.events, domain.RoleViewer, true)
 }
 
-func (a *API) authed(pattern string, handler http.HandlerFunc, min domain.Role, allowQueryToken bool) {
-	a.mux.Handle(pattern, a.withAuth(min, allowQueryToken, handler))
+// authed registers a handler behind authentication and a minimum role.
+// allowTicket additionally accepts a single-use event-stream ticket in the
+// query string (GET /v1/events only); long-lived tokens are header-only.
+func (a *API) authed(pattern string, handler http.HandlerFunc, min domain.Role, allowTicket bool) {
+	a.mux.Handle(pattern, a.withAuth(min, allowTicket, handler))
 }
 
 func (a *API) health(w http.ResponseWriter, _ *http.Request) {
@@ -264,9 +277,15 @@ func principalFrom(ctx context.Context) (auth.Principal, bool) {
 	return principal, ok
 }
 
-func (a *API) withAuth(min domain.Role, allowQueryToken bool, next http.Handler) http.Handler {
+func (a *API) withAuth(min domain.Role, allowTicket bool, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		principal, err := a.authenticate(r, allowQueryToken)
+		var principal auth.Principal
+		var err error
+		if allowTicket {
+			principal, err = a.eventStreamPrincipal(r)
+		} else {
+			principal, err = a.authenticate(r)
+		}
 		if err != nil {
 			if !isCredentialError(err) {
 				// A database or adapter failure is not the caller's fault.
@@ -301,11 +320,8 @@ func isCredentialError(err error) bool {
 		errors.Is(err, auth.ErrInvalidRefresh)
 }
 
-func (a *API) authenticate(r *http.Request, allowQueryToken bool) (auth.Principal, error) {
+func (a *API) authenticate(r *http.Request) (auth.Principal, error) {
 	raw := bearerToken(r)
-	if raw == "" && allowQueryToken {
-		raw = strings.TrimSpace(r.URL.Query().Get("access_token"))
-	}
 	if raw == "" {
 		return auth.Principal{}, auth.ErrInvalidToken
 	}

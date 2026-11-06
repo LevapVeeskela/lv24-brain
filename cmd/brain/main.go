@@ -1555,8 +1555,7 @@ func readSecretValue(stdin io.Reader) (string, error) {
 func runLogin(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	fs := newFlagSet("login", stderr)
 	login := fs.String("login", strings.TrimSpace(os.Getenv("BRAIN_LOGIN")), "user login (default: $BRAIN_LOGIN)")
-	password := fs.String("password", "", "password; prefer --password-stdin")
-	passwordStdin := fs.Bool("password-stdin", false, "read the password from one stdin line")
+	passwordStdin := fs.Bool("password-stdin", false, "read the password from one stdin line (or set BRAIN_PASSWORD)")
 	cfgPath := configFlag(fs)
 	if err := fs.Parse(args); err != nil {
 		return 2
@@ -1565,11 +1564,7 @@ func runLogin(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "brain login: unexpected arguments: %s\n", strings.Join(fs.Args(), " "))
 		return 2
 	}
-	if *passwordStdin && *password != "" {
-		fmt.Fprintln(stderr, "brain login: --password and --password-stdin are mutually exclusive")
-		return 2
-	}
-	secret := *password
+	var secret string
 	if *passwordStdin {
 		value, err := readSecretValue(stdin)
 		if err != nil {
@@ -1577,11 +1572,8 @@ func runLogin(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 			return 1
 		}
 		secret = value
-	} else if secret == "" {
+	} else {
 		secret = os.Getenv("BRAIN_PASSWORD")
-	}
-	if *password != "" {
-		fmt.Fprintln(stderr, "brain login: warning: --password exposes the password in process arguments; prefer --password-stdin")
 	}
 	if strings.TrimSpace(*login) == "" {
 		fmt.Fprintln(stderr, "brain login: --login is required")

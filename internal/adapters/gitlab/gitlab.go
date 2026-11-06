@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"net/url"
 	"sort"
@@ -59,6 +60,24 @@ type Connector struct {
 	now       func() time.Time
 }
 
+// isAllowedBaseURL reports whether u may carry the PAT: https always, http only
+// when the host is loopback so local test servers keep working.
+func isAllowedBaseURL(u *url.URL) bool {
+	switch u.Scheme {
+	case "https":
+		return true
+	case "http":
+		host := u.Hostname()
+		if strings.EqualFold(host, "localhost") {
+			return true
+		}
+		ip := net.ParseIP(host)
+		return ip != nil && ip.IsLoopback()
+	default:
+		return false
+	}
+}
+
 // New validates cfg and builds a connector.
 func New(cfg Config) (*Connector, error) {
 	if cfg.Secrets == nil {
@@ -69,8 +88,8 @@ func New(cfg Config) (*Connector, error) {
 		baseURL = DefaultBaseURL
 	}
 	parsed, err := url.Parse(baseURL)
-	if err != nil || parsed.Host == "" || (parsed.Scheme != "http" && parsed.Scheme != "https") {
-		return nil, domain.NewValidationError("gitlab.baseURL", "must be an http(s) URL")
+	if err != nil || parsed.Host == "" || !isAllowedBaseURL(parsed) {
+		return nil, domain.NewValidationError("gitlab.baseURL", "must be an https URL; http is allowed only for loopback hosts")
 	}
 	baseURL = strings.TrimRight(parsed.String(), "/")
 

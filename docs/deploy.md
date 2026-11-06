@@ -76,6 +76,8 @@ runs as UID/GID `10001` and drops new privileges.
 | `BRAIN_OIDC_CLIENT_ID` | with OIDC | OIDC client id. |
 | `BRAIN_OIDC_CLIENT_SECRET` | no | OIDC client secret for confidential clients. |
 | `BRAIN_OIDC_REDIRECT_URL` | with OIDC | Public callback URL. |
+| `BRAIN_LOGIN_RATE_LIMIT` | no | Login attempts per minute, applied per client address and per account; default `20`, `0` disables. |
+| `BRAIN_TRUSTED_PROXIES` | no | Comma-separated IPs/CIDRs of reverse proxies whose `X-Forwarded-For` is trusted for rate limiting. Under Compose the peer is the Docker network gateway (for example `172.16.0.0/12`). Empty ignores the header. |
 | `BRAIN_ADDR` | no | In-container listen address; Compose sets `0.0.0.0:8080`. |
 | `BRAIN_BIND_ADDR` | no | Host bind address, default `127.0.0.1`. |
 | `BRAIN_PORT` | no | Host port, default `8080`. |

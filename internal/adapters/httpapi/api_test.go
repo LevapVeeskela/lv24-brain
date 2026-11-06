@@ -6,7 +6,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -482,28 +481,7 @@ func TestOIDCFlowWithFakeProvider(t *testing.T) {
 		cfg.OIDCAllowSignup = true
 	})
 
-	client := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error {
-		return http.ErrUseLastResponse
-	}}
-	resp, err := client.Get(ts.URL + "/v1/auth/oidc/login")
-	if err != nil {
-		t.Fatalf("oidc login: %v", err)
-	}
-	_ = resp.Body.Close()
-	if resp.StatusCode != http.StatusFound {
-		t.Fatalf("status = %d, want 302", resp.StatusCode)
-	}
-	location, err := url.Parse(resp.Header.Get("Location"))
-	if err != nil {
-		t.Fatalf("parse location: %v", err)
-	}
-	state := location.Query().Get("state")
-	if state == "" {
-		t.Fatal("redirect has no state")
-	}
-
-	callback := fmt.Sprintf("%s/v1/auth/oidc/callback?code=good-code&state=%s", ts.URL, url.QueryEscape(state))
-	resp, payload := jsonRequest(t, http.MethodGet, callback, nil, "")
+	resp, payload := completeOIDCLogin(t, ts.URL, true)
 	requireStatus(t, resp, payload, http.StatusOK)
 	session := decodeSession(t, payload)
 	if session.User.Login != "oidc-user@example.test" || session.User.Role != domain.RoleMember {

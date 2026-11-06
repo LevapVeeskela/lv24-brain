@@ -51,12 +51,19 @@ type SessionStore interface {
 // OIDCClaims are the provider assertions the server trusts after ID-token
 // verification.
 type OIDCClaims struct {
-	Issuer      string
-	Subject     string
-	Login       string
-	DisplayName string
-	Role        domain.Role
-	Groups      []string
+	Issuer  string
+	Subject string
+	// Login is the verified email when available, otherwise the provider's
+	// preferred_username or subject. Only a verified email may be used to link
+	// an existing local account.
+	Login string
+	// Email is the email claim; EmailVerified reports the provider's
+	// email_verified assertion for it.
+	Email         string
+	EmailVerified bool
+	DisplayName   string
+	Role          domain.Role
+	Groups        []string
 }
 
 // OIDCProvider starts and completes an authorization-code + PKCE flow.

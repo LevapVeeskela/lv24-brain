@@ -484,12 +484,25 @@
         "responses": { "200": { "description": "Revisions" } }
       }
     },
+    "/v1/events/ticket": {
+      "post": {
+        "summary": "Issue a single-use, one-minute ticket for GET /v1/events",
+        "responses": {
+          "201": {
+            "description": "Ticket",
+            "content": { "application/json": { "schema": { "type": "object", "properties": { "ticket": { "type": "string" }, "expiresAt": { "type": "string", "format": "date-time" } } } } }
+          },
+          "401": { "description": "Unauthenticated" },
+          "429": { "description": "Too many outstanding tickets" }
+        }
+      }
+    },
     "/v1/events": {
       "get": {
         "summary": "Server-sent revision events with heartbeat and Last-Event-ID replay",
         "parameters": [
           { "name": "Last-Event-ID", "in": "header", "schema": { "type": "string" } },
-          { "name": "access_token", "in": "query", "description": "Alternative to the Authorization header for EventSource clients", "schema": { "type": "string" } }
+          { "name": "ticket", "in": "query", "description": "Single-use ticket from POST /v1/events/ticket, for EventSource clients that cannot send an Authorization header. Access tokens are never accepted in the URL.", "schema": { "type": "string" } }
         ],
         "responses": {
           "200": {

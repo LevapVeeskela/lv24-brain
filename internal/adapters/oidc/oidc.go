@@ -10,6 +10,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"net"
 	"net/url"
 	"strings"
 	"time"
@@ -51,9 +52,8 @@ func New(ctx context.Context, cfg Config) (*Authenticator, error) {
 	if strings.TrimSpace(cfg.Issuer) == "" {
 		return nil, errors.New("oidc issuer is required")
 	}
-	issuerURL, err := url.Parse(cfg.Issuer)
-	if err != nil || (issuerURL.Scheme != "https" && issuerURL.Scheme != "http") || issuerURL.Host == "" {
-		return nil, errors.New("oidc issuer must be an absolute http(s) URL")
+	if err := ValidateIssuerURL(cfg.Issuer); err != nil {
+		return nil, err
 	}
 	if strings.TrimSpace(cfg.ClientID) == "" {
 		return nil, errors.New("oidc client id is required")
@@ -132,42 +132,93 @@ func (a *Authenticator) Exchange(ctx context.Context, code, codeVerifier, nonce 
 	if subtle.ConstantTimeCompare([]byte(idToken.Nonce), []byte(nonce)) != 1 {
 		return auth.OIDCClaims{}, errors.New("oidc id token nonce mismatch")
 	}
-	var claims struct {
-		Subject           string `json:"sub"`
-		Email             string `json:"email"`
-		PreferredUsername string `json:"preferred_username"`
-		Name              string `json:"name"`
-	}
-	if err := idToken.Claims(&claims); err != nil {
-		return auth.OIDCClaims{}, fmt.Errorf("decode oidc claims: %w", err)
-	}
 	var raw map[string]any
 	if err := idToken.Claims(&raw); err != nil {
-		return auth.OIDCClaims{}, fmt.Errorf("decode oidc group claims: %w", err)
+		return auth.OIDCClaims{}, fmt.Errorf("decode oidc claims: %w", err)
 	}
-	groups := claimStrings(raw[a.cfg.GroupsClaim])
-	login := strings.TrimSpace(claims.Email)
-	if login == "" {
-		login = strings.TrimSpace(claims.PreferredUsername)
-	}
-	if login == "" {
-		login = claims.Subject
-	}
-	displayName := strings.TrimSpace(claims.Name)
-	if displayName == "" {
-		displayName = login
-	}
+	claims := ClaimsFromMap(idToken.Issuer, raw, a.cfg.GroupsClaim)
 	if strings.TrimSpace(claims.Subject) == "" {
 		return auth.OIDCClaims{}, errors.New("oidc id token has no subject")
 	}
+	claims.Role = MapRole(claims.Groups, a.cfg.GroupRoles, a.cfg.DefaultRole)
+	return claims, nil
+}
+
+// ClaimsFromMap converts verified ID-token claims to brain claims. The email
+// becomes the login only when the provider asserts email_verified; otherwise
+// preferred_username, then the subject, is used. Role is left for the caller.
+func ClaimsFromMap(issuer string, raw map[string]any, groupsClaim string) auth.OIDCClaims {
+	text := func(key string) string {
+		value, _ := raw[key].(string)
+		return strings.TrimSpace(value)
+	}
+	subject := text("sub")
+	email := text("email")
+	verified := claimBool(raw["email_verified"])
+	login := ""
+	if email != "" && verified {
+		login = email
+	}
+	if login == "" {
+		login = text("preferred_username")
+	}
+	if login == "" {
+		login = subject
+	}
+	displayName := text("name")
+	if displayName == "" {
+		displayName = login
+	}
 	return auth.OIDCClaims{
-		Issuer:      idToken.Issuer,
-		Subject:     claims.Subject,
-		Login:       login,
-		DisplayName: displayName,
-		Role:        MapRole(groups, a.cfg.GroupRoles, a.cfg.DefaultRole),
-		Groups:      groups,
-	}, nil
+		Issuer:        issuer,
+		Subject:       subject,
+		Login:         login,
+		Email:         email,
+		EmailVerified: verified,
+		DisplayName:   displayName,
+		Groups:        claimStrings(raw[groupsClaim]),
+	}
+}
+
+// claimBool accepts a JSON boolean or the string "true"; some providers send
+// email_verified as a string.
+func claimBool(value any) bool {
+	switch typed := value.(type) {
+	case bool:
+		return typed
+	case string:
+		return strings.EqualFold(strings.TrimSpace(typed), "true")
+	default:
+		return false
+	}
+}
+
+// ValidateIssuerURL requires an absolute https issuer; plain http is allowed
+// only for loopback hosts (local development and tests).
+func ValidateIssuerURL(raw string) error {
+	issuerURL, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil || issuerURL.Host == "" {
+		return errors.New("oidc issuer must be an absolute https URL")
+	}
+	switch issuerURL.Scheme {
+	case "https":
+		return nil
+	case "http":
+		if isLoopbackHost(issuerURL.Hostname()) {
+			return nil
+		}
+		return errors.New("oidc issuer must use https (http is allowed only for loopback hosts)")
+	default:
+		return errors.New("oidc issuer must be an absolute https URL")
+	}
+}
+
+func isLoopbackHost(host string) bool {
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 // PKCEChallenge computes the S256 code challenge for a verifier.
