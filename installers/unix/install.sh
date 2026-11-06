@@ -303,14 +303,16 @@ http_get() {
     effective="$(curl "${curl_args[@]}" -o "$destination" -w '%{url_effective}' "$url")" || return 1
 
     if [ "$kind" != api ]; then
-        # Redirects may only land on the two approved artifact hosts.
+        # Redirects may only land on the approved GitHub artifact hosts.
         assert_artifact_host "$effective"
     fi
 }
 
 http_try() {
-    # Like http_get, but quiet: used for optional metadata probes.
-    http_get "$1" "$2" "${3:-artifact}" 2>/dev/null
+    # Like http_get, but quiet: used for optional metadata probes. It runs in
+    # a subshell so a refusal inside http_get (die) fails only this probe
+    # instead of silently ending the installer with stderr discarded.
+    ( http_get "$1" "$2" "${3:-artifact}" ) 2>/dev/null
 }
 
 json_flat() {
@@ -456,6 +458,8 @@ assert_artifact_host() {
     case "${1:-}" in
         https://github.com/*) ;;
         https://objects.githubusercontent.com/*) ;;
+        # GitHub serves release assets from this host since 2025.
+        https://release-assets.githubusercontent.com/*) ;;
         *) die "refusing an artifact from an untrusted host: $1" ;;
     esac
 }
