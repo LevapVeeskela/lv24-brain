@@ -69,6 +69,9 @@ func (a *API) updateNote(w http.ResponseWriter, r *http.Request) {
 		a.writeError(w, r, err)
 		return
 	}
+	if !a.requireOwner(w, r, existing.CreatedBy) {
+		return
+	}
 	record, revision, err := a.store.UpdateNote(r.Context(), domain.Note{
 		ID:        existing.ID,
 		ProjectID: existing.ProjectID,
@@ -86,7 +89,15 @@ func (a *API) updateNote(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *API) deleteNote(w http.ResponseWriter, r *http.Request) {
-	revision, err := a.store.DeleteNote(r.Context(), r.PathValue("id"), queryInt64(r, "revision"))
+	existing, err := a.store.GetNote(r.Context(), r.PathValue("id"))
+	if err != nil {
+		a.writeError(w, r, err)
+		return
+	}
+	if !a.requireOwner(w, r, existing.CreatedBy) {
+		return
+	}
+	revision, err := a.store.DeleteNote(r.Context(), existing.ID, queryInt64(r, "revision"))
 	if err != nil {
 		a.writeError(w, r, err)
 		return
@@ -164,6 +175,9 @@ func (a *API) updateDecision(w http.ResponseWriter, r *http.Request) {
 		a.writeError(w, r, err)
 		return
 	}
+	if !a.requireOwner(w, r, existing.CreatedBy) {
+		return
+	}
 	record, revision, err := a.store.UpdateDecision(r.Context(), domain.Decision{
 		ID:           existing.ID,
 		ProjectID:    existing.ProjectID,
@@ -184,7 +198,15 @@ func (a *API) updateDecision(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *API) deleteDecision(w http.ResponseWriter, r *http.Request) {
-	revision, err := a.store.DeleteDecision(r.Context(), r.PathValue("id"), queryInt64(r, "revision"))
+	existing, err := a.store.GetDecision(r.Context(), r.PathValue("id"))
+	if err != nil {
+		a.writeError(w, r, err)
+		return
+	}
+	if !a.requireOwner(w, r, existing.CreatedBy) {
+		return
+	}
+	revision, err := a.store.DeleteDecision(r.Context(), existing.ID, queryInt64(r, "revision"))
 	if err != nil {
 		a.writeError(w, r, err)
 		return
@@ -258,6 +280,9 @@ func (a *API) updateAttempt(w http.ResponseWriter, r *http.Request) {
 		a.writeError(w, r, err)
 		return
 	}
+	if !a.requireOwner(w, r, existing.CreatedBy) {
+		return
+	}
 	record, revision, err := a.store.UpdateAttempt(r.Context(), domain.Attempt{
 		ID:         existing.ID,
 		ProjectID:  existing.ProjectID,
@@ -276,7 +301,15 @@ func (a *API) updateAttempt(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *API) deleteAttempt(w http.ResponseWriter, r *http.Request) {
-	revision, err := a.store.DeleteAttempt(r.Context(), r.PathValue("id"), queryInt64(r, "revision"))
+	existing, err := a.store.GetAttempt(r.Context(), r.PathValue("id"))
+	if err != nil {
+		a.writeError(w, r, err)
+		return
+	}
+	if !a.requireOwner(w, r, existing.CreatedBy) {
+		return
+	}
+	revision, err := a.store.DeleteAttempt(r.Context(), existing.ID, queryInt64(r, "revision"))
 	if err != nil {
 		a.writeError(w, r, err)
 		return
@@ -337,11 +370,39 @@ func (a *API) getHandoff(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *API) deleteHandoff(w http.ResponseWriter, r *http.Request) {
-	revision, err := a.store.DeleteHandoff(r.Context(), r.PathValue("id"), queryInt64(r, "revision"))
+	existing, err := a.store.GetHandoff(r.Context(), r.PathValue("id"))
+	if err != nil {
+		a.writeError(w, r, err)
+		return
+	}
+	if !a.requireOwner(w, r, existing.CreatedBy) {
+		return
+	}
+	revision, err := a.store.DeleteHandoff(r.Context(), existing.ID, queryInt64(r, "revision"))
 	if err != nil {
 		a.writeError(w, r, err)
 		return
 	}
 	a.publish(revision, "handoff", r.PathValue("id"), "delete")
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// requireOwner enforces "members change only their own knowledge": admins may
+// update or delete any note, decision, attempt or handoff; members only those
+// they created. Records with an unknown owner (created before ownership was
+// tracked) are admin-only. It writes 403 and returns false when denied.
+func (a *API) requireOwner(w http.ResponseWriter, r *http.Request, createdBy string) bool {
+	principal, ok := principalFrom(r.Context())
+	if !ok {
+		writeAuthError(w)
+		return false
+	}
+	if principal.User.Role == domain.RoleAdmin {
+		return true
+	}
+	if createdBy != "" && createdBy == principal.User.ID {
+		return true
+	}
+	writeErrorCode(w, http.StatusForbidden, "forbidden", "only the record owner or an admin can change this record")
+	return false
 }

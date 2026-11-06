@@ -614,7 +614,7 @@ func (m *MemoryStore) CreateNote(ctx context.Context, note domain.Note) (NoteRec
 	note.CreatedAt = at
 	note.UpdatedAt = at
 	revision := m.nextRevisionLocked(ctx, "note", note.ID, "create", nil)
-	record := NoteRecord{Note: note, Revision: revisionValue(revision)}
+	record := NoteRecord{Note: note, Revision: revisionValue(revision), CreatedBy: ports.ActorIDFromContext(ctx)}
 	m.notes[note.ID] = record
 	return record, revision, nil
 }
@@ -729,7 +729,7 @@ func (m *MemoryStore) CreateDecision(ctx context.Context, decision domain.Decisi
 	decision.CreatedAt = at
 	decision.UpdatedAt = at
 	revision := m.nextRevisionLocked(ctx, "decision", decision.ID, "create", map[string]any{"status": string(decision.Status)})
-	record := DecisionRecord{Decision: decision, Revision: revisionValue(revision)}
+	record := DecisionRecord{Decision: decision, Revision: revisionValue(revision), CreatedBy: ports.ActorIDFromContext(ctx)}
 	m.decisions[decision.ID] = record
 	return record, revision, nil
 }
@@ -849,7 +849,7 @@ func (m *MemoryStore) CreateAttempt(ctx context.Context, attempt domain.Attempt)
 	attempt.CreatedAt = at
 	attempt.UpdatedAt = at
 	revision := m.nextRevisionLocked(ctx, "attempt", attempt.ID, "create", nil)
-	record := AttemptRecord{Attempt: attempt, Revision: revisionValue(revision)}
+	record := AttemptRecord{Attempt: attempt, Revision: revisionValue(revision), CreatedBy: ports.ActorIDFromContext(ctx)}
 	m.attempts[attempt.ID] = record
 	return record, revision, nil
 }
@@ -962,7 +962,7 @@ func (m *MemoryStore) CreateHandoff(ctx context.Context, handoff domain.Handoff)
 	}
 	handoff.CreatedAt = m.nowUTC()
 	revision := m.nextRevisionLocked(ctx, "handoff", handoff.ID, "create", nil)
-	record := HandoffRecord{Handoff: handoff, Revision: revisionValue(revision)}
+	record := HandoffRecord{Handoff: handoff, Revision: revisionValue(revision), CreatedBy: ports.ActorIDFromContext(ctx)}
 	m.handoffs[handoff.ID] = record
 	return record, revision, nil
 }

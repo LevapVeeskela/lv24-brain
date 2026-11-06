@@ -227,9 +227,9 @@ a token in the repository URL.
 The HTTP API and the token-authenticated CLI client are implemented. Postgres
 persistence is enabled by `BRAIN_DATABASE_URL` (or `DATABASE_URL`); without it
 the server falls back to an in-memory store and loses data on restart. Server
-schema 4 (migrations `0002_auth_tokens.sql`, `0003_auth_revocations.sql`, and
-`0004_security_audit.sql`) stores API tokens, refresh-token families, and the
-security audit log durably. See
+schema 5 (migrations `0002_auth_tokens.sql` through `0005_knowledge_owner.sql`)
+stores API tokens, refresh-token families, the security audit log, and
+knowledge-record owners durably. See
 [deploy.md](deploy.md) for Compose, backups, and the migration gate.
 
 Start the server with an explicit signing key, one bootstrap administrator, and
@@ -353,7 +353,7 @@ ok: git (not used in server mode)
 A successful write prints `note note-<project>-YYYYMMDD-HHMMSS`.
 
 The `schema` check reports the data schema from `brain.yaml`; the server
-database schema (`postgres.SchemaVersion`, currently 4) is separate.
+database schema (`postgres.SchemaVersion`, currently 5) is separate.
 
 `brain sync` is not implemented in server mode — the API is the sync path.
 `brain index` is local-only; `brain search` works in server mode through

@@ -21,7 +21,7 @@ The engine has moved past the initial scaffold. Implemented and tested today:
 | Storage | Markdown + YAML frontmatter (`fsstore`), SQLite FTS5 index, `registry.json` project index |
 | Local search | `brain index` refreshes FTS5 from Markdown; `brain index --rebuild` discards and rebuilds it; `brain search` queries it in local/`git` mode. `brain index` is local-only; `brain search` also works in server mode through `GET /v1/search` |
 | Git sync | `fetch`, `pull --rebase`, commit, optional push; read-only `--status`; conflict reporting |
-| HTTP server | Health/readiness/version, OpenAPI JSON, JWT + rotating refresh tokens, API tokens, durable auth tables (migrations `0002_auth_tokens.sql` and `0003_auth_revocations.sql`, server schema 4 with `0004_security_audit.sql`), security audit log (`GET /v1/audit`, admin), local admin bootstrap, OIDC (PKCE/state/nonce), roles `admin\|member\|viewer`, SSE revision stream; Postgres when `BRAIN_DATABASE_URL` is set, in-memory fallback otherwise |
+| HTTP server | Health/readiness/version, OpenAPI JSON, JWT + rotating refresh tokens, API tokens, durable auth tables (migrations `0002_auth_tokens.sql` and `0003_auth_revocations.sql`, server schema 5: `0004_security_audit.sql`, `0005_knowledge_owner.sql`), security audit log (`GET /v1/audit`, admin), local admin bootstrap, OIDC (PKCE/state/nonce), roles `admin\|member\|viewer`, SSE revision stream; Postgres when `BRAIN_DATABASE_URL` is set, in-memory fallback otherwise |
 | Server-mode CLI | `brain login` / `brain logout`; one atomic OS secret-store bundle `server-session` (server URL, access token, refresh token) bound to the configured `server_url`; `server-token` remains an explicit static API-token fallback; the HTTP client refreshes once on `401` and retries; `BRAIN_TOKEN` overrides stored credentials |
 | Connectors | GitHub, GitLab, and IMAP adapters plus `brain connector run`; local/`git` writes Markdown dumps and run records under the data directory. Server mode runs through `POST /v1/connectors/run`, stores run records in PostgreSQL, and exports each run as Markdown at `GET /v1/connectors/runs/{id}/markdown` |
 | Auto-update | `brain update --check`, `--yes`, and `--rollback`; notify-only daily check; release check, Ed25519-signed manifest, SHA-256 verification, staged apply, previous binary kept; GoReleaser release workflow |
@@ -29,7 +29,7 @@ The engine has moved past the initial scaffold. Implemented and tested today:
 | Migration | `brain migrate` imports legacy `.brain` knowledge (idempotent, dry-run, path validation), registers projects, and sets `schema_version`; every import writes a backup manifest and `brain migrate --rollback <manifest.json \| latest>` reverts it (edited files are kept) |
 
 API tokens and refresh-token families are durable in Postgres (migrations
-`0002_auth_tokens.sql` and `0003_auth_revocations.sql`, server schema version 4),
+`0002_auth_tokens.sql` and `0003_auth_revocations.sql`, server schema version 5),
 so they survive restarts and refresh rotation still revokes the whole family on
 reuse. Revocation tombstones have no expiry, so pruning expired token rows
 cannot resurrect a revoked family or session. Without

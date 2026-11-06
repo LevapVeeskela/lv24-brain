@@ -161,8 +161,8 @@ docker compose --env-file .env -f docker-compose.yml up -d brain-server
 Before an upgrade, take a backup. The server applies embedded migrations on
 startup; an existing schema with pending migrations refuses to start until
 `BRAIN_DATABASE_BACKUP_CONFIRMED=1` is set in the server environment. Upgrading
-a database to schema 4 (migrations `0002_auth_tokens.sql`,
-`0003_auth_revocations.sql`, and `0004_security_audit.sql`) is such a migration: back up first, set the
+a database to schema 5 (migrations `0002_auth_tokens.sql` through
+`0005_knowledge_owner.sql`) is such a migration: back up first, set the
 confirmation variable for the upgrade start, and unset it afterwards if you
 prefer to keep the gate explicit for the next migration. An update must not run
 while migrations or active jobs are in progress. Roll back by restoring the
@@ -198,7 +198,7 @@ Current limits:
 
 - Pending migrations on an existing schema require a backup and
   `BRAIN_DATABASE_BACKUP_CONFIRMED=1`; migrations are forward-only. Upgrading a
-  server to schema 4 therefore needs a backup first.
+  server to schema 5 therefore needs a backup first.
 - Multi-replica deployment is not supported: the SSE broker and login rate
   limiter are per-process, so events and throttling are not shared between
   instances. Durable tokens do not change that.

@@ -99,19 +99,19 @@ func toStateRecord(record postgres.StateRecord) httpapi.StateRecord {
 }
 
 func toNoteRecord(record postgres.NoteRecord) httpapi.NoteRecord {
-	return httpapi.NoteRecord{Note: record.Note, Revision: record.Revision}
+	return httpapi.NoteRecord{Note: record.Note, Revision: record.Revision, CreatedBy: record.CreatedBy}
 }
 
 func toDecisionRecord(record postgres.DecisionRecord) httpapi.DecisionRecord {
-	return httpapi.DecisionRecord{Decision: record.Decision, Revision: record.Revision}
+	return httpapi.DecisionRecord{Decision: record.Decision, Revision: record.Revision, CreatedBy: record.CreatedBy}
 }
 
 func toAttemptRecord(record postgres.AttemptRecord) httpapi.AttemptRecord {
-	return httpapi.AttemptRecord{Attempt: record.Attempt, Revision: record.Revision}
+	return httpapi.AttemptRecord{Attempt: record.Attempt, Revision: record.Revision, CreatedBy: record.CreatedBy}
 }
 
 func toHandoffRecord(record postgres.HandoffRecord) httpapi.HandoffRecord {
-	return httpapi.HandoffRecord{Handoff: record.Handoff, Revision: record.Revision}
+	return httpapi.HandoffRecord{Handoff: record.Handoff, Revision: record.Revision, CreatedBy: record.CreatedBy}
 }
 
 func toRevisionRecord(record postgres.RevisionRecord) httpapi.RevisionRecord {

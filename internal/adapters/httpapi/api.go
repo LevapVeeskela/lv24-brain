@@ -310,6 +310,7 @@ func (a *API) withAuth(min domain.Role, allowTicket bool, next http.Handler) htt
 		}
 		ctx := context.WithValue(r.Context(), principalContextKey{}, principal)
 		ctx = ports.WithActor(ctx, principal.User.Login)
+		ctx = ports.WithActorID(ctx, principal.User.ID)
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
 }

@@ -7,14 +7,18 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/levapveeskela/lv24-brain/internal/domain"
+	"github.com/levapveeskela/lv24-brain/internal/ports"
 )
 
-const noteColumns = `id, project_id, title, body, tags, permalink, revision, created_at, updated_at`
+const noteColumns = `id, project_id, title, body, tags, permalink, revision, created_at, updated_at, created_by`
 
 // NoteRecord is a note plus its current server revision.
 type NoteRecord struct {
 	domain.Note
 	Revision int64 `json:"revision"`
+	// CreatedBy is the owning user's ID from ports.ActorIDFromContext at
+	// creation; immutable afterwards.
+	CreatedBy string `json:"createdBy,omitempty"`
 }
 
 // CreateNote inserts a note and returns it with the new revision. An empty ID
@@ -40,7 +44,7 @@ func (s *Store) CreateNote(ctx context.Context, note domain.Note) (NoteRecord, d
 	}
 	note.UpdatedAt = at
 	actor := ActorFromContext(ctx)
-	record := NoteRecord{Note: note}
+	record := NoteRecord{Note: note, CreatedBy: ports.ActorIDFromContext(ctx)}
 	var revision domain.SyncRevision
 
 	err := s.withTx(ctx, func(tx pgx.Tx) error {
@@ -51,10 +55,10 @@ func (s *Store) CreateNote(ctx context.Context, note domain.Note) (NoteRecord, d
 		record.Revision = revisionID
 		if _, err := tx.Exec(
 			ctx,
-			`INSERT INTO notes (id, project_id, title, body, tags, permalink, revision, created_at, updated_at)
-			 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+			`INSERT INTO notes (id, project_id, title, body, tags, permalink, revision, created_at, updated_at, created_by)
+			 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
 			note.ID, note.ProjectID, note.Title, note.Body, note.Tags, note.Permalink,
-			revisionID, note.CreatedAt, note.UpdatedAt,
+			revisionID, note.CreatedAt, note.UpdatedAt, record.CreatedBy,
 		); err != nil {
 			return mapPgError("create note", err)
 		}
@@ -200,7 +204,7 @@ func scanNote(row rowScanner) (NoteRecord, error) {
 	var record NoteRecord
 	if err := row.Scan(
 		&record.ID, &record.ProjectID, &record.Title, &record.Body, &record.Tags,
-		&record.Permalink, &record.Revision, &record.CreatedAt, &record.UpdatedAt,
+		&record.Permalink, &record.Revision, &record.CreatedAt, &record.UpdatedAt, &record.CreatedBy,
 	); err != nil {
 		return NoteRecord{}, err
 	}

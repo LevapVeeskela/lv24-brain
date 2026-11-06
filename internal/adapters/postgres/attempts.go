@@ -7,14 +7,18 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/levapveeskela/lv24-brain/internal/domain"
+	"github.com/levapveeskela/lv24-brain/internal/ports"
 )
 
-const attemptColumns = `id, project_id, title, hypothesis, result, reason, permalink, revision, created_at, updated_at`
+const attemptColumns = `id, project_id, title, hypothesis, result, reason, permalink, revision, created_at, updated_at, created_by`
 
 // AttemptRecord is an attempt plus its current server revision.
 type AttemptRecord struct {
 	domain.Attempt
 	Revision int64 `json:"revision"`
+	// CreatedBy is the owning user's ID from ports.ActorIDFromContext at
+	// creation; immutable afterwards.
+	CreatedBy string `json:"createdBy,omitempty"`
 }
 
 // CreateAttempt inserts an attempt record.
@@ -38,7 +42,7 @@ func (s *Store) CreateAttempt(ctx context.Context, attempt domain.Attempt) (Atte
 	}
 	attempt.UpdatedAt = at
 	actor := ActorFromContext(ctx)
-	record := AttemptRecord{Attempt: attempt}
+	record := AttemptRecord{Attempt: attempt, CreatedBy: ports.ActorIDFromContext(ctx)}
 	var revision domain.SyncRevision
 
 	err := s.withTx(ctx, func(tx pgx.Tx) error {
@@ -50,10 +54,10 @@ func (s *Store) CreateAttempt(ctx context.Context, attempt domain.Attempt) (Atte
 		if _, err := tx.Exec(
 			ctx,
 			`INSERT INTO attempts
-			 (id, project_id, title, hypothesis, result, reason, permalink, revision, created_at, updated_at)
-			 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+			 (id, project_id, title, hypothesis, result, reason, permalink, revision, created_at, updated_at, created_by)
+			 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
 			attempt.ID, attempt.ProjectID, attempt.Title, attempt.Hypothesis, attempt.Result,
-			attempt.Reason, attempt.Permalink, revisionID, attempt.CreatedAt, attempt.UpdatedAt,
+			attempt.Reason, attempt.Permalink, revisionID, attempt.CreatedAt, attempt.UpdatedAt, record.CreatedBy,
 		); err != nil {
 			return mapPgError("create attempt", err)
 		}
@@ -200,7 +204,7 @@ func scanAttempt(row rowScanner) (AttemptRecord, error) {
 	var record AttemptRecord
 	if err := row.Scan(
 		&record.ID, &record.ProjectID, &record.Title, &record.Hypothesis, &record.Result,
-		&record.Reason, &record.Permalink, &record.Revision, &record.CreatedAt, &record.UpdatedAt,
+		&record.Reason, &record.Permalink, &record.Revision, &record.CreatedAt, &record.UpdatedAt, &record.CreatedBy,
 	); err != nil {
 		return AttemptRecord{}, err
 	}

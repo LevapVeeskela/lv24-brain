@@ -7,14 +7,18 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/levapveeskela/lv24-brain/internal/domain"
+	"github.com/levapveeskela/lv24-brain/internal/ports"
 )
 
-const decisionColumns = `id, project_id, title, status, decision_context, alternatives, consequences, evidence, permalink, revision, created_at, updated_at`
+const decisionColumns = `id, project_id, title, status, decision_context, alternatives, consequences, evidence, permalink, revision, created_at, updated_at, created_by`
 
 // DecisionRecord is a decision plus its current server revision.
 type DecisionRecord struct {
 	domain.Decision
 	Revision int64 `json:"revision"`
+	// CreatedBy is the owning user's ID from ports.ActorIDFromContext at
+	// creation; immutable afterwards.
+	CreatedBy string `json:"createdBy,omitempty"`
 }
 
 // CreateDecision inserts a decision. An empty status defaults to proposed.
@@ -44,7 +48,7 @@ func (s *Store) CreateDecision(ctx context.Context, decision domain.Decision) (D
 	}
 	decision.UpdatedAt = at
 	actor := ActorFromContext(ctx)
-	record := DecisionRecord{Decision: decision}
+	record := DecisionRecord{Decision: decision, CreatedBy: ports.ActorIDFromContext(ctx)}
 	var revision domain.SyncRevision
 
 	err := s.withTx(ctx, func(tx pgx.Tx) error {
@@ -56,11 +60,11 @@ func (s *Store) CreateDecision(ctx context.Context, decision domain.Decision) (D
 		if _, err := tx.Exec(
 			ctx,
 			`INSERT INTO decisions
-			 (id, project_id, title, status, decision_context, alternatives, consequences, evidence, permalink, revision, created_at, updated_at)
-			 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
+			 (id, project_id, title, status, decision_context, alternatives, consequences, evidence, permalink, revision, created_at, updated_at, created_by)
+			 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)`,
 			decision.ID, decision.ProjectID, decision.Title, string(decision.Status), decision.Context,
 			decision.Alternatives, decision.Consequences, decision.Evidence, decision.Permalink,
-			revisionID, decision.CreatedAt, decision.UpdatedAt,
+			revisionID, decision.CreatedAt, decision.UpdatedAt, record.CreatedBy,
 		); err != nil {
 			return mapPgError("create decision", err)
 		}
@@ -222,7 +226,7 @@ func scanDecision(row rowScanner) (DecisionRecord, error) {
 	if err := row.Scan(
 		&record.ID, &record.ProjectID, &record.Title, &status, &record.Context,
 		&record.Alternatives, &record.Consequences, &record.Evidence, &record.Permalink,
-		&record.Revision, &record.CreatedAt, &record.UpdatedAt,
+		&record.Revision, &record.CreatedAt, &record.UpdatedAt, &record.CreatedBy,
 	); err != nil {
 		return DecisionRecord{}, err
 	}

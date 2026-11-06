@@ -103,7 +103,7 @@ Implemented in `internal/adapters/httpapi` and `internal/auth`:
   allowed-method validation; 15-minute default TTL.
 - Rotating refresh tokens stored as SHA-256 hashes; reuse revokes the token
   family. In a Postgres deployment they are persisted by migrations
-  `0002_auth_tokens.sql` and `0003_auth_revocations.sql` (server schema 4), so
+  `0002_auth_tokens.sql` and `0003_auth_revocations.sql` (server schema 5), so
   restarts do not invalidate sessions. Revocation tombstones have no expiry, so
   pruning expired token rows cannot resurrect a revoked family or session.
 - Opaque API tokens with the `brain_` prefix, stored as SHA-256 hashes in the
@@ -129,7 +129,11 @@ Implemented in `internal/adapters/httpapi` and `internal/auth`:
   best-effort: a failed write is logged and never fails the request. The
   in-memory development store keeps only the last 10,000 security events.
 - Server-side authorization on every route. `viewer` reads, `member` writes,
-  `admin` manages users and destructive operations. Connector execution is
+  `admin` manages users and destructive operations. Members create notes,
+  decisions, attempts and handoffs and may update or delete only their own
+  (owner = creating user id, `createdBy` in responses); shared entities
+  (projects, project state) stay member-writable. Records with an unknown
+  owner, created before ownership tracking, are admin-only. Connector execution is
   admin-only (`POST /v1/connectors/run`); viewers may list, read and export run
   records. The runner is bounded by `BRAIN_CONNECTOR_TIMEOUT` and uses the same
   environment/OS secret store as the CLI.
@@ -154,7 +158,7 @@ Current limits, stated plainly:
   applies embedded migrations on startup; startup logs redact the database URL.
 - An existing Postgres schema with pending migrations refuses to start until a
   backup is taken and `BRAIN_DATABASE_BACKUP_CONFIRMED=1` is set. Migrations are
-  forward-only; every upgrade (currently to schema 4) is gated this way.
+  forward-only; every upgrade (currently to schema 5) is gated this way.
 - API tokens and refresh-token families are durable in Postgres (migrations
   `0002_auth_tokens.sql` and `0003_auth_revocations.sql`), so restart no longer
   forces re-authentication.

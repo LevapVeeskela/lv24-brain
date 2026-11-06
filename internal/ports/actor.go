@@ -21,3 +21,21 @@ func ActorFromContext(ctx context.Context) string {
 	actor, _ := ctx.Value(actorContextKey{}).(string)
 	return actor
 }
+
+type actorIDContextKey struct{}
+
+// WithActorID attaches the acting user's stable ID. Stores record it as the
+// owner (created_by) of new knowledge records; unlike the login it survives
+// a rename.
+func WithActorID(ctx context.Context, id string) context.Context {
+	if id == "" {
+		return ctx
+	}
+	return context.WithValue(ctx, actorIDContextKey{}, id)
+}
+
+// ActorIDFromContext returns the ID stored by WithActorID, or "".
+func ActorIDFromContext(ctx context.Context) string {
+	id, _ := ctx.Value(actorIDContextKey{}).(string)
+	return id
+}

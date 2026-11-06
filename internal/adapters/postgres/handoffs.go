@@ -7,14 +7,18 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/levapveeskela/lv24-brain/internal/domain"
+	"github.com/levapveeskela/lv24-brain/internal/ports"
 )
 
-const handoffColumns = `id, project_id, summary, git_context, next_action, permalink, revision, created_at`
+const handoffColumns = `id, project_id, summary, git_context, next_action, permalink, revision, created_at, created_by`
 
 // HandoffRecord is a handoff plus its server revision.
 type HandoffRecord struct {
 	domain.Handoff
 	Revision int64 `json:"revision"`
+	// CreatedBy is the owning user's ID from ports.ActorIDFromContext at
+	// creation; immutable afterwards.
+	CreatedBy string `json:"createdBy,omitempty"`
 }
 
 // CreateHandoff inserts an immutable handoff snapshot.
@@ -37,7 +41,7 @@ func (s *Store) CreateHandoff(ctx context.Context, handoff domain.Handoff) (Hand
 		handoff.CreatedAt = databaseTime(handoff.CreatedAt)
 	}
 	actor := ActorFromContext(ctx)
-	record := HandoffRecord{Handoff: handoff}
+	record := HandoffRecord{Handoff: handoff, CreatedBy: ports.ActorIDFromContext(ctx)}
 	var revision domain.SyncRevision
 
 	err := s.withTx(ctx, func(tx pgx.Tx) error {
@@ -49,10 +53,10 @@ func (s *Store) CreateHandoff(ctx context.Context, handoff domain.Handoff) (Hand
 		if _, err := tx.Exec(
 			ctx,
 			`INSERT INTO handoffs
-			 (id, project_id, summary, git_context, next_action, permalink, revision, created_at)
-			 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+			 (id, project_id, summary, git_context, next_action, permalink, revision, created_at, created_by)
+			 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
 			handoff.ID, handoff.ProjectID, handoff.Summary, handoff.GitContext,
-			handoff.NextAction, handoff.Permalink, revisionID, handoff.CreatedAt,
+			handoff.NextAction, handoff.Permalink, revisionID, handoff.CreatedAt, record.CreatedBy,
 		); err != nil {
 			return mapPgError("create handoff", err)
 		}
@@ -143,7 +147,7 @@ func scanHandoff(row rowScanner) (HandoffRecord, error) {
 	var record HandoffRecord
 	if err := row.Scan(
 		&record.ID, &record.ProjectID, &record.Summary, &record.GitContext,
-		&record.NextAction, &record.Permalink, &record.Revision, &record.CreatedAt,
+		&record.NextAction, &record.Permalink, &record.Revision, &record.CreatedAt, &record.CreatedBy,
 	); err != nil {
 		return HandoffRecord{}, err
 	}

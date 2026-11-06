@@ -81,24 +81,36 @@ type StateRecord struct {
 type NoteRecord struct {
 	domain.Note
 	Revision int64 `json:"revision"`
+	// CreatedBy is the owning user's ID ("" for records created before
+	// ownership was tracked; only admins may change those).
+	CreatedBy string `json:"createdBy,omitempty"`
 }
 
 // DecisionRecord is a decision plus its current server revision.
 type DecisionRecord struct {
 	domain.Decision
 	Revision int64 `json:"revision"`
+	// CreatedBy is the owning user's ID ("" for records created before
+	// ownership was tracked; only admins may change those).
+	CreatedBy string `json:"createdBy,omitempty"`
 }
 
 // AttemptRecord is an attempt plus its current server revision.
 type AttemptRecord struct {
 	domain.Attempt
 	Revision int64 `json:"revision"`
+	// CreatedBy is the owning user's ID ("" for records created before
+	// ownership was tracked; only admins may change those).
+	CreatedBy string `json:"createdBy,omitempty"`
 }
 
 // HandoffRecord is a handoff plus its server revision.
 type HandoffRecord struct {
 	domain.Handoff
 	Revision int64 `json:"revision"`
+	// CreatedBy is the owning user's ID ("" for records created before
+	// ownership was tracked; only admins may change those).
+	CreatedBy string `json:"createdBy,omitempty"`
 }
 
 // ConnectorRunRecord is a connector run plus its current server revision.
