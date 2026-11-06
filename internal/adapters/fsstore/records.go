@@ -96,7 +96,7 @@ func (s *Store) AppendNote(ctx context.Context, note domain.Note) (domain.SyncRe
 			return domain.SyncRevision{}, err
 		}
 	case os.IsNotExist(err):
-		body = fmt.Sprintf("# Notes вЂ” %s\n\n", date)
+		body = fmt.Sprintf("# Notes — %s\n\n", date)
 		frontmatter = noteFileFrontmatter{
 			Frontmatter: markdown.Frontmatter{
 				ProjectID:     note.ProjectID,
@@ -379,7 +379,7 @@ func renderAttemptBody(attempt domain.Attempt) string {
 
 func renderHandoffBody(handoff domain.Handoff) string {
 	var out strings.Builder
-	fmt.Fprintf(&out, "# Handoff вЂ” %s\n\n", handoff.CreatedAt.UTC().Format(time.RFC3339))
+	fmt.Fprintf(&out, "# Handoff — %s\n\n", handoff.CreatedAt.UTC().Format(time.RFC3339))
 	out.WriteString("## Summary\n\n")
 	out.WriteString(strings.TrimSpace(handoff.Summary))
 	out.WriteString("\n\n## Git context\n\n")

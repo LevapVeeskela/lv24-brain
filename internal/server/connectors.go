@@ -20,6 +20,11 @@ const (
 	connectorRunPersistTime = 5 * time.Second
 )
 
+// errConnectorPanicked marks a run that ended in a recovered connector panic.
+// Unlike an ordinary connector failure it is a server bug, so Run persists the
+// failed record and still returns the error (HTTP 500) to the caller.
+var errConnectorPanicked = errors.New("connector panicked")
+
 // connectorRunner is the brain-server implementation of
 // httpapi.ConnectorRunner. It builds a read-only connector from the process
 // environment/OS secret store, runs it with a bounded context, and persists the
@@ -49,7 +54,7 @@ func newConnectorRunner(store httpapi.Store, secretStore ports.SecretStore, time
 func (r *connectorRunner) runConnector(ctx context.Context, connector ports.Connector, source string, opts ports.ConnectorOptions) (run domain.ConnectorRun, runErr error) {
 	defer func() {
 		if rec := recover(); rec != nil {
-			runErr = fmt.Errorf("connector panicked: %v", rec)
+			runErr = fmt.Errorf("%w: %v", errConnectorPanicked, rec)
 			run = connectors.FinishRun(connectors.NewRun(source, time.Now()), nil, runErr, time.Now())
 		}
 	}()
@@ -110,5 +115,8 @@ func (r *connectorRunner) Run(ctx context.Context, req httpapi.ConnectorRunReque
 		"counts", len(run.Counts),
 		"duration_ms", time.Since(started).Milliseconds(),
 	)
+	if errors.Is(runErr, errConnectorPanicked) {
+		return run, runErr
+	}
 	return run, nil
 }

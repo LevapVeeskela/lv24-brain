@@ -112,7 +112,7 @@ func renderStateBody(projectName string, state domain.State) string {
 		title = state.ProjectID
 	}
 	var out strings.Builder
-	fmt.Fprintf(&out, "# %s вЂ” State\n\n", singleLine(title))
+	fmt.Fprintf(&out, "# %s — State\n\n", singleLine(title))
 	out.WriteString("## Goal\n\n")
 	out.WriteString(strings.TrimSpace(state.Goal))
 	out.WriteString("\n\n## Active\n\n")
