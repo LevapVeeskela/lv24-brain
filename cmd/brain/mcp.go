@@ -290,3 +290,45 @@ func toMCPCatchup(result app.CatchupResult) mcpserver.Catchup {
 	}
 	return out
 }
+
+// ListRecords implements mcpserver.RecordBackend.
+func (b mcpBackend) ListRecords(ctx context.Context, query mcpserver.RecordQuery) ([]mcpserver.RecordSummary, error) {
+	records, err := b.app.ListRecords(ctx, app.ListRecordsOptions{
+		ProjectID: query.ProjectID,
+		Kinds:     query.Kinds,
+		Since:     query.Since,
+		Status:    query.Status,
+		Limit:     query.Limit,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return mapAll(records, toRecordSummary), nil
+}
+
+// GetRecord implements mcpserver.RecordBackend.
+func (b mcpBackend) GetRecord(ctx context.Context, projectID, id string) (mcpserver.RecordDetail, error) {
+	record, err := b.app.GetRecord(ctx, projectID, id)
+	if err != nil {
+		return mcpserver.RecordDetail{}, err
+	}
+	return toRecordDetail(record), nil
+}
+
+// SetDecisionStatus implements mcpserver.RecordBackend.
+func (b mcpBackend) SetDecisionStatus(ctx context.Context, projectID, id, status string) (mcpserver.RecordSummary, error) {
+	decision, err := b.app.SetDecisionStatus(ctx, projectID, id, domain.DecisionStatus(status))
+	if err != nil {
+		return mcpserver.RecordSummary{}, err
+	}
+	return toRecordSummary(app.Record{Decision: &decision}.Summary()), nil
+}
+
+// Supersede implements mcpserver.RecordBackend.
+func (b mcpBackend) Supersede(ctx context.Context, projectID, oldID, newID string) (mcpserver.RecordSummary, error) {
+	decision, err := b.app.Supersede(ctx, projectID, oldID, newID)
+	if err != nil {
+		return mcpserver.RecordSummary{}, err
+	}
+	return toRecordSummary(app.Record{Decision: &decision}.Summary()), nil
+}

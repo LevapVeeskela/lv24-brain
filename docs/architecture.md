@@ -130,6 +130,7 @@ brain handoff    append a session handoff
 brain status     show mode, paths, schema, engine version
 brain review     state age, questions, evidence, attempts + findings (stale/contradictory knowledge); --fix applies safe state fixes
 brain catchup    what changed since the latest handoff
+brain record     list|show records; status|supersede decisions; trash|restore|trash-list (local/git)
 brain session    start|end handlers for agent session hooks
 brain state      get|set the project state
 brain sync       commit, rebase, optional push, or --status (local/git only)

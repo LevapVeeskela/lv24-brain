@@ -69,6 +69,25 @@ brain handoff "Session summary" --next "Run the migration dry run"
   can read the data repository. Do not write secrets, tokens, or personal data
   into records.
 
+### Record lifecycle (local and git mode)
+
+```sh
+brain record list [project] --kind decision --status proposed --since 7d
+brain record show <id>
+brain record status <id> accepted          # proposed|accepted|rejected|superseded
+brain record supersede <old-id> --by <new-id>
+brain record trash <id> --yes              # moves it to projects/<p>/trash/
+brain record trash-list [project]
+brain record restore <id>
+```
+
+- Changes are journaled (`status`, `trash`, `restore`) and update the search
+  index at once. Trash is reversible and lives in the data repository, so it
+  syncs like any record. Notes written by hand without an id marker cannot be
+  trashed; edit the daily file instead.
+- Agents get `brain_records`, `brain_record` and `brain_decision_status` over
+  MCP; trash and restore stay CLI-only.
+
 ### Journal and search
 
 ```sh

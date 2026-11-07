@@ -147,6 +147,8 @@ func runCommand(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return runAgents(rest, stdout, stderr)
 	case "state":
 		return runState(rest, stdout, stderr)
+	case "record":
+		return runRecord(rest, stdout, stderr)
 	case "catchup":
 		return runCatchup(rest, stdout, stderr)
 	case "session":
@@ -209,6 +211,7 @@ Commands:
   agents     Sync the shared agent instructions (agents sync [--check])
   state      Get or set a project's goal, next action, blockers and questions
   catchup    what changed since the latest handoff
+  record     List, show, change status, trash and restore records
   session    start|end handlers for agent session hooks
   mcp        Serve the brain as an MCP server over stdio (for coding agents)
   connector  Run a read-only GitHub, GitLab, or IMAP connector
