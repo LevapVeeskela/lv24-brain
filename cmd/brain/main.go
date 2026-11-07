@@ -1964,8 +1964,15 @@ func runSecret(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		}
 		return 0
 	case "remove":
-		if len(rest) != 1 {
+		names, confirmed := withoutYesFlag(rest)
+		if len(names) != 1 {
 			printSecretUsage(stderr)
+			return 2
+		}
+		rest = names
+		if !confirmed {
+			// Removing a credential from the OS store cannot be undone.
+			fmt.Fprintf(stderr, "brain secret remove: this permanently deletes %q from the OS secret store; pass --yes to confirm\n", strings.TrimSpace(rest[0]))
 			return 2
 		}
 		useCase, closeRuntime, err := secretRuntime()
@@ -1985,6 +1992,20 @@ func runSecret(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	}
 }
 
+// withoutYesFlag drops --yes / -yes from args and reports whether it was set.
+func withoutYesFlag(args []string) ([]string, bool) {
+	out := make([]string, 0, len(args))
+	yes := false
+	for _, arg := range args {
+		if arg == "--yes" || arg == "-yes" {
+			yes = true
+			continue
+		}
+		out = append(out, arg)
+	}
+	return out, yes
+}
+
 func secretRuntime() (*app.App, func(), error) {
 	runtime, err := bootstrap.Build(config.Default())
 	if err != nil {
@@ -1997,7 +2018,8 @@ func printSecretUsage(w io.Writer) {
 	fmt.Fprint(w, `Usage:
   brain secret set <name>      Read the value from stdin and store it
   brain secret list            List secret names
-  brain secret remove <name>   Remove a secret from the OS store
+  brain secret remove <name> --yes
+                               Remove a secret from the OS store (irreversible)
 
 Secret values are never printed. Environment-supplied secrets cannot be
 overwritten or removed through this command.

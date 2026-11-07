@@ -694,6 +694,10 @@ func TestSecretCommandEnvironmentFallback(t *testing.T) {
 	}
 
 	code, _, stderr = runForTest(t, "secret", "remove", "github/token")
+	if code != 2 || !strings.Contains(stderr, "pass --yes") {
+		t.Fatalf("unconfirmed remove exit code = %d, stderr = %q", code, stderr)
+	}
+	code, _, stderr = runForTest(t, "secret", "remove", "github/token", "--yes")
 	if code != 1 || !strings.Contains(stderr, "cannot be deleted") {
 		t.Fatalf("remove exit code = %d, stderr = %q", code, stderr)
 	}

@@ -464,6 +464,53 @@ assert_artifact_host() {
     esac
 }
 
+# Release manifest signature (Ed25519). The key must match
+# internal/update/signature.go; a Go test keeps them in sync.
+RELEASE_PUBLIC_KEY_PEM='-----BEGIN PUBLIC KEY-----
+MCowBQYDK2VwAyEA8ZkT8c37JX6zeXnMEMHEnkcG9K8pGedO19gCAowW3iY=
+-----END PUBLIC KEY-----'
+SIGNATURE_CONTEXT='lv24-brain release manifest v1'
+
+# find_ed25519_openssl prints an openssl binary that can verify Ed25519
+# (OpenSSL 3+; macOS /usr/bin/openssl is LibreSSL and cannot).
+find_ed25519_openssl() {
+    local candidate key="$TMP_DIR/release-key.pem"
+    printf '%s\n' "$RELEASE_PUBLIC_KEY_PEM" > "$key"
+    for candidate in "$(command -v openssl 2>/dev/null || true)" \
+        /opt/homebrew/bin/openssl /usr/local/bin/openssl \
+        /opt/homebrew/opt/openssl@3/bin/openssl /usr/local/opt/openssl@3/bin/openssl; do
+        [ -n "$candidate" ] && [ -x "$candidate" ] || continue
+        if "$candidate" pkey -pubin -in "$key" -noout >/dev/null 2>&1; then
+            printf '%s\n' "$candidate"
+            return 0
+        fi
+    done
+    return 1
+}
+
+# verify_manifest_signature MANIFEST SIG_URL: fails closed on a bad or
+# missing signature when Ed25519 verification is available; otherwise warns
+# (or dies when BRAIN_REQUIRE_SIGNATURE=1). The updater always verifies.
+verify_manifest_signature() {
+    local manifest="$1" sig_url="$2" ossl sig="$TMP_DIR/release.json.sig"
+    if ! ossl="$(find_ed25519_openssl)"; then
+        if [ "${BRAIN_REQUIRE_SIGNATURE:-}" = "1" ]; then
+            die "BRAIN_REQUIRE_SIGNATURE=1 but no OpenSSL with Ed25519 support was found"
+        fi
+        note "release.json signature not checked (no OpenSSL 3 with Ed25519); relying on HTTPS and SHA-256"
+        return 0
+    fi
+    http_try "$sig_url" "$sig" || die "release.json.sig is missing for $TAG"
+    { printf '%s\n' "$SIGNATURE_CONTEXT"; cat "$manifest"; } > "$TMP_DIR/release-signed.bin"
+    "$ossl" base64 -d -A -in "$sig" -out "$TMP_DIR/release-sig.bin" 2>/dev/null ||
+        die "release.json.sig is not valid base64"
+    if ! "$ossl" pkeyutl -verify -pubin -inkey "$TMP_DIR/release-key.pem" -rawin \
+        -in "$TMP_DIR/release-signed.bin" -sigfile "$TMP_DIR/release-sig.bin" >/dev/null 2>&1; then
+        die "release.json signature verification failed for $TAG"
+    fi
+    note "release.json signature verified"
+}
+
 resolve_package() {
     local manifest_url manifest_ok checksums_url manifest_checksums
     manifest_ok=0
@@ -472,6 +519,7 @@ resolve_package() {
 
     step "Reading release metadata"
     if http_try "$manifest_url" "$TMP_DIR/release-manifest.json"; then
+        verify_manifest_signature "$TMP_DIR/release-manifest.json" "$manifest_url.sig"
         if manifest_lookup "$TMP_DIR/release-manifest.json"; then
             manifest_ok=1
             if [ -n "$MANIFEST_VERSION" ] && [ "$MANIFEST_VERSION" != "$VERSION_NUMBER" ]; then

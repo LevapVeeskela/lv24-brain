@@ -310,7 +310,7 @@ brain logout --config ~/brain-server.yaml
   is refused, and `brain logout` leaves a stored session untouched and exits
   non-zero.
 - A static token can be stored with `brain secret set server-token` (the value
-  is read from stdin) and removed with `brain secret remove server-token`.
+  is read from stdin) and removed with `brain secret remove server-token --yes`.
 - A static API token has no refresh token and cannot be revoked by
   `brain logout`. Revoke it on the server (see the incident checklist in
   section 8).
@@ -530,7 +530,7 @@ a token value.
    `GET /v1/audit?action=auth.token.created&since=<RFC 3339 time>`.
 5. Issue a replacement with `POST /v1/tokens` and give it to the owner through
    a channel that is not this repository or a chat log.
-6. On each client, run `brain secret remove server-token` and
+6. On each client, run `brain secret remove server-token --yes` and
    `brain secret set server-token`. For automation, update the `BRAIN_TOKEN`
    value in the secret store of the job.
 7. If the leaked value cannot be matched to a token id, revoke every token of

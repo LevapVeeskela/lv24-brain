@@ -41,7 +41,10 @@ The installer:
 
 1. Resolves the newest release on the selected channel (or `-Version`).
 2. Reads `release.json` and selects the Windows `amd64`/`arm64` CLI asset.
-3. Downloads the asset over HTTPS and verifies its SHA-256 checksum.
+3. Downloads the asset over HTTPS and verifies its SHA-256 checksum. Windows
+   PowerShell has no built-in Ed25519, so the installer does not check
+   `release.json.sig`; the installed `brain update` verifies every later
+   release's signature.
 4. Installs `brain.exe` under
    `%LOCALAPPDATA%\Programs\lv24-brain` (override with `-InstallDir`).
 5. Writes `brain.yaml`, optionally adds the install directory to the user
@@ -121,7 +124,12 @@ The installer:
 
 1. Resolves the newest release on the selected channel (or `--version`).
 2. Reads `release.json` and selects the `linux`/`darwin` `amd64`/`arm64` CLI
-   asset, falling back to `checksums.txt` when the manifest is absent.
+   asset, falling back to `checksums.txt` when the manifest is absent. When an
+   OpenSSL 3 with Ed25519 is available (on PATH or Homebrew; macOS
+   `/usr/bin/openssl` is LibreSSL and cannot verify it) the manifest's
+   `release.json.sig` is verified and a bad or missing signature stops the
+   install. Without such OpenSSL the installer warns and relies on HTTPS and
+   SHA-256; set `BRAIN_REQUIRE_SIGNATURE=1` to stop instead.
 3. Downloads over HTTPS from `github.com` or `objects.githubusercontent.com`
    and verifies SHA-256 before installing.
 4. Installs `brain` to `~/.local/bin` (override with `--dir`), keeps the

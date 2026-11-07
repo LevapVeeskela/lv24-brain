@@ -30,8 +30,9 @@ matching `.gitignore` into the data directory.
 - An environment-provided value shadows the OS store. `Set` and `Delete` fail
   closed for such a key instead of silently changing the wrong source.
 - `brain secret set <name>` reads the value from stdin and prints only the name;
-  `brain secret list` returns names without values; `brain secret remove`
-  deletes an OS-store entry.
+  `brain secret list` returns names without values; `brain secret remove <name> --yes`
+  deletes an OS-store entry (without `--yes` it refuses, since the deletion
+  cannot be undone).
 - Server-mode CLI sessions: `brain login` stores one JSON credential bundle
   under the OS secret-store key `server-session` (`serverUrl`, `accessToken`,
   `refreshToken`) in a single atomic write, bound to the normalized
@@ -187,7 +188,8 @@ Current limits, stated plainly:
   (`release.json.sig`) from a key embedded in the binary; unsigned or
   untrusted releases are skipped. Every artifact is verified by the SHA-256
   from the signed manifest before apply; missing manifest, signature, or
-  checksum fails closed.
+  checksum fails closed. The Unix installer verifies the same signature when
+  OpenSSL 3 is available; the Windows installer checks SHA-256 only.
 - Manifest, response, and download sizes are capped; downloads are capped at
   256 MiB.
 - Apply stages the binary and keeps `brain(.exe).previous`; a failed replacement
