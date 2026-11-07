@@ -8,12 +8,12 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"time"
 )
 
 // Apply replaces the running engine binary with artifactPath. It preserves the
-// current binary as <executable>.previous for Rollback. On Windows the swap is
-// delegated to a detached helper when the target is the running executable,
-// because a running image cannot be replaced in place.
+// current binary as <executable>.previous for Rollback. On Windows a running
+// image cannot be overwritten, so swap renames it aside first.
 func (u *Updater) Apply(ctx context.Context, artifactPath string) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -37,37 +37,20 @@ func (u *Updater) Apply(ctx context.Context, artifactPath string) error {
 		return errors.New("update: artifact is the running binary")
 	}
 
+	removeLeftovers(target, u.now())
 	staged, err := stageBinary(artifactPath, filepath.Dir(target), filepath.Base(target))
 	if err != nil {
 		return err
 	}
-	handedOff := false
-	defer func() {
-		if !handedOff {
-			_ = os.Remove(staged)
-		}
-	}()
-
 	if err := backupCurrent(target); err != nil {
+		_ = os.Remove(staged)
 		return err
 	}
-	if u.deferToHelper(target) {
-		if err := scheduleReplace(target, staged, u.updateDir, u.now); err != nil {
-			return err
-		}
-		handedOff = true
-		return nil
-	}
-	if err := replaceFile(staged, target); err != nil {
-		if u.goos == "windows" && runtime.GOOS == "windows" {
-			if helperErr := scheduleReplace(target, staged, u.updateDir, u.now); helperErr == nil {
-				handedOff = true
-				return nil
-			}
-		}
+	if err := u.swap(staged, target); err != nil {
+		_ = os.Remove(staged)
 		return fmt.Errorf("update: replace binary: %w", err)
 	}
-	handedOff = true
+	u.pruneStaged(artifactPath)
 	return nil
 }
 
@@ -92,34 +75,82 @@ func (u *Updater) Rollback(ctx context.Context) error {
 	if info.IsDir() || info.Size() == 0 {
 		return fmt.Errorf("%w: previous binary is not a file", ErrNoPrevious)
 	}
+	removeLeftovers(target, u.now())
 	staged, err := copyFileToTemp(previous, filepath.Dir(target), "."+filepath.Base(target)+"-rollback-*")
 	if err != nil {
 		return err
 	}
-	handedOff := false
-	defer func() {
-		if !handedOff {
-			_ = os.Remove(staged)
+	if err := u.swap(staged, target); err != nil {
+		_ = os.Remove(staged)
+		return fmt.Errorf("update: restore previous binary: %w", err)
+	}
+	return nil
+}
+
+// leftoverAge protects files a concurrent apply may still be using.
+const leftoverAge = time.Hour
+
+// swap moves staged over target. A running Windows image cannot be
+// overwritten but can be renamed, so the old file is moved aside to
+// .<name>-old-<n> (deleted by a later run once no process uses it). If even
+// the rename fails, a detached helper retries the swap after the process exits.
+func (u *Updater) swap(staged, target string) error {
+	err := replaceFile(staged, target)
+	if err == nil || u.goos != "windows" || runtime.GOOS != "windows" {
+		return err
+	}
+	aside := filepath.Join(filepath.Dir(target), fmt.Sprintf(".%s-old-%d", filepath.Base(target), u.now().UnixNano()))
+	if renameErr := os.Rename(target, aside); renameErr != nil {
+		if helperErr := scheduleReplace(target, staged, u.updateDir, u.now); helperErr != nil {
+			return errors.Join(err, renameErr, helperErr)
 		}
-	}()
-	if u.deferToHelper(target) {
-		if err := scheduleReplace(target, staged, u.updateDir, u.now); err != nil {
-			return err
-		}
-		handedOff = true
 		return nil
 	}
 	if err := replaceFile(staged, target); err != nil {
-		if u.goos == "windows" && runtime.GOOS == "windows" {
-			if helperErr := scheduleReplace(target, staged, u.updateDir, u.now); helperErr == nil {
-				handedOff = true
-				return nil
-			}
-		}
-		return fmt.Errorf("update: restore previous binary: %w", err)
+		_ = os.Rename(aside, target)
+		return err
 	}
-	handedOff = true
 	return nil
+}
+
+// removeLeftovers deletes binaries moved aside by earlier swaps and staged
+// copies of interrupted applies. Files still in use stay until a later run.
+func removeLeftovers(target string, now time.Time) {
+	dir, base := filepath.Dir(target), filepath.Base(target)
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+	for _, entry := range entries {
+		name := entry.Name()
+		if !strings.HasPrefix(name, "."+base+"-old-") && !strings.HasPrefix(name, "."+base+"-new-") {
+			continue
+		}
+		info, err := entry.Info()
+		if err != nil || (strings.HasPrefix(name, "."+base+"-new-") && now.Sub(info.ModTime()) < leftoverAge) {
+			continue
+		}
+		_ = os.Remove(filepath.Join(dir, name))
+	}
+}
+
+// pruneStaged removes downloaded release artifacts other than the one just
+// applied, so the update directory does not grow with every release.
+func (u *Updater) pruneStaged(keep string) {
+	if u.updateDir == "" {
+		return
+	}
+	entries, err := os.ReadDir(u.updateDir)
+	if err != nil {
+		return
+	}
+	for _, entry := range entries {
+		path := filepath.Join(u.updateDir, entry.Name())
+		if entry.IsDir() || !strings.HasPrefix(entry.Name(), "staged-") || samePath(path, keep) {
+			continue
+		}
+		_ = os.Remove(path)
+	}
 }
 
 func (u *Updater) executablePath() (string, error) {
@@ -139,29 +170,6 @@ func (u *Updater) executablePath() (string, error) {
 		return "", fmt.Errorf("update: resolve executable path: %w", err)
 	}
 	return absolute, nil
-}
-
-func (u *Updater) deferToHelper(target string) bool {
-	if runtime.GOOS != "windows" || u.goos != "windows" {
-		return false
-	}
-	return isCurrentExecutable(target)
-}
-
-func isCurrentExecutable(target string) bool {
-	self, err := os.Executable()
-	if err != nil {
-		return false
-	}
-	targetInfo, err := os.Stat(target)
-	if err != nil {
-		return false
-	}
-	selfInfo, err := os.Stat(self)
-	if err != nil {
-		return false
-	}
-	return os.SameFile(targetInfo, selfInfo)
 }
 
 func backupCurrent(target string) error {
