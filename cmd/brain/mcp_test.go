@@ -100,8 +100,8 @@ func TestMCPServesBrainTools(t *testing.T) {
 	}
 
 	tools := mcpResult(t, responses[1])["tools"].([]any)
-	if len(tools) != 11 { // 8 core tools + brain_state_get/brain_state_set + brain_catchup
-		t.Fatalf("tools = %d, want 11", len(tools))
+	if len(tools) != 12 { // 8 core tools + brain_state_get/brain_state_set + brain_catchup + brain_review
+		t.Fatalf("tools = %d, want 12", len(tools))
 	}
 
 	noteResult := mcpResult(t, responses[2])

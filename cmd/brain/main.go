@@ -196,7 +196,7 @@ Commands:
   attempt    Append an attempt record
   handoff    Append a session handoff
   status     Show the configured instance
-  review     Build a review report
+  review     Build a review report; --fix applies the safe fixes
   sync       Pull, commit, and push brain data
   index      Rebuild or refresh the local search index
   search     Search notes, decisions, attempts and handoffs
@@ -1134,24 +1134,43 @@ func runStatus(args []string, stdout, stderr io.Writer) int {
 
 func runReview(args []string, stdout, stderr io.Writer) int {
 	fs := newFlagSet("review", stderr)
-	project := fs.String("project", "", "project id")
+	project := fs.String("project", "", "project id or alias")
 	since := fs.String("since", "", "review window, for example 7d")
+	fix := fs.Bool("fix", false, "apply the fixable findings")
+	fixKind := fs.String("fix-kind", "", "comma-separated finding kinds to fix (implies --fix)")
 	asJSON := fs.Bool("json", false, "print JSON")
 	cfgPath := configFlag(fs)
-	if err := fs.Parse(args); err != nil {
+	positional, err := parseInterspersed(fs, args)
+	if err != nil {
 		return 2
 	}
-	cfg, err := loadRequiredConfig(*cfgPath)
+	kinds, err := app.ParseFindingKinds(*fixKind)
 	if err != nil {
 		return reportError(stderr, "review", err)
 	}
-	useCase, err := bootstrap.Build(cfg)
+	fixing := *fix || *fixKind != ""
+	ctx := context.Background()
+	runtime, target, code := stateTarget(ctx, *cfgPath, *project, positional, stderr, "review")
+	if code != 0 {
+		return code
+	}
+	defer func() { _ = runtime.Close() }()
+	projectID := target.Project.ID
+
+	var applied []app.Finding
+	if fixing {
+		fixed, err := runtime.App.FixFindings(ctx, projectID, kinds)
+		if err != nil {
+			return reportError(stderr, "review", err)
+		}
+		applied = fixed.Applied
+	}
+	findings, err := runtime.App.Findings(ctx, projectID)
 	if err != nil {
 		return reportError(stderr, "review", err)
 	}
-	defer func() { _ = useCase.Close() }()
-	result, err := useCase.App.Review(context.Background(), app.ReviewOptions{
-		ProjectID: *project,
+	result, err := runtime.App.Review(ctx, app.ReviewOptions{
+		ProjectID: projectID,
 		Since:     *since,
 	})
 	if err != nil {
@@ -1162,10 +1181,61 @@ func runReview(args []string, stdout, stderr io.Writer) int {
 		if items == nil {
 			items = []string{}
 		}
-		return writeJSONReport(stdout, stderr, "review", jsonReview{Summary: result.Summary, Items: items})
+		return writeJSONReport(stdout, stderr, "review", jsonReview{
+			Summary:  result.Summary,
+			Items:    items,
+			Findings: toJSONFindings(findings),
+			Applied:  toJSONFindings(applied),
+		})
 	}
 	printSummary(stdout, result.Summary)
+	if len(applied) > 0 {
+		fmt.Fprintln(stdout, "## Applied")
+		for _, finding := range applied {
+			fmt.Fprintf(stdout, "- [%s] %s\n", finding.Kind, finding.Fix)
+		}
+	}
+	printFindings(stdout, findings)
+	if !fixing && anyFixable(findings) {
+		fmt.Fprintln(stdout, "run `brain review --fix` to apply the fixable findings")
+	}
 	return 0
+}
+
+func printFindings(w io.Writer, findings []app.Finding) {
+	fmt.Fprintln(w, "## Findings")
+	if len(findings) == 0 {
+		fmt.Fprintln(w, "- none")
+		return
+	}
+	for _, finding := range findings {
+		fmt.Fprintf(w, "- [%s] %s", finding.Kind, finding.Message)
+		if finding.Evidence != "" {
+			fmt.Fprintf(w, " (evidence: %s)", finding.Evidence)
+		}
+		if finding.Fix != "" {
+			fmt.Fprintf(w, " -> fix: %s", finding.Fix)
+		}
+		fmt.Fprintln(w)
+	}
+}
+
+func anyFixable(findings []app.Finding) bool {
+	for _, finding := range findings {
+		if finding.Fixable {
+			return true
+		}
+	}
+	return false
+}
+
+func toJSONFindings(findings []app.Finding) []jsonFinding {
+	return mapAll(findings, func(finding app.Finding) jsonFinding {
+		return jsonFinding{
+			Kind: string(finding.Kind), Message: finding.Message, Evidence: finding.Evidence,
+			Fixable: finding.Fixable, Fix: finding.Fix,
+		}
+	})
 }
 
 func runSync(args []string, stdout, stderr io.Writer) int {

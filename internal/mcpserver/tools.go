@@ -135,7 +135,7 @@ type tool struct {
 }
 
 func (s *Server) toolList() []tool {
-	return slices.Concat(s.coreTools(), s.stateTools(), s.catchupTools())
+	return slices.Concat(s.coreTools(), s.stateTools(), s.catchupTools(), s.reviewTools())
 }
 
 func (s *Server) coreTools() []tool {

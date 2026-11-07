@@ -186,6 +186,9 @@ func sessionContext(ctx context.Context, a *app.App, target app.Resolved) (strin
 	b.WriteString(strings.TrimSpace(summary.Summary))
 	b.WriteString("\n\n## Since the latest handoff\n")
 	printCatchup(&b, catchup)
+	if findings, err := a.Findings(ctx, target.Project.ID); err == nil && len(findings) > 0 {
+		fmt.Fprintf(&b, "\n%d review findings (stale or contradictory knowledge): run `brain review` and confirm or fix them.\n", len(findings))
+	}
 	b.WriteString("\nKeep the brain current: `brain state set` when the goal or next step changes; " +
 		"`brain note` / `brain decision` / `brain attempt` for findings; `brain handoff` at the end.\n")
 	return b.String(), nil

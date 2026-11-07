@@ -116,7 +116,10 @@ brain decision   append a decision
 brain attempt    append an attempt
 brain handoff    append a session handoff
 brain status     show mode, paths, schema, engine version
-brain review     report state age, questions, evidence, attempts
+brain review     state age, questions, evidence, attempts + findings (stale/contradictory knowledge); --fix applies safe state fixes
+brain catchup    what changed since the latest handoff
+brain session    start|end handlers for agent session hooks
+brain state      get|set the project state
 brain sync       commit, rebase, optional push, or --status (local/git only)
 brain index      refresh the local FTS5 index, or --rebuild it (local/git only)
 brain search     query the local FTS5 index (local/git), or GET /v1/search (server)

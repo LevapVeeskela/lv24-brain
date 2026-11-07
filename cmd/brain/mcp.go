@@ -223,6 +223,29 @@ func toMCPState(state domain.State) mcpserver.State {
 	}
 }
 
+// Review implements mcpserver.ReviewBackend: the review summary plus the
+// findings that still apply. The tool never applies fixes.
+func (b mcpBackend) Review(ctx context.Context, projectID string) (mcpserver.Review, error) {
+	result, err := b.app.Review(ctx, app.ReviewOptions{ProjectID: projectID})
+	if err != nil {
+		return mcpserver.Review{}, err
+	}
+	findings, err := b.app.Findings(ctx, projectID)
+	if err != nil {
+		return mcpserver.Review{}, err
+	}
+	return mcpserver.Review{
+		ProjectID: projectID,
+		Summary:   result.Summary,
+		Findings: mapAll(findings, func(finding app.Finding) mcpserver.ReviewFinding {
+			return mcpserver.ReviewFinding{
+				Kind: string(finding.Kind), Message: finding.Message, Evidence: finding.Evidence,
+				Fixable: finding.Fixable, Fix: finding.Fix,
+			}
+		}),
+	}, nil
+}
+
 // Catchup implements mcpserver.CatchupBackend.
 func (b mcpBackend) Catchup(ctx context.Context, projectID string, since time.Time, limit int) (mcpserver.Catchup, error) {
 	result, err := b.app.Catchup(ctx, app.CatchupOptions{ProjectID: projectID, Since: since, Limit: limit})

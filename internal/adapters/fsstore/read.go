@@ -157,11 +157,23 @@ func parseAttemptBody(body string) (string, string, string, string) {
 		strings.TrimSpace(sections["why it failed"])
 }
 
+// legacyHandoffHeadings are the sections of handoffs migrated from the legacy
+// tool. They bound the engine sections, so an empty "## Next action" never
+// swallows the following heading, and fill summary and git context when the
+// engine sections are absent.
+var legacyHandoffHeadings = []string{"objective", "completed", "unfinished", "blockers", "evidence", "git log"}
+
 func parseHandoffBody(body string) (string, string, string) {
-	sections := splitSections(body, "summary", "git context", "next action")
-	return strings.TrimSpace(sections["summary"]),
-		strings.TrimSpace(sections["git context"]),
-		strings.TrimSpace(sections["next action"])
+	sections := splitSections(body, append([]string{"summary", "git context", "next action"}, legacyHandoffHeadings...)...)
+	summary := strings.TrimSpace(sections["summary"])
+	if summary == "" {
+		summary = strings.TrimSpace(sections["objective"])
+	}
+	gitContext := strings.TrimSpace(sections["git context"])
+	if gitContext == "" {
+		gitContext = strings.TrimSpace(sections["git log"])
+	}
+	return summary, gitContext, strings.TrimSpace(sections["next action"])
 }
 
 func parseNoteMarker(line string) (noteMetadata, bool, error) {

@@ -261,10 +261,22 @@ type jsonStatus struct {
 	UpdateChannel string `json:"update_channel"`
 }
 
-// jsonReview is `brain review --json`: the review text plus its items.
+// jsonReview is `brain review --json`: the review text, its items, the
+// findings that remain and the ones --fix applied.
 type jsonReview struct {
-	Summary string   `json:"summary"`
-	Items   []string `json:"items"`
+	Summary  string        `json:"summary"`
+	Items    []string      `json:"items"`
+	Findings []jsonFinding `json:"findings"`
+	Applied  []jsonFinding `json:"applied"`
+}
+
+// jsonFinding is one stale or contradictory finding in `brain review --json`.
+type jsonFinding struct {
+	Kind     string `json:"kind"`
+	Message  string `json:"message"`
+	Evidence string `json:"evidence"`
+	Fixable  bool   `json:"fixable"`
+	Fix      string `json:"fix"`
 }
 
 // jsonDoctorCheck is one compatibility probe. OK is false only for a failed
