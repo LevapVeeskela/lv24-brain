@@ -114,6 +114,7 @@ func (a *App) Reindex(ctx context.Context, opts IndexOptions) (IndexResult, erro
 			result.Documents++
 		}
 	}
+	a.clearIndexDirty()
 	return result, nil
 }
 

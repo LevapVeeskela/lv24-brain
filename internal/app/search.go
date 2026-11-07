@@ -31,6 +31,9 @@ func (a *App) Search(ctx context.Context, text, projectID string, limit int) ([]
 	if a.deps.Index == nil {
 		return nil, fmt.Errorf("%w: local search index is not available", domain.ErrUnsupported)
 	}
+	// A stale projection is still searchable; a failed repair keeps the
+	// marker and is retried by the next search.
+	_ = a.repairIndexIfDirty(ctx)
 	return a.search(ctx, text, projectID, limit, a.deps.Index.Search)
 }
 

@@ -98,7 +98,16 @@ Every user-facing file carries YAML frontmatter with `project_id`, `kind`,
 (temp file + rename). The SQLite index lives under `index/brain.db` and is
 derived data: new writes upsert into it. `brain index` refreshes it from
 existing Markdown, and `brain index --rebuild` deletes the database and sidecar
-files before rebuilding.
+files before rebuilding. When a write cannot update the index, or `brain sync`
+pulls commits from another machine, the engine sets `index/dirty`; sync then
+reindexes at once, and the next search repairs the index if that failed.
+`brain doctor` warns while the marker is set.
+
+Listing never stops at one damaged file: unreadable, malformed or empty record
+files are skipped and reported by `brain doctor` (check `records`). A daily
+notes file that no longer parses is moved aside to
+`<date>.md.corrupt-<n>` on the next note, so new notes keep working and the
+damaged content is kept for repair.
 
 Domain records: `Project`, `Note`, `Decision`, `Attempt`, `Handoff`, `State`,
 `User`, `Role` (`admin|member|viewer`), `AuthSource`, `SyncRevision`, and
@@ -280,6 +289,12 @@ git mode it writes Markdown dumps under the data directory (`github/...`,
 `connectors/runs/<UTC timestamp>-<source>-<run-id>.md`, including status,
 counts, and the sanitized error. Re-appending the same run record rewrites the
 same file, so retries stay idempotent.
+
+IMAP dumps are append-only: each batch of new messages is written to
+`mail/<account>/<folder>/<date>-uid<first>-<last>.md`, a run without new mail
+writes nothing, and the UID cursor advances only after the batch is stored
+(after a failed fetch, to the last stored message). GitHub and GitLab follow
+pagination (`Link` / `X-Next-Page`, at most 10 pages, `limit` up to 1000).
 
 In server mode the command calls `POST /v1/connectors/run`; the server builds the
 same adapter from environment/OS secrets, runs it with `BRAIN_CONNECTOR_TIMEOUT`,

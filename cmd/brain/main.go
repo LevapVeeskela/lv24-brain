@@ -1269,6 +1269,9 @@ func runSync(args []string, stdout, stderr io.Writer) int {
 	for _, conflict := range result.Conflicts {
 		fmt.Fprintf(stdout, "conflict: %s\n", conflict)
 	}
+	if result.Reindexed {
+		fmt.Fprintln(stdout, "reindexed: pulled records are searchable")
+	}
 	return 0
 }
 

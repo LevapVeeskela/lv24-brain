@@ -127,19 +127,26 @@ func (e *HTTPStatusError) Error() string {
 
 // GetJSON performs a read-only GET and decodes a JSON response into out.
 func (h *HTTP) GetJSON(ctx context.Context, rawURL string, header http.Header, out any) error {
+	_, err := h.GetJSONWithHeaders(ctx, rawURL, header, out)
+	return err
+}
+
+// GetJSONWithHeaders behaves like GetJSON and also returns the response headers
+// of the successful attempt (nil on error).
+func (h *HTTP) GetJSONWithHeaders(ctx context.Context, rawURL string, header http.Header, out any) (http.Header, error) {
 	parsed, err := url.Parse(rawURL)
 	if err != nil {
-		return fmt.Errorf("parse request url: %w", err)
+		return nil, fmt.Errorf("parse request url: %w", err)
 	}
 	if parsed.Scheme != "http" && parsed.Scheme != "https" {
-		return fmt.Errorf("unsupported request scheme %q", parsed.Scheme)
+		return nil, fmt.Errorf("unsupported request scheme %q", parsed.Scheme)
 	}
 
 	var lastErr error
 	for attempt := 1; attempt <= h.retry.MaxAttempts; attempt++ {
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
 		if err != nil {
-			return fmt.Errorf("build request: %w", err)
+			return nil, fmt.Errorf("build request: %w", err)
 		}
 		req.Header = header.Clone()
 		if req.Header == nil {
@@ -149,14 +156,14 @@ func (h *HTTP) GetJSON(ctx context.Context, rawURL string, header http.Header, o
 		resp, err := h.client.Do(req)
 		if err != nil {
 			if ctx.Err() != nil {
-				return ctx.Err()
+				return nil, ctx.Err()
 			}
 			lastErr = err
 			if attempt == h.retry.MaxAttempts {
-				return fmt.Errorf("request failed: %w", err)
+				return nil, fmt.Errorf("request failed: %w", err)
 			}
 			if err := h.sleep(ctx, h.backoff(attempt)); err != nil {
-				return err
+				return nil, err
 			}
 			continue
 		}
@@ -165,29 +172,29 @@ func (h *HTTP) GetJSON(ctx context.Context, rawURL string, header http.Header, o
 		closeErr := resp.Body.Close()
 		if readErr != nil {
 			if ctx.Err() != nil {
-				return ctx.Err()
+				return nil, ctx.Err()
 			}
 			lastErr = readErr
 			if attempt == h.retry.MaxAttempts {
-				return fmt.Errorf("read response: %w", readErr)
+				return nil, fmt.Errorf("read response: %w", readErr)
 			}
 			if err := h.sleep(ctx, h.backoff(attempt)); err != nil {
-				return err
+				return nil, err
 			}
 			continue
 		}
 		if closeErr != nil && ctx.Err() != nil {
-			return ctx.Err()
+			return nil, ctx.Err()
 		}
 
 		if resp.StatusCode >= 200 && resp.StatusCode < 300 {
 			if out == nil || len(body) == 0 {
-				return nil
+				return resp.Header.Clone(), nil
 			}
 			if err := json.Unmarshal(body, out); err != nil {
-				return fmt.Errorf("decode response: %w", err)
+				return nil, fmt.Errorf("decode response: %w", err)
 			}
-			return nil
+			return resp.Header.Clone(), nil
 		}
 
 		statusErr := &HTTPStatusError{
@@ -200,21 +207,21 @@ func (h *HTTP) GetJSON(ctx context.Context, rawURL string, header http.Header, o
 			wait, ok := h.retryWait(resp)
 			if !ok {
 				if hasRetryHint(resp) {
-					return statusErr
+					return nil, statusErr
 				}
 				wait = h.backoff(attempt)
 			}
 			if err := h.sleep(ctx, wait); err != nil {
-				return err
+				return nil, err
 			}
 			continue
 		}
-		return statusErr
+		return nil, statusErr
 	}
 	if lastErr != nil {
-		return lastErr
+		return nil, lastErr
 	}
-	return fmt.Errorf("request failed")
+	return nil, fmt.Errorf("request failed")
 }
 
 func (h *HTTP) backoff(attempt int) time.Duration {

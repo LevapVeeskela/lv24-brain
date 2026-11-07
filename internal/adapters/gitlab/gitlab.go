@@ -32,7 +32,7 @@ const (
 	// DefaultLimit is the per-collection item limit.
 	DefaultLimit = 25
 	// MaxLimit is the largest supported per-collection item limit.
-	MaxLimit = 100
+	MaxLimit = 1000
 )
 
 // Config configures the GitLab connector.
@@ -327,20 +327,15 @@ func (c *Connector) listMergeRequests(ctx context.Context, token, project string
 	query.Set("state", "all")
 	query.Set("order_by", "updated_at")
 	query.Set("sort", "desc")
-	query.Set("per_page", strconv.Itoa(limit))
 	if since != nil {
 		query.Set("updated_after", since.UTC().Format(time.RFC3339))
 	}
-	var out []mergeRequest
-	if err := c.get(ctx, token, projectAPIPath(project)+"/merge_requests", query, &out); err != nil {
-		return nil, err
+	keep := func(item mergeRequest) bool {
+		return since == nil || !item.UpdatedAt.Before(since.UTC())
 	}
-	filtered := out[:0]
-	for _, item := range out {
-		if since != nil && item.UpdatedAt.Before(since.UTC()) {
-			continue
-		}
-		filtered = append(filtered, item)
+	filtered, err := listPaged(ctx, c, token, projectAPIPath(project)+"/merge_requests", query, limit, keep, nil)
+	if err != nil {
+		return nil, err
 	}
 	sort.SliceStable(filtered, func(i, j int) bool {
 		if !filtered[i].UpdatedAt.Equal(filtered[j].UpdatedAt) {
@@ -348,9 +343,6 @@ func (c *Connector) listMergeRequests(ctx context.Context, token, project string
 		}
 		return filtered[i].IID > filtered[j].IID
 	})
-	if len(filtered) > limit {
-		filtered = filtered[:limit]
-	}
 	return filtered, nil
 }
 
@@ -359,20 +351,15 @@ func (c *Connector) listIssues(ctx context.Context, token, project string, since
 	query.Set("state", "all")
 	query.Set("order_by", "updated_at")
 	query.Set("sort", "desc")
-	query.Set("per_page", strconv.Itoa(limit))
 	if since != nil {
 		query.Set("updated_after", since.UTC().Format(time.RFC3339))
 	}
-	var out []issue
-	if err := c.get(ctx, token, projectAPIPath(project)+"/issues", query, &out); err != nil {
-		return nil, err
+	keep := func(item issue) bool {
+		return since == nil || !item.UpdatedAt.Before(since.UTC())
 	}
-	filtered := out[:0]
-	for _, item := range out {
-		if since != nil && item.UpdatedAt.Before(since.UTC()) {
-			continue
-		}
-		filtered = append(filtered, item)
+	filtered, err := listPaged(ctx, c, token, projectAPIPath(project)+"/issues", query, limit, keep, nil)
+	if err != nil {
+		return nil, err
 	}
 	sort.SliceStable(filtered, func(i, j int) bool {
 		if !filtered[i].UpdatedAt.Equal(filtered[j].UpdatedAt) {
@@ -380,20 +367,16 @@ func (c *Connector) listIssues(ctx context.Context, token, project string, since
 		}
 		return filtered[i].IID > filtered[j].IID
 	})
-	if len(filtered) > limit {
-		filtered = filtered[:limit]
-	}
 	return filtered, nil
 }
 
 func (c *Connector) listCommits(ctx context.Context, token, project string, since *time.Time, limit int) ([]commit, error) {
 	query := url.Values{}
-	query.Set("per_page", strconv.Itoa(limit))
 	if since != nil {
 		query.Set("since", since.UTC().Format(time.RFC3339))
 	}
-	var out []commit
-	if err := c.get(ctx, token, projectAPIPath(project)+"/repository/commits", query, &out); err != nil {
+	out, err := listPaged[commit](ctx, c, token, projectAPIPath(project)+"/repository/commits", query, limit, nil, nil)
+	if err != nil {
 		return nil, err
 	}
 	sort.SliceStable(out, func(i, j int) bool {
@@ -404,9 +387,6 @@ func (c *Connector) listCommits(ctx context.Context, token, project string, sinc
 		}
 		return out[i].ID < out[j].ID
 	})
-	if len(out) > limit {
-		out = out[:limit]
-	}
 	return out, nil
 }
 
@@ -415,9 +395,17 @@ func (c *Connector) get(ctx context.Context, token, path string, query url.Value
 	if len(query) > 0 {
 		requestURL += "?" + query.Encode()
 	}
+	_, err := c.getURL(ctx, token, requestURL, out)
+	return err
+}
+
+// getURL performs an authenticated GET and returns the response headers. The
+// token is attached to requestURL, so callers pass only the configured API base
+// or a next-page URL derived from it by nextPage.
+func (c *Connector) getURL(ctx context.Context, token, requestURL string, out any) (http.Header, error) {
 	header := http.Header{}
 	header.Set("PRIVATE-TOKEN", token)
 	header.Set("Accept", "application/json")
 	header.Set("User-Agent", c.userAgent)
-	return c.http.GetJSON(ctx, requestURL, header, out)
+	return c.http.GetJSONWithHeaders(ctx, requestURL, header, out)
 }

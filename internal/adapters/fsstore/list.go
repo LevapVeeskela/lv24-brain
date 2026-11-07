@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/levapveeskela/lv24-brain/internal/domain"
+	"github.com/levapveeskela/lv24-brain/internal/ports"
 )
 
 // orphanReservationAge is how old an empty record file must be before it is
@@ -21,14 +22,7 @@ const orphanReservationAge = 60 * time.Second
 //
 // Listing never deletes or repairs a file. Problems is the only place where
 // skipped files are reported, so the app can show them to the user.
-type Problem struct {
-	// Path is the absolute path of the skipped file.
-	Path string
-	// Kind is the record kind: "note", "decision", "attempt" or "handoff".
-	Kind string
-	// Reason says why the file was skipped, in a form suitable for display.
-	Reason string
-}
+type Problem = ports.RecordProblem
 
 // ListNotes returns every note stored under projects/<id>/notes, newest first.
 // Files that cannot be read are skipped; see Problems.
@@ -105,6 +99,11 @@ func (s *Store) scanNotes(ctx context.Context, projectID string) ([]domain.Note,
 	})
 	if err != nil {
 		return nil, nil, err
+	}
+	quarantined, _ := filepath.Glob(filepath.Join(dir, "*"+quarantineInfix+"*"))
+	sort.Strings(quarantined)
+	for _, path := range quarantined {
+		problems = append(problems, Problem{Path: path, Kind: "note", Reason: quarantineReason})
 	}
 	sort.SliceStable(notes, func(i, j int) bool {
 		if !notes[i].CreatedAt.Equal(notes[j].CreatedAt) {

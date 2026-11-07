@@ -52,6 +52,17 @@ func (s *memorySink) Write(ctx context.Context, path string, content []byte) err
 	return nil
 }
 
+func (s *memorySink) hasPrefix(prefix string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for path := range s.files {
+		if strings.HasPrefix(path, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
 func (s *memorySink) file(path string) (string, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -194,7 +205,7 @@ func TestConnectorReadsMetadataAndAdvancesUID(t *testing.T) {
 		t.Fatalf("logouts = %d", session.logouts)
 	}
 
-	content, ok := sink.file("mail/me/inbox.md")
+	content, ok := sink.file("mail/me/inbox/2026-11-05-uid3-4.md")
 	if !ok {
 		t.Fatalf("dump not written: %#v", sink.files)
 	}
@@ -223,16 +234,48 @@ func TestConnectorReadsMetadataAndAdvancesUID(t *testing.T) {
 		t.Fatalf("cursor = %#v", cursor)
 	}
 
-	// A second run starts after the persisted UID and writes an empty dump.
+	// A second run starts after the persisted UID and, with nothing new,
+	// writes nothing: the earlier dump stays as it was.
 	if _, err := connector.Run(context.Background(), ports.ConnectorOptions{}); err != nil {
 		t.Fatalf("second Run: %v", err)
 	}
 	if len(session.searches) != 2 || session.searches[1].After != 4 {
 		t.Fatalf("second search = %#v", session.searches)
 	}
-	second, _ := sink.file("mail/me/inbox.md")
-	if !strings.Contains(second, "No new messages.") {
-		t.Fatalf("second dump = %s", second)
+	if len(sink.files) != 1 {
+		t.Fatalf("idle run wrote dumps: %#v", sink.files)
+	}
+	if again, _ := sink.file("mail/me/inbox/2026-11-05-uid3-4.md"); again != content {
+		t.Fatal("idle run changed the earlier dump")
+	}
+}
+
+func TestConnectorWithoutSinkKeepsTheCursor(t *testing.T) {
+	statePath := filepath.Join(t.TempDir(), "mail-state.json")
+	session := &fakeSession{
+		states:   map[string]MailboxState{"INBOX": {UIDValidity: 10, UIDNext: 5, NumMessages: 1}},
+		messages: map[string]map[imapv2.UID]FetchedMessage{"INBOX": {3: message(3, "Subject", "Body")}},
+	}
+	connector, err := New(Config{
+		Account: "me", Address: "imap.example.test:993", Username: "me@example.test",
+		Secrets: fakeSecrets{value: testPassword}, Folders: []string{"INBOX"},
+		StatePath: statePath, Limit: 10,
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	connector.dial = func(context.Context, string, string, string, *tls.Config) (Session, error) { return session, nil }
+	if _, err := connector.Run(context.Background(), ports.ConnectorOptions{}); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	var state UIDState
+	if raw, err := os.ReadFile(statePath); err == nil {
+		if err := json.Unmarshal(raw, &state); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if cursor := state.Accounts["me"].Folders["INBOX"]; cursor.LastUID != 0 {
+		t.Fatalf("cursor advanced although nothing was persisted: %#v", cursor)
 	}
 }
 
@@ -324,15 +367,15 @@ func TestConnectorHonorsFoldersAndLimit(t *testing.T) {
 	if len(session.fetches) != 3 {
 		t.Fatalf("fetches = %#v", session.fetches)
 	}
-	if _, ok := sink.file("mail/me/inbox.md"); !ok {
+	if !sink.hasPrefix("mail/me/inbox/") {
 		t.Fatalf("missing INBOX dump: %#v", sink.files)
 	}
-	if _, ok := sink.file("mail/me/archive.md"); !ok {
+	if !sink.hasPrefix("mail/me/archive/") {
 		t.Fatalf("missing Archive dump: %#v", sink.files)
 	}
 }
 
-func TestConnectorDoesNotAdvanceCursorAfterFetchFailure(t *testing.T) {
+func TestConnectorCheckpointsAtTheLastPersistedMessageAfterFetchFailure(t *testing.T) {
 	statePath := filepath.Join(t.TempDir(), "mail-state.json")
 	session := &fakeSession{
 		states: map[string]MailboxState{"INBOX": {UIDValidity: 7, UIDNext: 4}},
@@ -341,12 +384,13 @@ func TestConnectorDoesNotAdvanceCursorAfterFetchFailure(t *testing.T) {
 		},
 		fetchErr: map[imapv2.UID]error{2: errors.New("connection dropped")},
 	}
+	sink := &memorySink{}
 	connector, err := New(Config{
 		Account:   "me",
 		Address:   "imap.example.test:993",
 		Username:  "me@example.test",
 		Secrets:   fakeSecrets{value: testPassword},
-		Sink:      &memorySink{},
+		Sink:      sink,
 		StatePath: statePath,
 		Dial: func(ctx context.Context, address, username, password string, tlsConfig *tls.Config) (Session, error) {
 			return session, nil
@@ -367,8 +411,11 @@ func TestConnectorDoesNotAdvanceCursorAfterFetchFailure(t *testing.T) {
 		t.Fatalf("Load: %v", err)
 	}
 	cursor := loaded.Accounts["me"].Folders["INBOX"]
-	if cursor.LastUID != 0 {
-		t.Fatalf("cursor advanced after fetch failure: %#v", cursor)
+	if cursor.LastUID != 1 {
+		t.Fatalf("cursor after fetch failure = %#v, want the last persisted UID 1", cursor)
+	}
+	if !sink.hasPrefix("mail/me/inbox/") || len(sink.files) != 1 {
+		t.Fatalf("persisted batch = %#v", sink.files)
 	}
 }
 

@@ -92,12 +92,46 @@ func (s *Store) AppendNote(ctx context.Context, note domain.Note) (domain.SyncRe
 	return s.revisionAfterWrite(ctx)
 }
 
+const (
+	// quarantineInfix marks a notes file moved aside because it no longer
+	// parses: <date>.md.corrupt-<unix-nanos>.
+	quarantineInfix  = ".md.corrupt-"
+	quarantineReason = "quarantined: the daily notes file did not parse; repair it and merge it back into <date>.md"
+)
+
+// notesFileParses reports whether a daily notes file can be read back.
+func notesFileParses(raw []byte) bool {
+	var frontmatter noteFileFrontmatter
+	body, err := markdown.Parse(raw, &frontmatter)
+	if err != nil {
+		return false
+	}
+	_, err = parseNotesBody(body, time.Time{})
+	return err == nil
+}
+
+func quarantine(path string, now time.Time) error {
+	aside := strings.TrimSuffix(path, ".md") + quarantineInfix + fmt.Sprint(now.UnixNano())
+	if err := os.Rename(path, aside); err != nil {
+		return fmt.Errorf("fsstore: quarantine unparseable notes %s: %w", path, err)
+	}
+	return nil
+}
+
 // appendNoteLocked performs the read-modify-write of one daily notes file. The
 // caller must hold the lock for path.
 func appendNoteLocked(path string, note domain.Note, date string, createdAt, updatedAt time.Time) error {
 	var frontmatter noteFileFrontmatter
 	body := ""
 	raw, err := os.ReadFile(path)
+	if err == nil && !notesFileParses(raw) {
+		// A damaged daily file must not block today's notes: keep it aside
+		// for repair (listing reports it) and start a fresh file.
+		if err := quarantine(path, updatedAt); err != nil {
+			return err
+		}
+		raw, err = nil, os.ErrNotExist
+	}
 	switch {
 	case err == nil:
 		body, err = markdown.Parse(raw, &frontmatter)

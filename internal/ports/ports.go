@@ -7,6 +7,22 @@ import (
 	"github.com/levapveeskela/lv24-brain/internal/domain"
 )
 
+// RecordProblem is a record file a store skipped while listing (unreadable,
+// malformed, zero bytes, or quarantined) so it can be reported and repaired.
+type RecordProblem struct {
+	// Path is the absolute path of the skipped file.
+	Path string
+	// Kind is the record kind: "note", "decision", "attempt" or "handoff".
+	Kind string
+	// Reason says why the file was skipped, in a form suitable for display.
+	Reason string
+}
+
+// ProblemReporter is implemented by stores whose listing skips damaged files.
+type ProblemReporter interface {
+	Problems(ctx context.Context, projectID string) ([]RecordProblem, error)
+}
+
 // Store persists brain records. Implementations decide whether the backing
 // storage is Markdown files, git, or a server API.
 type Store interface {

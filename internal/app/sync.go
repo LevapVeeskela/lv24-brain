@@ -50,6 +50,15 @@ func (a *App) Sync(ctx context.Context, opts SyncOptions) (SyncResult, error) {
 		return result, err
 	}
 	result.Changed += pulled.Changed
+	if pulled.Changed > 0 {
+		// Records written on other machines arrived as files; the search
+		// projection must pick them up.
+		a.markIndexDirty()
+		if err := a.repairIndexIfDirty(ctx); err != nil {
+			return result, fmt.Errorf("sync pulled %d commits but the search index refresh failed (run brain index): %w", pulled.Changed, err)
+		}
+		result.Reindexed = a.deps.Index != nil
+	}
 
 	if opts.Push {
 		pushed, err := a.deps.Sync.Push(ctx)

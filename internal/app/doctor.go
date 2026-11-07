@@ -37,6 +37,7 @@ func (a *App) Doctor(ctx context.Context, opts DoctorOptions) (DoctorReport, err
 	checks = append(checks, a.doctorDataDir())
 	checks = append(checks, a.doctorSchema())
 	checks = append(checks, a.doctorIndex(ctx))
+	checks = append(checks, a.doctorRecords(ctx))
 	checks = append(checks, a.doctorGit(ctx))
 	return DoctorReport{Checks: checks}, nil
 }
@@ -118,6 +119,42 @@ func (a *App) doctorSchema() DoctorCheck {
 	}
 }
 
+// maxListedProblems bounds the paths named in the records check.
+const maxListedProblems = 3
+
+// doctorRecords reports record files that listing skips (damaged, empty or
+// quarantined), which would otherwise be invisible to every command.
+func (a *App) doctorRecords(ctx context.Context) DoctorCheck {
+	reporter, ok := a.deps.Store.(ports.ProblemReporter)
+	if !ok {
+		return DoctorCheck{Name: "records", Status: doctorOK, Message: "not checked for this store"}
+	}
+	projects, err := a.deps.Store.ListProjects(ctx)
+	if err != nil {
+		return DoctorCheck{Name: "records", Status: doctorFail, Message: err.Error()}
+	}
+	var problems []ports.RecordProblem
+	for _, project := range projects {
+		found, err := reporter.Problems(ctx, project.ID)
+		if err != nil {
+			return DoctorCheck{Name: "records", Status: doctorFail, Message: project.ID + ": " + err.Error()}
+		}
+		problems = append(problems, found...)
+	}
+	if len(problems) == 0 {
+		return DoctorCheck{Name: "records", Status: doctorOK, Message: fmt.Sprintf("all record files readable (%d projects)", len(projects))}
+	}
+	listed := make([]string, 0, maxListedProblems)
+	for _, problem := range problems[:min(len(problems), maxListedProblems)] {
+		listed = append(listed, problem.Path+" ("+problem.Reason+")")
+	}
+	return DoctorCheck{
+		Name:    "records",
+		Status:  doctorWarn,
+		Message: fmt.Sprintf("%d record files are skipped by listing: %s", len(problems), strings.Join(listed, "; ")),
+	}
+}
+
 func (a *App) doctorIndex(ctx context.Context) DoctorCheck {
 	if a.cfg.Mode == config.ModeServer {
 		return DoctorCheck{Name: "index", Status: doctorOK, Message: "server mode uses the remote database"}
@@ -127,6 +164,9 @@ func (a *App) doctorIndex(ctx context.Context) DoctorCheck {
 	}
 	if _, err := a.deps.Index.Search(ctx, ports.Query{Text: "brain-doctor", Limit: 1}); err != nil {
 		return DoctorCheck{Name: "index", Status: doctorFail, Message: err.Error()}
+	}
+	if a.indexDirty() {
+		return DoctorCheck{Name: "index", Status: doctorWarn, Message: "the index may miss records (a write or sync could not update it); run brain index"}
 	}
 	return DoctorCheck{Name: "index", Status: doctorOK, Message: "SQLite FTS5 is usable"}
 }

@@ -189,3 +189,49 @@ func TestGetJSONRetriesNetworkErrors(t *testing.T) {
 		t.Fatalf("ok=%v attempts=%d", out.OK, transport.attempts.Load())
 	}
 }
+
+func TestGetJSONWithHeadersReturnsSuccessfulAttemptHeaders(t *testing.T) {
+	var attempts atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if attempts.Add(1) == 1 {
+			w.Header().Set("Retry-After", "0")
+			http.Error(w, "slow down", http.StatusTooManyRequests)
+			return
+		}
+		w.Header().Set("X-Next-Page", "2")
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	defer server.Close()
+
+	client := NewHTTP(HTTPOptions{
+		Client: server.Client(),
+		Retry:  RetryPolicy{MaxAttempts: 2},
+		Sleep:  func(context.Context, time.Duration) error { return nil },
+	})
+	var out struct {
+		OK bool `json:"ok"`
+	}
+	headers, err := client.GetJSONWithHeaders(context.Background(), server.URL, http.Header{}, &out)
+	if err != nil {
+		t.Fatalf("GetJSONWithHeaders: %v", err)
+	}
+	if got := headers.Get("X-Next-Page"); got != "2" {
+		t.Fatalf("X-Next-Page = %q, want 2", got)
+	}
+	if !out.OK || attempts.Load() != 2 {
+		t.Fatalf("out = %+v attempts = %d", out, attempts.Load())
+	}
+}
+
+func TestGetJSONWithHeadersReturnsNoHeadersOnError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "nope", http.StatusNotFound)
+	}))
+	defer server.Close()
+
+	client := NewHTTP(HTTPOptions{Client: server.Client(), Retry: RetryPolicy{MaxAttempts: 1}})
+	headers, err := client.GetJSONWithHeaders(context.Background(), server.URL, http.Header{}, nil)
+	if err == nil || headers != nil {
+		t.Fatalf("headers = %v err = %v, want nil headers and error", headers, err)
+	}
+}

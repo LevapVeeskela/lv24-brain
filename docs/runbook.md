@@ -82,9 +82,10 @@ brain index                 # refresh the local index after Markdown changed out
   newest first. It works in local and git mode.
 - `brain search` queries the local FTS5 index in local and git mode and calls
   `GET /v1/search` in server mode.
-- Writes made through the CLI update the local index. Markdown changed by a
-  pull or by hand needs `brain index` (or `brain index --rebuild` to rebuild it
-  from Markdown).
+- Writes made through the CLI update the local index, and `brain sync`
+  reindexes after pulling records from another machine. Markdown changed by
+  hand needs `brain index` (or `brain index --rebuild` to rebuild it from
+  Markdown).
 
 ### Session routine for agents
 

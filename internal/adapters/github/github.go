@@ -11,7 +11,6 @@ import (
 	"net/http"
 	"net/url"
 	"sort"
-	"strconv"
 	"strings"
 	"time"
 
@@ -32,7 +31,7 @@ const (
 	// DefaultLimit is the per-collection item limit.
 	DefaultLimit = 25
 	// MaxLimit is the largest supported per-collection item limit.
-	MaxLimit = 100
+	MaxLimit = 1000
 )
 
 // Config configures the GitHub connector.
@@ -327,17 +326,17 @@ func (c *Connector) listPullRequests(ctx context.Context, token, repo string, si
 	query.Set("state", "all")
 	query.Set("sort", "updated")
 	query.Set("direction", "desc")
-	query.Set("per_page", strconv.Itoa(limit))
-	var out []pullRequest
-	if err := c.get(ctx, token, repoAPIPath(repo)+"/pulls", query, &out); err != nil {
-		return nil, err
+	// Results are ordered by updated_at descending, so once a page ends before
+	// since, every later page is older too.
+	keep := func(item pullRequest) bool {
+		return since == nil || !item.UpdatedAt.Before(since.UTC())
 	}
-	filtered := out[:0]
-	for _, item := range out {
-		if since != nil && item.UpdatedAt.Before(since.UTC()) {
-			continue
-		}
-		filtered = append(filtered, item)
+	stop := func(page []pullRequest) bool {
+		return since != nil && len(page) > 0 && page[len(page)-1].UpdatedAt.Before(since.UTC())
+	}
+	filtered, err := listPaged(ctx, c, token, repoAPIPath(repo)+"/pulls", query, limit, keep, stop)
+	if err != nil {
+		return nil, err
 	}
 	sort.SliceStable(filtered, func(i, j int) bool {
 		if !filtered[i].UpdatedAt.Equal(filtered[j].UpdatedAt) {
@@ -345,9 +344,6 @@ func (c *Connector) listPullRequests(ctx context.Context, token, repo string, si
 		}
 		return filtered[i].Number > filtered[j].Number
 	})
-	if len(filtered) > limit {
-		filtered = filtered[:limit]
-	}
 	return filtered, nil
 }
 
@@ -356,23 +352,18 @@ func (c *Connector) listIssues(ctx context.Context, token, repo string, since *t
 	query.Set("state", "all")
 	query.Set("sort", "updated")
 	query.Set("direction", "desc")
-	query.Set("per_page", strconv.Itoa(limit))
 	if since != nil {
 		query.Set("since", since.UTC().Format(time.RFC3339))
 	}
-	var out []issue
-	if err := c.get(ctx, token, repoAPIPath(repo)+"/issues", query, &out); err != nil {
-		return nil, err
-	}
-	filtered := out[:0]
-	for _, item := range out {
+	keep := func(item issue) bool {
 		if item.PullRequest != nil {
-			continue
+			return false
 		}
-		if since != nil && item.UpdatedAt.Before(since.UTC()) {
-			continue
-		}
-		filtered = append(filtered, item)
+		return since == nil || !item.UpdatedAt.Before(since.UTC())
+	}
+	filtered, err := listPaged(ctx, c, token, repoAPIPath(repo)+"/issues", query, limit, keep, nil)
+	if err != nil {
+		return nil, err
 	}
 	sort.SliceStable(filtered, func(i, j int) bool {
 		if !filtered[i].UpdatedAt.Equal(filtered[j].UpdatedAt) {
@@ -380,20 +371,16 @@ func (c *Connector) listIssues(ctx context.Context, token, repo string, since *t
 		}
 		return filtered[i].Number > filtered[j].Number
 	})
-	if len(filtered) > limit {
-		filtered = filtered[:limit]
-	}
 	return filtered, nil
 }
 
 func (c *Connector) listCommits(ctx context.Context, token, repo string, since *time.Time, limit int) ([]commit, error) {
 	query := url.Values{}
-	query.Set("per_page", strconv.Itoa(limit))
 	if since != nil {
 		query.Set("since", since.UTC().Format(time.RFC3339))
 	}
-	var out []commit
-	if err := c.get(ctx, token, repoAPIPath(repo)+"/commits", query, &out); err != nil {
+	out, err := listPaged[commit](ctx, c, token, repoAPIPath(repo)+"/commits", query, limit, nil, nil)
+	if err != nil {
 		return nil, err
 	}
 	sort.SliceStable(out, func(i, j int) bool {
@@ -404,9 +391,6 @@ func (c *Connector) listCommits(ctx context.Context, token, repo string, since *
 		}
 		return out[i].SHA < out[j].SHA
 	})
-	if len(out) > limit {
-		out = out[:limit]
-	}
 	return out, nil
 }
 
@@ -415,10 +399,18 @@ func (c *Connector) get(ctx context.Context, token, path string, query url.Value
 	if len(query) > 0 {
 		requestURL += "?" + query.Encode()
 	}
+	_, err := c.getURL(ctx, token, requestURL, out)
+	return err
+}
+
+// getURL performs an authenticated GET and returns the response headers. The
+// token is attached to requestURL, so callers pass only the configured API base
+// or a next-page URL already checked by nextPage.
+func (c *Connector) getURL(ctx context.Context, token, requestURL string, out any) (http.Header, error) {
 	header := http.Header{}
 	header.Set("Authorization", "Bearer "+token)
 	header.Set("Accept", "application/vnd.github+json")
 	header.Set("X-GitHub-Api-Version", "2022-11-28")
 	header.Set("User-Agent", c.userAgent)
-	return c.http.GetJSON(ctx, requestURL, header, out)
+	return c.http.GetJSONWithHeaders(ctx, requestURL, header, out)
 }

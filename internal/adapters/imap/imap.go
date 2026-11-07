@@ -231,15 +231,22 @@ func (c *Connector) Run(ctx context.Context, opts ports.ConnectorOptions) (domai
 			messages = append(messages, message)
 		}
 
-		wrote := true
-		if c.sink != nil {
-			content := renderFolder(c.account, folder, mailbox, cursor, messages, c.now().UTC())
-			if err := c.sink.Write(ctx, dumpPath(c.account, folder), content); err != nil {
+		// Each batch goes to its own file named by its UID range, so earlier
+		// dumps are never overwritten and a refetch rewrites the same file.
+		// Without a sink nothing is persisted, so the cursor must not move.
+		wrote := len(messages) == 0
+		if len(messages) > 0 && c.sink != nil {
+			generated := c.now().UTC()
+			content := renderFolder(c.account, folder, mailbox, messages, generated)
+			if err := c.sink.Write(ctx, dumpPath(c.account, folder, generated, messages), content); err != nil {
 				failures = append(failures, fmt.Sprintf("%s: write markdown: %s", folder, connectors.SanitizeError(err, password)))
-				wrote = false
+			} else {
+				wrote = true
 			}
 		}
-		if !fetchFailed && wrote {
+		// After a failed fetch, checkpoint at the last persisted message so the
+		// next run continues instead of refetching (and re-dumping) the batch.
+		if wrote && (!fetchFailed || len(messages) > 0) {
 			next := cursor
 			next.UpdatedAt = c.now().UTC()
 			if len(messages) > 0 {
@@ -291,11 +298,14 @@ func sinceOrZero(since *time.Time) time.Time {
 	return since.UTC()
 }
 
-func dumpPath(account, folder string) string {
+// dumpPath is mail/<account>/<folder>/<date>-uid<first>-<last>.md for one
+// fetched batch (messages are sorted by UID and non-empty).
+func dumpPath(account, folder string, generated time.Time, messages []FetchedMessage) string {
 	accountSlug := connectors.Slug(account)
 	folderSlug, err := connectors.SlugPath(folder)
 	if err != nil {
 		folderSlug = connectors.Slug(folder)
 	}
-	return "mail/" + accountSlug + "/" + folderSlug + ".md"
+	return fmt.Sprintf("mail/%s/%s/%s-uid%d-%d.md", accountSlug, folderSlug, generated.Format("2006-01-02"),
+		messages[0].UID, messages[len(messages)-1].UID)
 }

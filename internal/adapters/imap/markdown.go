@@ -11,7 +11,9 @@ import (
 	"github.com/levapveeskela/lv24-brain/internal/connectors"
 )
 
-func renderFolder(account, folder string, mailbox MailboxState, cursor FolderCursor, messages []FetchedMessage, generatedAt time.Time) []byte {
+// renderFolder renders one fetched batch of a folder (messages non-empty,
+// sorted by UID).
+func renderFolder(account, folder string, mailbox MailboxState, messages []FetchedMessage, generatedAt time.Time) []byte {
 	fields := map[string]string{
 		"kind":           "connector_dump",
 		"source":         Name,
@@ -21,18 +23,15 @@ func renderFolder(account, folder string, mailbox MailboxState, cursor FolderCur
 		"account":        account,
 		"folder":         folder,
 		"uid_validity":   strconv.FormatUint(uint64(mailbox.UIDValidity), 10),
+		"first_uid":      strconv.FormatUint(uint64(messages[0].UID), 10),
+		"last_uid":       strconv.FormatUint(uint64(messages[len(messages)-1].UID), 10),
 	}
 
 	var b strings.Builder
 	fmt.Fprintf(&b, "# %s / %s\n\n", connectors.EscapeInline(account), connectors.EscapeInline(folder))
 	fmt.Fprintf(&b, "- UID validity: %d\n", mailbox.UIDValidity)
-	fmt.Fprintf(&b, "- Last UID: %d\n", cursor.LastUID)
+	fmt.Fprintf(&b, "- UIDs: %d-%d\n", messages[0].UID, messages[len(messages)-1].UID)
 	fmt.Fprintf(&b, "- Messages: %d\n", len(messages))
-
-	if len(messages) == 0 {
-		b.WriteString("\nNo new messages.\n")
-		return connectors.Document(fields, b.String())
-	}
 
 	for _, message := range messages {
 		subject := "(no subject)"

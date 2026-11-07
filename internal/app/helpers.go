@@ -235,11 +235,17 @@ func handoffIDs(handoffs []domain.Handoff) []string {
 	return ids
 }
 
+// upsertIndex updates the search projection after a write. On failure it
+// marks the index dirty so the next search repairs it.
 func (a *App) upsertIndex(ctx context.Context, doc ports.Document) error {
 	if a.deps.Index == nil {
 		return nil
 	}
-	return a.deps.Index.Upsert(ctx, doc)
+	if err := a.deps.Index.Upsert(ctx, doc); err != nil {
+		a.markIndexDirty()
+		return err
+	}
+	return nil
 }
 
 func noteDocument(note domain.Note) ports.Document {

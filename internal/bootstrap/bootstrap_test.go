@@ -542,6 +542,40 @@ func TestGitSyncWithTempRepository(t *testing.T) {
 	if strings.Contains(tree, "index/") {
 		t.Fatalf("remote tree contains the derived index:\n%s", tree)
 	}
+
+	// A second machine writes a note; the first one's sync must make it
+	// searchable without a manual `brain index`.
+	other := filepath.Join(root, "other")
+	runGitAt(t, root, "clone", "--quiet", remote, other)
+	runGitAt(t, other, "config", "user.name", "Brain Test")
+	runGitAt(t, other, "config", "user.email", "brain@example.test")
+	otherCfg := cfg
+	otherCfg.DataDir = other
+	otherRuntime, err := bootstrap.Build(otherCfg)
+	if err != nil {
+		t.Fatalf("Build other: %v", err)
+	}
+	defer func() { _ = otherRuntime.Close() }()
+	if _, err := otherRuntime.App.Note(ctx, app.NoteInput{ProjectID: "demo", Title: "From the other machine", Body: "kiwifruit"}); err != nil {
+		t.Fatalf("other Note: %v", err)
+	}
+	if _, err := otherRuntime.App.Sync(ctx, app.SyncOptions{Push: true}); err != nil {
+		t.Fatalf("other Sync: %v", err)
+	}
+	pulled, err := runtime.App.Sync(ctx, app.SyncOptions{})
+	if err != nil {
+		t.Fatalf("Sync pull: %v", err)
+	}
+	if !pulled.Reindexed {
+		t.Fatalf("pull did not reindex: %+v", pulled)
+	}
+	if _, err := os.Stat(filepath.Join(clone, "index", "dirty")); !os.IsNotExist(err) {
+		t.Fatalf("dirty marker left after a successful reindex: %v", err)
+	}
+	hits, err := runtime.App.Search(ctx, "kiwifruit", "", 5)
+	if err != nil || len(hits) != 1 {
+		t.Fatalf("pulled note not searchable: %+v, %v", hits, err)
+	}
 }
 
 func requireGit(t *testing.T) {

@@ -228,6 +228,8 @@ type SyncResult struct {
 	Behind    int
 	Changed   int
 	Conflicts []string
+	// Reindexed reports that pulled records were added to the search index.
+	Reindexed bool
 }
 
 // UpdateOptions controls the updater.
