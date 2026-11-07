@@ -123,7 +123,8 @@ jobs:
           $bin = Join-Path $env:RUNNER_TEMP 'bin'
           $data = Join-Path $env:RUNNER_TEMP 'brain'
           $log = Join-Path $env:RUNNER_TEMP 'reinstall.log'
-          ./installers/windows/install.ps1 -Mode local -InstallDir $bin -DataDir $data -NoPath -Yes | Tee-Object -FilePath $log
+          # Write-Host goes to the information stream; *>&1 captures it.
+          ./installers/windows/install.ps1 -Mode local -InstallDir $bin -DataDir $data -NoPath -Yes *>&1 | Tee-Object -FilePath $log
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           if (-not (Select-String -Path $log -Pattern 'already installed' -Quiet)) { throw 'reinstall did not take the already-installed path' }
       - name: uninstall (brain.yaml must survive)
