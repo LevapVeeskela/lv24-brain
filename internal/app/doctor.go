@@ -39,6 +39,7 @@ func (a *App) Doctor(ctx context.Context, opts DoctorOptions) (DoctorReport, err
 	checks = append(checks, a.doctorIndex(ctx))
 	checks = append(checks, a.doctorRecords(ctx))
 	checks = append(checks, a.doctorJournal(ctx))
+	checks = append(checks, a.doctorIDs(ctx))
 	checks = append(checks, a.doctorGit(ctx))
 	return DoctorReport{Checks: checks}, nil
 }
@@ -118,6 +119,38 @@ func (a *App) doctorSchema() DoctorCheck {
 	default:
 		return DoctorCheck{Name: "schema", Status: doctorOK, Message: fmt.Sprintf("schema %d", a.cfg.SchemaVersion)}
 	}
+}
+
+// doctorIDs reports record IDs used by more than one record. Lookups by ID
+// (show, status, trash) and journal lines cannot tell such records apart.
+func (a *App) doctorIDs(ctx context.Context) DoctorCheck {
+	if a.deps.Store == nil || a.cfg.Mode == config.ModeServer {
+		return DoctorCheck{Name: "ids", Status: doctorOK, Message: "not checked in this mode"}
+	}
+	projects, err := a.deps.Store.ListProjects(ctx)
+	if err != nil {
+		return DoctorCheck{Name: "ids", Status: doctorFail, Message: err.Error()}
+	}
+	seen := map[string]string{}
+	var duplicates []string
+	for _, project := range projects {
+		records, err := a.projectRecords(ctx, project.ID)
+		if err != nil {
+			return DoctorCheck{Name: "ids", Status: doctorFail, Message: project.ID + ": " + err.Error()}
+		}
+		for _, record := range records {
+			id := record.Summary().ID
+			if first, ok := seen[id]; ok {
+				duplicates = append(duplicates, fmt.Sprintf("%s (%s, %s)", id, first, project.ID))
+				continue
+			}
+			seen[id] = project.ID
+		}
+	}
+	if len(duplicates) == 0 {
+		return DoctorCheck{Name: "ids", Status: doctorOK, Message: fmt.Sprintf("%d record ids are unique", len(seen))}
+	}
+	return DoctorCheck{Name: "ids", Status: doctorWarn, Message: fmt.Sprintf("%d duplicate record ids: %s", len(duplicates), strings.Join(duplicates[:min(len(duplicates), maxListedProblems)], "; "))}
 }
 
 // doctorJournal reports recent records that no journal mentions.
