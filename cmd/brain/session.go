@@ -31,12 +31,22 @@ const (
 )
 
 // hookInput is the subset of the JSON a coding agent passes to a session hook
-// on stdin (Claude Code: SessionStart / SessionEnd).
+// on stdin (Claude Code: SessionStart / SessionEnd; Codex: SessionStart /
+// Stop, which carries the last assistant message).
 type hookInput struct {
-	Cwd            string `json:"cwd"`
-	TranscriptPath string `json:"transcript_path"`
-	Source         string `json:"source"`
-	Reason         string `json:"reason"`
+	Cwd                  string `json:"cwd"`
+	TranscriptPath       string `json:"transcript_path"`
+	Source               string `json:"source"`
+	Reason               string `json:"reason"`
+	LastAssistantMessage string `json:"last_assistant_message"`
+	SessionID            string `json:"session_id"`
+	HookEventName        string `json:"hook_event_name"`
+}
+
+// jsonHook reports hook protocols that pass JSON on stdin and expect the
+// Claude-style hookSpecificOutput on stdout (Claude Code and Codex share it).
+func jsonHook(hook string) bool {
+	return hook == "claude" || hook == "codex"
 }
 
 type sessionOptions struct {
@@ -51,12 +61,12 @@ type sessionOptions struct {
 // and the exit code is 0; an unregistered directory is silently ignored.
 func runSession(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	if len(args) == 0 || (args[0] != "start" && args[0] != "end") {
-		fmt.Fprintln(stderr, "usage: brain session start|end [--hook claude|opencode] [--cwd <dir>]")
+		fmt.Fprintln(stderr, "usage: brain session start|end [--hook claude|codex|opencode] [--cwd <dir>]")
 		return 2
 	}
 	action := args[0]
 	fs := newFlagSet("session "+action, stderr)
-	hook := fs.String("hook", "", "agent hook protocol: claude (JSON on stdin) or opencode")
+	hook := fs.String("hook", "", "agent hook protocol: claude or codex (JSON on stdin), or opencode")
 	cwd := fs.String("cwd", "", "project directory (default: from the hook input, else the working directory)")
 	cfgPath := configFlag(fs)
 	if err := fs.Parse(args[1:]); err != nil {
@@ -67,13 +77,13 @@ func runSession(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return 2
 	}
 	switch *hook {
-	case "", "claude", "opencode":
+	case "", "claude", "codex", "opencode":
 	default:
-		fmt.Fprintf(stderr, "brain session %s: unknown --hook %q (want claude or opencode)\n", action, *hook)
+		fmt.Fprintf(stderr, "brain session %s: unknown --hook %q (want claude, codex or opencode)\n", action, *hook)
 		return 2
 	}
 	opts := sessionOptions{hook: *hook, cwd: strings.TrimSpace(*cwd), cfgPath: *cfgPath}
-	if opts.hook == "claude" {
+	if jsonHook(opts.hook) {
 		opts.input = readHookInput(stdin)
 		if opts.cwd == "" {
 			opts.cwd = strings.TrimSpace(opts.input.Cwd)
@@ -82,9 +92,15 @@ func runSession(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	ctx, cancel := context.WithTimeout(context.Background(), sessionTimeout)
 	defer cancel()
 	var err error
-	if action == "start" {
+	switch {
+	case action == "start":
+		if opts.hook == "codex" {
+			flushStaleCodexCheckpoints(ctx, opts)
+		}
 		err = sessionStart(ctx, opts, stdout)
-	} else {
+	case opts.hook == "codex":
+		err = codexSessionEnd(ctx, opts, stdout)
+	default:
 		err = sessionEnd(ctx, opts, stdout)
 	}
 	if err == nil {
@@ -151,7 +167,7 @@ func sessionStart(ctx context.Context, opts sessionOptions, stdout io.Writer) er
 	if err != nil {
 		return err
 	}
-	if opts.hook != "claude" {
+	if !jsonHook(opts.hook) {
 		_, err = io.WriteString(stdout, text)
 		return err
 	}
@@ -238,7 +254,10 @@ func sessionEnd(ctx context.Context, opts sessionOptions, stdout io.Writer) erro
 // transcript is available, else a digest of what was recorded since the
 // latest handoff. Empty means there is nothing worth a handoff.
 func sessionSummary(ctx context.Context, a *app.App, target app.Resolved, opts sessionOptions) (string, error) {
-	if opts.input.TranscriptPath != "" {
+	if text := strings.Join(strings.Fields(opts.input.LastAssistantMessage), " "); text != "" {
+		return text, nil
+	}
+	if opts.hook == "claude" && opts.input.TranscriptPath != "" {
 		if text := lastAssistantText(opts.input.TranscriptPath); text != "" {
 			return text, nil
 		}

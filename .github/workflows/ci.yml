@@ -55,7 +55,9 @@ jobs:
           go build -o /tmp/brain-server ./cmd/brain-server
 
       - name: node check
-        run: node --check integrations/opencode/brain-handoff.js
+        run: |
+          node --check integrations/opencode/brain-handoff.js
+          node --test integrations/opencode/brain-handoff.test.mjs
 
       - name: validate compose
         run: |

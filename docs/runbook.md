@@ -259,6 +259,16 @@ Text outside the markers is never touched. Edit the canonical file, run
 `brain sync --push`, then `brain agents sync` on each machine (`--check` reports
 drift without writing and exits 1).
 
+`brain agents sync --hooks` (opt-in; the nightly job does not pass it) also installs
+brain session hooks: SessionStart and SessionEnd in `~/.claude/settings.json`,
+SessionStart, Stop and SessionEnd in `~/.codex/hooks.json`, and an OpenCode plugin in
+`~/.config/opencode/plugins/` (`brain-session-end.js` if present, else `brain-handoff.js`).
+Existing settings and hooks are kept, the commands are refreshed in place when the
+binary or config path changes, and the first change to a file saves
+`<file>.pre-brain-hooks`. Codex keeps new hooks disabled until you approve them in
+Codex yourself (the owner approves hooks; brain does not). Brain never edits
+`~/.codex/config.toml`. `--check --hooks` reports what would change and exits 1.
+
 Scheduled refresh: on Windows the nightly "Company Brain Graph Refresh" task
 runs graphs, connectors, `brain sync --push` and `brain agents sync`. On macOS
 the LaunchAgent `by.lv24.brain-daily` (`~/Library/LaunchAgents/`, script

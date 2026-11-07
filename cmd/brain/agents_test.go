@@ -299,6 +299,31 @@ func TestAgentsSkipsOptionalTargetsWithoutDirs(t *testing.T) {
 	}
 }
 
+func TestAgentsSyncHooksFlagIsOptIn(t *testing.T) {
+	f := newAgentsFixture(t)
+	settings := filepath.Join(f.home, ".claude", "settings.json")
+	agentsWrite(t, settings, "{}\n")
+
+	code, stdout, stderr := runAgentsForTest(t, f.args()...)
+	if code != 0 {
+		t.Fatalf("sync exit = %d (stderr: %s)", code, stderr)
+	}
+	if strings.Contains(stdout, "settings.json") || agentsRead(t, settings) != "{}\n" {
+		t.Errorf("without --hooks no settings file may be touched:\n%s", stdout)
+	}
+
+	code, stdout, stderr = runAgentsForTest(t, f.args("--hooks")...)
+	if code != 0 {
+		t.Fatalf("sync --hooks exit = %d (stderr: %s)", code, stderr)
+	}
+	if !strings.Contains(stdout, "updated "+settings+"\n") {
+		t.Errorf("--hooks should update settings.json:\n%s", stdout)
+	}
+	if !strings.Contains(agentsRead(t, settings), " session start --hook claude --config ") {
+		t.Error("settings.json lacks the brain SessionStart hook")
+	}
+}
+
 func TestAgentsUsageAndUnknownSubcommand(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	if code := runAgents(nil, &stdout, &stderr); code != 2 {

@@ -96,7 +96,7 @@ func printAgentsUsage(w io.Writer) {
 	fmt.Fprint(w, `Keep shared agent instructions identical on every machine.
 
 Usage:
-  brain agents sync [--check] [--source <file>] [--root <dir>] [--home <dir>] [--config <brain.yaml>]
+  brain agents sync [--check] [--hooks] [--source <file>] [--root <dir>] [--home <dir>] [--config <brain.yaml>]
 
 The canonical file is <data_dir>/global/AGENTS.md unless --source is given.
 Each target receives a managed block between LV24_SHARED markers:
@@ -104,6 +104,14 @@ Each target receives a managed block between LV24_SHARED markers:
   <home>/.config/opencode/AGENTS.md     canonical content (if the directory exists)
   <home>/.codex/AGENTS.md               canonical content (if the directory exists)
   <home>/.claude/CLAUDE.md              @import of the canonical file (if the directory exists)
+
+--hooks also installs brain session hooks (off by default; the nightly job does not pass it):
+  <home>/.claude/settings.json          SessionStart and SessionEnd hook groups
+  <home>/.codex/hooks.json              SessionStart, Stop and SessionEnd hook groups
+  <home>/.config/opencode/plugins/      brain-session-end.js, or brain-handoff.js
+Other settings and hooks are kept; a one-time <file>.pre-brain-hooks backup is written
+before the first change. Codex keeps new hooks disabled until you approve them in Codex;
+brain never edits ~/.codex/config.toml.
 
 --check writes nothing and exits 1 if any file would change.
 `)
@@ -115,6 +123,7 @@ func runAgentsSync(args []string, stdout, stderr io.Writer) int {
 	source := fs.String("source", "", "canonical instructions file (default: <data_dir>/global/AGENTS.md)")
 	root := fs.String("root", "", "workspace root for <root>/AGENTS.md (default: parent of data_dir)")
 	home := fs.String("home", "", "home directory for agent config dirs (default: user home)")
+	hooks := fs.Bool("hooks", false, "also install brain session hooks for Claude Code, Codex and OpenCode")
 	cfgPath := configFlag(fs)
 	positional, err := parseInterspersed(fs, args)
 	if err != nil {
@@ -214,6 +223,20 @@ func runAgentsSync(args []string, stdout, stderr io.Writer) int {
 			continue
 		}
 		fmt.Fprintf(stdout, "%s %s\n", out.status, target.path)
+	}
+
+	if *hooks {
+		exe, err := os.Executable()
+		if err != nil {
+			return reportError(stderr, "agents", err)
+		}
+		cfgAbs, err := filepath.Abs(*cfgPath)
+		if err != nil {
+			return reportError(stderr, "agents", err)
+		}
+		if syncAgentHooks(homeDir, exe, cfgAbs, *check, stdout, stderr) != 0 {
+			exit = 1
+		}
 	}
 	return exit
 }

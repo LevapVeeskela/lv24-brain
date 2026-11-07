@@ -1,15 +1,28 @@
-# OpenCode handoff hook
+# OpenCode brain hook
 
-`brain-handoff.js` is an OpenCode plugin template. On `session.idle`
-(10-minute debounce), `session.deleted`, and `global.disposed` (1-minute
-debounce) it runs `brain session end --hook opencode --cwd <dir>`. The engine
-writes a `[auto]` handoff summarizing what was recorded since the latest
-handoff, and skips it when nothing was recorded or a handoff is less than 30
-minutes old.
+`brain-handoff.js` is an OpenCode plugin template with two parts.
 
-OpenCode loads the default export and calls `server(ctx)`; the returned
-`event` hook runs `brain session end ... --config ...`. All failures are
+**Session start (context injection).** The first `context` call of each
+OpenCode session runs `brain session start --hook opencode --cwd <dir>` once
+and appends its plain-text project context to the system prompt. The text is
+cached per session, so later turns append the same context without running the
+command again. This is the OpenCode equivalent of the Claude SessionStart hook.
+The command is killed after 10 seconds; empty output, a non-zero exit or an
+error injects nothing. The context is not refreshed after a compaction.
+Older OpenCode builds without `ctx.session.hook` skip injection silently.
+
+**Session end (handoff).** On `session.idle` (10-minute debounce),
+`session.deleted`, and `global.disposed` (1-minute debounce) it runs
+`brain session end --hook opencode --cwd <dir>`. The engine writes a `[auto]`
+handoff summarizing what was recorded since the latest handoff, and skips it
+when nothing was recorded or a handoff is less than 30 minutes old. A
+`session.deleted` event also drops that session's cached start context.
+
+OpenCode loads the default export and calls `server(ctx)`. The returned object
+carries the `event` hook (end handoff) and `dispose`. All failures are
 swallowed, so a missing binary or config can never break an OpenCode session.
+
+Tests: `node --test integrations/opencode/` (no dependencies).
 
 ## Install
 

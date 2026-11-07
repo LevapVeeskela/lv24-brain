@@ -1,13 +1,23 @@
 /**
- * LV24 Brain OpenCode handoff hook template.
+ * LV24 Brain OpenCode hook template.
  *
- * OpenCode loads the default export and calls `server(ctx)`. The returned
- * object's `event` hook runs `brain session end --hook opencode` when a session
- * goes idle or closes. The engine writes a handoff only when something was
- * recorded since the latest one and no handoff was written in the last 30
- * minutes, so idle checkpoints no longer pile up placeholder handoffs.
+ * OpenCode loads the default export and calls `server(ctx)`. Two hooks:
+ *
+ *   - Session start: the first `context` call of a session runs
+ *     `brain session start --hook opencode` once and appends its plain-text
+ *     output to the system prompt. Later calls of the same session append the
+ *     cached text again (the system prompt is rebuilt every turn), but the
+ *     command never runs twice for one session. Empty output, errors and a
+ *     10 s timeout inject nothing.
+ *   - Session end: the returned `event` hook runs `brain session end --hook
+ *     opencode` when a session goes idle or closes. The engine writes a handoff
+ *     only when something was recorded since the latest one and no handoff was
+ *     written in the last 30 minutes, so idle checkpoints no longer pile up
+ *     placeholder handoffs.
+ *
  * Every failure is swallowed so the brain CLI can never break an OpenCode
- * session.
+ * session. Older OpenCode builds without `ctx.session.hook` skip injection and
+ * keep the end handoff.
  *
  * Placeholders (replaced by installers/windows/install.ps1):
  *   __BRAIN_BIN__       absolute path to brain.exe (or `brain` on PATH)
@@ -17,9 +27,10 @@
  *
  * Hook evidence (OpenCode 2.1.4):
  *   - default export shape: { id, server(ctx) }
- *   - server(ctx) returns { event: async ({ event }) => ... }
+ *   - server(ctx) returns { event: async ({ event }) => ..., dispose }
  *   - event.type values include session.idle, session.deleted, global.disposed.
  *   - There is no session.end / session.ended event in this build.
+ *   - ctx.session.hook("context", fn) receives { sessionID, system }.
  */
 
 import { spawn } from "node:child_process";
@@ -39,9 +50,18 @@ const FINAL_EVENTS = new Set(["session.deleted", "global.disposed"]);
 const IDLE_DEBOUNCE_MS = 10 * 60 * 1000;
 const FINAL_DEBOUNCE_MS = 60 * 1000;
 const HANDOFF_TIMEOUT_MS = 30 * 1000;
+const START_TIMEOUT_MS = 10 * 1000;
+const MAX_TRACKED_SESSIONS = 200;
 
-function isConfigured() {
-  return Boolean(BRAIN_BIN) && !BRAIN_BIN.startsWith("__");
+const DEFAULT_DEPS = {
+  spawn,
+  bin: BRAIN_BIN,
+  config: BRAIN_CONFIG,
+  startTimeoutMs: START_TIMEOUT_MS,
+};
+
+function isConfigured(bin) {
+  return Boolean(bin) && !bin.startsWith("__");
 }
 
 function normalizePath(value) {
@@ -69,19 +89,28 @@ function resolveProjectDirectory(ctx, event) {
   return process.cwd();
 }
 
-function handoffArgs(directory) {
-  const args = ["session", "end", "--hook", "opencode", "--cwd", directory];
-  if (BRAIN_CONFIG && !BRAIN_CONFIG.startsWith("__")) {
-    args.push("--config", BRAIN_CONFIG);
+/** Builds `brain session <subcommand> --hook opencode --cwd <dir> [--config cfg]`. */
+function brainArgs(subcommand, directory, config) {
+  const args = ["session", subcommand, "--hook", "opencode", "--cwd", directory];
+  if (config && !config.startsWith("__")) {
+    args.push("--config", config);
   }
   return args;
 }
 
-function runBrainHandoff(directory) {
+function killQuietly(child) {
+  try {
+    child?.kill?.();
+  } catch {
+    // Best effort only.
+  }
+}
+
+function runBrainHandoff(deps, directory) {
   return new Promise((resolvePromise) => {
     let child;
     try {
-      child = spawn(BRAIN_BIN, handoffArgs(directory), {
+      child = deps.spawn(deps.bin, brainArgs("end", directory, deps.config), {
         cwd: directory,
         windowsHide: true,
         stdio: "ignore",
@@ -101,11 +130,7 @@ function runBrainHandoff(directory) {
     };
 
     timer = setTimeout(() => {
-      try {
-        child.kill();
-      } catch {
-        // Best effort only.
-      }
+      killQuietly(child);
       finish();
     }, HANDOFF_TIMEOUT_MS);
 
@@ -114,38 +139,161 @@ function runBrainHandoff(directory) {
   });
 }
 
-function createBrainHandoffServer(ctx) {
+function decodeStdout(chunks) {
+  return Buffer.concat(chunks).toString("utf8").trim();
+}
+
+/** Resolves to the trimmed start context, or "" on any failure. Never rejects. */
+function runBrainStart(deps, directory) {
+  return new Promise((resolvePromise) => {
+    const chunks = [];
+    let settled = false;
+    let timer = null;
+    const finish = (text) => {
+      if (settled) return;
+      settled = true;
+      if (timer) clearTimeout(timer);
+      resolvePromise(text);
+    };
+
+    let child;
+    try {
+      child = deps.spawn(deps.bin, brainArgs("start", directory, deps.config), {
+        cwd: directory,
+        windowsHide: true,
+        stdio: ["ignore", "pipe", "ignore"],
+      });
+    } catch {
+      finish("");
+      return;
+    }
+
+    timer = setTimeout(() => {
+      killQuietly(child);
+      finish("");
+    }, deps.startTimeoutMs);
+
+    child.stdout?.on("data", (chunk) => chunks.push(Buffer.from(chunk)));
+    child.once("error", () => finish(""));
+    child.once("close", (code) => finish(code === 0 ? decodeStdout(chunks) : ""));
+  });
+}
+
+/**
+ * Append text to the last system text part, or push a new part when the
+ * last part is missing or not text. Mirrors the engram plugin: some models
+ * accept only a single system block, so text is concatenated onto it.
+ */
+function appendSystemText(system, text) {
+  const last = system[system.length - 1];
+  if (last && last.type === "text" && typeof last.text === "string") {
+    last.text = last.text + "\n\n" + text;
+    return;
+  }
+  system.push({ type: "text", text });
+}
+
+function rememberSession(map, sessionID, value) {
+  map.set(sessionID, value);
+  while (map.size > MAX_TRACKED_SESSIONS) {
+    map.delete(map.keys().next().value);
+  }
+}
+
+function deletedSessionId(event) {
+  if (event?.type !== "session.deleted") return "";
+  const id =
+    event.properties?.sessionID ?? event.data?.sessionID ?? event.sessionID;
+  return typeof id === "string" ? id : "";
+}
+
+/**
+ * Builds the plugin instance. `deps` is a test seam:
+ * { spawn, bin, config, startTimeoutMs }; defaults come from the template.
+ */
+export function createServer(ctx, deps = {}) {
+  const d = { ...DEFAULT_DEPS, ...deps };
   let disposed = false;
   let lastHandoffAt = 0;
+  // sessionID -> Promise<string> of the start context (run once per session).
+  const startContexts = new Map();
+  let contextRegistration = null;
+
+  const getStartContext = (directory, sessionID) => {
+    let pending = startContexts.get(sessionID);
+    if (!pending) {
+      pending = runBrainStart(d, directory);
+      rememberSession(startContexts, sessionID, pending);
+    }
+    return pending;
+  };
+
+  const onSystemContext = async (event) => {
+    try {
+      if (disposed || !isConfigured(d.bin)) return;
+      const system = event?.system;
+      const sessionID = event?.sessionID;
+      if (!Array.isArray(system)) return;
+      if (typeof sessionID !== "string" || !sessionID) return;
+
+      const directory = resolveProjectDirectory(ctx, event);
+      const text = await getStartContext(directory, sessionID);
+      if (text) appendSystemText(system, text);
+    } catch {
+      // Never let context injection break an OpenCode session.
+    }
+  };
+
+  if (isConfigured(d.bin) && typeof ctx?.session?.hook === "function") {
+    try {
+      contextRegistration = Promise.resolve(
+        ctx.session.hook("context", onSystemContext)
+      ).catch(() => null);
+    } catch {
+      contextRegistration = null;
+    }
+  }
 
   return {
-    event: async ({ event } = {}) => {
-      if (disposed || !isConfigured()) return;
-      if (!HANDOFF_EVENTS.has(event?.type)) return;
+    event: async (input) => {
+      try {
+        const event = input?.event;
+        const forgotten = deletedSessionId(event);
+        if (forgotten) startContexts.delete(forgotten);
 
-      const projectDirectory = resolveProjectDirectory(ctx, event);
-      if (!projectDirectory) return;
+        if (disposed || !isConfigured(d.bin)) return;
+        if (!HANDOFF_EVENTS.has(event?.type)) return;
 
-      const eventDirectory = event?.location?.directory;
-      if (!isRelatedLocation(eventDirectory, projectDirectory)) return;
+        const projectDirectory = resolveProjectDirectory(ctx, event);
+        if (!projectDirectory) return;
 
-      const now = Date.now();
-      const debounceMs = FINAL_EVENTS.has(event.type)
-        ? FINAL_DEBOUNCE_MS
-        : IDLE_DEBOUNCE_MS;
-      if (now - lastHandoffAt < debounceMs) return;
+        const eventDirectory = event?.location?.directory;
+        if (!isRelatedLocation(eventDirectory, projectDirectory)) return;
 
-      lastHandoffAt = now;
-      await runBrainHandoff(projectDirectory);
+        const now = Date.now();
+        const debounceMs = FINAL_EVENTS.has(event.type)
+          ? FINAL_DEBOUNCE_MS
+          : IDLE_DEBOUNCE_MS;
+        if (now - lastHandoffAt < debounceMs) return;
+
+        lastHandoffAt = now;
+        await runBrainHandoff(d, projectDirectory);
+      } catch {
+        // Handoff failures are never surfaced to OpenCode.
+      }
     },
 
     dispose: () => {
       disposed = true;
+      startContexts.clear();
+      contextRegistration
+        ?.then((registration) => registration?.dispose?.())
+        .catch(() => {});
     },
   };
 }
 
 export default {
   id: "brain-handoff",
-  server: createBrainHandoffServer,
+  server: (ctx) => createServer(ctx),
 };
