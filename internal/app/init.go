@@ -107,6 +107,9 @@ func (a *App) Init(ctx context.Context, opts InitOptions) (InitResult, error) {
 			return InitResult{}, fmt.Errorf("init: create data directory %s: %w", dataDir, err)
 		}
 		if mode == config.ModeGit {
+			if err := ensureGitattributes(dataDir); err != nil {
+				return InitResult{}, err
+			}
 			if err := ensureGitignore(dataDir); err != nil {
 				return InitResult{}, err
 			}
@@ -138,6 +141,27 @@ func ensureGitignore(dataDir string) error {
 		return fmt.Errorf("init: inspect %s: %w", path, err)
 	}
 	if err := os.WriteFile(path, []byte(gitignoreContent), 0o644); err != nil {
+		return fmt.Errorf("init: write %s: %w", path, err)
+	}
+	return nil
+}
+
+// gitattributesContent makes git keep every line of append-only journals that
+// several machines of one user write concurrently (journal/<user>.jsonl), so a
+// sync never stops on a journal conflict.
+const gitattributesContent = `# Journals are append-only JSON Lines written by several machines; union
+# merge keeps every line from both sides instead of stopping on a conflict.
+journal/*.jsonl merge=union
+`
+
+func ensureGitattributes(dataDir string) error {
+	path := filepath.Join(dataDir, ".gitattributes")
+	if _, err := os.Stat(path); err == nil {
+		return nil
+	} else if !os.IsNotExist(err) {
+		return fmt.Errorf("init: inspect %s: %w", path, err)
+	}
+	if err := os.WriteFile(path, []byte(gitattributesContent), 0o644); err != nil {
 		return fmt.Errorf("init: write %s: %w", path, err)
 	}
 	return nil
