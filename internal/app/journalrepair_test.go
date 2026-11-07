@@ -2,6 +2,7 @@ package app_test
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -38,6 +39,22 @@ func TestRetriedWriteIsJournaledOnce(t *testing.T) {
 	entries, err := a.ReadJournal(ctx, ports.JournalQuery{Event: app.JournalNote})
 	if err != nil || len(entries) != 1 {
 		t.Fatalf("journal note lines = %+v, %v", entries, err)
+	}
+}
+
+// The journal adapter returns 50 lines unless told otherwise; gap detection
+// must see older lines too, or repair would duplicate them.
+func TestJournalGapsSeesMoreThanTheDefaultReadLimit(t *testing.T) {
+	ctx := context.Background()
+	a, _ := newJournalApp(t)
+	for i := range 60 {
+		if _, err := a.Note(ctx, app.NoteInput{ProjectID: "p", Title: "n", Body: fmt.Sprintf("body %d", i), CreateProject: true}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	gaps, err := a.JournalGaps(ctx, time.Now().Add(-time.Hour))
+	if err != nil || len(gaps) != 0 {
+		t.Fatalf("gaps with a complete 60-line journal = %d, %v", len(gaps), err)
 	}
 }
 

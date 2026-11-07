@@ -15,10 +15,14 @@ const journalDedupeWindow = 24 * time.Hour
 // check look for records without a journal line.
 const DefaultJournalRepairWindow = 30 * 24 * time.Hour
 
+// journalScanLimit is the largest journal read (the adapter's maximum); an
+// unbounded read would otherwise return only the newest 50 lines.
+const journalScanLimit = 1000
+
 // journaled reports whether any user's journal already has this record event.
 func (a *App) journaled(ctx context.Context, event, projectID, id string) bool {
 	entries, err := a.deps.Journal.Read(ctx, ports.JournalQuery{
-		Project: projectID, Event: event, Since: a.now().Add(-journalDedupeWindow),
+		Project: projectID, Event: event, Since: a.now().Add(-journalDedupeWindow), Limit: journalScanLimit,
 	})
 	if err != nil {
 		return false
@@ -42,31 +46,53 @@ type JournalGap struct {
 
 // JournalGaps lists records created after since that have no journal line in
 // any user's journal (a journal append failed after the record was stored).
+// A project whose journal read reaches journalScanLimit is skipped: its lines
+// cannot all be seen, and reporting them would make repair write duplicates.
 func (a *App) JournalGaps(ctx context.Context, since time.Time) ([]JournalGap, error) {
 	if err := a.requireStore(); err != nil || a.deps.Journal == nil {
 		return nil, err
-	}
-	entries, err := a.deps.Journal.Read(ctx, ports.JournalQuery{Since: since.Add(-time.Hour)})
-	if err != nil {
-		return nil, err
-	}
-	logged := make(map[string]struct{}, len(entries))
-	for _, entry := range entries {
-		if entry.ID != "" {
-			logged[entry.Event+"\x00"+entry.ID] = struct{}{}
-		}
 	}
 	records, err := a.recordsSince(ctx, since)
 	if err != nil {
 		return nil, err
 	}
+	logged := map[string]map[string]struct{}{}
 	var gaps []JournalGap
 	for _, record := range records {
-		if _, ok := logged[record.Event+"\x00"+record.ID]; !ok {
+		ids, seen := logged[record.ProjectID]
+		if !seen {
+			if ids, err = a.journaledIDs(ctx, record.ProjectID, since); err != nil {
+				return nil, err
+			}
+			logged[record.ProjectID] = ids
+		}
+		if ids == nil {
+			continue
+		}
+		if _, ok := ids[record.Event+"\x00"+record.ID]; !ok {
 			gaps = append(gaps, record)
 		}
 	}
 	return gaps, nil
+}
+
+// journaledIDs returns event+id keys journaled for a project after since,
+// or nil when the read was truncated.
+func (a *App) journaledIDs(ctx context.Context, projectID string, since time.Time) (map[string]struct{}, error) {
+	entries, err := a.deps.Journal.Read(ctx, ports.JournalQuery{Project: projectID, Since: since.Add(-time.Hour), Limit: journalScanLimit})
+	if err != nil {
+		return nil, err
+	}
+	if len(entries) >= journalScanLimit {
+		return nil, nil
+	}
+	ids := make(map[string]struct{}, len(entries))
+	for _, entry := range entries {
+		if entry.ID != "" {
+			ids[entry.Event+"\x00"+entry.ID] = struct{}{}
+		}
+	}
+	return ids, nil
 }
 
 // RepairJournal appends a line for every gap, timed at the record's creation
