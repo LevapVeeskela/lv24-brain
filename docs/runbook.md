@@ -194,6 +194,22 @@ brain discover --root <workspace> --apply   # register the new ones
   directory or file, or `main/.git`), never modifies existing projects, and
   reports id conflicts instead of registering them.
 
+## 3b. Shared agent instructions
+
+One file in the private data repository, `<data-dir>/global/AGENTS.md`, holds
+the instructions every coding agent must follow on every machine. `brain agents
+sync` writes it into a managed block (between `LV24_SHARED_START` and
+`LV24_SHARED_END` markers) in:
+
+- `<workspace>/AGENTS.md` — the folder that contains the data directory;
+- `~/.config/opencode/AGENTS.md` and `~/.codex/AGENTS.md`, when those tools are installed;
+- `~/.claude/CLAUDE.md`, as a single `@<data-dir>/global/AGENTS.md` import line.
+
+Text outside the markers is never touched. Edit the canonical file, run
+`brain sync --push`, then `brain agents sync` on each machine (`--check` reports
+drift without writing and exits 1). The instructions refer to `brain` on PATH,
+so they are identical on Windows and macOS.
+
 ## 4. Server-mode operations
 
 Server mode runs `brain-server` with PostgreSQL (`BRAIN_DATABASE_URL`). The

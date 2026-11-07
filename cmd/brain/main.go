@@ -120,6 +120,8 @@ func runWithInput(args []string, stdin io.Reader, stdout, stderr io.Writer) int 
 		return runDiscover(rest, stdout, stderr)
 	case "graphs":
 		return runGraphs(rest, stdout, stderr)
+	case "agents":
+		return runAgents(rest, stdout, stderr)
 	case "connector":
 		return runConnector(rest, stdout, stderr)
 	case "migrate":
@@ -173,6 +175,7 @@ Commands:
   config     Set or show the default brain.yaml (config use <path> | show | clear)
   discover   Find git checkouts under --root and register new projects (--apply)
   graphs     Refresh graphify/codegraph indexes of registered projects
+  agents     Sync the shared agent instructions (agents sync [--check])
   connector  Run a read-only GitHub, GitLab, or IMAP connector
   migrate    Import a legacy .brain data directory; --rollback reverts an import
   secret     Manage OS-backed secrets (set, list, remove)
@@ -2049,7 +2052,7 @@ func runUpdate(args []string, stdout, stderr io.Writer) int {
 // never block or change the exit code of the command the user asked for.
 func maybeDailyUpdateNotice(command string, args []string, stderr io.Writer) {
 	switch command {
-	case "serve", "init", "help", "-h", "--help", "version", "-v", "--version", "update", "event", "hooks", "config":
+	case "serve", "init", "help", "-h", "--help", "version", "-v", "--version", "update", "event", "hooks", "config", "agents":
 		return
 	}
 	cfg, err := loadConfigOrDefault(configPathFromArgs(args))
