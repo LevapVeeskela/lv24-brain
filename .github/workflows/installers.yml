@@ -1,0 +1,95 @@
+name: installers
+
+# Smoke-tests the installers against the latest published release whenever an
+# installer changes. Cost: three short jobs (Linux, macOS, Windows) on public-
+# repository runners, only for installer changes; the account's Actions budget
+# is $0 with usage blocked (checked 2026-11-07), so no paid minutes can accrue.
+# No matrix, no artifacts, no caches, no secrets.
+
+on:
+  pull_request:
+    paths:
+      - "installers/**"
+      - ".github/workflows/installers.yml"
+  push:
+    branches:
+      - main
+    paths:
+      - "installers/**"
+      - ".github/workflows/installers.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: installers-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  linux:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      # Read-only token for release lookups (rate limit); OpenSSL 3 is
+      # present, so the manifest signature must verify.
+      GITHUB_TOKEN: ${{ github.token }}
+      BRAIN_REQUIRE_SIGNATURE: "1"
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: install and init
+        run: |
+          set -euo pipefail
+          bash installers/unix/install.sh --dir "$RUNNER_TEMP/bin" --mode local \
+            --data-dir "$RUNNER_TEMP/brain" --yes --no-path-hint | tee "$RUNNER_TEMP/install.log"
+          grep -q "release.json signature verified" "$RUNNER_TEMP/install.log"
+      - name: smoke
+        run: |
+          set -euo pipefail
+          "$RUNNER_TEMP/bin/brain" version
+          "$RUNNER_TEMP/bin/brain" status --config "$RUNNER_TEMP/brain/brain.yaml"
+
+  macos:
+    runs-on: macos-latest
+    timeout-minutes: 10
+    env:
+      GITHUB_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: install and init
+        run: |
+          set -euo pipefail
+          bash installers/unix/install.sh --dir "$RUNNER_TEMP/bin" --mode local \
+            --data-dir "$RUNNER_TEMP/brain" --yes --no-path-hint | tee "$RUNNER_TEMP/install.log"
+          # The runner image ships Homebrew OpenSSL 3; LibreSSL alone would
+          # only warn. Either outcome is acceptable, a failure is not.
+          grep -Eq "signature (verified|not checked)" "$RUNNER_TEMP/install.log"
+      - name: smoke
+        run: |
+          set -euo pipefail
+          "$RUNNER_TEMP/bin/brain" version
+          "$RUNNER_TEMP/bin/brain" status --config "$RUNNER_TEMP/brain/brain.yaml"
+
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 10
+    env:
+      GITHUB_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: install and init
+        # Windows PowerShell 5.1, the shell users get by default (it returns
+        # JSON arrays differently from pwsh 7).
+        shell: powershell
+        run: |
+          $bin = Join-Path $env:RUNNER_TEMP 'bin'
+          $data = Join-Path $env:RUNNER_TEMP 'brain'
+          ./installers/windows/install.ps1 -Mode local -InstallDir $bin -DataDir $data -NoPath -Yes
+      - name: smoke
+        shell: pwsh
+        run: |
+          $brain = Join-Path $env:RUNNER_TEMP 'bin\brain.exe'
+          & $brain version
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & $brain status --config (Join-Path $env:RUNNER_TEMP 'brain\brain.yaml')
+          exit $LASTEXITCODE

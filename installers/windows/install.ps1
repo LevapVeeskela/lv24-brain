@@ -222,7 +222,9 @@ function Get-Release {
         [Parameter(Mandatory = $true)][string]$ReleaseChannel
     )
     $uri = "https://api.github.com/repos/$Repository/releases?per_page=30"
-    $releases = @(Invoke-RestMethod -Uri $uri -Headers $script:Headers -Method Get)
+    # Windows PowerShell 5.1 returns a JSON array as one object; piping
+    # unrolls it so each release is filtered on its own.
+    $releases = @((Invoke-RestMethod -Uri $uri -Headers $script:Headers -Method Get) | ForEach-Object { $_ })
     $filtered = @($releases | Where-Object { -not $_.draft })
     if ($ReleaseChannel -eq 'stable') {
         $filtered = @($filtered | Where-Object { -not $_.prerelease })
