@@ -83,6 +83,11 @@ type Options struct {
 	// TrustedKeys overrides the release public keys embedded in the build
 	// (tests only). Nil uses DefaultTrustedKeys.
 	TrustedKeys []ed25519.PublicKey
+	// Token authenticates GitHub API requests (never asset downloads) to lift
+	// the shared per-IP rate limit. Empty falls back to BRAIN_GITHUB_TOKEN,
+	// GITHUB_TOKEN, GH_TOKEN, then TokenSource, resolved on the first request.
+	Token       string
+	TokenSource func(context.Context) (string, error)
 }
 
 // Updater checks, verifies, stages and replaces the engine binary. It
@@ -100,6 +105,7 @@ type Updater struct {
 	getenv     func(string) string
 	ignoreOff  bool
 	keys       []ed25519.PublicKey
+	token      *apiToken
 }
 
 var _ ports.Updater = (*Updater)(nil)
@@ -172,6 +178,7 @@ func New(opts Options) (*Updater, error) {
 		getenv:     getenv,
 		ignoreOff:  opts.IgnoreDisabled,
 		keys:       keys,
+		token:      &apiToken{explicit: opts.Token, getenv: getenv, source: opts.TokenSource},
 	}, nil
 }
 

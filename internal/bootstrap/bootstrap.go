@@ -120,7 +120,7 @@ func BuildWithOptions(cfg config.BrainConfig, opts Options) (*Runtime, error) {
 		return nil, domain.NewValidationError("config.mode", "must be local, git, or server")
 	}
 
-	updater, err := update.New(update.Options{IgnoreDisabled: true})
+	updater, err := update.New(update.Options{IgnoreDisabled: true, TokenSource: githubTokenSource(secretStore)})
 	if err != nil {
 		if index != nil {
 			_ = index.Close()

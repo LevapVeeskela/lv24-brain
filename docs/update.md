@@ -59,9 +59,21 @@ Staged artifacts live under:
 | macOS | `~/Library/Caches/lv24-brain/updates` |
 | Linux | `$XDG_CACHE_HOME/lv24-brain/updates` or `~/.cache/lv24-brain/updates` |
 
-Override with `BRAIN_UPDATE_DIR`. The previous binary is always stored next to
+Override with `BRAIN_UPDATE_DIR`. A successful apply deletes every staged
+download except the one it applied. The previous binary is always stored next to
 the executable as `brain.exe.previous` on Windows or `brain.previous` on
 macOS/Linux.
+
+## GitHub API rate limit
+
+Release lookups use the GitHub API, which allows 60 unauthenticated requests
+per hour per IP; machines behind one address share that budget. A token lifts
+the limit (the release repository is public, so any token with no scopes
+works). The updater reads, in order: `BRAIN_GITHUB_TOKEN`, `GITHUB_TOKEN`,
+`GH_TOKEN`; `brain update` then falls back to the `github/token` OS secret and
+the `gh` CLI login, resolved only when it actually contacts GitHub. The token
+is sent to API requests only, never to asset downloads; a token GitHub rejects
+is dropped and the request retried without it.
 
 ## Release manifest
 
@@ -140,9 +152,13 @@ trusted.
 
 - macOS/Linux: the staged binary is renamed over the current executable
   (atomic on the same filesystem).
-- Windows: when the target is the running executable, a detached `cmd.exe`
-  helper waits up to 120 seconds and performs the move after the process
-  exits. The update takes effect on the next start.
+- Windows: a running image cannot be overwritten but can be renamed, so when
+  the direct move fails (for example a long-lived `brain mcp` holds the
+  executable) the current file is renamed to `.brain.exe-old-<n>` and the new
+  binary moved into place at once. Running processes keep the old image; new
+  starts get the new one. Aside copies and interrupted `.brain.exe-new-*`
+  files are deleted by a later update. If even the rename fails, a detached
+  `cmd.exe` helper retries the move for up to 120 seconds.
 - Rollback restores `brain(.exe).previous` and keeps that copy for retries.
 
 `brain update --rollback` performs the restore. If the CLI itself cannot start

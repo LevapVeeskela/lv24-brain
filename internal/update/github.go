@@ -79,16 +79,9 @@ func (u *Updater) getJSON(ctx context.Context, rawURL string, dst any, limit int
 }
 
 func (u *Updater) getBytes(ctx context.Context, rawURL string, limit int64) ([]byte, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
+	resp, err := u.get(ctx, rawURL)
 	if err != nil {
-		return nil, fmt.Errorf("update: build request: %w", err)
-	}
-	req.Header.Set("Accept", "application/vnd.github+json, application/json")
-	req.Header.Set("User-Agent", "lv24-brain-updater")
-	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
-	resp, err := u.client.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("update: request %s: %w", rawURL, err)
+		return nil, err
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
@@ -105,4 +98,38 @@ func (u *Updater) getBytes(ctx context.Context, rawURL string, limit int64) ([]b
 		return nil, fmt.Errorf("update: response from %s exceeds %d bytes", rawURL, limit)
 	}
 	return raw, nil
+}
+
+// get sends a GET; API requests carry the token when one is configured and
+// are retried once without it when GitHub rejects it.
+func (u *Updater) get(ctx context.Context, rawURL string) (*http.Response, error) {
+	token := ""
+	if strings.HasPrefix(rawURL, u.apiBaseURL+"/") {
+		token = u.token.get(ctx)
+	}
+	resp, err := u.send(ctx, rawURL, token)
+	if err != nil || token == "" || resp.StatusCode != http.StatusUnauthorized {
+		return resp, err
+	}
+	_ = resp.Body.Close()
+	u.token.reject()
+	return u.send(ctx, rawURL, "")
+}
+
+func (u *Updater) send(ctx context.Context, rawURL, token string) (*http.Response, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
+	if err != nil {
+		return nil, fmt.Errorf("update: build request: %w", err)
+	}
+	req.Header.Set("Accept", "application/vnd.github+json, application/json")
+	req.Header.Set("User-Agent", "lv24-brain-updater")
+	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	resp, err := u.client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("update: request %s: %w", rawURL, err)
+	}
+	return resp, nil
 }

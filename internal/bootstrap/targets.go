@@ -165,6 +165,14 @@ func withGHTokenFallback(inner ports.SecretStore) ports.SecretStore {
 	}
 }
 
+// githubTokenSource reads github/token (the OS secret, else the gh CLI
+// login) for update checks. It runs only when an update request is made, so
+// ordinary commands never spawn gh.
+func githubTokenSource(store ports.SecretStore) func(context.Context) (string, error) {
+	fallback := withGHTokenFallback(store)
+	return func(ctx context.Context) (string, error) { return fallback.Get(ctx, "github/token") }
+}
+
 func (s ghTokenSecrets) Get(ctx context.Context, key string) (string, error) {
 	value, err := s.SecretStore.Get(ctx, key)
 	if key != "github/token" || (err == nil && strings.TrimSpace(value) != "") {
