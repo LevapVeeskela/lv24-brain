@@ -90,13 +90,27 @@ func (a *App) resolveProject(ctx context.Context, projectID string) (domain.Proj
 	return project, nil
 }
 
-// ensureProject resolves a project and creates a minimal registry entry plus an
-// empty state when the project is new. This keeps the CLI usable without a
-// separate project-management command.
-func (a *App) ensureProject(ctx context.Context, projectID string) (domain.Project, error) {
+// ensureProject resolves the project of a write: an explicit id or alias, or
+// the working directory's project when projectID is empty. An unknown project
+// is created only with create=true, so a typo or an unregistered alias never
+// silently starts a new project.
+func (a *App) ensureProject(ctx context.Context, projectID string, create bool) (domain.Project, error) {
 	id := strings.TrimSpace(projectID)
 	if id == "" {
-		return a.resolveProject(ctx, "")
+		project, err := a.resolveProject(ctx, "")
+		if err != nil {
+			return domain.Project{}, err
+		}
+		return project, a.ensureState(ctx, project.ID)
+	}
+	if project, ok, err := a.LookupProject(ctx, id); err != nil {
+		return domain.Project{}, err
+	} else if ok {
+		return project, a.ensureState(ctx, project.ID)
+	}
+	if !create {
+		return domain.Project{}, domain.NewValidationError("project",
+			fmt.Sprintf("%q is not a registered project id or alias; pass --create to register it", id))
 	}
 	project, err := a.deps.Store.GetProject(ctx, id)
 	if errors.Is(err, domain.ErrNotFound) {
@@ -469,4 +483,23 @@ func compareVersionCore(a, b string) int {
 		}
 	}
 	return 0
+}
+
+// LookupProject finds a project by exact id or alias (case-insensitive); it
+// never interprets the selector as a path.
+func (a *App) LookupProject(ctx context.Context, selector string) (domain.Project, bool, error) {
+	selector = strings.TrimSpace(selector)
+	if selector == "" {
+		return domain.Project{}, false, nil
+	}
+	projects, err := a.deps.Store.ListProjects(ctx)
+	if err != nil {
+		return domain.Project{}, false, err
+	}
+	for _, project := range projects {
+		if strings.EqualFold(project.ID, selector) || containsFold(project.Aliases, selector) {
+			return project, true, nil
+		}
+	}
+	return domain.Project{}, false, nil
 }

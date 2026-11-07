@@ -100,7 +100,7 @@ func TestConfigUseMakesFlaglessCommandsWork(t *testing.T) {
 	if code, stdout, stderr := runForTest(t, "config", "use", filepath.Join(dataDir, "brain.yaml")); code != 0 || !strings.Contains(stdout, "default config:") {
 		t.Fatalf("config use: %d %q %s", code, stdout, stderr)
 	}
-	if code, stdout, stderr := runForTest(t, "note", "--project", "p", "flagless"); code != 0 || !strings.HasPrefix(stdout, "note note-p-") {
+	if code, stdout, stderr := runForTest(t, "note", "--create", "--project", "p", "flagless"); code != 0 || !strings.HasPrefix(stdout, "note note-p-") {
 		t.Fatalf("flagless note: %d %q %s", code, stdout, stderr)
 	}
 	if code, stdout, _ := runForTest(t, "config", "show"); code != 0 || !strings.Contains(stdout, "user default") {

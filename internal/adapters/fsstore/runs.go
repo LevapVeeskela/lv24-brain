@@ -102,17 +102,21 @@ func (s *Store) AppendConnectorRun(ctx context.Context, run domain.ConnectorRun)
 		return err
 	}
 	base := started.Format("20060102T150405Z") + "-" + source + "-" + idPart
-	path, reserved, err := reserveConnectorRunPath(dir, base, id, run.Source)
-	if err != nil {
-		return err
-	}
-	if err := writeFileAtomic(path, raw); err != nil {
-		if reserved {
-			_ = os.Remove(path)
+	// The lock on the runs directory serializes the reuse lookup with the write,
+	// so two appends of one id cannot both create a file.
+	return withFileLock(ctx, dir, func() error {
+		path, reserved, err := reserveConnectorRunPath(dir, base, id, run.Source)
+		if err != nil {
+			return err
 		}
-		return err
-	}
-	return nil
+		if err := writeFileAtomic(path, raw); err != nil {
+			if reserved {
+				_ = os.Remove(path)
+			}
+			return err
+		}
+		return nil
+	})
 }
 
 // ListConnectorRuns returns stored runs newest first. An empty source matches

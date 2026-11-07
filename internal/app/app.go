@@ -126,6 +126,9 @@ type NoteInput struct {
 	Title     string
 	Body      string
 	Tags      []string
+	// CreateProject registers ProjectID when no project, alias or path
+	// matches; without it an unknown project is an error.
+	CreateProject bool
 }
 
 // NoteResult identifies the appended note.
@@ -143,6 +146,9 @@ type DecisionInput struct {
 	Alternatives []string
 	Consequences []string
 	Evidence     []string
+	// CreateProject registers ProjectID when no project, alias or path
+	// matches; without it an unknown project is an error.
+	CreateProject bool
 }
 
 // DecisionResult identifies the appended decision.
@@ -158,6 +164,9 @@ type AttemptInput struct {
 	Hypothesis string
 	Result     string
 	Reason     string
+	// CreateProject registers ProjectID when no project, alias or path
+	// matches; without it an unknown project is an error.
+	CreateProject bool
 }
 
 // AttemptResult identifies the appended attempt.
@@ -172,6 +181,9 @@ type HandoffInput struct {
 	Summary    string
 	GitContext string
 	NextAction string
+	// CreateProject registers ProjectID when no project, alias or path
+	// matches; without it an unknown project is an error.
+	CreateProject bool
 }
 
 // HandoffResult identifies the appended handoff.

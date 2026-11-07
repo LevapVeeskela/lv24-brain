@@ -580,7 +580,7 @@ func TestLocalWorkflowCLI(t *testing.T) {
 		t.Fatalf("init stdout = %q", stdout)
 	}
 
-	code, stdout, stderr = runForTest(t, "note", "--config", cfgPath, "--project", "demo", "--title", "First note", "--body", "hello world", "--tags", "alpha, beta")
+	code, stdout, stderr = runForTest(t, "note", "--create", "--config", cfgPath, "--project", "demo", "--title", "First note", "--body", "hello world", "--tags", "alpha, beta")
 	if code != 0 {
 		t.Fatalf("note exit code = %d (stderr: %s)", code, stderr)
 	}
@@ -720,7 +720,7 @@ func TestIndexAndSearchCLI(t *testing.T) {
 	if code, _, stderr := runForTest(t, "init", "--mode", "local", "--data-dir", dataDir); code != 0 {
 		t.Fatalf("init exit code = %d (stderr: %s)", code, stderr)
 	}
-	if code, _, stderr := runForTest(t, "note", "--config", cfgPath, "--project", "demo", "--title", "Search note", "--body", "searchable needle"); code != 0 {
+	if code, _, stderr := runForTest(t, "note", "--create", "--config", cfgPath, "--project", "demo", "--title", "Search note", "--body", "searchable needle"); code != 0 {
 		t.Fatalf("note exit code = %d (stderr: %s)", code, stderr)
 	}
 	if code, _, stderr := runForTest(t, "decision", "--config", cfgPath, "--project", "demo", "--title", "Search decision", "--evidence", "needle evidence"); code != 0 {

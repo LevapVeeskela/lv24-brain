@@ -26,7 +26,7 @@ func TestWritesAndCommitsAreJournaledPerUser(t *testing.T) {
 	cfg.User = "alice"
 	a := app.New(cfg, app.Dependencies{Store: store, Journal: journal.New(dataDir)})
 
-	note, err := a.Note(ctx, app.NoteInput{ProjectID: "demo", Title: "Hello", Body: "first note"})
+	note, err := a.Note(ctx, app.NoteInput{ProjectID: "demo", Title: "Hello", Body: "first note", CreateProject: true})
 	if err != nil {
 		t.Fatalf("Note: %v", err)
 	}

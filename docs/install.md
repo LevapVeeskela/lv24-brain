@@ -45,7 +45,8 @@ The installer:
 4. Installs `brain.exe` under
    `%LOCALAPPDATA%\Programs\lv24-brain` (override with `-InstallDir`).
 5. Writes `brain.yaml`, optionally adds the install directory to the user
-   `PATH`, and optionally installs the OpenCode handoff hook.
+   `PATH`, and optionally installs the OpenCode handoff hook. An existing
+   `brain.yaml` is kept on reinstall; pass `-OverwriteConfig` to replace it.
 6. Never asks for, writes, or logs secrets.
 
 ### Install modes
@@ -243,5 +244,7 @@ overrides (`BRAIN_BIN`, `BRAIN_CONFIG`, `BRAIN_HANDOFF_SUMMARY`).
 - `SHA-256 mismatch`: the download is corrupt or the release is not trusted.
   Do not run it; retry or report the release.
 - `Could not replace brain.exe`: stop a running `brain` process and retry.
-- `BRAIN_NO_UPDATE` only affects background update checks. No background check
-  ships yet, and explicit `brain update` runs ignore the switch.
+- The CLI runs a notify-only daily update check before ordinary commands (at
+  most one release lookup per 24 hours; it never downloads or applies an
+  update). `BRAIN_NO_UPDATE=1` disables it. Explicit `brain update` runs ignore
+  the switch.

@@ -50,37 +50,42 @@ func (s *Store) PutProject(ctx context.Context, project domain.Project) error {
 	if _, err := s.projectDir(project.ID); err != nil {
 		return err
 	}
-	registry, err := s.readRegistry()
-	if err != nil {
-		return err
-	}
-
-	index := -1
-	for i := range registry.Projects {
-		if registry.Projects[i].ID == project.ID {
-			index = i
-			break
+	// registry.json is read, updated and rewritten as one step under its lock, so
+	// concurrent PutProject calls cannot drop each other's project.
+	registryPath := filepath.Join(s.root, registryFile)
+	return withFileLock(ctx, registryPath, func() error {
+		registry, err := s.readRegistry()
+		if err != nil {
+			return err
 		}
-	}
-	now := s.nowUTC()
-	if index >= 0 && !registry.Projects[index].CreatedAt.IsZero() {
-		project.CreatedAt = registry.Projects[index].CreatedAt.UTC()
-	} else if project.CreatedAt.IsZero() {
-		project.CreatedAt = now
-	} else {
-		project.CreatedAt = project.CreatedAt.UTC()
-	}
-	project.UpdatedAt = now
-	record := registryProjectFromDomain(project)
-	if index >= 0 {
-		registry.Projects[index] = record
-	} else {
-		registry.Projects = append(registry.Projects, record)
-	}
-	if err := s.writeRegistry(registry); err != nil {
-		return fmt.Errorf("fsstore: write project %q: %w", project.ID, err)
-	}
-	return nil
+
+		index := -1
+		for i := range registry.Projects {
+			if registry.Projects[i].ID == project.ID {
+				index = i
+				break
+			}
+		}
+		now := s.nowUTC()
+		if index >= 0 && !registry.Projects[index].CreatedAt.IsZero() {
+			project.CreatedAt = registry.Projects[index].CreatedAt.UTC()
+		} else if project.CreatedAt.IsZero() {
+			project.CreatedAt = now
+		} else {
+			project.CreatedAt = project.CreatedAt.UTC()
+		}
+		project.UpdatedAt = now
+		record := registryProjectFromDomain(project)
+		if index >= 0 {
+			registry.Projects[index] = record
+		} else {
+			registry.Projects = append(registry.Projects, record)
+		}
+		if err := s.writeRegistry(registry); err != nil {
+			return fmt.Errorf("fsstore: write project %q: %w", project.ID, err)
+		}
+		return nil
+	})
 }
 
 // GetProject loads one project from registry.json.

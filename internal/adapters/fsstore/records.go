@@ -80,6 +80,21 @@ func (s *Store) AppendNote(ctx context.Context, note domain.Note) (domain.SyncRe
 	updatedAt := s.nowUTC()
 	path := filepath.Join(dir, notesDir, date+".md")
 
+	// The daily file is read, extended and rewritten as one step. The lock keeps
+	// a concurrent AppendNote from reading the same old content and dropping
+	// this note.
+	err = withFileLock(ctx, path, func() error {
+		return appendNoteLocked(path, note, date, createdAt, updatedAt)
+	})
+	if err != nil {
+		return domain.SyncRevision{}, err
+	}
+	return s.revisionAfterWrite(ctx)
+}
+
+// appendNoteLocked performs the read-modify-write of one daily notes file. The
+// caller must hold the lock for path.
+func appendNoteLocked(path string, note domain.Note, date string, createdAt, updatedAt time.Time) error {
 	var frontmatter noteFileFrontmatter
 	body := ""
 	raw, err := os.ReadFile(path)
@@ -87,13 +102,13 @@ func (s *Store) AppendNote(ctx context.Context, note domain.Note) (domain.SyncRe
 	case err == nil:
 		body, err = markdown.Parse(raw, &frontmatter)
 		if err != nil {
-			return domain.SyncRevision{}, fmt.Errorf("fsstore: parse notes %s: %w", path, err)
+			return fmt.Errorf("fsstore: parse notes %s: %w", path, err)
 		}
 		if err := validateRecordFrontmatter(path, frontmatter.Frontmatter, "note"); err != nil {
-			return domain.SyncRevision{}, err
+			return err
 		}
 		if err := checkProjectMatch(path, frontmatter.ProjectID, note.ProjectID); err != nil {
-			return domain.SyncRevision{}, err
+			return err
 		}
 	case os.IsNotExist(err):
 		body = fmt.Sprintf("# Notes — %s\n\n", date)
@@ -107,12 +122,12 @@ func (s *Store) AppendNote(ctx context.Context, note domain.Note) (domain.SyncRe
 			Date: date,
 		}
 	default:
-		return domain.SyncRevision{}, fmt.Errorf("fsstore: read notes %s: %w", path, err)
+		return fmt.Errorf("fsstore: read notes %s: %w", path, err)
 	}
 
 	existing, err := parseNotesBody(body, createdAt)
 	if err != nil {
-		return domain.SyncRevision{}, fmt.Errorf("fsstore: parse notes %s: %w", path, err)
+		return fmt.Errorf("fsstore: parse notes %s: %w", path, err)
 	}
 	usedIDs := make(map[string]struct{}, len(existing))
 	for _, existingNote := range existing {
@@ -122,7 +137,7 @@ func (s *Store) AppendNote(ctx context.Context, note domain.Note) (domain.SyncRe
 	if id == "" {
 		id = nextNoteID(usedIDs, date, note.Title)
 	} else if _, conflict := usedIDs[id]; conflict {
-		return domain.SyncRevision{}, fmt.Errorf("fsstore: note %q: %w", id, domain.ErrConflict)
+		return fmt.Errorf("fsstore: note %q: %w", id, domain.ErrConflict)
 	}
 
 	entry := renderNoteEntry(noteMetadata{
@@ -144,12 +159,12 @@ func (s *Store) AppendNote(ctx context.Context, note domain.Note) (domain.SyncRe
 	frontmatter.Date = date
 	rendered, err := markdown.Render(frontmatter, body)
 	if err != nil {
-		return domain.SyncRevision{}, fmt.Errorf("fsstore: render notes %s: %w", path, err)
+		return fmt.Errorf("fsstore: render notes %s: %w", path, err)
 	}
 	if err := writeFileAtomic(path, rendered); err != nil {
-		return domain.SyncRevision{}, fmt.Errorf("fsstore: write notes %s: %w", path, err)
+		return fmt.Errorf("fsstore: write notes %s: %w", path, err)
 	}
-	return s.revisionAfterWrite(ctx)
+	return nil
 }
 
 // AppendDecision writes projects/<id>/decisions/YYYY-MM-DD-<slug>.md.
@@ -173,38 +188,36 @@ func (s *Store) AppendDecision(ctx context.Context, decision domain.Decision) (d
 	createdAt := recordCreatedAt(decision.CreatedAt, s.nowUTC())
 	updatedAt := s.nowUTC()
 
-	path, name, err := reserveRecordFile(
+	_, err = publishRecordFile(
 		filepath.Join(dir, decisionsDir),
 		createdAt.Format("2006-01-02")+"-"+slugify(decision.Title),
+		func(stem string) ([]byte, error) {
+			id := strings.TrimSpace(decision.ID)
+			if id == "" {
+				id = "decision-" + stem
+			}
+			frontmatter := decisionFrontmatter{
+				Frontmatter: markdown.Frontmatter{
+					ProjectID:     decision.ProjectID,
+					Kind:          "decision",
+					UpdatedAt:     updatedAt,
+					SchemaVersion: SchemaVersion,
+					Permalink:     decision.Permalink,
+				},
+				ID:        id,
+				Title:     decision.Title,
+				Status:    decision.Status,
+				CreatedAt: createdAt,
+			}
+			raw, err := markdown.Render(frontmatter, renderDecisionBody(decision))
+			if err != nil {
+				return nil, fmt.Errorf("fsstore: render decision %q: %w", id, err)
+			}
+			return raw, nil
+		},
 	)
 	if err != nil {
-		return domain.SyncRevision{}, err
-	}
-	id := strings.TrimSpace(decision.ID)
-	if id == "" {
-		id = "decision-" + name
-	}
-	frontmatter := decisionFrontmatter{
-		Frontmatter: markdown.Frontmatter{
-			ProjectID:     decision.ProjectID,
-			Kind:          "decision",
-			UpdatedAt:     updatedAt,
-			SchemaVersion: SchemaVersion,
-			Permalink:     decision.Permalink,
-		},
-		ID:        id,
-		Title:     decision.Title,
-		Status:    decision.Status,
-		CreatedAt: createdAt,
-	}
-	raw, err := markdown.Render(frontmatter, renderDecisionBody(decision))
-	if err != nil {
-		_ = os.Remove(path)
-		return domain.SyncRevision{}, fmt.Errorf("fsstore: render decision %q: %w", id, err)
-	}
-	if err := writeFileAtomic(path, raw); err != nil {
-		_ = os.Remove(path)
-		return domain.SyncRevision{}, fmt.Errorf("fsstore: write decision %q: %w", id, err)
+		return domain.SyncRevision{}, fmt.Errorf("fsstore: write decision %q: %w", decision.Title, err)
 	}
 	return s.revisionAfterWrite(ctx)
 }
@@ -227,37 +240,35 @@ func (s *Store) AppendAttempt(ctx context.Context, attempt domain.Attempt) (doma
 	createdAt := recordCreatedAt(attempt.CreatedAt, s.nowUTC())
 	updatedAt := s.nowUTC()
 
-	path, name, err := reserveRecordFile(
+	_, err = publishRecordFile(
 		filepath.Join(dir, attemptsDir),
 		createdAt.Format("2006-01-02")+"-"+slugify(attempt.Title),
+		func(stem string) ([]byte, error) {
+			id := strings.TrimSpace(attempt.ID)
+			if id == "" {
+				id = "attempt-" + stem
+			}
+			frontmatter := attemptFrontmatter{
+				Frontmatter: markdown.Frontmatter{
+					ProjectID:     attempt.ProjectID,
+					Kind:          "attempt",
+					UpdatedAt:     updatedAt,
+					SchemaVersion: SchemaVersion,
+					Permalink:     attempt.Permalink,
+				},
+				ID:        id,
+				Title:     attempt.Title,
+				CreatedAt: createdAt,
+			}
+			raw, err := markdown.Render(frontmatter, renderAttemptBody(attempt))
+			if err != nil {
+				return nil, fmt.Errorf("fsstore: render attempt %q: %w", id, err)
+			}
+			return raw, nil
+		},
 	)
 	if err != nil {
-		return domain.SyncRevision{}, err
-	}
-	id := strings.TrimSpace(attempt.ID)
-	if id == "" {
-		id = "attempt-" + name
-	}
-	frontmatter := attemptFrontmatter{
-		Frontmatter: markdown.Frontmatter{
-			ProjectID:     attempt.ProjectID,
-			Kind:          "attempt",
-			UpdatedAt:     updatedAt,
-			SchemaVersion: SchemaVersion,
-			Permalink:     attempt.Permalink,
-		},
-		ID:        id,
-		Title:     attempt.Title,
-		CreatedAt: createdAt,
-	}
-	raw, err := markdown.Render(frontmatter, renderAttemptBody(attempt))
-	if err != nil {
-		_ = os.Remove(path)
-		return domain.SyncRevision{}, fmt.Errorf("fsstore: render attempt %q: %w", id, err)
-	}
-	if err := writeFileAtomic(path, raw); err != nil {
-		_ = os.Remove(path)
-		return domain.SyncRevision{}, fmt.Errorf("fsstore: write attempt %q: %w", id, err)
+		return domain.SyncRevision{}, fmt.Errorf("fsstore: write attempt %q: %w", attempt.Title, err)
 	}
 	return s.revisionAfterWrite(ctx)
 }
@@ -279,36 +290,34 @@ func (s *Store) AppendHandoff(ctx context.Context, handoff domain.Handoff) (doma
 	}
 	createdAt := recordCreatedAt(handoff.CreatedAt, s.nowUTC())
 
-	path, name, err := reserveRecordFile(
+	_, err = publishRecordFile(
 		filepath.Join(dir, handoffsDir),
 		createdAt.Format("2006-01-02-150405"),
+		func(stem string) ([]byte, error) {
+			id := strings.TrimSpace(handoff.ID)
+			if id == "" {
+				id = "handoff-" + stem
+			}
+			frontmatter := handoffFrontmatter{
+				Frontmatter: markdown.Frontmatter{
+					ProjectID:     handoff.ProjectID,
+					Kind:          "handoff",
+					UpdatedAt:     createdAt,
+					SchemaVersion: SchemaVersion,
+					Permalink:     handoff.Permalink,
+				},
+				ID:        id,
+				CreatedAt: createdAt,
+			}
+			raw, err := markdown.Render(frontmatter, renderHandoffBody(handoff))
+			if err != nil {
+				return nil, fmt.Errorf("fsstore: render handoff %q: %w", id, err)
+			}
+			return raw, nil
+		},
 	)
 	if err != nil {
-		return domain.SyncRevision{}, err
-	}
-	id := strings.TrimSpace(handoff.ID)
-	if id == "" {
-		id = "handoff-" + name
-	}
-	frontmatter := handoffFrontmatter{
-		Frontmatter: markdown.Frontmatter{
-			ProjectID:     handoff.ProjectID,
-			Kind:          "handoff",
-			UpdatedAt:     createdAt,
-			SchemaVersion: SchemaVersion,
-			Permalink:     handoff.Permalink,
-		},
-		ID:        id,
-		CreatedAt: createdAt,
-	}
-	raw, err := markdown.Render(frontmatter, renderHandoffBody(handoff))
-	if err != nil {
-		_ = os.Remove(path)
-		return domain.SyncRevision{}, fmt.Errorf("fsstore: render handoff %q: %w", id, err)
-	}
-	if err := writeFileAtomic(path, raw); err != nil {
-		_ = os.Remove(path)
-		return domain.SyncRevision{}, fmt.Errorf("fsstore: write handoff %q: %w", id, err)
+		return domain.SyncRevision{}, fmt.Errorf("fsstore: write handoff: %w", err)
 	}
 	return s.revisionAfterWrite(ctx)
 }

@@ -1,0 +1,223 @@
+package main
+
+import (
+	"context"
+	"fmt"
+	"io"
+	"strings"
+
+	"github.com/levapveeskela/lv24-brain/internal/app"
+	"github.com/levapveeskela/lv24-brain/internal/bootstrap"
+	"github.com/levapveeskela/lv24-brain/internal/domain"
+	"github.com/levapveeskela/lv24-brain/internal/gitinfo"
+	"github.com/levapveeskela/lv24-brain/internal/mcpserver"
+	"github.com/levapveeskela/lv24-brain/internal/ports"
+	"github.com/levapveeskela/lv24-brain/internal/version"
+)
+
+// runMCP serves the Model Context Protocol over stdin and stdout until stdin
+// reaches end of file. Stdout carries protocol messages only; diagnostics go
+// to stderr.
+func runMCP(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
+	fs := newFlagSet("mcp", stderr)
+	cfgPath := configFlag(fs)
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	if fs.NArg() > 0 {
+		fmt.Fprintf(stderr, "brain mcp: unexpected arguments: %s\n", strings.Join(fs.Args(), " "))
+		return 2
+	}
+	cfg, err := loadRequiredConfig(*cfgPath)
+	if err != nil {
+		return reportError(stderr, "mcp", err)
+	}
+	useCase, err := bootstrap.Build(cfg)
+	if err != nil {
+		return reportError(stderr, "mcp", err)
+	}
+	defer func() { _ = useCase.Close() }()
+	server := mcpserver.New(mcpBackend{app: useCase.App}, version.Version)
+	if err := server.Serve(context.Background(), stdin, stdout); err != nil {
+		return reportError(stderr, "mcp", err)
+	}
+	return 0
+}
+
+// mcpBackend adapts the application layer to the MCP tool backend. Project
+// selection follows the CLI rules (resolveTarget) and never creates projects.
+type mcpBackend struct {
+	app *app.App
+}
+
+func (b mcpBackend) Resolve(ctx context.Context, selector string) (mcpserver.Target, error) {
+	resolved, err := resolveTarget(ctx, b.app, "", selector)
+	if err != nil {
+		return mcpserver.Target{}, err
+	}
+	return mcpserver.Target{ID: resolved.Project.ID, Path: resolved.Path}, nil
+}
+
+func (b mcpBackend) Bootstrap(ctx context.Context, projectID string, budget int) (string, error) {
+	result, err := b.app.Bootstrap(ctx, app.BootstrapOptions{ProjectID: projectID, Budget: budget})
+	if err != nil {
+		return "", err
+	}
+	return result.Summary, nil
+}
+
+func (b mcpBackend) Search(ctx context.Context, query, projectID string, limit int) ([]mcpserver.Hit, error) {
+	hits, err := b.app.Search(ctx, query, projectID, limit)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]mcpserver.Hit, 0, len(hits))
+	for _, hit := range hits {
+		out = append(out, mcpserver.Hit{
+			ID:        hit.ID,
+			ProjectID: hit.ProjectID,
+			Kind:      hit.Kind,
+			Title:     hit.Title,
+			Snippet:   hit.Snippet,
+		})
+	}
+	return out, nil
+}
+
+func (b mcpBackend) Note(ctx context.Context, in mcpserver.NoteInput) (mcpserver.Record, error) {
+	result, err := b.app.Note(ctx, app.NoteInput{ProjectID: in.ProjectID, Title: in.Title, Body: in.Body})
+	if err != nil {
+		return mcpserver.Record{}, err
+	}
+	return mcpserver.Record{ID: result.Note.ID, ProjectID: in.ProjectID}, nil
+}
+
+func (b mcpBackend) Decision(ctx context.Context, in mcpserver.DecisionInput) (mcpserver.Record, error) {
+	result, err := b.app.Decision(ctx, app.DecisionInput{
+		ProjectID:    in.ProjectID,
+		Title:        in.Title,
+		Status:       domain.DecisionStatus(in.Status),
+		Context:      in.Context,
+		Alternatives: in.Alternatives,
+		Consequences: in.Consequences,
+	})
+	if err != nil {
+		return mcpserver.Record{}, err
+	}
+	return mcpserver.Record{ID: result.Decision.ID, ProjectID: in.ProjectID}, nil
+}
+
+func (b mcpBackend) Attempt(ctx context.Context, in mcpserver.AttemptInput) (mcpserver.Record, error) {
+	result, err := b.app.Attempt(ctx, app.AttemptInput{
+		ProjectID:  in.ProjectID,
+		Title:      in.Title,
+		Hypothesis: in.Hypothesis,
+		Result:     in.Result,
+		Reason:     in.Reason,
+	})
+	if err != nil {
+		return mcpserver.Record{}, err
+	}
+	return mcpserver.Record{ID: result.Attempt.ID, ProjectID: in.ProjectID}, nil
+}
+
+// Handoff captures the git context of the project checkout, as `brain
+// handoff` does, before recording the handoff.
+func (b mcpBackend) Handoff(ctx context.Context, in mcpserver.HandoffInput) (mcpserver.Record, error) {
+	resolved, err := b.app.ResolveSelector(ctx, in.ProjectID)
+	if err != nil {
+		return mcpserver.Record{}, err
+	}
+	gitContext := gitinfo.Read(ctx, gitDir(resolved)).Context()
+	result, err := b.app.Handoff(ctx, app.HandoffInput{
+		ProjectID:  in.ProjectID,
+		Summary:    in.Summary,
+		GitContext: gitContext,
+		NextAction: in.NextAction,
+	})
+	if err != nil {
+		return mcpserver.Record{}, err
+	}
+	return mcpserver.Record{ID: result.Handoff.ID, ProjectID: in.ProjectID}, nil
+}
+
+func (b mcpBackend) Journal(ctx context.Context, query mcpserver.JournalQuery) ([]mcpserver.JournalEntry, error) {
+	entries, err := b.app.ReadJournal(ctx, ports.JournalQuery{Project: query.ProjectID, Limit: query.Limit})
+	if err != nil {
+		return nil, err
+	}
+	out := make([]mcpserver.JournalEntry, 0, len(entries))
+	for _, entry := range entries {
+		fields := entry.Fields
+		if fields == nil {
+			fields = map[string]string{}
+		}
+		out = append(out, mcpserver.JournalEntry{
+			Time:    entry.Time,
+			User:    entry.User,
+			Event:   entry.Event,
+			Project: entry.Project,
+			ID:      entry.ID,
+			Title:   entry.Title,
+			Fields:  fields,
+		})
+	}
+	return out, nil
+}
+
+func (b mcpBackend) Projects(ctx context.Context) ([]mcpserver.Project, error) {
+	projects, err := b.app.ListProjects(ctx)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]mcpserver.Project, 0, len(projects))
+	for _, project := range projects {
+		paths := project.Paths
+		if paths == nil {
+			paths = []string{}
+		}
+		out = append(out, mcpserver.Project{
+			ID:      project.ID,
+			Name:    project.Name,
+			Kind:    string(project.Kind),
+			Paths:   paths,
+			RepoURL: project.RepoURL,
+		})
+	}
+	return out, nil
+}
+
+// GetState implements mcpserver.StateBackend.
+func (b mcpBackend) GetState(ctx context.Context, projectID string) (mcpserver.State, error) {
+	_, state, err := b.app.GetState(ctx, projectID)
+	if err != nil {
+		return mcpserver.State{}, err
+	}
+	return toMCPState(state), nil
+}
+
+// SetState implements mcpserver.StateBackend.
+func (b mcpBackend) SetState(ctx context.Context, in mcpserver.StateInput) (mcpserver.State, error) {
+	state, err := b.app.SetState(ctx, app.StateInput{
+		ProjectID: in.ProjectID, Goal: in.Goal, NextAction: in.NextAction,
+		Active: in.Active, Blocked: in.Blocked, OpenQuestions: in.OpenQuestions, FreshUntil: in.FreshUntil,
+	})
+	if err != nil {
+		return mcpserver.State{}, err
+	}
+	return toMCPState(state), nil
+}
+
+func toMCPState(state domain.State) mcpserver.State {
+	nonNil := func(values []string) []string {
+		if values == nil {
+			return []string{}
+		}
+		return values
+	}
+	return mcpserver.State{
+		ProjectID: state.ProjectID, Goal: state.Goal, NextAction: state.NextAction,
+		Active: nonNil(state.Active), Blocked: nonNil(state.Blocked), OpenQuestions: nonNil(state.OpenQuestions),
+		UpdatedAt: state.UpdatedAt, FreshUntil: state.FreshUntil,
+	}
+}

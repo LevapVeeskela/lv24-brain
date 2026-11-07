@@ -17,7 +17,7 @@ The engine has moved past the initial scaffold. Implemented and tested today:
 
 | Area | State |
 |---|---|
-| CLI | `discover`, `graphs`, `config`, `hooks`, `init`, `open`, `project list`, `project show`, `project set`, `bootstrap`, `note`, `decision`, `attempt`, `handoff`, `status`, `review`, `doctor`, `index [--rebuild]`, `search <query>`, `journal`, `event commit`, `sync`, `migrate [--rollback]`, `secret`, `update`, `version`, `help`; `login` and `logout` in server mode |
+| CLI | `init`, `doctor`, `open`, `project list\|show\|set`, `bootstrap`, `note`, `decision`, `attempt`, `handoff`, `status`, `review`, `sync`, `index [--rebuild]`, `search <query>`, `journal`, `event commit`, `hooks`, `config`, `discover`, `graphs`, `agents sync [--check]`, `connector run`, `migrate [--rollback]`, `secret`, `update`, `serve`, `version`, `help`; `login` and `logout` in server mode |
 | Storage | Markdown + YAML frontmatter (`fsstore`), SQLite FTS5 index, `registry.json` project index |
 | Local search | `brain index` refreshes FTS5 from Markdown; `brain index --rebuild` discards and rebuilds it; `brain search` queries it in local/`git` mode. `brain index` is local-only; `brain search` also works in server mode through `GET /v1/search` |
 | Git sync | `fetch`, `pull --rebase`, commit, optional push; read-only `--status`; conflict reporting |
@@ -29,8 +29,8 @@ The engine has moved past the initial scaffold. Implemented and tested today:
 | Migration | `brain migrate` imports legacy `.brain` knowledge (idempotent, dry-run, path validation), registers projects, and sets `schema_version`; every import writes a backup manifest and `brain migrate --rollback <manifest.json \| latest>` reverts it (edited files are kept) |
 
 API tokens and refresh-token families are durable in Postgres (migrations
-`0002_auth_tokens.sql` and `0003_auth_revocations.sql`, server schema version 5),
-so they survive restarts and refresh rotation still revokes the whole family on
+`0002_auth_tokens.sql` and `0003_auth_revocations.sql`; the server schema is
+version 6 after `0006_api_token_expiry.sql`), so they survive restarts and refresh rotation still revokes the whole family on
 reuse. Revocation tombstones have no expiry, so pruning expired token rows
 cannot resurrect a revoked family or session. Without
 `BRAIN_DATABASE_URL`, `brain-server` still falls back to an in-memory store that

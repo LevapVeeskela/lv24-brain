@@ -207,7 +207,8 @@ users, projects, knowledge records, revisions, API tokens, refresh-token
 families, and audit events there. Compose always sets that URL, so this stack is
 durable.
 
-The server schema is version 3. Migration `0002_auth_tokens.sql` adds the
+The server schema is version 6 (migrations `0001_init.sql` through
+`0006_api_token_expiry.sql`). Migration `0002_auth_tokens.sql` adds the
 `api_tokens` and `refresh_tokens` tables, so API tokens and refresh sessions
 survive a restart; refresh rotation still revokes the whole family when a used
 token is presented again. Migration `0003_auth_revocations.sql` adds durable

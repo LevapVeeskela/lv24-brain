@@ -21,7 +21,7 @@ func TestJournalAndEventCommitCLI(t *testing.T) {
 	if code, _, stderr := runForTest(t, "init", "--mode", "local", "--data-dir", dataDir); code != 0 {
 		t.Fatalf("init: %s", stderr)
 	}
-	if code, _, stderr := runForTest(t, "note", "--config", cfgPath, "--project", "demo", "--title", "Journaled", "--body", "x"); code != 0 {
+	if code, _, stderr := runForTest(t, "note", "--create", "--config", cfgPath, "--project", "demo", "--title", "Journaled", "--body", "x"); code != 0 {
 		t.Fatalf("note: %s", stderr)
 	}
 

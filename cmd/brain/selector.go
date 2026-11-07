@@ -9,7 +9,7 @@ import (
 	"strings"
 
 	"github.com/levapveeskela/lv24-brain/internal/app"
-	"github.com/levapveeskela/lv24-brain/internal/gitinfo"
+	"github.com/levapveeskela/lv24-brain/internal/domain"
 )
 
 // parseInterspersed parses fs from args while allowing flags after
@@ -37,7 +37,16 @@ func parseInterspersed(fs *flag.FlagSet, args []string) ([]string, error) {
 func resolveTarget(ctx context.Context, a *app.App, projectFlag, selector string) (app.Resolved, error) {
 	switch {
 	case strings.TrimSpace(projectFlag) != "":
-		return a.ResolveSelector(ctx, projectFlag)
+		// --project names a project (id or alias), never a path.
+		project, ok, err := a.LookupProject(ctx, projectFlag)
+		if err != nil {
+			return app.Resolved{}, err
+		}
+		if !ok {
+			return app.Resolved{}, domain.NewValidationError("project",
+				fmt.Sprintf("%q is not a registered project id or alias", strings.TrimSpace(projectFlag)))
+		}
+		return a.ResolveSelector(ctx, project.ID)
 	case strings.TrimSpace(selector) != "":
 		return a.ResolveSelector(ctx, selector)
 	default:
@@ -79,7 +88,7 @@ func gitDir(resolved app.Resolved) string {
 
 // printGitAndGraphs appends the ## Git and ## Graphs sections of `brain open`.
 func printGitAndGraphs(ctx context.Context, w io.Writer, resolved app.Resolved) {
-	summary := gitinfo.Read(ctx, gitDir(resolved))
+	summary, graphs := gitAndGraphsFor(ctx, resolved)
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "## Git")
 	if !summary.IsRepo {
@@ -90,11 +99,6 @@ func printGitAndGraphs(ctx context.Context, w io.Writer, resolved app.Resolved) 
 			fmt.Fprintln(w, line)
 		}
 	}
-	roots := app.LocalPaths(resolved.Project.Paths)
-	if len(roots) == 0 && resolved.Path != "" {
-		roots = []string{resolved.Path}
-	}
-	graphs := gitinfo.FindGraphs(roots)
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "## Graphs")
 	if len(graphs) == 0 {

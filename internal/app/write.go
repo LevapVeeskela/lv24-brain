@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/levapveeskela/lv24-brain/internal/domain"
 )
@@ -14,7 +15,7 @@ func (a *App) Note(ctx context.Context, input NoteInput) (NoteResult, error) {
 	if err := a.requireStore(); err != nil {
 		return NoteResult{}, err
 	}
-	project, err := a.ensureProject(ctx, input.ProjectID)
+	project, err := a.ensureProject(ctx, input.ProjectID, input.CreateProject)
 	if err != nil {
 		return NoteResult{}, err
 	}
@@ -33,6 +34,11 @@ func (a *App) Note(ctx context.Context, input NoteInput) (NoteResult, error) {
 	existing, err := a.listNotes(ctx, project.ID)
 	if err != nil {
 		return NoteResult{}, err
+	}
+	for _, prior := range existing {
+		if prior.Title == note.Title && prior.Body == note.Body && a.isRetry(prior.CreatedAt) {
+			return NoteResult{Note: prior}, a.afterWrite(ctx, JournalNote, prior.ProjectID, prior.ID, prior.Title, noteDocument(prior))
+		}
 	}
 	used := stringSet(noteIDs(existing))
 	base := recordID("note", project.ID, now)
@@ -60,7 +66,7 @@ func (a *App) Decision(ctx context.Context, input DecisionInput) (DecisionResult
 	if err := a.requireStore(); err != nil {
 		return DecisionResult{}, err
 	}
-	project, err := a.ensureProject(ctx, input.ProjectID)
+	project, err := a.ensureProject(ctx, input.ProjectID, input.CreateProject)
 	if err != nil {
 		return DecisionResult{}, err
 	}
@@ -87,6 +93,11 @@ func (a *App) Decision(ctx context.Context, input DecisionInput) (DecisionResult
 	if err != nil {
 		return DecisionResult{}, err
 	}
+	for _, prior := range existing {
+		if prior.Title == decision.Title && prior.Context == decision.Context && a.isRetry(prior.CreatedAt) {
+			return DecisionResult{Decision: prior}, a.afterWrite(ctx, JournalDecision, prior.ProjectID, prior.ID, prior.Title, decisionDocument(prior))
+		}
+	}
 	decision.ID = availableID(recordID("decision", project.ID, now), stringSet(decisionIDs(existing)))
 	revision, err := a.deps.Store.AppendDecision(ctx, decision)
 	if err != nil {
@@ -101,7 +112,7 @@ func (a *App) Attempt(ctx context.Context, input AttemptInput) (AttemptResult, e
 	if err := a.requireStore(); err != nil {
 		return AttemptResult{}, err
 	}
-	project, err := a.ensureProject(ctx, input.ProjectID)
+	project, err := a.ensureProject(ctx, input.ProjectID, input.CreateProject)
 	if err != nil {
 		return AttemptResult{}, err
 	}
@@ -122,6 +133,12 @@ func (a *App) Attempt(ctx context.Context, input AttemptInput) (AttemptResult, e
 	if err != nil {
 		return AttemptResult{}, err
 	}
+	for _, prior := range existing {
+		if prior.Title == attempt.Title && prior.Hypothesis == attempt.Hypothesis && prior.Result == attempt.Result &&
+			prior.Reason == attempt.Reason && a.isRetry(prior.CreatedAt) {
+			return AttemptResult{Attempt: prior}, a.afterWrite(ctx, JournalAttempt, prior.ProjectID, prior.ID, prior.Title, attemptDocument(prior))
+		}
+	}
 	attempt.ID = availableID(recordID("attempt", project.ID, now), stringSet(attemptIDs(existing)))
 	revision, err := a.deps.Store.AppendAttempt(ctx, attempt)
 	if err != nil {
@@ -136,7 +153,7 @@ func (a *App) Handoff(ctx context.Context, input HandoffInput) (HandoffResult, e
 	if err := a.requireStore(); err != nil {
 		return HandoffResult{}, err
 	}
-	project, err := a.ensureProject(ctx, input.ProjectID)
+	project, err := a.ensureProject(ctx, input.ProjectID, input.CreateProject)
 	if err != nil {
 		return HandoffResult{}, err
 	}
@@ -155,6 +172,11 @@ func (a *App) Handoff(ctx context.Context, input HandoffInput) (HandoffResult, e
 	if err != nil {
 		return HandoffResult{}, err
 	}
+	for _, prior := range existing {
+		if prior.Summary == handoff.Summary && prior.NextAction == handoff.NextAction && a.isRetry(prior.CreatedAt) {
+			return HandoffResult{Handoff: prior}, a.afterWrite(ctx, JournalHandoff, prior.ProjectID, prior.ID, prior.Summary, handoffDocument(prior))
+		}
+	}
 	handoff.ID = availableID(recordID("handoff", project.ID, now), stringSet(handoffIDs(existing)))
 	revision, err := a.deps.Store.AppendHandoff(ctx, handoff)
 	if err != nil {
@@ -162,4 +184,16 @@ func (a *App) Handoff(ctx context.Context, input HandoffInput) (HandoffResult, e
 	}
 	result := HandoffResult{Handoff: handoff, Revision: revision}
 	return result, a.afterWrite(ctx, JournalHandoff, handoff.ProjectID, handoff.ID, handoff.Summary, handoffDocument(handoff))
+}
+
+// retryWindow is how long an identical record counts as a retry of the same
+// write (for example after "written but the index update failed") instead of
+// a new record.
+const retryWindow = 10 * time.Minute
+
+// isRetry reports whether a record created at createdAt is recent enough that
+// an identical write is a retry and must not create a duplicate.
+func (a *App) isRetry(createdAt time.Time) bool {
+	age := a.now().Sub(createdAt)
+	return age >= -time.Minute && age < retryWindow
 }

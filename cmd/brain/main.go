@@ -66,7 +66,30 @@ func run(args []string, stdout, stderr io.Writer) int {
 	return runWithInput(args, os.Stdin, stdout, stderr)
 }
 
+// runWithInput dispatches a command. A leaf `--help`/`-h` makes the standard
+// flag package print the usage and fail with flag.ErrHelp, which the commands
+// report as a usage error (2); asking for help is a success, so it maps to 0.
 func runWithInput(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
+	code := runCommand(args, stdin, stdout, stderr)
+	if code == 2 && len(args) > 1 && wantsHelp(args[1:]) {
+		return 0
+	}
+	return code
+}
+
+func wantsHelp(args []string) bool {
+	for _, arg := range args {
+		switch arg {
+		case "--":
+			return false
+		case "-h", "-help", "--help":
+			return true
+		}
+	}
+	return false
+}
+
+func runCommand(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
 		printUsage(stderr)
 		return 2
@@ -122,6 +145,10 @@ func runWithInput(args []string, stdin io.Reader, stdout, stderr io.Writer) int 
 		return runGraphs(rest, stdout, stderr)
 	case "agents":
 		return runAgents(rest, stdout, stderr)
+	case "state":
+		return runState(rest, stdout, stderr)
+	case "mcp":
+		return runMCP(rest, stdin, stdout, stderr)
 	case "connector":
 		return runConnector(rest, stdout, stderr)
 	case "migrate":
@@ -176,6 +203,8 @@ Commands:
   discover   Find git checkouts under --root and register new projects (--apply)
   graphs     Refresh graphify/codegraph indexes of registered projects
   agents     Sync the shared agent instructions (agents sync [--check])
+  state      Get or set a project's goal, next action, blockers and questions
+  mcp        Serve the brain as an MCP server over stdio (for coding agents)
   connector  Run a read-only GitHub, GitLab, or IMAP connector
   migrate    Import a legacy .brain data directory; --rollback reverts an import
   secret     Manage OS-backed secrets (set, list, remove)
@@ -326,6 +355,7 @@ func runInit(args []string, stdout, stderr io.Writer) int {
 func runDoctor(args []string, stdout, stderr io.Writer) int {
 	fs := newFlagSet("doctor", stderr)
 	cfgPath := configFlag(fs)
+	asJSON := fs.Bool("json", false, "print JSON")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -343,10 +373,26 @@ func runDoctor(args []string, stdout, stderr io.Writer) int {
 		return reportError(stderr, "doctor", err)
 	}
 	failed := false
+	payload := jsonDoctor{Checks: make([]jsonDoctorCheck, 0, len(report.Checks))}
 	for _, check := range report.Checks {
-		fmt.Fprintf(stdout, "%s: %s (%s)\n", check.Status, check.Name, check.Message)
+		if !*asJSON {
+			fmt.Fprintf(stdout, "%s: %s (%s)\n", check.Status, check.Name, check.Message)
+		}
+		payload.Checks = append(payload.Checks, jsonDoctorCheck{
+			Name:   check.Name,
+			OK:     check.Status != "fail",
+			Status: check.Status,
+			Detail: check.Message,
+		})
 		if check.Status == "fail" {
 			failed = true
+		}
+	}
+	if *asJSON {
+		// The JSON document is printed even when a check fails; the exit
+		// code still reports the failure.
+		if code := writeJSONReport(stdout, stderr, "doctor", payload); code != 0 {
+			return code
 		}
 	}
 	if failed {
@@ -360,6 +406,7 @@ func runOpen(args []string, stdout, stderr io.Writer) int {
 	project := fs.String("project", "", "project id or alias")
 	budget := fs.Int("budget", app.DefaultBootstrapBudget, "summary size budget in runes")
 	brief := fs.Bool("brief", false, "print only the project and state fields")
+	asJSON := fs.Bool("json", false, "print JSON")
 	cfgPath := configFlag(fs)
 	positional, err := parseInterspersed(fs, args)
 	if err != nil {
@@ -392,12 +439,32 @@ func runOpen(args []string, stdout, stderr io.Writer) int {
 		if err != nil {
 			return reportError(stderr, "open", err)
 		}
+		if *asJSON {
+			return writeJSONReport(stdout, stderr, "open", jsonOpenBrief{
+				Project: toJSONProject(result.Project),
+				State:   toJSONState(result.State),
+			})
+		}
 		printOpenResult(stdout, result)
 		return 0
 	}
 	result, err := useCase.App.Bootstrap(ctx, app.BootstrapOptions{ProjectID: target.Project.ID, Budget: *budget})
 	if err != nil {
 		return reportError(stderr, "open", err)
+	}
+	if *asJSON {
+		opened, err := useCase.App.Open(ctx, app.OpenOptions{ProjectID: target.Project.ID})
+		if err != nil {
+			return reportError(stderr, "open", err)
+		}
+		summary, graphs := gitAndGraphsFor(ctx, target)
+		return writeJSONReport(stdout, stderr, "open", jsonOpen{
+			Project: toJSONProject(opened.Project),
+			State:   toJSONState(opened.State),
+			Git:     toJSONGit(summary),
+			Graphs:  toJSONGraphs(graphs),
+			Summary: result.Summary,
+		})
 	}
 	printSummary(stdout, result.Summary)
 	printGitAndGraphs(ctx, stdout, target)
@@ -506,7 +573,7 @@ func runProjectList(args []string, stdout, stderr io.Writer) int {
 		if projects == nil {
 			projects = []domain.Project{}
 		}
-		if err := writeJSON(stdout, projects); err != nil {
+		if err := encodeJSON(stdout, projects); err != nil {
 			return reportError(stderr, "project list", err)
 		}
 		return 0
@@ -703,7 +770,7 @@ func projectRuntime(cfgPath string) (*app.App, func(), error) {
 
 func printProject(w io.Writer, project domain.Project, asJSON bool) error {
 	if asJSON {
-		return writeJSON(w, project)
+		return encodeJSON(w, project)
 	}
 	printProjectDetail(w, project)
 	return nil
@@ -747,12 +814,6 @@ func joinValues(values []string) string {
 	return strings.Join(values, ", ")
 }
 
-func writeJSON(w io.Writer, value any) error {
-	encoder := json.NewEncoder(w)
-	encoder.SetIndent("", "  ")
-	return encoder.Encode(value)
-}
-
 func printProjectUsage(w io.Writer) {
 	fmt.Fprint(w, `Usage:
   brain project list [--json]
@@ -774,6 +835,7 @@ func runBootstrap(args []string, stdout, stderr io.Writer) int {
 	fs := newFlagSet("bootstrap", stderr)
 	project := fs.String("project", "", "project id or alias")
 	budget := fs.Int("budget", app.DefaultBootstrapBudget, "summary size budget in runes")
+	asJSON := fs.Bool("json", false, "print JSON")
 	cfgPath := configFlag(fs)
 	positional, err := parseInterspersed(fs, args)
 	if err != nil {
@@ -807,6 +869,13 @@ func runBootstrap(args []string, stdout, stderr io.Writer) int {
 	if err != nil {
 		return reportError(stderr, "bootstrap", err)
 	}
+	if *asJSON {
+		return writeJSONReport(stdout, stderr, "bootstrap", jsonBootstrap{
+			ProjectID: result.ProjectID,
+			Summary:   result.Summary,
+			Budget:    effectiveBudget(*budget),
+		})
+	}
 	printSummary(stdout, result.Summary)
 	return 0
 }
@@ -824,6 +893,7 @@ func runNote(args []string, stdout, stderr io.Writer) int {
 	title := fs.String("title", "", "note title")
 	body := fs.String("body", "", "note body in Markdown")
 	tags := fs.String("tags", "", "comma-separated tags")
+	create := fs.Bool("create", false, "register --project first if it does not exist yet")
 	cfgPath := configFlag(fs)
 	positional, err := parseInterspersed(fs, args)
 	if err != nil {
@@ -849,10 +919,11 @@ func runNote(args []string, stdout, stderr io.Writer) int {
 	}
 	defer func() { _ = useCase.Close() }()
 	result, err := useCase.App.Note(context.Background(), app.NoteInput{
-		ProjectID: *project,
-		Title:     *title,
-		Body:      *body,
-		Tags:      splitList(*tags),
+		CreateProject: *create,
+		ProjectID:     *project,
+		Title:         *title,
+		Body:          *body,
+		Tags:          splitList(*tags),
 	})
 	if err != nil {
 		return reportError(stderr, "note", err)
@@ -870,6 +941,7 @@ func runDecision(args []string, stdout, stderr io.Writer) int {
 	alternatives := fs.String("alternatives", "", "alternatives considered")
 	consequences := fs.String("consequences", "", "consequences")
 	evidence := fs.String("evidence", "", "supporting evidence")
+	create := fs.Bool("create", false, "register --project first if it does not exist yet")
 	cfgPath := configFlag(fs)
 	positional, err := parseInterspersed(fs, args)
 	if err != nil {
@@ -892,13 +964,14 @@ func runDecision(args []string, stdout, stderr io.Writer) int {
 	}
 	defer func() { _ = useCase.Close() }()
 	result, err := useCase.App.Decision(context.Background(), app.DecisionInput{
-		ProjectID:    *project,
-		Title:        *title,
-		Status:       domain.DecisionStatus(*status),
-		Context:      *contextText,
-		Alternatives: splitList(*alternatives),
-		Consequences: splitList(*consequences),
-		Evidence:     splitList(*evidence),
+		CreateProject: *create,
+		ProjectID:     *project,
+		Title:         *title,
+		Status:        domain.DecisionStatus(*status),
+		Context:       *contextText,
+		Alternatives:  splitList(*alternatives),
+		Consequences:  splitList(*consequences),
+		Evidence:      splitList(*evidence),
 	})
 	if err != nil {
 		return reportError(stderr, "decision", err)
@@ -914,6 +987,7 @@ func runAttempt(args []string, stdout, stderr io.Writer) int {
 	hypothesis := fs.String("hypothesis", "", "what was expected")
 	resultText := fs.String("result", "", "what happened")
 	reason := fs.String("reason", "", "why it failed")
+	create := fs.Bool("create", false, "register --project first if it does not exist yet")
 	cfgPath := configFlag(fs)
 	positional, err := parseInterspersed(fs, args)
 	if err != nil {
@@ -936,11 +1010,12 @@ func runAttempt(args []string, stdout, stderr io.Writer) int {
 	}
 	defer func() { _ = useCase.Close() }()
 	result, err := useCase.App.Attempt(context.Background(), app.AttemptInput{
-		ProjectID:  *project,
-		Title:      *title,
-		Hypothesis: *hypothesis,
-		Result:     *resultText,
-		Reason:     *reason,
+		CreateProject: *create,
+		ProjectID:     *project,
+		Title:         *title,
+		Hypothesis:    *hypothesis,
+		Result:        *resultText,
+		Reason:        *reason,
 	})
 	if err != nil {
 		return reportError(stderr, "attempt", err)
@@ -956,6 +1031,7 @@ func runHandoff(args []string, stdout, stderr io.Writer) int {
 	next := fs.String("next", "", "next action")
 	gitContext := fs.String("git-context", "", "git context for the handoff (default: read from the project checkout)")
 	noGit := fs.Bool("no-git", false, "do not record git context")
+	create := fs.Bool("create", false, "register --project first if it does not exist yet")
 	cfgPath := configFlag(fs)
 	positional, err := parseInterspersed(fs, args)
 	if err != nil {
@@ -979,6 +1055,10 @@ func runHandoff(args []string, stdout, stderr io.Writer) int {
 	defer func() { _ = useCase.Close() }()
 	ctx := context.Background()
 	target, err := resolveTarget(ctx, useCase.App, *project, "")
+	if err != nil && *create && strings.TrimSpace(*project) != "" {
+		// A new project has no checkout yet; the app registers it below.
+		target, err = app.Resolved{Project: domain.Project{ID: strings.TrimSpace(*project)}}, nil
+	}
 	if err != nil {
 		return reportError(stderr, "handoff", err)
 	}
@@ -987,10 +1067,11 @@ func runHandoff(args []string, stdout, stderr io.Writer) int {
 		*gitContext = gitinfo.Read(ctx, gitDir(target)).Context()
 	}
 	result, err := useCase.App.Handoff(ctx, app.HandoffInput{
-		ProjectID:  *project,
-		Summary:    *summary,
-		GitContext: *gitContext,
-		NextAction: *next,
+		CreateProject: *create,
+		ProjectID:     *project,
+		Summary:       *summary,
+		GitContext:    *gitContext,
+		NextAction:    *next,
 	})
 	if err != nil {
 		return reportError(stderr, "handoff", err)
@@ -1001,6 +1082,7 @@ func runHandoff(args []string, stdout, stderr io.Writer) int {
 
 func runStatus(args []string, stdout, stderr io.Writer) int {
 	fs := newFlagSet("status", stderr)
+	asJSON := fs.Bool("json", false, "print JSON")
 	cfgPath := configFlag(fs)
 	if err := fs.Parse(args); err != nil {
 		return 2
@@ -1013,6 +1095,17 @@ func runStatus(args []string, stdout, stderr io.Writer) int {
 	status, err := useCase.Status(context.Background())
 	if err != nil {
 		return reportError(stderr, "status", err)
+	}
+	if *asJSON {
+		return writeJSONReport(stdout, stderr, "status", jsonStatus{
+			Mode:          status.Mode,
+			DataDir:       status.DataDir,
+			ServerURL:     status.ServerURL,
+			User:          status.User,
+			SchemaVersion: status.SchemaVersion,
+			EngineVersion: status.EngineVersion,
+			UpdateChannel: status.UpdateChannel,
+		})
 	}
 	fmt.Fprintf(stdout, "mode: %s\n", status.Mode)
 	fmt.Fprintf(stdout, "data_dir: %s\n", status.DataDir)
@@ -1028,6 +1121,7 @@ func runReview(args []string, stdout, stderr io.Writer) int {
 	fs := newFlagSet("review", stderr)
 	project := fs.String("project", "", "project id")
 	since := fs.String("since", "", "review window, for example 7d")
+	asJSON := fs.Bool("json", false, "print JSON")
 	cfgPath := configFlag(fs)
 	if err := fs.Parse(args); err != nil {
 		return 2
@@ -1047,6 +1141,13 @@ func runReview(args []string, stdout, stderr io.Writer) int {
 	})
 	if err != nil {
 		return reportError(stderr, "review", err)
+	}
+	if *asJSON {
+		items := result.Items
+		if items == nil {
+			items = []string{}
+		}
+		return writeJSONReport(stdout, stderr, "review", jsonReview{Summary: result.Summary, Items: items})
 	}
 	printSummary(stdout, result.Summary)
 	return 0
@@ -1130,6 +1231,7 @@ func runSearch(args []string, stdout, stderr io.Writer) int {
 	fs := newFlagSet("search", stderr)
 	project := fs.String("project", "", "project id filter")
 	limit := fs.Int("limit", app.DefaultSearchLimit, "maximum results")
+	asJSON := fs.Bool("json", false, "print JSON")
 	cfgPath := configFlag(fs)
 	flagArgs, queryParts := splitValueFlags(args, map[string]bool{
 		"project": true,
@@ -1164,6 +1266,9 @@ func runSearch(args []string, stdout, stderr io.Writer) int {
 	hits, err := runtime.App.Search(context.Background(), query, *project, *limit)
 	if err != nil {
 		return reportError(stderr, "search", err)
+	}
+	if *asJSON {
+		return writeJSONReport(stdout, stderr, "search", jsonSearch{Query: query, Hits: toJSONHits(hits)})
 	}
 	for _, hit := range hits {
 		fmt.Fprintf(stdout, "%s/%s/%s\n  %s\n", hit.Kind, hit.ProjectID, hit.Title, hit.Snippet)
@@ -2052,7 +2157,7 @@ func runUpdate(args []string, stdout, stderr io.Writer) int {
 // never block or change the exit code of the command the user asked for.
 func maybeDailyUpdateNotice(command string, args []string, stderr io.Writer) {
 	switch command {
-	case "serve", "init", "help", "-h", "--help", "version", "-v", "--version", "update", "event", "hooks", "config", "agents":
+	case "serve", "init", "help", "-h", "--help", "version", "-v", "--version", "update", "event", "hooks", "config", "agents", "mcp":
 		return
 	}
 	cfg, err := loadConfigOrDefault(configPathFromArgs(args))

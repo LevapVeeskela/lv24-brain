@@ -82,9 +82,10 @@ func TestLocalWorkflowEndToEnd(t *testing.T) {
 		t.Fatalf("note result = %+v", noteResult)
 	}
 	otherNote, err := runtime.App.Note(ctx, app.NoteInput{
-		ProjectID: "other",
-		Title:     "Other note",
-		Body:      "hello other",
+		ProjectID:     "other",
+		Title:         "Other note",
+		Body:          "hello other",
+		CreateProject: true,
 	})
 	if err != nil {
 		t.Fatalf("Note(other): %v", err)
@@ -262,7 +263,16 @@ func TestNoteAutoCreatesProject(t *testing.T) {
 	}
 	defer func() { _ = runtime.Close() }()
 
-	if _, err := runtime.App.Note(ctx, app.NoteInput{ProjectID: "auto", Body: "created implicitly"}); err != nil {
+	// An unknown project is never created implicitly (a typo or an alias must
+	// not start a new project) ...
+	if _, err := runtime.App.Note(ctx, app.NoteInput{ProjectID: "auto", Body: "typo"}); !errors.Is(err, domain.ErrValidation) {
+		t.Fatalf("Note without CreateProject error = %v, want a validation error", err)
+	}
+	if projects, _ := runtime.App.ListProjects(ctx); len(projects) != 0 {
+		t.Fatalf("projects after refused note = %+v", projects)
+	}
+	// ... only on request.
+	if _, err := runtime.App.Note(ctx, app.NoteInput{ProjectID: "auto", Body: "created on request", CreateProject: true}); err != nil {
 		t.Fatalf("Note: %v", err)
 	}
 	openResult, err := runtime.App.Open(ctx, app.OpenOptions{ProjectID: "auto"})
@@ -300,9 +310,10 @@ func TestBootstrapBudgetTruncates(t *testing.T) {
 	defer func() { _ = runtime.Close() }()
 	for i := 0; i < 8; i++ {
 		if _, err := runtime.App.Decision(ctx, app.DecisionInput{
-			ProjectID: "demo",
-			Title:     "Decision with a deliberately long title for budget testing",
-			Context:   strings.Repeat("long context ", 20),
+			ProjectID:     "demo",
+			CreateProject: true,
+			Title:         "Decision with a deliberately long title for budget testing",
+			Context:       strings.Repeat("long context ", 20),
 		}); err != nil {
 			t.Fatalf("Decision %d: %v", i, err)
 		}

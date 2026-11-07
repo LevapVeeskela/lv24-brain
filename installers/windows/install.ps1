@@ -38,6 +38,10 @@ Install a local brain.exe instead of downloading a release.
 .PARAMETER Sha256
 Expected SHA-256 for -SourceBinary or as an override for the release asset.
 
+.PARAMETER OverwriteConfig
+Replace an existing brain.yaml. Off by default: a reinstall keeps the existing
+configuration and prints a note instead.
+
 .EXAMPLE
 .\install.ps1 -Mode local -InstallOpenCodeHook
 
@@ -80,6 +84,8 @@ param(
     [switch]$NoPath,
 
     [switch]$SkipChecksum,
+
+    [switch]$OverwriteConfig,
 
     [switch]$Yes
 )
@@ -427,6 +433,11 @@ function Initialize-BrainInstance {
         [string]$BrainServerUrl,
         [Parameter(Mandatory = $true)][string]$UpdateChannel
     )
+    if ((Test-Path -LiteralPath $ConfigPath) -and -not $OverwriteConfig) {
+        Write-Note "Keeping the existing $ConfigPath (reinstall does not overwrite brain.yaml)."
+        Write-Note 'Pass -OverwriteConfig to replace it with the values selected by this run.'
+        return $ConfigPath
+    }
     if ($BrainDataDir -and -not (Test-Path -LiteralPath $BrainDataDir)) {
         New-Item -ItemType Directory -Path $BrainDataDir -Force | Out-Null
     }

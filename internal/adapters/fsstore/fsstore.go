@@ -22,8 +22,13 @@
 // brain revision. The returned At timestamp is the newest included file
 // modification time and is informational only.
 //
-// The store assumes a single writer, like a local checkout. Concurrent appends
-// to one daily notes file are not serialized beyond atomic replacement.
+// Concurrency: every read-modify-write of a shared file (a daily notes file,
+// registry.json, the connector run directory) runs under a cross-process lock
+// file "<file>.lock" (see lock.go). New record files are published complete:
+// the content is written to a hidden ".tmp-" file and hard-linked to its final
+// name, which fails if the name is taken, so a crash never leaves a reserved but
+// empty record behind. Listing tolerates damaged files: they are skipped and
+// reported by Problems (see list.go).
 package fsstore
 
 import (
@@ -108,6 +113,14 @@ func (s *Store) revisionAfterWrite(ctx context.Context) (domain.SyncRevision, er
 // CurrentRevision hashes the relative path and bytes of every regular data file.
 // The value is "sha256:<hex>"; it is stable across runs and operating systems.
 // An empty data directory hashes the empty stream and reports a zero At time.
+// Temporary and lock files are excluded, so a write in progress does not change
+// the revision.
+//
+// TODO(perf): this walks and rereads the whole data directory on every write,
+// which is O(N) in the number of files. An incremental approach would keep a
+// per-file digest index (path, size, mtime, sha256) in memory or in a cache
+// file, rehash only the paths touched by the write, and fold the digests in
+// sorted path order. Not done yet: it changes the revision contract.
 func (s *Store) CurrentRevision(ctx context.Context) (domain.SyncRevision, error) {
 	if err := contextError(ctx); err != nil {
 		return domain.SyncRevision{}, err
@@ -141,7 +154,7 @@ func (s *Store) CurrentRevision(ctx context.Context) (domain.SyncRevision, error
 		if dirEntry.Type()&os.ModeSymlink != 0 || !dirEntry.Type().IsRegular() {
 			return nil
 		}
-		if strings.HasPrefix(dirEntry.Name(), tempFilePrefix) {
+		if strings.HasPrefix(dirEntry.Name(), tempFilePrefix) || strings.HasSuffix(dirEntry.Name(), lockFileSuffix) {
 			return nil
 		}
 		content, err := os.ReadFile(path)
@@ -269,47 +282,115 @@ func isWindowsReservedName(name string) bool {
 	return false
 }
 
+// hardLink creates the final name of a published record. It is a variable so
+// tests can simulate a filesystem without hard links.
+var hardLink = os.Link
+
+// writeTempFile writes data to a new hidden temporary file in dir, flushes it to
+// disk and returns its path. On failure the temporary file is removed.
+func writeTempFile(dir string, data []byte) (string, error) {
+	temp, err := os.CreateTemp(dir, tempFilePrefix+"*")
+	if err != nil {
+		return "", fmt.Errorf("fsstore: create temp file in %s: %w", dir, err)
+	}
+	tempName := temp.Name()
+	if _, err := temp.Write(data); err != nil {
+		_ = temp.Close()
+		_ = os.Remove(tempName)
+		return "", fmt.Errorf("fsstore: write temp file: %w", err)
+	}
+	if err := temp.Sync(); err != nil {
+		_ = temp.Close()
+		_ = os.Remove(tempName)
+		return "", fmt.Errorf("fsstore: sync temp file: %w", err)
+	}
+	if err := temp.Close(); err != nil {
+		_ = os.Remove(tempName)
+		return "", fmt.Errorf("fsstore: close temp file: %w", err)
+	}
+	if err := os.Chmod(tempName, 0o644); err != nil {
+		_ = os.Remove(tempName)
+		return "", fmt.Errorf("fsstore: set file mode: %w", err)
+	}
+	return tempName, nil
+}
+
+// writeFileAtomic replaces path with data through a temporary file and rename.
 func writeFileAtomic(path string, data []byte) error {
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return fmt.Errorf("fsstore: create directory %s: %w", dir, err)
 	}
-	temp, err := os.CreateTemp(dir, tempFilePrefix+"*")
+	tempName, err := writeTempFile(dir, data)
 	if err != nil {
-		return fmt.Errorf("fsstore: create temp file in %s: %w", dir, err)
-	}
-	tempName := temp.Name()
-	cleanup := true
-	defer func() {
-		if cleanup {
-			_ = os.Remove(tempName)
-		}
-	}()
-	if _, err := temp.Write(data); err != nil {
-		_ = temp.Close()
-		return fmt.Errorf("fsstore: write temp file: %w", err)
-	}
-	if err := temp.Sync(); err != nil {
-		_ = temp.Close()
-		return fmt.Errorf("fsstore: sync temp file: %w", err)
-	}
-	if err := temp.Close(); err != nil {
-		return fmt.Errorf("fsstore: close temp file: %w", err)
-	}
-	if err := os.Chmod(tempName, 0o644); err != nil {
-		return fmt.Errorf("fsstore: set file mode: %w", err)
+		return err
 	}
 	if err := os.Rename(tempName, path); err != nil {
+		_ = os.Remove(tempName)
 		return fmt.Errorf("fsstore: replace %s: %w", path, err)
 	}
-	cleanup = false
 	return nil
 }
 
+// publishRecordFile creates a new "<base>.md" record in dir, or "<base>-N.md"
+// (N from 2) when earlier names are taken, and returns the final name stem.
+//
+// render receives the candidate stem and returns the complete file content, so
+// an ID derived from the stem matches the file name. The content is written to a
+// hidden temporary file and hard-linked to the final name. Linking fails when
+// the name exists, so each name is claimed exactly once, and the record appears
+// complete or not at all: no empty reservation is ever visible to listing.
+//
+// Filesystems without hard links fall back to an O_EXCL placeholder that is then
+// replaced with writeFileAtomic. Listing skips any empty leftover of that path.
+func publishRecordFile(dir, base string, render func(stem string) ([]byte, error)) (string, error) {
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return "", fmt.Errorf("fsstore: create directory %s: %w", dir, err)
+	}
+	for attempt := 1; attempt <= maxNameAttempts; attempt++ {
+		stem := base
+		if attempt > 1 {
+			stem = fmt.Sprintf("%s-%d", base, attempt)
+		}
+		path := filepath.Join(dir, stem+".md")
+		raw, err := render(stem)
+		if err != nil {
+			return "", err
+		}
+		tempName, err := writeTempFile(dir, raw)
+		if err != nil {
+			return "", err
+		}
+		linkErr := hardLink(tempName, path)
+		_ = os.Remove(tempName)
+		if linkErr == nil {
+			return stem, nil
+		}
+		if os.IsExist(linkErr) {
+			continue
+		}
+		placeholder, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
+		if err != nil {
+			if os.IsExist(err) {
+				continue
+			}
+			return "", fmt.Errorf("fsstore: reserve %s: %w", path, err)
+		}
+		_ = placeholder.Close()
+		if err := writeFileAtomic(path, raw); err != nil {
+			_ = os.Remove(path)
+			return "", err
+		}
+		return stem, nil
+	}
+	return "", fmt.Errorf("fsstore: no free record name for %q", base)
+}
+
 // reserveRecordFile atomically claims an unused "<base>.md" name in dir and
-// returns the reserved path and the final name stem. The caller replaces the
-// empty reservation with writeFileAtomic; callers must remove the reservation on
-// failure.
+// returns the reserved path and the final name stem. It leaves an empty file
+// behind until the caller replaces it, so it is used only where the content
+// cannot be rendered before the name is known (connector runs). Callers must
+// remove the reservation on failure.
 func reserveRecordFile(dir, base string) (string, string, error) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return "", "", fmt.Errorf("fsstore: create directory %s: %w", dir, err)

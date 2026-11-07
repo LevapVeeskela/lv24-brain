@@ -25,6 +25,7 @@ func runJournal(args []string, stdout, stderr io.Writer) int {
 	event := fs.String("event", "", "event filter (note, decision, attempt, handoff, commit, ...)")
 	since := fs.Duration("since", 0, "only entries newer than this duration, e.g. 24h")
 	limit := fs.Int("limit", 20, "maximum entries")
+	asJSON := fs.Bool("json", false, "print JSON")
 	cfgPath := configFlag(fs)
 	if err := fs.Parse(args); err != nil {
 		return 2
@@ -53,6 +54,9 @@ func runJournal(args []string, stdout, stderr io.Writer) int {
 	entries, err := runtime.App.ReadJournal(context.Background(), query)
 	if err != nil {
 		return reportError(stderr, "journal", err)
+	}
+	if *asJSON {
+		return writeJSONReport(stdout, stderr, "journal", toJSONJournal(entries))
 	}
 	for _, entry := range entries {
 		fmt.Fprintln(stdout, formatJournalEntry(entry))

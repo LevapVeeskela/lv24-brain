@@ -104,6 +104,118 @@ jobs:
           go test -count=1 -run TestMigrateIsIdempotent -v ./internal/adapters/postgres | tee /tmp/guard.txt
           grep -q -- "--- PASS: TestMigrateIsIdempotent" /tmp/guard.txt
 
+      - name: guard against skipped audit end-to-end test
+        shell: bash
+        run: |
+          set -o pipefail
+          go test -count=1 -run TestServerAuditActorAndSecurityEvents -v ./internal/adapters/serverstore | tee /tmp/guard-audit.txt
+          grep -q -- "--- PASS: TestServerAuditActorAndSecurityEvents" /tmp/guard-audit.txt
+
+  release-check:
+    # Free-tier only: one ubuntu-latest job, no matrix, no artifact upload, no
+    # signing (PR jobs have no secrets). Mirrors the release workflow so asset
+    # naming mistakes fail on pull requests instead of on a tag.
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: goreleaser check
+        uses: goreleaser/goreleaser-action@e435ccd777264be153ace6237001ef4d979d3a7a # v6
+        with:
+          distribution: goreleaser
+          version: "~> v2"
+          args: check -f deploy/goreleaser.yaml
+
+      - name: goreleaser snapshot build
+        uses: goreleaser/goreleaser-action@e435ccd777264be153ace6237001ef4d979d3a7a # v6
+        with:
+          distribution: goreleaser
+          version: "~> v2"
+          args: release --snapshot --clean --skip=publish -f deploy/goreleaser.yaml
+
+      - name: Assemble release assets and manifest
+        env:
+          TAG: v0.0.0-ci
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          VERSION="${TAG#v}"
+          mkdir -p release-assets
+          find dist -type f | while read -r file; do
+            base="$(basename "$file")"
+            case "$base" in
+              brain_*|brain-server_*|checksums.txt) cp "$file" "release-assets/$base" ;;
+            esac
+          done
+          cp dist/checksums.txt release-assets/checksums.txt
+          python3 - <<'PY'
+          import json, os, re
+          from datetime import datetime, timezone
+
+          tag = os.environ["TAG"]
+          version = tag[1:] if tag.startswith("v") else tag
+          repo = os.environ["REPOSITORY"]
+          channel = "beta" if "-" in version else "stable"
+
+          sums = {}
+          with open("release-assets/checksums.txt", encoding="utf-8") as handle:
+              for line in handle:
+                  parts = line.split()
+                  if len(parts) >= 2 and re.fullmatch(r"[0-9a-fA-F]{64}", parts[0]):
+                      sums[parts[-1].lstrip("*")] = parts[0].lower()
+
+          pattern = re.compile(
+              r"^(brain|brain-server)_(.+?)_(windows|linux|darwin)_(amd64|arm64)(\.exe)?$"
+          )
+          assets = []
+          for name, digest in sorted(sums.items()):
+              match = pattern.match(name)
+              if not match:
+                  continue
+              kind, _, goos, goarch, _ = match.groups()
+              assets.append({
+                  "kind": "cli" if kind == "brain" else "server",
+                  "os": goos,
+                  "arch": goarch,
+                  "name": name,
+                  "url": f"https://github.com/{repo}/releases/download/{tag}/{name}",
+                  "sha256": digest,
+              })
+
+          if not assets:
+              raise SystemExit("no brain release assets found in checksums.txt")
+
+          # Every manifest asset must be a file that is about to be uploaded,
+          # and every uploaded binary must be in the manifest (v0.1.1 shipped
+          # .exe.exe files while the manifest pointed at .exe).
+          files = set(os.listdir("release-assets"))
+          named = {asset["name"] for asset in assets}
+          missing = sorted(name for name in named if name not in files)
+          stray = sorted(f for f in files if re.match(r"^(brain|brain-server)_", f) and f not in named)
+          if missing or stray:
+              raise SystemExit(f"release assets do not match the manifest: missing={missing} unreferenced={stray}")
+
+          manifest = {
+              "version": version,
+              "channel": channel,
+              "min_schema_version": 1,
+              "published_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z"),
+              "assets": assets,
+          }
+          with open("release-assets/release.json", "w", encoding="utf-8") as handle:
+              json.dump(manifest, handle, indent=2, sort_keys=True)
+              handle.write("\n")
+          PY
+          ls -l release-assets
+
   race:
     runs-on: ubuntu-latest
     timeout-minutes: 15

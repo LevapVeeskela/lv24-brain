@@ -44,7 +44,7 @@ func TestBuildLocalRuntime(t *testing.T) {
 	if _, err := runtime.App.Status(ctx); err != nil {
 		t.Fatalf("Status: %v", err)
 	}
-	if _, err := runtime.App.Note(ctx, app.NoteInput{ProjectID: "demo", Body: "hello"}); err != nil {
+	if _, err := runtime.App.Note(ctx, app.NoteInput{ProjectID: "demo", Body: "hello", CreateProject: true}); err != nil {
 		t.Fatalf("Note: %v", err)
 	}
 	if _, err := os.Stat(filepath.Join(dataDir, "index", "brain.db")); err != nil {
@@ -510,7 +510,7 @@ func TestGitSyncWithTempRepository(t *testing.T) {
 		}
 	}
 
-	if _, err := runtime.App.Note(ctx, app.NoteInput{ProjectID: "demo", Title: "Git note", Body: "sync me"}); err != nil {
+	if _, err := runtime.App.Note(ctx, app.NoteInput{ProjectID: "demo", Title: "Git note", Body: "sync me", CreateProject: true}); err != nil {
 		t.Fatalf("Note: %v", err)
 	}
 	result, err := runtime.App.Sync(ctx, app.SyncOptions{Push: true})

@@ -2,37 +2,109 @@ package fsstore
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/levapveeskela/lv24-brain/internal/domain"
 )
 
+// orphanReservationAge is how old an empty record file must be before it is
+// reported as an orphaned reservation rather than a write in progress.
+const orphanReservationAge = 60 * time.Second
+
+// Problem describes one file under a project's record directories that listing
+// skipped. Skipping keeps one damaged file from hiding every other record.
+//
+// Listing never deletes or repairs a file. Problems is the only place where
+// skipped files are reported, so the app can show them to the user.
+type Problem struct {
+	// Path is the absolute path of the skipped file.
+	Path string
+	// Kind is the record kind: "note", "decision", "attempt" or "handoff".
+	Kind string
+	// Reason says why the file was skipped, in a form suitable for display.
+	Reason string
+}
+
 // ListNotes returns every note stored under projects/<id>/notes, newest first.
+// Files that cannot be read are skipped; see Problems.
 func (s *Store) ListNotes(ctx context.Context, projectID string) ([]domain.Note, error) {
+	notes, _, err := s.scanNotes(ctx, projectID)
+	return notes, err
+}
+
+// ListDecisions returns every decision stored under projects/<id>/decisions,
+// newest first. Files that cannot be read are skipped; see Problems.
+func (s *Store) ListDecisions(ctx context.Context, projectID string) ([]domain.Decision, error) {
+	decisions, _, err := s.scanDecisions(ctx, projectID)
+	return decisions, err
+}
+
+// ListAttempts returns every attempt stored under projects/<id>/attempts,
+// newest first. Files that cannot be read are skipped; see Problems.
+func (s *Store) ListAttempts(ctx context.Context, projectID string) ([]domain.Attempt, error) {
+	attempts, _, err := s.scanAttempts(ctx, projectID)
+	return attempts, err
+}
+
+// ListHandoffs returns every handoff stored under projects/<id>/handoffs,
+// newest first. Files that cannot be read are skipped; see Problems.
+func (s *Store) ListHandoffs(ctx context.Context, projectID string) ([]domain.Handoff, error) {
+	handoffs, _, err := s.scanHandoffs(ctx, projectID)
+	return handoffs, err
+}
+
+// Problems reports the record files that the List methods skip for projectID:
+// notes, decisions, attempts and handoffs that are unreadable, have malformed
+// frontmatter, carry an incompatible kind or schema, or are zero bytes.
+// Results are ordered by kind, then by path. A missing project is an error; a
+// project without problems returns an empty slice.
+func (s *Store) Problems(ctx context.Context, projectID string) ([]Problem, error) {
 	if err := contextError(ctx); err != nil {
 		return nil, err
 	}
 	if err := s.requireProject(projectID); err != nil {
 		return nil, err
 	}
-	dir, err := s.projectDir(projectID)
+	problems := make([]Problem, 0)
+	_, noteProblems, err := s.scanNotes(ctx, projectID)
 	if err != nil {
 		return nil, err
 	}
-	paths, err := recordPaths(filepath.Join(dir, notesDir))
+	_, decisionProblems, err := s.scanDecisions(ctx, projectID)
 	if err != nil {
 		return nil, err
 	}
-	notes := make([]domain.Note, 0, len(paths))
-	for _, path := range paths {
+	_, attemptProblems, err := s.scanAttempts(ctx, projectID)
+	if err != nil {
+		return nil, err
+	}
+	_, handoffProblems, err := s.scanHandoffs(ctx, projectID)
+	if err != nil {
+		return nil, err
+	}
+	problems = append(problems, noteProblems...)
+	problems = append(problems, decisionProblems...)
+	problems = append(problems, attemptProblems...)
+	problems = append(problems, handoffProblems...)
+	return problems, nil
+}
+
+func (s *Store) scanNotes(ctx context.Context, projectID string) ([]domain.Note, []Problem, error) {
+	dir, err := s.recordDir(ctx, projectID, notesDir)
+	if err != nil {
+		return nil, nil, err
+	}
+	notes, problems, err := readRecords(ctx, dir, "note", func(path string) ([]domain.Note, error) {
 		_, fileNotes, err := readNotesFile(path)
-		if err != nil {
-			return nil, err
-		}
-		notes = append(notes, fileNotes...)
+		return fileNotes, err
+	})
+	if err != nil {
+		return nil, nil, err
 	}
 	sort.SliceStable(notes, func(i, j int) bool {
 		if !notes[i].CreatedAt.Equal(notes[j].CreatedAt) {
@@ -40,33 +112,23 @@ func (s *Store) ListNotes(ctx context.Context, projectID string) ([]domain.Note,
 		}
 		return notes[i].ID < notes[j].ID
 	})
-	return notes, nil
+	return notes, problems, nil
 }
 
-// ListDecisions returns every decision stored under projects/<id>/decisions,
-// newest first.
-func (s *Store) ListDecisions(ctx context.Context, projectID string) ([]domain.Decision, error) {
-	if err := contextError(ctx); err != nil {
-		return nil, err
-	}
-	if err := s.requireProject(projectID); err != nil {
-		return nil, err
-	}
-	dir, err := s.projectDir(projectID)
+func (s *Store) scanDecisions(ctx context.Context, projectID string) ([]domain.Decision, []Problem, error) {
+	dir, err := s.recordDir(ctx, projectID, decisionsDir)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	paths, err := recordPaths(filepath.Join(dir, decisionsDir))
-	if err != nil {
-		return nil, err
-	}
-	decisions := make([]domain.Decision, 0, len(paths))
-	for _, path := range paths {
+	decisions, problems, err := readRecords(ctx, dir, "decision", func(path string) ([]domain.Decision, error) {
 		decision, err := readDecisionFile(path)
 		if err != nil {
 			return nil, err
 		}
-		decisions = append(decisions, decision)
+		return []domain.Decision{decision}, nil
+	})
+	if err != nil {
+		return nil, nil, err
 	}
 	sort.SliceStable(decisions, func(i, j int) bool {
 		if !decisions[i].CreatedAt.Equal(decisions[j].CreatedAt) {
@@ -74,33 +136,23 @@ func (s *Store) ListDecisions(ctx context.Context, projectID string) ([]domain.D
 		}
 		return decisions[i].ID < decisions[j].ID
 	})
-	return decisions, nil
+	return decisions, problems, nil
 }
 
-// ListAttempts returns every attempt stored under projects/<id>/attempts,
-// newest first.
-func (s *Store) ListAttempts(ctx context.Context, projectID string) ([]domain.Attempt, error) {
-	if err := contextError(ctx); err != nil {
-		return nil, err
-	}
-	if err := s.requireProject(projectID); err != nil {
-		return nil, err
-	}
-	dir, err := s.projectDir(projectID)
+func (s *Store) scanAttempts(ctx context.Context, projectID string) ([]domain.Attempt, []Problem, error) {
+	dir, err := s.recordDir(ctx, projectID, attemptsDir)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	paths, err := recordPaths(filepath.Join(dir, attemptsDir))
-	if err != nil {
-		return nil, err
-	}
-	attempts := make([]domain.Attempt, 0, len(paths))
-	for _, path := range paths {
+	attempts, problems, err := readRecords(ctx, dir, "attempt", func(path string) ([]domain.Attempt, error) {
 		attempt, err := readAttemptFile(path)
 		if err != nil {
 			return nil, err
 		}
-		attempts = append(attempts, attempt)
+		return []domain.Attempt{attempt}, nil
+	})
+	if err != nil {
+		return nil, nil, err
 	}
 	sort.SliceStable(attempts, func(i, j int) bool {
 		if !attempts[i].CreatedAt.Equal(attempts[j].CreatedAt) {
@@ -108,33 +160,23 @@ func (s *Store) ListAttempts(ctx context.Context, projectID string) ([]domain.At
 		}
 		return attempts[i].ID < attempts[j].ID
 	})
-	return attempts, nil
+	return attempts, problems, nil
 }
 
-// ListHandoffs returns every handoff stored under projects/<id>/handoffs,
-// newest first.
-func (s *Store) ListHandoffs(ctx context.Context, projectID string) ([]domain.Handoff, error) {
-	if err := contextError(ctx); err != nil {
-		return nil, err
-	}
-	if err := s.requireProject(projectID); err != nil {
-		return nil, err
-	}
-	dir, err := s.projectDir(projectID)
+func (s *Store) scanHandoffs(ctx context.Context, projectID string) ([]domain.Handoff, []Problem, error) {
+	dir, err := s.recordDir(ctx, projectID, handoffsDir)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	paths, err := recordPaths(filepath.Join(dir, handoffsDir))
-	if err != nil {
-		return nil, err
-	}
-	handoffs := make([]domain.Handoff, 0, len(paths))
-	for _, path := range paths {
+	handoffs, problems, err := readRecords(ctx, dir, "handoff", func(path string) ([]domain.Handoff, error) {
 		handoff, err := readHandoffFile(path)
 		if err != nil {
 			return nil, err
 		}
-		handoffs = append(handoffs, handoff)
+		return []domain.Handoff{handoff}, nil
+	})
+	if err != nil {
+		return nil, nil, err
 	}
 	sort.SliceStable(handoffs, func(i, j int) bool {
 		if !handoffs[i].CreatedAt.Equal(handoffs[j].CreatedAt) {
@@ -142,11 +184,74 @@ func (s *Store) ListHandoffs(ctx context.Context, projectID string) ([]domain.Ha
 		}
 		return handoffs[i].ID < handoffs[j].ID
 	})
-	return handoffs, nil
+	return handoffs, problems, nil
+}
+
+// recordDir validates the context and project, then returns the record
+// subdirectory of kindDir for projectID.
+func (s *Store) recordDir(ctx context.Context, projectID, kindDir string) (string, error) {
+	if err := contextError(ctx); err != nil {
+		return "", err
+	}
+	if err := s.requireProject(projectID); err != nil {
+		return "", err
+	}
+	dir, err := s.projectDir(projectID)
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, kindDir), nil
+}
+
+// readRecords reads every record file in dir with read. A file that cannot be
+// read or parsed is skipped and returned as a Problem instead of failing the
+// whole listing. A zero-byte file is never parsed: it is an interrupted write,
+// so it is skipped and reported, and never deleted.
+func readRecords[T any](ctx context.Context, dir, kind string, read func(path string) ([]T, error)) ([]T, []Problem, error) {
+	paths, err := recordPaths(dir)
+	if err != nil {
+		return nil, nil, err
+	}
+	items := make([]T, 0, len(paths))
+	problems := make([]Problem, 0)
+	for _, path := range paths {
+		if err := contextError(ctx); err != nil {
+			return nil, nil, err
+		}
+		info, err := os.Stat(path)
+		if err != nil {
+			if os.IsNotExist(err) {
+				// Removed after the directory was listed.
+				continue
+			}
+			problems = append(problems, Problem{Path: path, Kind: kind, Reason: err.Error()})
+			continue
+		}
+		if info.Size() == 0 {
+			problems = append(problems, Problem{Path: path, Kind: kind, Reason: emptyRecordReason(info.ModTime())})
+			continue
+		}
+		got, err := read(path)
+		if err != nil {
+			problems = append(problems, Problem{Path: path, Kind: kind, Reason: err.Error()})
+			continue
+		}
+		items = append(items, got...)
+	}
+	return items, problems, nil
+}
+
+func emptyRecordReason(modTime time.Time) string {
+	age := time.Since(modTime)
+	if age >= orphanReservationAge {
+		return fmt.Sprintf("empty file, orphaned reservation from an interrupted write (%s old); not deleted automatically", age.Truncate(time.Second))
+	}
+	return "empty file, possibly a write in progress or an interrupted write"
 }
 
 // recordPaths lists sorted Markdown record files in dir. A missing directory is
-// an empty record set, matching a freshly created project.
+// an empty record set, matching a freshly created project. Temporary and lock
+// files never end in ".md" or are excluded explicitly.
 func recordPaths(dir string) ([]string, error) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
@@ -161,7 +266,8 @@ func recordPaths(dir string) ([]string, error) {
 			continue
 		}
 		name := entry.Name()
-		if strings.HasPrefix(name, tempFilePrefix) {
+		if strings.HasPrefix(name, ".") {
+			// Hidden names hold temporary and reservation files.
 			continue
 		}
 		if !strings.HasSuffix(strings.ToLower(name), ".md") {

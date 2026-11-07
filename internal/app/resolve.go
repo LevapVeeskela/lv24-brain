@@ -46,6 +46,9 @@ func (a *App) ResolveSelector(ctx context.Context, selector string) (Resolved, e
 			return Resolved{}, err
 		}
 		target = wd
+	} else if !looksLikePath(target) {
+		return Resolved{}, domain.NewValidationError("project",
+			"\""+selector+"\" is not a registered project id or alias (pass a path with a separator, e.g. ./dir, to select by path)")
 	}
 	full := normalizePath(target)
 
@@ -154,4 +157,15 @@ func LocalPaths(paths []string) []string {
 		}
 	}
 	return out
+}
+
+// looksLikePath reports whether a selector should be treated as a filesystem
+// path: absolute, relative with a separator, or starting with ".". A bare word
+// such as a mistyped project id is not a path, so it cannot silently resolve
+// to the working directory's project.
+func looksLikePath(selector string) bool {
+	if filepath.IsAbs(selector) || strings.HasPrefix(selector, ".") || strings.HasPrefix(selector, "~") {
+		return true
+	}
+	return strings.ContainsAny(selector, `/\`)
 }
