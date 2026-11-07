@@ -3,6 +3,24 @@
 Three ways to run LV24 Brain. Pick one, finish the smoke checks, then read the
 mode-specific document.
 
+## Five-minute path (one machine, coding agents)
+
+Install a release (see [install.md](install.md); the Unix installer verifies
+the release signature), then:
+
+```sh
+brain init --mode local --data-dir ~/brain        # or --mode git with a clone of your private data repo
+brain config use ~/brain/brain.yaml              # commands work without --config from now on
+brain project set myapp --path ~/src/myapp
+brain note --project myapp --title "First note" --body "It works"
+cd ~/src/myapp && brain open                     # the project is found from the directory
+brain agents sync --hooks                        # Claude Code, Codex and OpenCode start with this context
+```
+
+Approve the new brain hooks in Codex once (Codex keeps hooks disabled until
+they are trusted). That is the whole loop: agents read `brain open` at session
+start and leave an `[auto]` handoff at the end.
+
 | Mode | Storage | Sync | Best for |
 |---|---|---|---|
 | `local` | Markdown on this machine | none | one person |
@@ -68,15 +86,16 @@ Single user, filesystem data, no network.
 Write and read a record:
 
 ```sh
-./bin/brain note --project demo --title "First note" --body "Local smoke check" \
+./bin/brain note --project demo --create --title "First note" --body "Local smoke check" \
   --config ~/brain/brain.yaml
 ./bin/brain open --project demo --config ~/brain/brain.yaml
 ./bin/brain bootstrap --project demo --config ~/brain/brain.yaml
 ./bin/brain review --project demo --config ~/brain/brain.yaml
 ```
 
-`--project demo` is created on first write with an empty state. If exactly one
-project exists, `--project` can be omitted.
+`--create` registers `demo` on this first write; without it an unknown
+project is an error, so a typo never creates a project. If exactly one project
+exists, `--project` can be omitted.
 
 Expected `status` output (paths and version numbers vary):
 
@@ -93,7 +112,7 @@ update_channel: stable
 Expected record output:
 
 ```text
-note note-YYYYMMDD-HHMMSS
+note note-demo-YYYYMMDD-HHMMSS
 ```
 
 Expected `doctor` output:
@@ -103,6 +122,9 @@ ok: config (configuration is valid: <data-dir>/brain.yaml)
 ok: data_dir (exists: <data-dir>)
 ok: schema (schema 1)
 ok: index (SQLite FTS5 is usable)
+ok: records (all record files readable (1 projects))
+ok: journal (every record of the last 30 days is journaled)
+ok: ids (1 record ids are unique)
 ok: git (not required in local mode)
 ```
 
@@ -154,8 +176,9 @@ For GitLab use `BRAIN_GITLAB_PROJECTS` and the secret key `gitlab/token`. For
 IMAP set `BRAIN_IMAP_ACCOUNT`, `BRAIN_IMAP_ADDRESS`, `BRAIN_IMAP_USERNAME`, and
 store the password under `imap/<account-slug>/password` (or override the key
 with `BRAIN_IMAP_PASSWORD_KEY`). Dumps are written below the data directory:
-`github/<owner>/<repo>.md`, `gitlab/<group>/<project>.md`, and
-`mail/<account>/<folder>.md`.
+`github/<owner>/<repo>.md`, `gitlab/<group>/<project>.md`, and one file per
+batch of new mail, `mail/<account>/<folder>/<date>-uid<first>-<last>.md`.
+They are searchable with `brain search --dumps`.
 
 `--since <RFC3339>` limits items by update time; `--limit <n>` caps each
 collection. The command prints source, status, counts, and a sanitized error.
@@ -190,14 +213,15 @@ git clone <private-data-repo-url> "$env:USERPROFILE\brain-data"
 Write, then publish:
 
 ```sh
-./bin/brain note --project demo --title "Team note" --body "Git smoke check" \
+./bin/brain note --project demo --create --title "Team note" --body "Git smoke check" \
   --config ~/brain-data/brain.yaml
 ./bin/brain sync --config ~/brain-data/brain.yaml --push
 ./bin/brain sync --status --config ~/brain-data/brain.yaml
 ```
 
 `brain sync` stages non-ignored files, commits when dirty, fetches, rebases onto
-the upstream branch, and pushes only with `--push`. It never force-pushes and
+the upstream branch, and pushes only with `--push`. A freshly created, empty
+data repository works too: the first `sync --push` creates its branch. It never force-pushes and
 never resolves conflicts automatically. `--status` is read-only.
 
 Expected `sync --status` output:

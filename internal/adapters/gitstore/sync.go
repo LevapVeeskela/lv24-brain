@@ -60,6 +60,19 @@ func (p *Provider) Pull(ctx context.Context, opts ports.SyncOptions) (ports.Sync
 		return ports.SyncResult{}, err
 	}
 
+	// A new, empty data repository has no remote branch yet: there is
+	// nothing to pull, and the first push creates it.
+	if branch != "" && !p.remoteBranchExists(ctx, branch) {
+		revision, err := p.revision(ctx)
+		if err != nil {
+			return ports.SyncResult{}, err
+		}
+		if !opts.Push {
+			return ports.SyncResult{Revision: revision}, nil
+		}
+		return p.Push(ctx)
+	}
+
 	if _, err := p.run(ctx, "pull", "--rebase"); err != nil {
 		conflicts, conflictErr := p.conflictedPaths(ctx)
 		if conflictErr != nil {
@@ -146,4 +159,10 @@ func (p *Provider) Push(ctx context.Context) (ports.SyncResult, error) {
 		return ports.SyncResult{}, err
 	}
 	return ports.SyncResult{Revision: revision, Changed: ahead}, nil
+}
+
+// remoteBranchExists reports whether the last fetch saw branch on the remote.
+func (p *Provider) remoteBranchExists(ctx context.Context, branch string) bool {
+	_, err := p.run(ctx, "rev-parse", "--verify", "--quiet", "refs/remotes/"+p.remote+"/"+branch)
+	return err == nil
 }

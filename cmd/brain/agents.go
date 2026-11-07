@@ -154,8 +154,14 @@ func runAgentsSync(args []string, stdout, stderr io.Writer) int {
 	if err != nil {
 		return reportError(stderr, "agents", err)
 	}
-	content, err := agentsLoadCanonical(sourcePath)
-	if err != nil {
+	// A new instance has no shared instructions yet; --hooks still installs
+	// the session hooks, which do not depend on them.
+	_, statErr := os.Stat(sourcePath)
+	skipInstructions := *hooks && *source == "" && errors.Is(statErr, os.ErrNotExist)
+	content := ""
+	if skipInstructions {
+		fmt.Fprintf(stdout, "skipped (no shared instructions; create %s to sync them) agent instructions\n", sourcePath)
+	} else if content, err = agentsLoadCanonical(sourcePath); err != nil {
 		return reportError(stderr, "agents", err)
 	}
 
@@ -187,7 +193,11 @@ func runAgentsSync(args []string, stdout, stderr io.Writer) int {
 	}
 
 	exit := 0
-	for _, target := range agentsTargets(rootDir, homeDir) {
+	targets := agentsTargets(rootDir, homeDir)
+	if skipInstructions {
+		targets = nil
+	}
+	for _, target := range targets {
 		out, err := agentsPlan(target, src)
 		if err != nil {
 			fmt.Fprintf(stderr, "brain agents: %s: %v\n", target.path, err)

@@ -48,6 +48,18 @@ jobs:
           set -euo pipefail
           "$RUNNER_TEMP/bin/brain" version
           "$RUNNER_TEMP/bin/brain" status --config "$RUNNER_TEMP/brain/brain.yaml"
+      - name: reinstall (expect already installed)
+        run: |
+          set -euo pipefail
+          bash installers/unix/install.sh --dir "$RUNNER_TEMP/bin" --mode local \
+            --data-dir "$RUNNER_TEMP/brain" --yes --no-path-hint | tee "$RUNNER_TEMP/reinstall.log"
+          grep -q "already installed" "$RUNNER_TEMP/reinstall.log"
+      - name: uninstall (brain.yaml must survive)
+        run: |
+          set -euo pipefail
+          bash installers/unix/install.sh --uninstall --dir "$RUNNER_TEMP/bin" --yes
+          test ! -e "$RUNNER_TEMP/bin/brain"
+          test -f "$RUNNER_TEMP/brain/brain.yaml"
 
   macos:
     runs-on: macos-latest
@@ -69,6 +81,18 @@ jobs:
           set -euo pipefail
           "$RUNNER_TEMP/bin/brain" version
           "$RUNNER_TEMP/bin/brain" status --config "$RUNNER_TEMP/brain/brain.yaml"
+      - name: reinstall (expect already installed)
+        run: |
+          set -euo pipefail
+          bash installers/unix/install.sh --dir "$RUNNER_TEMP/bin" --mode local \
+            --data-dir "$RUNNER_TEMP/brain" --yes --no-path-hint | tee "$RUNNER_TEMP/reinstall.log"
+          grep -q "already installed" "$RUNNER_TEMP/reinstall.log"
+      - name: uninstall (brain.yaml must survive)
+        run: |
+          set -euo pipefail
+          bash installers/unix/install.sh --uninstall --dir "$RUNNER_TEMP/bin" --yes
+          test ! -e "$RUNNER_TEMP/bin/brain"
+          test -f "$RUNNER_TEMP/brain/brain.yaml"
 
   windows:
     runs-on: windows-latest
@@ -93,3 +117,21 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           & $brain status --config (Join-Path $env:RUNNER_TEMP 'brain\brain.yaml')
           exit $LASTEXITCODE
+      - name: reinstall (expect already installed)
+        shell: powershell
+        run: |
+          $bin = Join-Path $env:RUNNER_TEMP 'bin'
+          $data = Join-Path $env:RUNNER_TEMP 'brain'
+          $log = Join-Path $env:RUNNER_TEMP 'reinstall.log'
+          ./installers/windows/install.ps1 -Mode local -InstallDir $bin -DataDir $data -NoPath -Yes | Tee-Object -FilePath $log
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if (-not (Select-String -Path $log -Pattern 'already installed' -Quiet)) { throw 'reinstall did not take the already-installed path' }
+      - name: uninstall (brain.yaml must survive)
+        shell: powershell
+        run: |
+          $bin = Join-Path $env:RUNNER_TEMP 'bin'
+          $data = Join-Path $env:RUNNER_TEMP 'brain'
+          ./installers/windows/install.ps1 -Uninstall -InstallDir $bin -Yes
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if (Test-Path -LiteralPath (Join-Path $bin 'brain.exe')) { throw 'brain.exe is still present after uninstall' }
+          if (-not (Test-Path -LiteralPath (Join-Path $data 'brain.yaml'))) { throw 'brain.yaml was removed by uninstall' }

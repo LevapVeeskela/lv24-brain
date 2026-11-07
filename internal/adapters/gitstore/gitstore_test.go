@@ -525,3 +525,32 @@ func TestSanitizeCapsLength(t *testing.T) {
 		t.Errorf("sanitized length = %d, want cap near %d", len(got), maxErrorBytes)
 	}
 }
+
+// A data repository created empty on the hosting service has no remote branch
+// until the first push; the first sync must publish instead of failing to pull.
+func TestPullWithPushIntoEmptyRemote(t *testing.T) {
+	requireGit(t)
+	root := t.TempDir()
+	bare := filepath.Join(root, "remote.git")
+	initRepo(t, bare, true)
+	clone := filepath.Join(root, "clone")
+	runGit(t, root, "clone", "--quiet", bare, clone)
+	repo := &testRepo{t: t, dir: clone}
+	repo.configure()
+	repo.run("symbolic-ref", "HEAD", "refs/heads/main")
+	provider := newTestProvider(t, clone)
+
+	writeFile(t, clone, "brain.yaml", "mode: git\n")
+	if _, err := provider.Commit(context.Background(), "first"); err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+	if _, err := provider.Pull(context.Background(), ports.SyncOptions{}); err != nil {
+		t.Fatalf("Pull without push on an empty remote: %v", err)
+	}
+	if _, err := provider.Pull(context.Background(), ports.SyncOptions{Push: true}); err != nil {
+		t.Fatalf("Pull with push on an empty remote: %v", err)
+	}
+	if log := runGit(t, root, "--git-dir="+bare, "log", "--oneline", "main"); !strings.Contains(log, "first") {
+		t.Fatalf("remote log = %q", log)
+	}
+}

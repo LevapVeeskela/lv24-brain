@@ -169,6 +169,8 @@ func runCommand(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return runServe(rest, stdout, stderr)
 	case "update":
 		return runUpdate(rest, stdout, stderr)
+	case "completion":
+		return runCompletion(rest, stdout, stderr)
 	default:
 		fmt.Fprintf(stderr, "brain: unknown command %q\n\n", command)
 		printUsage(stderr)
@@ -221,6 +223,7 @@ Commands:
   logout     Revoke the server session and clear stored tokens
   serve      Run the HTTP server
   update     Check for, apply, or roll back engine updates
+  completion Print a bash, zsh, fish or PowerShell completion script
   version    Print version information
   help       Show this help
 
@@ -2281,7 +2284,7 @@ func runUpdate(args []string, stdout, stderr io.Writer) int {
 // never block or change the exit code of the command the user asked for.
 func maybeDailyUpdateNotice(command string, args []string, stderr io.Writer) {
 	switch command {
-	case "serve", "init", "help", "-h", "--help", "version", "-v", "--version", "update", "event", "hooks", "config", "agents", "mcp", "session":
+	case "serve", "init", "help", "-h", "--help", "version", "-v", "--version", "update", "event", "hooks", "config", "agents", "mcp", "session", "completion":
 		return
 	}
 	cfg, err := loadConfigOrDefault(configPathFromArgs(args))

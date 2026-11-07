@@ -106,6 +106,8 @@ Local and Git modes write a `data_dir`; server mode writes only `server_url`.
 | `-InstallOpenCodeHook` | Install the OpenCode handoff plugin. |
 | `-NoPath` | Do not modify the user `PATH`. |
 | `-SkipChecksum` | Explicitly skip checksum verification (not recommended). |
+| `-Force` | Reinstall even when the binary already reports the selected version. |
+| `-Uninstall` | Remove `brain.exe` and leftovers from `-InstallDir`, the PATH entry the installer added, and the OpenCode hook if it is the brain one. Keeps `brain.yaml`, data, and secrets. Needs `-Yes` when input is not interactive (exit 2). |
 | `-Yes` | Non-interactive; defaults to `local` when `-Mode` is omitted. |
 
 ## macOS and Linux installer
@@ -122,7 +124,9 @@ The script requires bash 3.2 or newer (the macOS default), `curl`, and one of
 
 The installer:
 
-1. Resolves the newest release on the selected channel (or `--version`).
+1. Resolves the release with the highest semantic version on the selected
+   channel (or `--version`). Drafts are skipped; stable skips prereleases;
+   `v0.2.10` ranks above `v0.2.9`, and `v1.0.0` above `v1.0.0-beta.2`.
 2. Reads `release.json` and selects the `linux`/`darwin` `amd64`/`arm64` CLI
    asset, falling back to `checksums.txt` when the manifest is absent. When an
    OpenSSL 3 with Ed25519 is available (on PATH or Homebrew; macOS
@@ -147,14 +151,18 @@ Options:
 | `--data-dir <path>` | Data directory for `local`/`git`. |
 | `--server-url <url>` | Server URL for `server` (HTTPS only). |
 | `--config <path>` | `brain.yaml` path. |
-| `--yes` | Run the init step without prompting. |
+| `--yes` | Run the init step without prompting; with `--uninstall`, skip the confirmation. |
+| `--force` | Reinstall even when the binary already reports the selected version. |
+| `--uninstall` | Remove `brain`, `brain.previous`, and installer leftovers from `--dir`. |
 | `--no-path-hint` | Do not print PATH instructions. |
 | `--help` | Show usage. |
 
 Set a read-only `GITHUB_TOKEN` to raise GitHub API rate limits; the script
 sends it only as a request header and never prints or stores it. Re-running the
-installer is safe: an identical installed binary is left untouched and keeps
-its `brain.previous` rollback copy.
+installer is safe: when the installed `brain version` already names the selected
+version, the download is skipped and `brain.yaml` and the data directory are
+left as they are. `--force` reinstalls; the previous binary is kept as
+`brain.previous`.
 
 Git mode does not clone. Point `--data-dir` at an existing clone of the private
 data repository (default `~/brain-data`), or clone it first.
@@ -176,11 +184,14 @@ Rollback and uninstall:
 
 ```sh
 mv ~/.local/bin/brain.previous ~/.local/bin/brain   # rollback
-rm ~/.local/bin/brain ~/.local/bin/brain.previous   # uninstall
+bash installers/unix/install.sh --uninstall --dir ~/.local/bin   # uninstall (asks first)
 ```
 
-Remove the `PATH` line and delete the data directory only after you have backed
-it up.
+`--uninstall` removes only the binary, `brain.previous`, and installer leftovers
+in `--dir`. It never removes `brain.yaml`, the data directory, secrets, or
+`~/.claude` / `~/.codex` settings, and it prints what it kept. Remove the
+`PATH` line from your shell profile yourself, and delete the data directory
+only after you have backed it up.
 
 ## Manual install
 
@@ -264,13 +275,29 @@ timeout because the default is very short:
 }
 ```
 
+## Shell completion
+
+`brain completion <shell>` prints a static completion script for commands,
+subcommands, flags, and the fixed values of `--kind`, `--status`, and
+`--hook`. Project ids are not completed. Install it once per shell:
+
+- bash: `brain completion bash > ~/.local/share/bash-completion/completions/brain`
+- zsh: `brain completion zsh > <a directory on $fpath>/_brain`, for example `~/.zfunc/_brain`, then start a new shell
+- fish: `brain completion fish > ~/.config/fish/completions/brain.fish`
+- PowerShell: append `brain completion powershell | Out-String | Invoke-Expression` to `$PROFILE`
+
+Open a new shell after installing. Re-run the command after upgrading brain so
+new flags are picked up.
+
 ## Updating and uninstalling
 
 - Check for updates with `brain update --check`; see [update.md](update.md).
-- To uninstall, remove the binary directory, remove its entry from the user
-  `PATH`, remove the OpenCode hook, and delete the local data directory only
-  after you have backed it up. Deleting data is destructive and is never done
-  automatically by the installer.
+- To uninstall, run the installer with `--uninstall` (macOS/Linux) or
+  `-Uninstall` (Windows); both ask before removing anything, and `--yes` /
+  `-Yes` skips the prompt. The uninstaller removes the binary and its leftovers,
+  the PATH entry it added, and the brain OpenCode hook. It keeps `brain.yaml`,
+  the data directory, and secrets. Deleting data is destructive and is never
+  done automatically by the installer; delete it yourself after a backup.
 
 ## Troubleshooting
 

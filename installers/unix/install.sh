@@ -2,10 +2,13 @@
 #
 # LV24 Brain installer for macOS and Linux.
 #
-# Resolves a published GitHub release, reads release.json (or checksums.txt),
-# verifies the SHA-256 checksum, installs the brain binary atomically, keeps
-# the previous binary as brain.previous, and optionally initializes a brain
-# instance.
+# Resolves a published GitHub release (latest = highest semantic version on the
+# channel), reads release.json (or checksums.txt), verifies the SHA-256 checksum,
+# installs the brain binary atomically, keeps the previous binary as
+# brain.previous, and optionally initializes a brain instance. A re-run for the
+# version already installed skips the download unless --force is given.
+# --uninstall removes the binary and its leftovers; it never touches brain.yaml,
+# the data directory, secrets, or ~/.claude / ~/.codex settings.
 #
 # The installer never asks for, writes, or logs secrets, never uses sudo, and
 # never pipes a download into a shell. Compatible with bash 3.2 (macOS).
@@ -25,6 +28,8 @@ SERVER_URL=""
 CONFIG_PATH=""
 ASSUME_YES=0
 NO_PATH_HINT=0
+FORCE=0
+UNINSTALL=0
 
 OS=""
 ARCH=""
@@ -58,7 +63,12 @@ Options:
   --data-dir PATH        Brain data directory for local and git mode.
   --server-url URL       Brain server base URL for server mode (https only).
   --config PATH          brain.yaml path passed to "brain init".
-  --yes                  Non-interactive: run "brain init" when --mode is set.
+  --yes                  Non-interactive: run "brain init" when --mode is set;
+                         with --uninstall, skip the confirmation prompt.
+  --force                Reinstall even when the binary already reports the version.
+  --uninstall            Remove brain, brain.previous, and install leftovers from
+                         --dir. Keeps brain.yaml, data, and secrets. Refuses
+                         without --yes when stdin is not a terminal (exit 2).
   --no-path-hint         Do not print a PATH hint.
   -h, --help             Show this help.
 
@@ -185,6 +195,14 @@ parse_args() {
                 NO_PATH_HINT=1
                 shift
                 ;;
+            --force)
+                FORCE=1
+                shift
+                ;;
+            --uninstall)
+                UNINSTALL=1
+                shift
+                ;;
             -*)
                 usage_error "unknown option: $1"
                 ;;
@@ -241,7 +259,7 @@ validate_args() {
         usage_error "--mode server requires --server-url"
     fi
 
-    if [ -z "$MODE" ] && { [ -n "$DATA_DIR" ] || [ -n "$CONFIG_PATH" ]; }; then
+    if [ -z "$MODE" ] && [ "$UNINSTALL" -eq 0 ] && { [ -n "$DATA_DIR" ] || [ -n "$CONFIG_PATH" ]; }; then
         warn "--data-dir and --config only apply with --mode; ignoring them"
         DATA_DIR=""
         CONFIG_PATH=""
@@ -343,6 +361,147 @@ api_get() {
     http_get "$API_ROOT$1" "$2" api
 }
 
+semver_valid() {
+    # semver_valid TAG: succeeds for vMAJOR.MINOR.PATCH with optional -pre and +build.
+    printf '%s' "$1" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$'
+}
+
+compare_num() {
+    # compare_num A B: prints -1, 0, or 1 for two non-negative integers.
+    if [ $((10#$1)) -lt $((10#$2)) ]; then
+        printf -- '-1'
+    elif [ $((10#$1)) -gt $((10#$2)) ]; then
+        printf '1'
+    else
+        printf '0'
+    fi
+}
+
+compare_pre_identifier() {
+    # SemVer 2.0 rule for one prerelease identifier: numeric < alphanumeric,
+    # numeric identifiers compare as numbers.
+    local left="$1" right="$2" left_num=0 right_num=0
+    case "$left" in ''|*[!0-9]*) ;; *) left_num=1 ;; esac
+    case "$right" in ''|*[!0-9]*) ;; *) right_num=1 ;; esac
+    if [ "$left_num" -eq 1 ] && [ "$right_num" -eq 1 ]; then
+        compare_num "$left" "$right"
+    elif [ "$left_num" -eq 1 ]; then
+        printf -- '-1'
+    elif [ "$right_num" -eq 1 ]; then
+        printf '1'
+    elif [ "$left" = "$right" ]; then
+        printf '0'
+    elif [[ "$left" < "$right" ]]; then
+        printf -- '-1'
+    else
+        printf '1'
+    fi
+}
+
+semver_compare() {
+    # semver_compare A B: prints -1, 0, or 1 by SemVer 2.0 precedence.
+    # A leading v and +build metadata are ignored. A release outranks its prereleases.
+    local a b a_pre="" b_pre="" a1 a2 a3 b1 b2 b3 r i
+    local -a ap bp
+    a="${1#v}"
+    a="${a%%+*}"
+    b="${2#v}"
+    b="${b%%+*}"
+    case "$a" in *-*) a_pre="${a#*-}" ;; esac
+    case "$b" in *-*) b_pre="${b#*-}" ;; esac
+    IFS=. read -r a1 a2 a3 <<<"${a%%-*}"
+    IFS=. read -r b1 b2 b3 <<<"${b%%-*}"
+    r="$(compare_num "${a1:-0}" "${b1:-0}")"
+    if [ "$r" != 0 ]; then printf '%s' "$r"; return 0; fi
+    r="$(compare_num "${a2:-0}" "${b2:-0}")"
+    if [ "$r" != 0 ]; then printf '%s' "$r"; return 0; fi
+    r="$(compare_num "${a3:-0}" "${b3:-0}")"
+    if [ "$r" != 0 ]; then printf '%s' "$r"; return 0; fi
+
+    if [ -z "$a_pre" ] && [ -z "$b_pre" ]; then printf '0'; return 0; fi
+    if [ -z "$a_pre" ]; then printf '1'; return 0; fi
+    if [ -z "$b_pre" ]; then printf -- '-1'; return 0; fi
+
+    IFS=. read -r -a ap <<<"$a_pre"
+    IFS=. read -r -a bp <<<"$b_pre"
+    i=0
+    while [ "$i" -lt "${#ap[@]}" ] && [ "$i" -lt "${#bp[@]}" ]; do
+        r="$(compare_pre_identifier "${ap[$i]}" "${bp[$i]}")"
+        if [ "$r" != 0 ]; then printf '%s' "$r"; return 0; fi
+        i=$((i + 1))
+    done
+    if [ "${#ap[@]}" -lt "${#bp[@]}" ]; then
+        printf -- '-1'
+    elif [ "${#ap[@]}" -gt "${#bp[@]}" ]; then
+        printf '1'
+    else
+        printf '0'
+    fi
+}
+
+release_records() {
+    # release_records FILE: prints one line per release of a GitHub release list,
+    # keeping only each release's own top-level fields. Nested author and asset
+    # objects are dropped, so draft and prerelease belong to their own release.
+    tr -d '\r' <"$1" | awk '
+        BEGIN { depth = 0; instr = 0; esc = 0; rec = "" }
+        {
+            n = length($0)
+            for (i = 1; i <= n; i++) {
+                c = substr($0, i, 1)
+                if (instr) {
+                    if (esc) { esc = 0 } else if (c == "\\") { esc = 1 } else if (c == "\"") { instr = 0 }
+                    if (depth == 2) rec = rec c
+                    continue
+                }
+                if (c == "\"") {
+                    instr = 1
+                    if (depth == 2) rec = rec c
+                } else if (c == "{" || c == "[") {
+                    depth++
+                } else if (c == "}" || c == "]") {
+                    depth--
+                    if (depth == 1 && c == "}") { print rec; rec = "" }
+                } else if (depth == 2) {
+                    rec = rec c
+                }
+            }
+        }'
+}
+
+select_latest_release() {
+    # select_latest_release FILE CHANNEL: prints the top-level record of the
+    # highest-version non-draft release on CHANNEL. Stable skips prereleases;
+    # beta accepts both. Non-semver tags are ignored.
+    local file="$1" channel="$2" record tag best="" best_tag=""
+    release_records "$file" >"$TMP_DIR/release-records.txt"
+    while IFS= read -r record; do
+        [ -n "$record" ] || continue
+        tag="$(json_string "$record" tag_name)"
+        semver_valid "$tag" || continue
+        if json_true "$record" draft; then continue; fi
+        if [ "$channel" = stable ] && json_true "$record" prerelease; then continue; fi
+        if [ -z "$best_tag" ] || [ "$(semver_compare "$tag" "$best_tag")" = 1 ]; then
+            best="$record"
+            best_tag="$tag"
+        fi
+    done <"$TMP_DIR/release-records.txt"
+    [ -n "$best" ] || return 1
+    printf '%s\n' "$best"
+}
+
+binary_reports_version() {
+    # binary_reports_version VERSION: succeeds when TARGET_PATH runs and its
+    # "brain version" first line names VERSION (for example "brain 0.2.10 (commit ...)").
+    local want line
+    want="${1#v}"
+    [ -x "$TARGET_PATH" ] || return 1
+    line="$("$TARGET_PATH" version 2>/dev/null | sed -n '1p')" || return 1
+    printf '%s\n' "$line" | awk -v want="$want" '
+        { for (i = 1; i <= NF; i++) { f = $i; sub(/^v/, "", f); if (f == want) found = 1 } }
+        END { exit (found ? 0 : 1) }'
+}
+
 resolve_release() {
     local release_file release_json
     release_file="$TMP_DIR/release.json"
@@ -353,20 +512,14 @@ resolve_release() {
         if ! api_get "/repos/$REPO/releases/tags/$TAG" "$release_file"; then
             die "release $TAG was not found in $REPO (or GitHub was unreachable)"
         fi
-    elif [ "$CHANNEL" = stable ]; then
-        step "Looking up the latest stable release"
-        if ! api_get "/repos/$REPO/releases/latest" "$release_file"; then
-            die "no stable release resolved; set GITHUB_TOKEN for rate limits or use --channel beta"
-        fi
+        release_json="$(json_flat "$release_file")"
     else
-        step "Looking up the latest $CHANNEL release"
-        if ! api_get "/repos/$REPO/releases?per_page=1" "$release_file"; then
-            die "could not read the release list for $REPO"
+        step "Looking up the latest $CHANNEL release (highest semantic version)"
+        if ! api_get "/repos/$REPO/releases?per_page=100" "$release_file"; then
+            die "could not read the release list for $REPO; set GITHUB_TOKEN for rate limits or pin --version"
         fi
-    fi
-
-    release_json="$(json_flat "$release_file")"
-    if [ -z "$TAG" ]; then
+        release_json="$(select_latest_release "$release_file" "$CHANNEL")" ||
+            die "no $CHANNEL release with a semantic version was found in $REPO"
         TAG="$(json_string "$release_json" tag_name)"
     fi
     [ -n "$TAG" ] || die "the GitHub response did not contain a release tag"
@@ -561,7 +714,7 @@ resolve_package() {
 
     assert_artifact_host "$ASSET_URL"
 
-    if [ -f "$TARGET_PATH" ] && [ "$(sha256_file "$TARGET_PATH")" = "$EXPECTED_SHA" ]; then
+    if [ "$FORCE" -eq 0 ] && [ -f "$TARGET_PATH" ] && [ "$(sha256_file "$TARGET_PATH")" = "$EXPECTED_SHA" ]; then
         INSTALLED_ALREADY=1
     fi
 }
@@ -724,24 +877,65 @@ cleanup() {
     fi
 }
 
+uninstall_targets() {
+    # Prints the files --uninstall removes from INSTALL_DIR that exist, one per line.
+    local candidate
+    for candidate in "$INSTALL_DIR/brain" "$INSTALL_DIR/brain.previous" \
+        "$INSTALL_DIR"/.brain.install.* "$INSTALL_DIR"/.brain*-old-* "$INSTALL_DIR"/.brain*-new-*; do
+        if [ -e "$candidate" ] || [ -L "$candidate" ]; then
+            printf '%s\n' "$candidate"
+        fi
+    done
+}
+
+uninstall() {
+    local targets path
+    targets="$(uninstall_targets)"
+    if [ -z "$targets" ]; then
+        step "Uninstall: nothing to remove in $INSTALL_DIR"
+        return 0
+    fi
+
+    step "Uninstalling brain from $INSTALL_DIR"
+    while IFS= read -r path; do
+        note "will remove: $path"
+    done <<<"$targets"
+
+    if [ "$ASSUME_YES" -eq 0 ]; then
+        if [ ! -t 0 ]; then
+            printf 'install.sh: uninstall needs confirmation; rerun with --yes when stdin is not a terminal\n' >&2
+            exit 2
+        fi
+        printf 'Remove the files listed above? [y/N] '
+        local answer=""
+        IFS= read -r answer || answer=""
+        case "$answer" in
+            y|Y|yes|YES) ;;
+            *) step "Uninstall cancelled; nothing was removed."; exit 1 ;;
+        esac
+    fi
+
+    while IFS= read -r path; do
+        rm -f "$path" || die "cannot remove $path"
+        note "removed: $path"
+    done <<<"$targets"
+
+    step "Kept (never removed by the uninstaller)"
+    note "brain.yaml and data directories (default \$HOME/brain or \$HOME/brain-data, or the --data-dir you passed)"
+    note "secrets, .env files, and ~/.claude / ~/.codex settings"
+    if [ -n "$DATA_DIR" ]; then
+        note "To delete data manually after a backup: rm -rf \"$DATA_DIR\""
+    else
+        note "To delete data manually after a backup: rm -rf \"\$HOME/brain\" or \"\$HOME/brain-data\""
+    fi
+    note "Remove any PATH export you added to your shell profile yourself; this installer does not add one."
+}
+
 main() {
     local uname_s uname_m
 
     parse_args "$@"
     validate_args
-
-    uname_s="$(uname -s)"
-    case "$uname_s" in
-        Linux) OS="linux" ;;
-        Darwin) OS="darwin" ;;
-        *) die "unsupported operating system: $uname_s (releases cover Linux and macOS)" ;;
-    esac
-    uname_m="$(uname -m)"
-    case "$uname_m" in
-        x86_64|amd64) ARCH="amd64" ;;
-        arm64|aarch64) ARCH="arm64" ;;
-        *) die "unsupported architecture: $uname_m (releases cover amd64 and arm64)" ;;
-    esac
 
     if [ -z "${HOME:-}" ]; then
         die "HOME is not set; pass --dir to choose an install directory"
@@ -758,6 +952,25 @@ main() {
         CONFIG_PATH="$(absolute_path "$(expand_path "$CONFIG_PATH")")"
     fi
 
+    # Uninstall only removes local files, so it does not need a supported platform check.
+    if [ "$UNINSTALL" -eq 1 ]; then
+        uninstall
+        return 0
+    fi
+
+    uname_s="$(uname -s)"
+    case "$uname_s" in
+        Linux) OS="linux" ;;
+        Darwin) OS="darwin" ;;
+        *) die "unsupported operating system: $uname_s (releases cover Linux and macOS)" ;;
+    esac
+    uname_m="$(uname -m)"
+    case "$uname_m" in
+        x86_64|amd64) ARCH="amd64" ;;
+        arm64|aarch64) ARCH="arm64" ;;
+        *) die "unsupported architecture: $uname_m (releases cover amd64 and arm64)" ;;
+    esac
+
     check_prereqs
     TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/lv24-brain-install.XXXXXX")" || die "cannot create a temporary directory"
     trap cleanup EXIT
@@ -766,10 +979,18 @@ main() {
 
     step "Installing brain for $OS/$ARCH into $INSTALL_DIR"
     resolve_release
-    resolve_package
-    install_binary
+    if [ "$FORCE" -eq 0 ] && binary_reports_version "$VERSION_NUMBER"; then
+        step "brain $VERSION_NUMBER is already installed at $TARGET_PATH; download skipped (use --force to reinstall)"
+        INSTALLED_ALREADY=1
+    else
+        resolve_package
+        install_binary
+    fi
     verify_binary
     finish
 }
 
-main "$@"
+# Tests source this file with LV24_INSTALLER_SOURCE_ONLY=1 to call helpers such as semver_compare.
+if [ "${LV24_INSTALLER_SOURCE_ONLY:-0}" != 1 ]; then
+    main "$@"
+fi

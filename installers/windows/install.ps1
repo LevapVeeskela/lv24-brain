@@ -42,6 +42,18 @@ Expected SHA-256 for -SourceBinary or as an override for the release asset.
 Replace an existing brain.yaml. Off by default: a reinstall keeps the existing
 configuration and prints a note instead.
 
+.PARAMETER Force
+Reinstall the binary even when it already reports the selected version.
+
+.PARAMETER Uninstall
+Remove brain.exe (and its .previous/.new leftovers) from -InstallDir, the
+installer's user PATH entry, and the OpenCode hook when it is the brain one.
+Never removes brain.yaml, the data directory, secrets, or ~/.claude and
+~/.codex settings. Requires -Yes when input is not interactive.
+
+.EXAMPLE
+.\install.ps1 -Uninstall -Yes
+
 .EXAMPLE
 .\install.ps1 -Mode local -InstallOpenCodeHook
 
@@ -86,6 +98,10 @@ param(
     [switch]$SkipChecksum,
 
     [switch]$OverwriteConfig,
+
+    [switch]$Force,
+
+    [switch]$Uninstall,
 
     [switch]$Yes
 )
@@ -215,13 +231,73 @@ function Invoke-Download {
     Invoke-WebRequest -Uri $Uri -OutFile $Destination -Headers $script:Headers -UseBasicParsing
 }
 
+function ConvertTo-SemVer {
+    # Returns Major/Minor/Patch (int64) and Pre (prerelease text, '' for a release),
+    # or $null when the text is not a semantic version. A leading v and +build are allowed.
+    param([AllowNull()][string]$Text)
+    if (-not $Text) {
+        return $null
+    }
+    $match = [regex]::Match($Text, '^v?([0-9]+)\.([0-9]+)\.([0-9]+)(?:-([0-9A-Za-z.-]+))?(?:\+[0-9A-Za-z.-]+)?$')
+    if (-not $match.Success) {
+        return $null
+    }
+    return [pscustomobject]@{
+        Major = [int64]$match.Groups[1].Value
+        Minor = [int64]$match.Groups[2].Value
+        Patch = [int64]$match.Groups[3].Value
+        Pre   = [string]$match.Groups[4].Value
+    }
+}
+
+function Compare-PreIdentifier {
+    param([string]$Left, [string]$Right)
+    $leftNumeric = $Left -match '^[0-9]+$'
+    $rightNumeric = $Right -match '^[0-9]+$'
+    if ($leftNumeric -and $rightNumeric) {
+        if ([int64]$Left -lt [int64]$Right) { return -1 }
+        if ([int64]$Left -gt [int64]$Right) { return 1 }
+        return 0
+    }
+    if ($leftNumeric) { return -1 }
+    if ($rightNumeric) { return 1 }
+    return [Math]::Sign([string]::CompareOrdinal($Left, $Right))
+}
+
+function Compare-SemVer {
+    # SemVer 2.0 precedence: returns -1, 0, or 1 for $Left against $Right.
+    param([Parameter(Mandatory = $true)][string]$Left, [Parameter(Mandatory = $true)][string]$Right)
+    $a = ConvertTo-SemVer $Left
+    $b = ConvertTo-SemVer $Right
+    if (-not $a -or -not $b) {
+        throw "Not a semantic version: $Left or $Right"
+    }
+    foreach ($field in @('Major', 'Minor', 'Patch')) {
+        if ($a.$field -lt $b.$field) { return -1 }
+        if ($a.$field -gt $b.$field) { return 1 }
+    }
+    if (-not $a.Pre -and -not $b.Pre) { return 0 }
+    if (-not $a.Pre) { return 1 }
+    if (-not $b.Pre) { return -1 }
+    $leftIds = @($a.Pre -split '\.')
+    $rightIds = @($b.Pre -split '\.')
+    $count = [Math]::Min($leftIds.Count, $rightIds.Count)
+    for ($i = 0; $i -lt $count; $i++) {
+        $order = Compare-PreIdentifier $leftIds[$i] $rightIds[$i]
+        if ($order -ne 0) { return $order }
+    }
+    if ($leftIds.Count -eq $rightIds.Count) { return 0 }
+    if ($leftIds.Count -lt $rightIds.Count) { return -1 }
+    return 1
+}
+
 function Get-Release {
     param(
         [Parameter(Mandatory = $true)][string]$Repository,
         [Parameter(Mandatory = $true)][string]$ReleaseVersion,
         [Parameter(Mandatory = $true)][string]$ReleaseChannel
     )
-    $uri = "https://api.github.com/repos/$Repository/releases?per_page=30"
+    $uri = "https://api.github.com/repos/$Repository/releases?per_page=100"
     # Windows PowerShell 5.1 returns a JSON array as one object; piping
     # unrolls it so each release is filtered on its own.
     $releases = @((Invoke-RestMethod -Uri $uri -Headers $script:Headers -Method Get) | ForEach-Object { $_ })
@@ -240,9 +316,22 @@ function Get-Release {
         }
         return $match
     }
-    $latest = $filtered | Sort-Object { [DateTime]$_.published_at } -Descending | Select-Object -First 1
+    # Highest semantic version wins (v0.2.10 > v0.2.9, 1.0.0 > 1.0.0-beta.2),
+    # not the newest published_at. Non-semver tags are ignored.
+    $latest = $null
+    $latestTag = ''
+    foreach ($candidate in $filtered) {
+        $candidateTag = [string](Get-Field $candidate 'tag_name')
+        if (-not (ConvertTo-SemVer $candidateTag)) {
+            continue
+        }
+        if (-not $latest -or (Compare-SemVer $candidateTag $latestTag) -gt 0) {
+            $latest = $candidate
+            $latestTag = $candidateTag
+        }
+    }
     if (-not $latest) {
-        throw "No releases found on channel $ReleaseChannel."
+        throw "No releases with a semantic version found on channel $ReleaseChannel."
     }
     return $latest
 }
@@ -337,6 +426,12 @@ function Install-BrainBinary {
         Write-Step "Looking up release ($Channel, $Version)"
         $release = Get-Release -Repository $Repo -ReleaseVersion $Version -ReleaseChannel $Channel
         $manifest = Get-ReleaseManifest -Release $release
+        $manifestVersion = [string](Get-Field $manifest 'version')
+        $installedExe = Join-Path $TargetDir 'brain.exe'
+        if (-not $Force -and (Test-InstalledVersion -BrainExe $installedExe -Version $manifestVersion)) {
+            Write-Step "brain $manifestVersion is already installed at $installedExe (download skipped; use -Force to reinstall)"
+            return $installedExe
+        }
         $asset = Get-ManifestAsset -Manifest $manifest -Architecture $Architecture
         if (-not $expected) {
             $expected = Get-Field $asset 'sha256'
@@ -388,12 +483,15 @@ function Add-UserPath {
             break
         }
     }
+    $added = $false
     if (-not $present) {
         $updated = (($entries + $Directory.TrimEnd('\')) -join ';')
         [Environment]::SetEnvironmentVariable('Path', $updated, 'User')
         Write-Step "Added $Directory to the user PATH (open a new terminal to pick it up)"
+        $added = $true
     }
     $env:Path = $Directory + ';' + $env:Path
+    return $added
 }
 
 function Write-BrainConfig {
@@ -531,7 +629,155 @@ function Install-OpenCodeHook {
     Write-Step "Installed the OpenCode handoff hook at $target"
 }
 
+function Get-InstalledVersion {
+    # Returns the version named by "brain version" (first line), or '' when unavailable.
+    param([Parameter(Mandatory = $true)][string]$BrainExe)
+    if (-not (Test-Path -LiteralPath $BrainExe)) {
+        return ''
+    }
+    try {
+        $line = @(& $BrainExe version 2>$null) | Select-Object -First 1
+    }
+    catch {
+        return ''
+    }
+    if ($LASTEXITCODE -ne 0 -or -not $line) {
+        return ''
+    }
+    if ([string]$line -match '^brain\s+v?([0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?)(?:\+[0-9A-Za-z.-]+)?\s') {
+        return $Matches[1]
+    }
+    return ''
+}
+
+function Test-InstalledVersion {
+    # True when the binary at BrainExe already reports exactly Version (semver equality).
+    param(
+        [Parameter(Mandatory = $true)][string]$BrainExe,
+        [Parameter(Mandatory = $true)][string]$Version
+    )
+    $installed = Get-InstalledVersion -BrainExe $BrainExe
+    if (-not $installed -or -not (ConvertTo-SemVer $Version)) {
+        return $false
+    }
+    return ((Compare-SemVer $installed $Version) -eq 0)
+}
+
+function Remove-UserPath {
+    # Removes only the exact Directory entry from the user PATH; other entries keep their order and text.
+    param([Parameter(Mandatory = $true)][string]$Directory)
+    $current = [Environment]::GetEnvironmentVariable('Path', 'User')
+    if ([string]::IsNullOrEmpty($current)) {
+        return $false
+    }
+    $target = $Directory.TrimEnd('\')
+    $kept = @()
+    $removed = $false
+    foreach ($entry in ($current -split ';')) {
+        if ($entry -and $entry.TrimEnd('\') -ieq $target) {
+            $removed = $true
+            continue
+        }
+        $kept += $entry
+    }
+    if ($removed) {
+        [Environment]::SetEnvironmentVariable('Path', ($kept -join ';'), 'User')
+    }
+    return $removed
+}
+
+function Invoke-Uninstall {
+    # Removes brain.exe and its leftovers, the installer's PATH entry, and the brain OpenCode hook.
+    # Never touches brain.yaml, the data directory, secrets, or ~/.claude / ~/.codex settings.
+    $dir = [IO.Path]::GetFullPath($InstallDir)
+    $targets = New-Object System.Collections.Generic.List[string]
+    foreach ($name in @('brain.exe', 'brain.exe.previous', 'brain.exe.new')) {
+        $candidate = Join-Path $dir $name
+        if (Test-Path -LiteralPath $candidate) {
+            $targets.Add($candidate)
+        }
+    }
+    if (Test-Path -LiteralPath $dir) {
+        foreach ($item in @(Get-ChildItem -LiteralPath $dir -Force -File)) {
+            if (($item.Name -like '.brain*-old-*') -or ($item.Name -like '.brain*-new-*')) {
+                $targets.Add($item.FullName)
+            }
+        }
+    }
+    $markerPath = Join-Path $dir '.path-added'
+    $pathAdded = Test-Path -LiteralPath $markerPath
+    $hookPath = Join-Path $env:USERPROFILE '.config\opencode\plugins\brain-handoff.js'
+    $hookIsBrain = $false
+    if (Test-Path -LiteralPath $hookPath) {
+        $hookIsBrain = [IO.File]::ReadAllText($hookPath).Contains('LV24 Brain OpenCode hook template')
+    }
+
+    if ($targets.Count -eq 0 -and -not $pathAdded -and -not $hookIsBrain) {
+        Write-Step "Uninstall: nothing to remove in $dir"
+        return
+    }
+
+    Write-Step "Uninstalling brain from $dir"
+    foreach ($path in $targets) {
+        Write-Note "will remove: $path"
+    }
+    if ($hookIsBrain) {
+        Write-Note "will remove: $hookPath (OpenCode hook with the brain marker)"
+    }
+    if ($pathAdded) {
+        if ($NoPath) {
+            Write-Note 'user PATH is left unchanged (-NoPath)'
+        }
+        else {
+            Write-Note "will remove $dir from the user PATH (the installer added it)"
+        }
+    }
+
+    if (-not $Yes) {
+        if ([Console]::IsInputRedirected) {
+            Write-Host 'Uninstall needs confirmation: rerun with -Yes when input is not interactive.' -ForegroundColor Red
+            exit 2
+        }
+        $answer = [string](Read-Host 'Remove the items listed above? [y/N]')
+        if ($answer.Trim() -notmatch '^(y|yes)$') {
+            Write-Step 'Uninstall cancelled; nothing was removed.'
+            exit 1
+        }
+    }
+
+    foreach ($path in $targets) {
+        Remove-Item -LiteralPath $path -Force
+        Write-Note "removed: $path"
+    }
+    if ($hookIsBrain) {
+        Remove-Item -LiteralPath $hookPath -Force
+        Write-Note "removed: $hookPath"
+    }
+    if ($pathAdded -and -not $NoPath) {
+        if (Remove-UserPath -Directory $dir) {
+            Write-Note "removed $dir from the user PATH"
+        }
+        else {
+            Write-Note 'the user PATH had no entry for this directory'
+        }
+        Remove-Item -LiteralPath $markerPath -Force
+    }
+
+    Write-Host ''
+    Write-Step 'Kept (never removed by the uninstaller)'
+    Write-Note 'brain.yaml and the data directory (default %USERPROFILE%\brain or %USERPROFILE%\brain-data, or the -DataDir you passed)'
+    Write-Note 'secrets, .env files, %USERPROFILE%\.claude and %USERPROFILE%\.codex settings, OpenCode hook backups (*.bak-*)'
+    if ($DataDir) {
+        Write-Note "To delete data manually after a backup: Remove-Item -Recurse -Force '$DataDir'"
+    }
+    Write-Note 'Open a new terminal to refresh PATH.'
+}
+
 try {
+    if ($Uninstall) {
+        Invoke-Uninstall
+        exit 0
+    }
     $Mode = Resolve-InstallMode -RequestedMode $Mode -NonInteractive:$Yes
     if ($Mode -eq 'server') {
         $ServerUrl = Resolve-ServerUrl -Value $ServerUrl -NonInteractive:$Yes
@@ -561,7 +807,10 @@ try {
     Initialize-BrainInstance -BrainExe $brainExe -ConfigPath $configPath -SelectedMode $installMode -BrainDataDir $dataDirectory -BrainServerUrl $ServerUrl -UpdateChannel $Channel | Out-Null
 
     if (-not $NoPath) {
-        Add-UserPath -Directory $InstallDir
+        if (Add-UserPath -Directory $InstallDir) {
+            # Marks the PATH entry as installer-owned so -Uninstall removes only that.
+            [IO.File]::WriteAllText((Join-Path $InstallDir '.path-added'), "added by install.ps1`r`n", (New-Object System.Text.UTF8Encoding($false)))
+        }
     }
 
     if (-not $InstallOpenCodeHook -and -not $Yes) {
