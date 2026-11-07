@@ -182,7 +182,10 @@ with `brain secret set server-token` (value read from stdin). There is no CLI
 OIDC flow yet. Missing or invalid tokens surface as a failing `server` check in
 `brain doctor`. `brain sync` and `brain index` are not available in server
 mode: the API is the sync path. `brain search` works in server mode through
-`GET /v1/search`.
+`GET /v1/search`. Server search is PostgreSQL full-text search over generated
+`search_tsv` columns (migration 0007, `simple` configuration, title weighted
+above body) and ranks before it applies the limit. `kind` and `exclude_kind`
+filters are honored in both server and local modes.
 
 List-like capabilities are optional Store extensions: an adapter that does not
 implement `ListNotes` / `ListDecisions` / `ListAttempts` / `ListHandoffs` still

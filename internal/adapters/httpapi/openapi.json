@@ -468,13 +468,18 @@
     },
     "/v1/search": {
       "get": {
-        "summary": "Full-text substring search over knowledge",
+        "summary": "Full-text search over knowledge, ranked by relevance",
         "parameters": [
           { "name": "q", "in": "query", "required": true, "schema": { "type": "string" } },
           { "name": "projectId", "in": "query", "schema": { "type": "string" } },
-          { "name": "limit", "in": "query", "schema": { "type": "integer" } }
+          { "name": "limit", "in": "query", "schema": { "type": "integer" } },
+          { "name": "kind", "in": "query", "description": "Keep only these kinds; repeatable", "schema": { "type": "string", "enum": ["note", "decision", "attempt", "handoff", "state", "dump"] } },
+          { "name": "exclude_kind", "in": "query", "description": "Drop these kinds; repeatable", "schema": { "type": "string", "enum": ["note", "decision", "attempt", "handoff", "state", "dump"] } }
         ],
-        "responses": { "200": { "description": "Hits" } }
+        "responses": {
+          "200": { "description": "Hits" },
+          "400": { "description": "Invalid query, such as an unknown kind" }
+        }
       }
     },
     "/v1/audit": {

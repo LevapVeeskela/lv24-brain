@@ -111,8 +111,11 @@ brain journal --repair --dry-run   # records of the last 30 days without a journ
   `--kind note,decision` (or `--kind dump`) filters by kind. GitHub/GitLab
   dumps are indexed under the registered project whose `repo_url` they
   mirror, so `brain search --project ims --kind dump "flaky"` finds that
-  repository's issues. Connector runs index their dumps; server mode ignores
-  `--kind`/`--dumps` for now.
+  repository's issues. Connector runs index their dumps. Server mode applies
+  `--kind` too (Postgres full-text search, ranked); it stores no dumps.
+- Server mode also supports `brain record list|show|status|supersede`,
+  `catchup`, `review` and `journal --repair` reads; trash and restore are
+  local/git only.
 - Writes made through the CLI update the local index, and `brain sync`
   reindexes after pulling records from another machine. Markdown changed by
   hand needs `brain index` (or `brain index --rebuild` to rebuild it from

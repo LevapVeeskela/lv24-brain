@@ -14,13 +14,19 @@ const (
 	RecordHandoff  = "handoff"
 )
 
+// DecisionUpdater is implemented by stores that can rewrite a stored
+// decision, including server clients (status and supersede changes).
+type DecisionUpdater interface {
+	// UpdateDecision rewrites the stored decision with the same ID and
+	// project. ErrNotFound when no such decision exists.
+	UpdateDecision(ctx context.Context, decision domain.Decision) error
+}
+
 // RecordEditor is implemented by stores that can change or retract single
 // records (local and git mode). It is optional so server clients keep
 // satisfying Store.
 type RecordEditor interface {
-	// UpdateDecision rewrites the stored decision with the same ID and
-	// project. ErrNotFound when no such decision exists.
-	UpdateDecision(ctx context.Context, decision domain.Decision) error
+	DecisionUpdater
 	// TrashRecord moves one record (kind: note, decision, attempt, handoff)
 	// out of the project's listings into its trash, where RestoreRecord can
 	// bring it back. ErrNotFound when no such record exists.

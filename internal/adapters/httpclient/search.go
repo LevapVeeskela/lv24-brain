@@ -17,8 +17,9 @@ type searchResponse struct {
 }
 
 // Search runs a full-text search on the server through GET /v1/search. The
-// server reads q, projectId, and limit; empty optional parameters are omitted
-// so the server applies its own defaults.
+// server reads q, projectId, limit, and the repeated kind and exclude_kind
+// filters; empty optional parameters are omitted so the server applies its
+// own defaults.
 func (c *Client) Search(ctx context.Context, query ports.Query) ([]ports.Hit, error) {
 	text := strings.TrimSpace(query.Text)
 	if err := requireValue("search.query", text); err != nil {
@@ -32,6 +33,8 @@ func (c *Client) Search(ctx context.Context, query ports.Query) ([]ports.Hit, er
 	if query.Limit > 0 {
 		params.Set("limit", strconv.Itoa(query.Limit))
 	}
+	addKinds(params, "kind", query.Kinds)
+	addKinds(params, "exclude_kind", query.ExcludeKinds)
 	var payload searchResponse
 	if err := c.do(ctx, http.MethodGet, "/v1/search", params, nil, &payload); err != nil {
 		return nil, err
@@ -40,4 +43,13 @@ func (c *Client) Search(ctx context.Context, query ports.Query) ([]ports.Hit, er
 		return []ports.Hit{}, nil
 	}
 	return payload.Items, nil
+}
+
+// addKinds appends one repeated query parameter per non-blank kind.
+func addKinds(params url.Values, name string, kinds []string) {
+	for _, kind := range kinds {
+		if kind = strings.TrimSpace(kind); kind != "" {
+			params.Add(name, kind)
+		}
+	}
 }

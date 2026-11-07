@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -290,10 +291,22 @@ func (a *API) search(w http.ResponseWriter, r *http.Request) {
 		a.writeError(w, r, domain.NewValidationError("search.text", "q is required"))
 		return
 	}
+	kinds, err := searchKindParams(r, "kind")
+	if err != nil {
+		a.writeError(w, r, err)
+		return
+	}
+	excludeKinds, err := searchKindParams(r, "exclude_kind")
+	if err != nil {
+		a.writeError(w, r, err)
+		return
+	}
 	query := ports.Query{
-		Text:      text,
-		ProjectID: queryString(r, "projectId"),
-		Limit:     queryInt(r, "limit"),
+		Text:         text,
+		ProjectID:    queryString(r, "projectId"),
+		Limit:        queryInt(r, "limit"),
+		Kinds:        kinds,
+		ExcludeKinds: excludeKinds,
 	}
 	hits, err := a.store.Search(r.Context(), query)
 	if err != nil {
@@ -301,6 +314,31 @@ func (a *API) search(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"items": hits})
+}
+
+// searchKinds lists the document kinds a search may filter on. "state" and
+// "dump" are accepted so local-mode clients can send the same filters; server
+// search simply finds no documents of those kinds.
+var searchKinds = map[string]struct{}{
+	"note": {}, "decision": {}, "attempt": {}, "handoff": {}, "state": {}, "dump": {},
+}
+
+// searchKindParams reads repeated kind query parameters. Blank values are
+// ignored; an unknown kind is a validation error.
+func searchKindParams(r *http.Request, name string) ([]string, error) {
+	values := r.URL.Query()[name]
+	kinds := make([]string, 0, len(values))
+	for _, raw := range values {
+		kind := strings.TrimSpace(raw)
+		if kind == "" {
+			continue
+		}
+		if _, ok := searchKinds[kind]; !ok {
+			return nil, domain.NewValidationError("search."+name, "unknown kind "+strconv.Quote(kind))
+		}
+		kinds = append(kinds, kind)
+	}
+	return kinds, nil
 }
 
 func (a *API) listRevisions(w http.ResponseWriter, r *http.Request) {

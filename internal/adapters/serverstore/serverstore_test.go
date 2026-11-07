@@ -2,9 +2,8 @@ package serverstore
 
 import (
 	"errors"
-	"strings"
+	"reflect"
 	"testing"
-	"unicode/utf8"
 
 	"github.com/levapveeskela/lv24-brain/internal/adapters/httpapi"
 	"github.com/levapveeskela/lv24-brain/internal/adapters/postgres"
@@ -60,17 +59,14 @@ func TestEscapeLike(t *testing.T) {
 	}
 }
 
-func TestSnippet(t *testing.T) {
-	if got := snippet("", "needle", 16); got != "" {
-		t.Fatalf("empty body snippet = %q", got)
+func TestOptionalArrayBindsEmptyFilterAsNull(t *testing.T) {
+	if got := optionalArray(nil); got != nil {
+		t.Fatalf("nil filter = %#v, want nil", got)
 	}
-	body := "The quick brown fox jumps over the lazy dog"
-	got := snippet(body, "lazy", 12)
-	if !strings.Contains(got, "lazy") {
-		t.Fatalf("snippet = %q", got)
+	if got := optionalArray([]string{}); got != nil {
+		t.Fatalf("empty filter = %#v, want nil", got)
 	}
-	unicode := "Минск — столица Беларуси"
-	if got := snippet(unicode, "столица", 10); !utf8.ValidString(got) {
-		t.Fatalf("snippet split a rune: %q", got)
+	if got := optionalArray([]string{"note"}); !reflect.DeepEqual(got, []string{"note"}) {
+		t.Fatalf("filter = %#v", got)
 	}
 }

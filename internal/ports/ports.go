@@ -2,6 +2,7 @@ package ports
 
 import (
 	"context"
+	"slices"
 	"time"
 
 	"github.com/levapveeskela/lv24-brain/internal/domain"
@@ -77,6 +78,15 @@ type Query struct {
 	Kinds []string
 	// ExcludeKinds drops these kinds (applied after Kinds).
 	ExcludeKinds []string
+}
+
+// AllowsKind reports whether a hit of kind passes the Kinds and ExcludeKinds
+// filters. Adapters without SQL use it; SQL adapters apply the same rule.
+func (q Query) AllowsKind(kind string) bool {
+	if len(q.Kinds) > 0 && !slices.Contains(q.Kinds, kind) {
+		return false
+	}
+	return !slices.Contains(q.ExcludeKinds, kind)
 }
 
 // Hit is one search result.

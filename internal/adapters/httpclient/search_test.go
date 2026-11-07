@@ -79,3 +79,37 @@ func TestSearchMapsServerErrors(t *testing.T) {
 		t.Fatalf("error = %v, want ErrUnauthorized", err)
 	}
 }
+
+func TestSearchSendsKindFilters(t *testing.T) {
+	client := newClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		query := r.URL.Query()
+		if got := query["kind"]; len(got) != 2 || got[0] != "note" || got[1] != "decision" {
+			t.Errorf("kind = %v, want [note decision]", got)
+		}
+		if got := query["exclude_kind"]; len(got) != 1 || got[0] != "dump" {
+			t.Errorf("exclude_kind = %v, want [dump]", got)
+		}
+		writeJSON(t, w, http.StatusOK, `{"items":[]}`)
+	}))
+
+	_, err := client.Search(context.Background(), ports.Query{
+		Text:         "term",
+		Kinds:        []string{" note ", "", "decision"},
+		ExcludeKinds: []string{"dump"},
+	})
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+}
+
+func TestSearchOmitsEmptyKindFilters(t *testing.T) {
+	client := newClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if query := r.URL.Query(); query.Has("kind") || query.Has("exclude_kind") {
+			t.Errorf("unexpected kind parameters: %s", r.URL.RawQuery)
+		}
+		writeJSON(t, w, http.StatusOK, `{"items":[]}`)
+	}))
+	if _, err := client.Search(context.Background(), ports.Query{Text: "term"}); err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+}

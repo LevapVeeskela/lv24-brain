@@ -3,6 +3,7 @@ package httpclient
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -13,7 +14,19 @@ import (
 	"github.com/levapveeskela/lv24-brain/internal/ports"
 )
 
-var _ ports.Store = (*Client)(nil)
+var (
+	_ ports.Store           = (*Client)(nil)
+	_ ports.DecisionUpdater = (*Client)(nil)
+)
+
+const (
+	// listPageSize is the page size requested per list call; the server
+	// clamps larger values to its own maximum, and a short page ends the scan.
+	listPageSize = 500
+	// maxListedRecords bounds how many records one List call reads. Reaching
+	// it is an error, never a silently truncated listing.
+	maxListedRecords = 10000
+)
 
 type projectRecord struct {
 	domain.Project
@@ -86,6 +99,9 @@ type decisionRequest struct {
 	Consequences []string              `json:"consequences"`
 	Evidence     []string              `json:"evidence"`
 	Permalink    string                `json:"permalink"`
+	// Revision is the record revision the update was based on; zero makes
+	// the server write unconditionally. Create requests leave it out.
+	Revision int64 `json:"revision,omitempty"`
 }
 
 type attemptRequest struct {
@@ -271,6 +287,113 @@ func (c *Client) AppendHandoff(ctx context.Context, handoff domain.Handoff) (dom
 		return domain.SyncRevision{}, err
 	}
 	return revisionFromNumber(record.Revision, record.CreatedAt), nil
+}
+
+// ListNotes returns every note of a project, newest first as the server orders them.
+func (c *Client) ListNotes(ctx context.Context, projectID string) ([]domain.Note, error) {
+	records, err := listAll[noteRecord](ctx, c, projectPath(projectID, "notes"))
+	if err != nil {
+		return nil, err
+	}
+	notes := make([]domain.Note, 0, len(records))
+	for _, record := range records {
+		notes = append(notes, record.Note)
+	}
+	return notes, nil
+}
+
+// ListDecisions returns every decision of a project.
+func (c *Client) ListDecisions(ctx context.Context, projectID string) ([]domain.Decision, error) {
+	records, err := listAll[decisionRecord](ctx, c, projectPath(projectID, "decisions"))
+	if err != nil {
+		return nil, err
+	}
+	decisions := make([]domain.Decision, 0, len(records))
+	for _, record := range records {
+		decisions = append(decisions, record.Decision)
+	}
+	return decisions, nil
+}
+
+// ListAttempts returns every attempt of a project.
+func (c *Client) ListAttempts(ctx context.Context, projectID string) ([]domain.Attempt, error) {
+	records, err := listAll[attemptRecord](ctx, c, projectPath(projectID, "attempts"))
+	if err != nil {
+		return nil, err
+	}
+	attempts := make([]domain.Attempt, 0, len(records))
+	for _, record := range records {
+		attempts = append(attempts, record.Attempt)
+	}
+	return attempts, nil
+}
+
+// ListHandoffs returns every handoff of a project.
+func (c *Client) ListHandoffs(ctx context.Context, projectID string) ([]domain.Handoff, error) {
+	records, err := listAll[handoffRecord](ctx, c, projectPath(projectID, "handoffs"))
+	if err != nil {
+		return nil, err
+	}
+	handoffs := make([]domain.Handoff, 0, len(records))
+	for _, record := range records {
+		handoffs = append(handoffs, record.Handoff)
+	}
+	return handoffs, nil
+}
+
+// UpdateDecision replaces a decision's content. It reads the current record
+// first and sends its revision back, so a concurrent edit fails with
+// domain.ErrConflict instead of being overwritten. ErrNotFound when the
+// decision is missing or belongs to another project.
+func (c *Client) UpdateDecision(ctx context.Context, decision domain.Decision) error {
+	if err := decision.Validate(); err != nil {
+		return err
+	}
+	if err := requireValue("decision.id", decision.ID); err != nil {
+		return err
+	}
+	var current decisionRecord
+	if err := c.do(ctx, http.MethodGet, "/v1/decisions/"+url.PathEscape(decision.ID), nil, nil, &current); err != nil {
+		return err
+	}
+	if current.ProjectID != decision.ProjectID {
+		return fmt.Errorf("decision %s in project %s: %w", decision.ID, decision.ProjectID, domain.ErrNotFound)
+	}
+	body := decisionRequest{
+		Title:        decision.Title,
+		Status:       decision.Status,
+		Context:      decision.Context,
+		Alternatives: decision.Alternatives,
+		Consequences: decision.Consequences,
+		Evidence:     decision.Evidence,
+		Permalink:    decision.Permalink,
+		Revision:     current.Revision,
+	}
+	return c.do(ctx, http.MethodPatch, "/v1/decisions/"+url.PathEscape(decision.ID), nil, body, nil)
+}
+
+// listAll reads every page of a project collection. The server returns
+// {"items": [...]} per page; a page shorter than listPageSize is the last one.
+func listAll[T any](ctx context.Context, c *Client, path string) ([]T, error) {
+	var all []T
+	for offset := 0; ; offset += listPageSize {
+		if offset >= maxListedRecords {
+			return nil, fmt.Errorf("httpclient: %s holds more than %d records; the listing was not read in full", path, maxListedRecords)
+		}
+		query := url.Values{}
+		query.Set("limit", strconv.Itoa(listPageSize))
+		query.Set("offset", strconv.Itoa(offset))
+		var payload struct {
+			Items []T `json:"items"`
+		}
+		if err := c.do(ctx, http.MethodGet, path, query, nil, &payload); err != nil {
+			return nil, err
+		}
+		all = append(all, payload.Items...)
+		if len(payload.Items) < listPageSize {
+			return all, nil
+		}
+	}
 }
 
 // CurrentRevision returns the newest server revision. An empty server reports

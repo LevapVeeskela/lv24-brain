@@ -1168,6 +1168,9 @@ func (m *MemoryStore) Search(_ context.Context, query ports.Query) ([]ports.Hit,
 		if query.ProjectID != "" && projectID != query.ProjectID {
 			return
 		}
+		if !query.AllowsKind(kind) {
+			return
+		}
 		combined := strings.ToLower(title + "\n" + body + "\n" + strings.Join(content, "\n"))
 		if !strings.Contains(combined, text) {
 			return

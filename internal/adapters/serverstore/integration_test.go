@@ -409,8 +409,8 @@ func TestStoreSearch(t *testing.T) {
 	if err != nil || len(hits) != 1 || hits[0].Kind != "decision" {
 		t.Fatalf("Search(ENGINE) = (%+v, %v)", hits, err)
 	}
-	if hits[0].Score <= 1 {
-		t.Fatalf("title match score = %v, want > 1", hits[0].Score)
+	if hits[0].Score <= 0 {
+		t.Fatalf("title match score = %v, want > 0", hits[0].Score)
 	}
 
 	hits, err = store.Search(ctx, ports.Query{Text: "100%"})
@@ -425,6 +425,158 @@ func TestStoreSearch(t *testing.T) {
 
 	if _, err := store.Search(ctx, ports.Query{Text: "  "}); !errors.Is(err, domain.ErrValidation) {
 		t.Fatalf("empty search error = %v", err)
+	}
+}
+
+func TestStoreSearchRanksTitleMatchFirst(t *testing.T) {
+	store := newTestStore(t)
+	ctx := testContext(t)
+	project := mustProject(t, ctx, store, "rank")
+
+	// Body-only match is created last so recency cannot explain the order.
+	if _, _, err := store.CreateNote(ctx, domain.Note{
+		ProjectID: project.ID, Title: "Misc", Body: "deploy steps",
+	}); err != nil {
+		t.Fatalf("create body note: %v", err)
+	}
+	if _, _, err := store.CreateNote(ctx, domain.Note{
+		ProjectID: project.ID, Title: "Deploy", Body: "unrelated words",
+	}); err != nil {
+		t.Fatalf("create title note: %v", err)
+	}
+
+	hits, err := store.Search(ctx, ports.Query{Text: "deploy", ProjectID: project.ID})
+	if err != nil || len(hits) != 2 {
+		t.Fatalf("Search(deploy) = (%+v, %v)", hits, err)
+	}
+	if hits[0].Title != "Deploy" || hits[0].Score <= hits[1].Score {
+		t.Fatalf("title match is not ranked first: %+v", hits)
+	}
+}
+
+func TestStoreSearchLimitAppliesAfterRanking(t *testing.T) {
+	store := newTestStore(t)
+	ctx := testContext(t)
+	project := mustProject(t, ctx, store, "limit")
+
+	// Many weak matches are created first; the strong title match is newest.
+	for i := 0; i < 12; i++ {
+		if _, _, err := store.CreateNote(ctx, domain.Note{
+			ProjectID: project.ID, Title: fmt.Sprintf("Filler %d", i), Body: "cache mentioned once",
+		}); err != nil {
+			t.Fatalf("create filler note: %v", err)
+		}
+	}
+	if _, _, err := store.CreateNote(ctx, domain.Note{
+		ProjectID: project.ID, Title: "Cache", Body: "layer",
+	}); err != nil {
+		t.Fatalf("create title note: %v", err)
+	}
+
+	hits, err := store.Search(ctx, ports.Query{Text: "cache", ProjectID: project.ID, Limit: 1})
+	if err != nil || len(hits) != 1 || hits[0].Title != "Cache" {
+		t.Fatalf("Search(limit 1) = (%+v, %v), want the title match", hits, err)
+	}
+}
+
+func TestStoreSearchKindFilters(t *testing.T) {
+	store := newTestStore(t)
+	ctx := testContext(t)
+	project := mustProject(t, ctx, store, "kinds")
+	if _, _, err := store.CreateNote(ctx, domain.Note{
+		ProjectID: project.ID, Title: "Rollout", Body: "rollout plan",
+	}); err != nil {
+		t.Fatalf("create note: %v", err)
+	}
+	if _, _, err := store.CreateDecision(ctx, domain.Decision{
+		ProjectID: project.ID, Title: "Rollout strategy", Context: "staged",
+	}); err != nil {
+		t.Fatalf("create decision: %v", err)
+	}
+	if _, _, err := store.CreateHandoff(ctx, domain.Handoff{
+		ProjectID: project.ID, Summary: "rollout pending",
+	}); err != nil {
+		t.Fatalf("create handoff: %v", err)
+	}
+
+	cases := []struct {
+		name  string
+		query ports.Query
+		want  []string
+	}{
+		{"all kinds", ports.Query{}, []string{"note", "decision", "handoff"}},
+		{"kind keeps one", ports.Query{Kinds: []string{"decision"}}, []string{"decision"}},
+		{"kind keeps two", ports.Query{Kinds: []string{"note", "handoff"}}, []string{"note", "handoff"}},
+		{"exclude drops one", ports.Query{ExcludeKinds: []string{"note"}}, []string{"decision", "handoff"}},
+		{"kind then exclude", ports.Query{Kinds: []string{"note", "decision"}, ExcludeKinds: []string{"note"}}, []string{"decision"}},
+		{"unindexed kind finds nothing", ports.Query{Kinds: []string{"dump"}}, nil},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			tc.query.Text = "rollout"
+			tc.query.ProjectID = project.ID
+			hits, err := store.Search(ctx, tc.query)
+			if err != nil {
+				t.Fatalf("Search: %v", err)
+			}
+			got := make([]string, 0, len(hits))
+			for _, hit := range hits {
+				got = append(got, hit.Kind)
+			}
+			if len(got) != len(tc.want) {
+				t.Fatalf("kinds = %v, want %v", got, tc.want)
+			}
+			seen := map[string]bool{}
+			for _, kind := range got {
+				seen[kind] = true
+			}
+			for _, kind := range tc.want {
+				if !seen[kind] {
+					t.Fatalf("kinds = %v, missing %q", got, kind)
+				}
+			}
+		})
+	}
+}
+
+func TestStoreSearchRussianText(t *testing.T) {
+	store := newTestStore(t)
+	ctx := testContext(t)
+	project := mustProject(t, ctx, store, "ru")
+	if _, _, err := store.CreateNote(ctx, domain.Note{
+		ProjectID: project.ID, Title: "Столица", Body: "Минск — столица Беларуси, сборка OK",
+	}); err != nil {
+		t.Fatalf("create note: %v", err)
+	}
+
+	for _, text := range []string{"столица", "Беларуси", "минск OK"} {
+		hits, err := store.Search(ctx, ports.Query{Text: text, ProjectID: project.ID})
+		if err != nil || len(hits) != 1 {
+			t.Fatalf("Search(%q) = (%+v, %v), want one hit", text, hits, err)
+		}
+		if hits[0].Snippet == "" {
+			t.Fatalf("Search(%q) returned an empty snippet", text)
+		}
+	}
+}
+
+func TestStoreSearchFallsBackWhenQueryHasNoLexemes(t *testing.T) {
+	store := newTestStore(t)
+	ctx := testContext(t)
+	project := mustProject(t, ctx, store, "fallback")
+	if _, _, err := store.CreateNote(ctx, domain.Note{
+		ProjectID: project.ID, Title: "Alert", Body: "build failed!!! retry",
+	}); err != nil {
+		t.Fatalf("create note: %v", err)
+	}
+
+	hits, err := store.Search(ctx, ports.Query{Text: "!!!", ProjectID: project.ID})
+	if err != nil || len(hits) != 1 || hits[0].Title != "Alert" {
+		t.Fatalf("Search(!!!) = (%+v, %v), want the punctuation match", hits, err)
+	}
+	hits, err = store.Search(ctx, ports.Query{Text: "%", ProjectID: project.ID})
+	if err != nil || len(hits) != 0 {
+		t.Fatalf("Search(%%) = (%+v, %v), want no hits", hits, err)
 	}
 }
 

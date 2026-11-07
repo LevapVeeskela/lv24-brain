@@ -216,9 +216,11 @@ func (a *App) Supersede(ctx context.Context, projectID, oldID, newID string) (do
 }
 
 func (a *App) updateDecision(ctx context.Context, projectID, id string, change func(*domain.Decision) error) (domain.Decision, error) {
-	editor, err := a.recordEditor()
-	if err != nil {
-		return domain.Decision{}, err
+	// Server clients can update decisions but have no trash, so this needs
+	// only the narrower interface.
+	editor, ok := a.deps.Store.(ports.DecisionUpdater)
+	if !ok {
+		return domain.Decision{}, fmt.Errorf("%w: changing decisions is not supported by this store", domain.ErrUnsupported)
 	}
 	record, err := a.GetRecord(ctx, projectID, id)
 	if err != nil {

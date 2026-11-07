@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"sort"
 	"strings"
 
 	"github.com/levapveeskela/lv24-brain/internal/adapters/httpapi"
@@ -16,21 +15,16 @@ import (
 const (
 	defaultSearchLimit = 20
 	maxSearchLimit     = 100
-
-	// searchFetchFactor over-fetches candidates so title matches are not lost
-	// before in-memory scoring.
-	searchFetchFactor = 4
-	maxSearchFetch    = 500
-
-	snippetBytes = 160
 )
 
-// Search performs a case-insensitive substring search across notes, decisions,
-// attempts and handoffs. postgres.Store has no search implementation, so this
-// adapter owns the read-only query. All input is parameterized; LIKE wildcards
-// in the query text are escaped.
+// Search runs a PostgreSQL full-text search over notes, decisions, attempts
+// and handoffs. Matching uses the generated search_tsv columns (migration
+// 0007) with websearch_to_tsquery, so quoted phrases, OR and exclusion work.
+// Ranking and LIMIT happen in SQL before snippets are built, so the result is
+// the true top N. When the query has no lexemes (only punctuation), it falls
+// back to a case-insensitive substring match. All input is parameterized.
 func (s *Store) Search(ctx context.Context, query ports.Query) ([]ports.Hit, error) {
-	text := strings.ToLower(strings.TrimSpace(query.Text))
+	text := strings.TrimSpace(query.Text)
 	if text == "" {
 		return nil, domain.NewValidationError("search.text", "is required")
 	}
@@ -41,80 +35,97 @@ func (s *Store) Search(ctx context.Context, query ports.Query) ([]ports.Hit, err
 	if limit > maxSearchLimit {
 		limit = maxSearchLimit
 	}
-	fetchLimit := limit * searchFetchFactor
-	if fetchLimit > maxSearchFetch {
-		fetchLimit = maxSearchFetch
-	}
 
-	rows, err := s.pg.Pool().Query(ctx, searchSQL, query.ProjectID, "%"+escapeLike(text)+"%", fetchLimit)
+	rows, err := s.pg.Pool().Query(ctx, searchSQL,
+		query.ProjectID,
+		text,
+		"%"+escapeLike(text)+"%",
+		optionalArray(query.Kinds),
+		optionalArray(query.ExcludeKinds),
+		limit,
+	)
 	if err != nil {
 		return nil, mapError(err)
 	}
 	defer rows.Close()
 
-	hits := make([]ports.Hit, 0, fetchLimit)
+	hits := make([]ports.Hit, 0, limit)
 	for rows.Next() {
-		var id, projectID, kind, title, body, extra string
-		if err := rows.Scan(&id, &projectID, &kind, &title, &body, &extra); err != nil {
+		var hit ports.Hit
+		if err := rows.Scan(&hit.ID, &hit.ProjectID, &hit.Kind, &hit.Title, &hit.Snippet, &hit.Score); err != nil {
 			return nil, mapError(err)
 		}
-		score := 1.0
-		if strings.Contains(strings.ToLower(title), text) {
-			score = 2.0
-		}
-		content := strings.TrimSpace(body + "\n" + extra)
-		hits = append(hits, ports.Hit{
-			ID:        id,
-			ProjectID: projectID,
-			Kind:      kind,
-			Title:     title,
-			Snippet:   snippet(content, text, snippetBytes),
-			Score:     score,
-		})
+		hits = append(hits, hit)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, mapError(err)
 	}
-
-	sort.Slice(hits, func(i, j int) bool {
-		if hits[i].Score == hits[j].Score {
-			return hits[i].ID < hits[j].ID
-		}
-		return hits[i].Score > hits[j].Score
-	})
-	if len(hits) > limit {
-		hits = hits[:limit]
-	}
 	return hits, nil
 }
 
-// searchSQL unions every searchable knowledge table, filters by project and
-// substring, and leaves scoring to the caller. ILIKE uses '!' as the escape
-// character so no backslash-level quoting is involved.
+// optionalArray binds an empty filter as SQL NULL, which the query treats as
+// "no filter"; a non-empty slice binds as text[].
+func optionalArray(values []string) any {
+	if len(values) == 0 {
+		return nil
+	}
+	return values
+}
+
+// searchSQL parameters: $1 project id (empty for all), $2 raw query text,
+// $3 ILIKE pattern for the fallback, $4 kinds (NULL = all), $5 excluded kinds
+// (NULL = none), $6 limit.
+//
+// The CTEs are: query (the tsquery), items (union of the searchable tables),
+// matched (filters plus rank), page (ranked top N). Snippets are built only
+// for the N rows in page, with ts_headline, bounded to MaxWords.
 const searchSQL = `
-SELECT id, project_id, kind, title, body, extra
-FROM (
-    SELECT id, project_id, 'note'::text AS kind, title, body, ''::text AS extra
+WITH query AS (
+    SELECT websearch_to_tsquery('simple', $2) AS tsq, $3::text AS pattern
+), items AS (
+    SELECT id, project_id, 'note'::text AS kind, title,
+           coalesce(body, '') AS content, updated_at, search_tsv AS tsv
     FROM notes
     UNION ALL
-    SELECT id, project_id, 'decision'::text, title, decision_context,
-           coalesce(array_to_string(alternatives, ' '), '') || ' ' ||
-           coalesce(array_to_string(consequences, ' '), '') || ' ' ||
-           coalesce(array_to_string(evidence, ' '), '')
+    SELECT id, project_id, 'decision'::text, title,
+           coalesce(decision_context, '') || ' ' || brain_search_join(alternatives) || ' ' ||
+           brain_search_join(consequences) || ' ' || brain_search_join(evidence),
+           updated_at, search_tsv
     FROM decisions
     UNION ALL
     SELECT id, project_id, 'attempt'::text, title,
-           coalesce(hypothesis, '') || ' ' || coalesce(result, '') || ' ' || coalesce(reason, ''), ''::text
+           coalesce(hypothesis, '') || ' ' || coalesce(result, '') || ' ' || coalesce(reason, ''),
+           updated_at, search_tsv
     FROM attempts
     UNION ALL
     SELECT id, project_id, 'handoff'::text, summary,
-           coalesce(git_context, '') || ' ' || coalesce(next_action, ''), ''::text
+           coalesce(git_context, '') || ' ' || coalesce(next_action, ''),
+           created_at, search_tsv
     FROM handoffs
-) AS items
-WHERE ($1 = '' OR project_id = $1)
-  AND (title || ' ' || body || ' ' || extra) ILIKE $2 ESCAPE '!'
-ORDER BY id
-LIMIT $3`
+), matched AS (
+    SELECT items.id, items.project_id, items.kind, items.title, items.content,
+           items.updated_at, query.tsq,
+           CAST(CASE WHEN numnode(query.tsq) > 0 THEN ts_rank(items.tsv, query.tsq) ELSE 0 END AS float8) AS rank
+    FROM items
+    CROSS JOIN query
+    WHERE ($1 = '' OR items.project_id = $1)
+      AND ($4::text[] IS NULL OR items.kind = ANY($4::text[]))
+      AND ($5::text[] IS NULL OR NOT (items.kind = ANY($5::text[])))
+      AND (
+            (numnode(query.tsq) > 0 AND items.tsv @@ query.tsq)
+         OR (numnode(query.tsq) = 0 AND (items.title || ' ' || items.content) ILIKE query.pattern ESCAPE '!')
+      )
+), page AS (
+    SELECT * FROM matched
+    ORDER BY rank DESC, updated_at DESC, id ASC
+    LIMIT $6
+)
+SELECT id, project_id, kind, title,
+       ts_headline('simple', content, tsq,
+                   'MaxFragments=1, MaxWords=30, MinWords=10, StartSel="[", StopSel="]"') AS snippet,
+       rank
+FROM page
+ORDER BY rank DESC, updated_at DESC, id ASC`
 
 // ListRevisions returns the global revision trail. Descending listings and all
 // filters are delegated to postgres.Store. Ascending listings are issued here
@@ -215,50 +226,4 @@ func clampLimit(limit int) int {
 func escapeLike(value string) string {
 	replacer := strings.NewReplacer("!", "!!", "%", "!%", "_", "!_")
 	return replacer.Replace(value)
-}
-
-func snippet(body, needle string, max int) string {
-	if body == "" || max <= 0 {
-		return ""
-	}
-	runes := []rune(body)
-	if len(runes) <= max {
-		return strings.TrimSpace(body)
-	}
-	index := indexRunes([]rune(strings.ToLower(body)), []rune(strings.ToLower(needle)))
-	if index < 0 {
-		index = 0
-	}
-	start := index - max/3
-	if start < 0 {
-		start = 0
-	}
-	end := start + max
-	if end > len(runes) {
-		end = len(runes)
-		start = end - max
-		if start < 0 {
-			start = 0
-		}
-	}
-	return strings.TrimSpace(string(runes[start:end]))
-}
-
-func indexRunes(haystack, needle []rune) int {
-	if len(needle) == 0 {
-		return 0
-	}
-	for i := 0; i+len(needle) <= len(haystack); i++ {
-		match := true
-		for j := range needle {
-			if haystack[i+j] != needle[j] {
-				match = false
-				break
-			}
-		}
-		if match {
-			return i
-		}
-	}
-	return -1
 }

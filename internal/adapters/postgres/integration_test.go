@@ -1427,3 +1427,46 @@ func TestFindAPITokenIgnoresLastUsedUpdateFailure(t *testing.T) {
 		t.Fatalf("token = %+v", found)
 	}
 }
+
+func TestSearchFullTextMigrationIsIdempotent(t *testing.T) {
+	store := newTestStore(t)
+	ctx := testContext(t)
+	migrations, err := LoadMigrations()
+	if err != nil {
+		t.Fatalf("LoadMigrations: %v", err)
+	}
+	var searchSQL string
+	for _, migration := range migrations {
+		if migration.Version == 7 {
+			searchSQL = migration.SQL
+		}
+	}
+	if searchSQL == "" {
+		t.Fatal("migration 7 (full-text search) is missing")
+	}
+
+	// Running the file again must succeed: every statement is IF NOT EXISTS
+	// or OR REPLACE, so a partially applied schema can be repaired safely.
+	for run := 0; run < 2; run++ {
+		if _, err := store.Pool().Exec(ctx, searchSQL); err != nil {
+			t.Fatalf("re-run migration 7 (pass %d): %v", run+1, err)
+		}
+	}
+
+	project := mustProject(t, ctx, store, "fts")
+	if _, _, err := store.CreateNote(ctx, domain.Note{
+		ProjectID: project.ID, Title: "Индекс", Body: "generated vector",
+	}); err != nil {
+		t.Fatalf("create note: %v", err)
+	}
+	var matches bool
+	if err := store.Pool().QueryRow(ctx,
+		`SELECT search_tsv @@ websearch_to_tsquery('simple', 'индекс') FROM notes WHERE project_id = $1`,
+		project.ID,
+	).Scan(&matches); err != nil {
+		t.Fatalf("query generated tsvector: %v", err)
+	}
+	if !matches {
+		t.Fatal("generated search_tsv does not match the note title")
+	}
+}
