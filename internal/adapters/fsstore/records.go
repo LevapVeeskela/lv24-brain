@@ -405,6 +405,8 @@ func renderDecisionBody(decision domain.Decision) string {
 	writeRecordList(&out, decision.Consequences)
 	out.WriteString("\n## Evidence\n\n")
 	writeRecordList(&out, decision.Evidence)
+	out.WriteString("\n## Paths\n\n")
+	writeRecordList(&out, decision.Paths)
 	return out.String()
 }
 

@@ -7,6 +7,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/netip"
 	"net/url"
 	"os"
@@ -62,6 +63,33 @@ type Config struct {
 	// DatabaseBackupConfirmed acknowledges that a backup exists before
 	// pending migrations are applied to an existing schema.
 	DatabaseBackupConfirmed bool
+	// DatabaseMaxConns caps the pgx pool (BRAIN_DATABASE_MAX_CONNS).
+	DatabaseMaxConns int32
+	// DatabaseStatementTimeout is applied per connection as the
+	// statement_timeout runtime parameter. Zero disables it
+	// (BRAIN_DATABASE_STATEMENT_TIMEOUT).
+	DatabaseStatementTimeout time.Duration
+
+	// MetricsEnabled exposes Prometheus metrics on MetricsAddr only
+	// (BRAIN_METRICS_ENABLED). The public API listener never serves them.
+	MetricsEnabled bool
+	MetricsAddr    string
+
+	// RetentionDisabled turns off the in-process retention job
+	// (BRAIN_RETENTION_DISABLED). It has no effect in memory mode.
+	RetentionDisabled bool
+	// AuditRetention is how long audit events are kept (BRAIN_AUDIT_RETENTION).
+	AuditRetention time.Duration
+	// RevisionRetention is how long unreferenced revisions are kept
+	// (BRAIN_REVISION_RETENTION).
+	RevisionRetention time.Duration
+	// RetentionInterval is the period between retention runs
+	// (BRAIN_RETENTION_INTERVAL).
+	RetentionInterval time.Duration
+
+	// RequestLogger receives the structured per-request log. Nil uses the
+	// process logger passed to New.
+	RequestLogger *slog.Logger
 
 	OIDC            oidc.Config
 	OIDCAllowSignup bool
@@ -87,9 +115,16 @@ func DefaultConfig() Config {
 		LoginRateLimit:   20,
 		ConnectorTimeout: 5 * time.Minute,
 		DatabaseTimeout:  30 * time.Second,
-		OIDCAllowSignup:  true,
-		Now:              time.Now,
-		PasswordParams:   auth.DefaultArgon2Params,
+		// Sized for a small team; raise together with the Postgres max_connections.
+		DatabaseMaxConns:         defaultDatabaseMaxConns,
+		DatabaseStatementTimeout: defaultDatabaseStatementTimeout,
+		MetricsAddr:              defaultMetricsAddr,
+		AuditRetention:           defaultAuditRetention,
+		RevisionRetention:        defaultRevisionRetention,
+		RetentionInterval:        defaultRetentionInterval,
+		OIDCAllowSignup:          true,
+		Now:                      time.Now,
+		PasswordParams:           auth.DefaultArgon2Params,
 	}
 }
 
@@ -182,6 +217,9 @@ func (c Config) Validate() error {
 	}
 	if c.DatabaseTimeout < time.Second || c.DatabaseTimeout > 5*time.Minute {
 		return errors.New("server: database timeout must be between 1s and 5m")
+	}
+	if err := c.validateOperations(); err != nil {
+		return err
 	}
 	if err := validateDatabaseURL(c.DatabaseURL); err != nil {
 		return err
@@ -326,6 +364,9 @@ func applyEnvironment(cfg *Config, getenv func(string) string) error {
 		return err
 	}
 	cfg.DatabaseBackupConfirmed = backupConfirmed
+	if err := applyOperationsEnvironment(cfg, getenv); err != nil {
+		return err
+	}
 
 	cfg.BootstrapLogin = strings.TrimSpace(getenv("BRAIN_BOOTSTRAP_ADMIN_LOGIN"))
 	cfg.BootstrapPassword = getenv("BRAIN_BOOTSTRAP_ADMIN_PASSWORD")

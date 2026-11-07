@@ -147,12 +147,24 @@ func (i *Index) Delete(ctx context.Context, id string) error {
 }
 
 // Search returns matching documents ordered by relevance, recency and id.
+// Every term must match (AND). When that finds nothing and the query has two or
+// more terms, the same terms are retried with OR. Filters apply to both passes.
 func (i *Index) Search(ctx context.Context, query ports.Query) ([]ports.Hit, error) {
-	match, ok := matchExpression(query.Text)
+	match, ok := matchExpression(query.Text, joinAll)
 	if !ok {
 		return []ports.Hit{}, nil
 	}
 	limit := normalizeLimit(query.Limit)
+	hits, err := i.runSearch(ctx, query, match, limit)
+	if err != nil || len(hits) > 0 || termCount(query.Text) < 2 {
+		return hits, err
+	}
+	anyMatch, _ := matchExpression(query.Text, joinAny)
+	return i.runSearch(ctx, query, anyMatch, limit)
+}
+
+// runSearch executes one FTS5 MATCH expression with the query filters applied.
+func (i *Index) runSearch(ctx context.Context, query ports.Query, match string, limit int) ([]ports.Hit, error) {
 	statement, args := buildSearchStatement(query, match, limit)
 	rows, err := i.db.QueryContext(ctx, statement, args...)
 	if err != nil {

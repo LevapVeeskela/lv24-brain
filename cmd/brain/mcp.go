@@ -112,6 +112,7 @@ func (b mcpBackend) Decision(ctx context.Context, in mcpserver.DecisionInput) (m
 		Context:      in.Context,
 		Alternatives: in.Alternatives,
 		Consequences: in.Consequences,
+		Paths:        in.Paths,
 	})
 	if err != nil {
 		return mcpserver.Record{}, err

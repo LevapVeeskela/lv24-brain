@@ -175,6 +175,12 @@ type Store interface {
 	UpdateUser(ctx context.Context, user domain.User, expected int64) (UserRecord, domain.SyncRevision, error)
 	SetUserOIDC(ctx context.Context, id, issuer, subject string) (domain.SyncRevision, error)
 	DeleteUser(ctx context.Context, id string, expected int64) (domain.SyncRevision, error)
+	// UpdateUserPasswordHash replaces a local account's stored hash. The hash
+	// is opaque to the store; expected 0 skips the revision check.
+	UpdateUserPasswordHash(ctx context.Context, id, passwordHash string, expected int64) (domain.SyncRevision, error)
+	// RevokeUserSessions revokes every refresh-token family of a user except
+	// exceptFamilyID (empty means all) and returns how many families it covered.
+	RevokeUserSessions(ctx context.Context, userID, exceptFamilyID string, now time.Time) (int, error)
 
 	CreateAPIToken(ctx context.Context, token APITokenRecord) (APITokenRecord, error)
 	GetAPIToken(ctx context.Context, id string) (APITokenRecord, error)

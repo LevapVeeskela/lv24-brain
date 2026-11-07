@@ -146,6 +146,8 @@ type DecisionInput struct {
 	Alternatives []string
 	Consequences []string
 	Evidence     []string
+	// Paths are repo-relative files or directories the decision governs.
+	Paths []string
 	// CreateProject registers ProjectID when no project, alias or path
 	// matches; without it an unknown project is an error.
 	CreateProject bool

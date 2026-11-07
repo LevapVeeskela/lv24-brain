@@ -56,3 +56,33 @@ func (a *App) Logout(ctx context.Context) error {
 	}
 	return a.deps.Auth.Logout(ctx, "")
 }
+
+// passwordChanger and allSessionsRevoker are client-only capabilities. The
+// server-side auth service does not provide them, so they are checked at
+// runtime rather than added to ports.AuthProvider.
+type passwordChanger interface {
+	ChangePassword(ctx context.Context, currentPassword, newPassword string) error
+}
+
+type allSessionsRevoker interface {
+	RevokeAllSessions(ctx context.Context) error
+}
+
+// ChangePassword changes the signed-in account's local password.
+func (a *App) ChangePassword(ctx context.Context, currentPassword, newPassword string) error {
+	changer, ok := a.deps.Auth.(passwordChanger)
+	if a.deps.Auth == nil || !ok {
+		return notImplemented("password")
+	}
+	return changer.ChangePassword(ctx, currentPassword, newPassword)
+}
+
+// LogoutAll revokes every session of the signed-in account and clears the
+// stored credentials.
+func (a *App) LogoutAll(ctx context.Context) error {
+	revoker, ok := a.deps.Auth.(allSessionsRevoker)
+	if a.deps.Auth == nil || !ok {
+		return notImplemented("logout --all")
+	}
+	return revoker.RevokeAllSessions(ctx)
+}

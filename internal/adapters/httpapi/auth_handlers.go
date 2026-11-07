@@ -141,6 +141,130 @@ func (a *API) me(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, response)
 }
 
+type changePasswordRequest struct {
+	CurrentPassword string `json:"current_password"`
+	NewPassword     string `json:"new_password"`
+}
+
+// changePassword changes the caller's own local password, verifying the
+// current one first. On success every refresh-token family of the user except
+// the caller's current session is revoked; the current session and API tokens
+// are left alone. Access JWTs of the revoked families stop working at once.
+func (a *API) changePassword(w http.ResponseWriter, r *http.Request) {
+	principal, ok := principalFrom(r.Context())
+	if !ok || !requireLoginSession(w, principal) {
+		return
+	}
+	var body changePasswordRequest
+	if err := a.decodeJSON(w, r, &body); err != nil {
+		a.writeError(w, r, err)
+		return
+	}
+	record, err := a.store.GetUser(r.Context(), principal.User.ID)
+	if err != nil {
+		a.writeError(w, r, err)
+		return
+	}
+	if record.AuthSource != "local" || record.PasswordHash == "" {
+		writeErrorCode(w, http.StatusForbidden, "forbidden", "password change is available only for local accounts")
+		return
+	}
+	// The same per-account budget as login stops a stolen access token from
+	// guessing the current password.
+	if !a.accountLimit.allow(strings.ToLower(record.Login)) {
+		writeLoginRateLimited(w)
+		return
+	}
+	match, err := auth.VerifyPassword(record.PasswordHash, body.CurrentPassword)
+	if err != nil {
+		a.writeError(w, r, err)
+		return
+	}
+	if !match {
+		a.audit(r, record.Login, SecurityEvent{Action: AuditPasswordFailed, EntityKind: auditEntityUser, EntityID: record.ID})
+		writeErrorCode(w, http.StatusForbidden, "invalid_current_password", "current password is incorrect")
+		return
+	}
+	if err := auth.ValidatePassword(body.NewPassword); err != nil {
+		a.writeError(w, r, domain.NewValidationError("new_password", err.Error()))
+		return
+	}
+	if body.NewPassword == body.CurrentPassword {
+		a.writeError(w, r, domain.NewValidationError("new_password", "must differ from the current password"))
+		return
+	}
+	hash, err := auth.HashPassword(body.NewPassword, a.cfg.PasswordParams)
+	if err != nil {
+		a.writeError(w, r, err)
+		return
+	}
+	revision, err := a.store.UpdateUserPasswordHash(r.Context(), record.ID, hash, 0)
+	if err != nil {
+		a.writeError(w, r, err)
+		return
+	}
+	a.publish(revision, "user", record.ID, "update")
+	revoked, err := a.store.RevokeUserSessions(r.Context(), record.ID, principal.FamilyID, a.cfg.Now().UTC())
+	if err != nil {
+		// The new password is already stored. Failing closed here keeps the
+		// caller informed that other sessions may still be live.
+		a.writeError(w, r, err)
+		return
+	}
+	a.audit(r, record.Login, SecurityEvent{
+		Action: AuditPasswordChanged, EntityKind: auditEntityUser, EntityID: record.ID,
+		Detail: map[string]any{"families_revoked": revoked, "kept_current_session": principal.FamilyID != ""},
+	})
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// revokeOwnSessions revokes every refresh-token family of the caller, the
+// current session included. Its access JWT is rejected at once. API tokens are
+// not affected.
+func (a *API) revokeOwnSessions(w http.ResponseWriter, r *http.Request) {
+	principal, ok := principalFrom(r.Context())
+	if !ok || !requireLoginSession(w, principal) {
+		return
+	}
+	a.revokeSessionsFor(w, r, principal.User.ID, "self")
+}
+
+// revokeUserSessions is the admin variant of revokeOwnSessions for another
+// user. API tokens of that user are not affected.
+func (a *API) revokeUserSessions(w http.ResponseWriter, r *http.Request) {
+	target, err := a.store.GetUser(r.Context(), r.PathValue("id"))
+	if err != nil {
+		a.writeError(w, r, err)
+		return
+	}
+	a.revokeSessionsFor(w, r, target.User.ID, "admin")
+}
+
+// requireLoginSession refuses API-token callers on self-service account
+// changes: a static token must not rotate a person's password or sign them
+// out. It writes the error and returns false when the caller is not a login
+// session.
+func requireLoginSession(w http.ResponseWriter, principal auth.Principal) bool {
+	if principal.AuthSource == "jwt" {
+		return true
+	}
+	writeErrorCode(w, http.StatusForbidden, "forbidden", "this action requires a login session, not an API token")
+	return false
+}
+
+func (a *API) revokeSessionsFor(w http.ResponseWriter, r *http.Request, userID, scope string) {
+	revoked, err := a.store.RevokeUserSessions(r.Context(), userID, "", a.cfg.Now().UTC())
+	if err != nil {
+		a.writeError(w, r, err)
+		return
+	}
+	a.audit(r, "", SecurityEvent{
+		Action: AuditSessionsRevoked, EntityKind: auditEntityUser, EntityID: userID,
+		Detail: map[string]any{"families_revoked": revoked, "scope": scope},
+	})
+	w.WriteHeader(http.StatusNoContent)
+}
+
 // oidcFlow is one in-flight authorization-code exchange.
 type oidcFlow struct {
 	Nonce     string

@@ -47,6 +47,7 @@ func (a *App) GetState(ctx context.Context, projectID string) (domain.Project, d
 // it, refreshes the search index and records a journal line. It never
 // creates a project.
 func (a *App) SetState(ctx context.Context, input StateInput) (domain.State, error) {
+	input.redact()
 	if err := a.requireStore(); err != nil {
 		return domain.State{}, err
 	}

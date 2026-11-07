@@ -24,6 +24,9 @@ const (
 	AuditOIDCRefused       = "auth.oidc.refused"
 	AuditAPITokenCreated   = "auth.token.created"
 	AuditAPITokenRevoked   = "auth.token.revoked"
+	AuditPasswordChanged   = "auth.password.changed"
+	AuditPasswordFailed    = "auth.password.failed"
+	AuditSessionsRevoked   = "auth.sessions.revoked"
 	auditEntityUser        = "user"
 	auditEntityAPIToken    = "api_token"
 	maxMemoryAuditEvents   = 10000

@@ -12,6 +12,7 @@ import (
 
 // Note appends a dated note and indexes it for search.
 func (a *App) Note(ctx context.Context, input NoteInput) (NoteResult, error) {
+	input.redact()
 	if err := a.requireStore(); err != nil {
 		return NoteResult{}, err
 	}
@@ -63,6 +64,11 @@ func (a *App) finishNote(ctx context.Context, note domain.Note, revision domain.
 
 // Decision appends a decision record and indexes it for search.
 func (a *App) Decision(ctx context.Context, input DecisionInput) (DecisionResult, error) {
+	input.redact()
+	paths, err := domain.NormalizePaths(input.Paths)
+	if err != nil {
+		return DecisionResult{}, err
+	}
 	if err := a.requireStore(); err != nil {
 		return DecisionResult{}, err
 	}
@@ -83,6 +89,7 @@ func (a *App) Decision(ctx context.Context, input DecisionInput) (DecisionResult
 		Alternatives: input.Alternatives,
 		Consequences: input.Consequences,
 		Evidence:     input.Evidence,
+		Paths:        paths,
 		CreatedAt:    now,
 		UpdatedAt:    now,
 	}
@@ -109,6 +116,7 @@ func (a *App) Decision(ctx context.Context, input DecisionInput) (DecisionResult
 
 // Attempt appends an attempt record and indexes it for search.
 func (a *App) Attempt(ctx context.Context, input AttemptInput) (AttemptResult, error) {
+	input.redact()
 	if err := a.requireStore(); err != nil {
 		return AttemptResult{}, err
 	}
@@ -150,6 +158,7 @@ func (a *App) Attempt(ctx context.Context, input AttemptInput) (AttemptResult, e
 
 // Handoff appends a session handoff and indexes it for search.
 func (a *App) Handoff(ctx context.Context, input HandoffInput) (HandoffResult, error) {
+	input.redact()
 	if err := a.requireStore(); err != nil {
 		return HandoffResult{}, err
 	}

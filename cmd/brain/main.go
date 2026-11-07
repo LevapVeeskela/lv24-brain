@@ -151,6 +151,8 @@ func runCommand(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return runRecord(rest, stdout, stderr)
 	case "catchup":
 		return runCatchup(rest, stdout, stderr)
+	case "digest":
+		return runDigest(rest, stdout, stderr)
 	case "session":
 		return runSession(rest, stdin, stdout, stderr)
 	case "mcp":
@@ -165,6 +167,8 @@ func runCommand(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return runLogin(rest, stdin, stdout, stderr)
 	case "logout":
 		return runLogout(rest, stdout, stderr)
+	case "password":
+		return runPassword(rest, stdin, stdout, stderr)
 	case "serve":
 		return runServe(rest, stdout, stderr)
 	case "update":
@@ -213,6 +217,7 @@ Commands:
   agents     Sync the shared agent instructions (agents sync [--check])
   state      Get or set a project's goal, next action, blockers and questions
   catchup    what changed since the latest handoff
+  digest     Morning summary across projects: changes, and what needs you (--write saves it)
   record     List, show, change status, trash and restore records
   session    start|end handlers for agent session hooks
   mcp        Serve the brain as an MCP server over stdio (for coding agents)
@@ -220,7 +225,8 @@ Commands:
   migrate    Import a legacy .brain data directory; --rollback reverts an import
   secret     Manage OS-backed secrets (set, list, remove)
   login      Authenticate against a server-mode brain
-  logout     Revoke the server session and clear stored tokens
+  logout     Revoke the server session and clear stored tokens (--all: every session)
+  password   Change your server password (reads current and new from stdin)
   serve      Run the HTTP server
   update     Check for, apply, or roll back engine updates
   completion Print a bash, zsh, fish or PowerShell completion script
@@ -971,6 +977,7 @@ func runDecision(args []string, stdout, stderr io.Writer) int {
 	alternatives := fs.String("alternatives", "", "alternatives considered")
 	consequences := fs.String("consequences", "", "consequences")
 	evidence := fs.String("evidence", "", "supporting evidence")
+	paths := fs.String("paths", "", "repo-relative files or directories this decision governs, comma-separated")
 	create := fs.Bool("create", false, "register --project first if it does not exist yet")
 	cfgPath := configFlag(fs)
 	positional, err := parseInterspersed(fs, args)
@@ -1002,6 +1009,7 @@ func runDecision(args []string, stdout, stderr io.Writer) int {
 		Alternatives:  splitList(*alternatives),
 		Consequences:  splitList(*consequences),
 		Evidence:      splitList(*evidence),
+		Paths:         splitList(*paths),
 	})
 	if err != nil {
 		return reportError(stderr, "decision", err)
@@ -2135,6 +2143,7 @@ func runLogin(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 
 func runLogout(args []string, stdout, stderr io.Writer) int {
 	fs := newFlagSet("logout", stderr)
+	all := fs.Bool("all", false, "revoke every session of this account, not only this one")
 	cfgPath := configFlag(fs)
 	if err := fs.Parse(args); err != nil {
 		return 2
@@ -2175,7 +2184,12 @@ func runLogout(args []string, stdout, stderr io.Writer) int {
 		return reportError(stderr, "logout", err)
 	}
 	defer func() { _ = useCase.Close() }()
-	if err := useCase.App.Logout(context.Background()); err != nil {
+	if *all {
+		err = useCase.App.LogoutAll(context.Background())
+	} else {
+		err = useCase.App.Logout(context.Background())
+	}
+	if err != nil {
 		switch {
 		case errors.Is(err, httpclient.ErrWrongServer):
 			fmt.Fprintf(stderr, "brain logout: warning: stored credentials belong to a different server; tokens were left unchanged: %v\n", err)
@@ -2191,8 +2205,86 @@ func runLogout(args []string, stdout, stderr io.Writer) int {
 			return reportError(stderr, "logout", err)
 		}
 	}
+	if *all {
+		fmt.Fprintln(stdout, "logged out: all sessions of this account were revoked (API tokens are unaffected)")
+		return 0
+	}
 	fmt.Fprintln(stdout, "logged out")
 	return 0
+}
+
+// runPassword changes the signed-in account's password. Both values are read
+// from stdin, one line each, and are never printed.
+func runPassword(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
+	fs := newFlagSet("password", stderr)
+	cfgPath := configFlag(fs)
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	if fs.NArg() > 0 {
+		fmt.Fprintf(stderr, "brain password: unexpected arguments: %s\n", strings.Join(fs.Args(), " "))
+		return 2
+	}
+	current, next, err := readPasswordPair(stdin)
+	if err != nil {
+		fmt.Fprintf(stderr, "brain password: %v\n", err)
+		return 2
+	}
+	cfg, err := loadRequiredConfig(*cfgPath)
+	if err != nil {
+		return reportError(stderr, "password", err)
+	}
+	if err := cfg.Validate(); err != nil {
+		return reportError(stderr, "password", err)
+	}
+	if cfg.Mode != config.ModeServer {
+		fmt.Fprintln(stderr, "brain password: server mode is required (set mode: server in brain.yaml)")
+		return 1
+	}
+	if strings.TrimSpace(cfg.ServerURL) == "" {
+		fmt.Fprintln(stderr, "brain password: config.server_url is required")
+		return 1
+	}
+	if staticServerTokenFromEnv() {
+		fmt.Fprintln(stderr, "brain password: a static server token is set in the environment (BRAIN_TOKEN or BRAIN_SECRET_SERVER_TOKEN); a static API token cannot change a password, unset it and log in with a user account")
+		return 1
+	}
+	useCase, err := buildRuntime(cfg)
+	if err != nil {
+		return reportError(stderr, "password", err)
+	}
+	defer func() { _ = useCase.Close() }()
+	if err := useCase.App.ChangePassword(context.Background(), current, next); err != nil {
+		if errors.Is(err, httpclient.ErrUnauthorized) {
+			fmt.Fprintln(stderr, "brain password: your session has expired; run brain login again")
+			return 1
+		}
+		return reportError(stderr, "password", err)
+	}
+	fmt.Fprintln(stdout, "password changed; other sessions of this account were signed out")
+	return 0
+}
+
+// readPasswordPair reads the current and the new password from two stdin
+// lines, using one reader so the second line is not lost to buffering.
+func readPasswordPair(stdin io.Reader) (string, string, error) {
+	if stdin == nil {
+		return "", "", errors.New("stdin is not available; pipe the current and new password on two lines")
+	}
+	reader := bufio.NewReader(stdin)
+	values := make([]string, 0, 2)
+	for _, label := range []string{"current password", "new password"} {
+		line, err := reader.ReadString('\n')
+		if err != nil && !errors.Is(err, io.EOF) {
+			return "", "", err
+		}
+		value := strings.TrimRight(line, "\r\n")
+		if value == "" {
+			return "", "", fmt.Errorf("the %s is required on stdin", label)
+		}
+		values = append(values, value)
+	}
+	return values[0], values[1], nil
 }
 
 // storedCredentials reports whether the secret store still holds a session or

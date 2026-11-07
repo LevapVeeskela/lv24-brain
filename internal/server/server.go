@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"strings"
@@ -28,6 +29,13 @@ type Server struct {
 	store  httpapi.Store
 	api    *httpapi.API
 	logger *slog.Logger
+
+	// pg is the PostgreSQL store, nil in memory mode.
+	pg *postgres.Store
+	// metrics is nil unless BRAIN_METRICS_ENABLED is set.
+	metrics *httpapi.Metrics
+	// retention is nil in memory mode or when retention is disabled.
+	retention *retentionJob
 
 	closeStore func()
 	closeOnce  sync.Once
@@ -51,10 +59,11 @@ func New(ctx context.Context, cfg Config, logger *slog.Logger) (*Server, error) 
 	if err := cfg.Validate(); err != nil {
 		return nil, err
 	}
-	store, closeStore, err := openStore(ctx, cfg, logger)
+	backend, err := openStore(ctx, cfg, logger)
 	if err != nil {
 		return nil, err
 	}
+	store, closeStore := backend.store, backend.close
 	if cfg.BootstrapLogin != "" {
 		hash, err := auth.HashPassword(cfg.BootstrapPassword, cfg.PasswordParams)
 		if err != nil {
@@ -85,6 +94,24 @@ func New(ctx context.Context, cfg Config, logger *slog.Logger) (*Server, error) 
 		provider = authenticator
 	}
 
+	var metrics *httpapi.Metrics
+	if cfg.MetricsEnabled {
+		metrics = httpapi.NewMetrics(httpapi.CurrentBuildInfo())
+		if backend.pg != nil {
+			metrics.SetDBStats(poolStats(backend.pg))
+		}
+	}
+
+	var retention *retentionJob
+	if backend.pg != nil && !cfg.RetentionDisabled {
+		retention = newRetentionJob(backend.pg, cfg, logger)
+		logger.Info("retention enabled",
+			"interval", cfg.RetentionInterval.String(),
+			"audit_retention", cfg.AuditRetention.String(),
+			"revision_retention", cfg.RevisionRetention.String(),
+		)
+	}
+
 	connectorRunner := newConnectorRunner(store, secrets.Default(), cfg.ConnectorTimeout, logger)
 	api, err := httpapi.New(httpapi.Config{
 		Secret:          []byte(cfg.JWTSecret),
@@ -103,12 +130,23 @@ func New(ctx context.Context, cfg Config, logger *slog.Logger) (*Server, error) 
 		ConnectorRunner: connectorRunner,
 		Now:             cfg.Now,
 		Logger:          logger,
+		RequestLogger:   cfg.RequestLogger,
+		Metrics:         metrics,
 	}, store)
 	if err != nil {
 		closeStore()
 		return nil, err
 	}
-	return &Server{cfg: cfg, store: store, api: api, logger: logger, closeStore: closeStore}, nil
+	return &Server{
+		cfg:        cfg,
+		store:      store,
+		api:        api,
+		logger:     logger,
+		pg:         backend.pg,
+		metrics:    metrics,
+		retention:  retention,
+		closeStore: closeStore,
+	}, nil
 }
 
 // Close releases SSE subscribers and the database pool. It is idempotent.
@@ -127,20 +165,31 @@ func (s *Server) Close() error {
 	return nil
 }
 
+// storeBackend is the persistence layer chosen at startup.
+type storeBackend struct {
+	store httpapi.Store
+	// pg is set only for PostgreSQL; memory mode leaves it nil.
+	pg    *postgres.Store
+	close func()
+}
+
 // openStore selects the persistence backend. A database URL enables durable
 // server mode; without one the process deliberately falls back to the
 // in-memory store, which loses all data on restart.
-func openStore(ctx context.Context, cfg Config, logger *slog.Logger) (httpapi.Store, func(), error) {
+func openStore(ctx context.Context, cfg Config, logger *slog.Logger) (storeBackend, error) {
 	if strings.TrimSpace(cfg.DatabaseURL) == "" {
 		logger.Warn("BRAIN_DATABASE_URL is not set; using the in-memory store (development mode only; all data is lost on restart)")
-		return httpapi.NewMemoryStore(), func() {}, nil
+		return storeBackend{store: httpapi.NewMemoryStore(), close: func() {}}, nil
 	}
 
 	openCtx, cancel := context.WithTimeout(ctx, cfg.DatabaseTimeout)
 	defer cancel()
-	pg, err := postgres.Open(openCtx, cfg.DatabaseURL, postgres.Options{})
+	pg, err := postgres.Open(openCtx, cfg.DatabaseURL, postgres.Options{
+		MaxConns:         cfg.DatabaseMaxConns,
+		StatementTimeout: cfg.DatabaseStatementTimeout,
+	})
 	if err != nil {
-		return nil, nil, fmt.Errorf("server: open database: %w", err)
+		return storeBackend{}, fmt.Errorf("server: open database: %w", err)
 	}
 	closePostgres := pg.Close
 
@@ -148,24 +197,39 @@ func openStore(ctx context.Context, cfg Config, logger *slog.Logger) (httpapi.St
 	// protects an existing schema before forward-only migrations run.
 	if err := migrationGate(openCtx, pg, cfg.DatabaseBackupConfirmed); err != nil {
 		closePostgres()
-		return nil, nil, err
+		return storeBackend{}, err
 	}
 	result, err := pg.Migrate(openCtx)
 	if err != nil {
 		closePostgres()
-		return nil, nil, fmt.Errorf("server: migrate database: %w", err)
+		return storeBackend{}, fmt.Errorf("server: migrate database: %w", err)
 	}
 	store, err := serverstore.New(pg)
 	if err != nil {
 		closePostgres()
-		return nil, nil, fmt.Errorf("server: adapt database store: %w", err)
+		return storeBackend{}, fmt.Errorf("server: adapt database store: %w", err)
 	}
 	logger.Info("postgres persistence enabled",
 		"database", redactDatabaseURL(cfg.DatabaseURL),
 		"schema_version", result.Version,
 		"migrations_applied", len(result.Applied),
+		"max_conns", cfg.DatabaseMaxConns,
+		"statement_timeout", cfg.DatabaseStatementTimeout.String(),
 	)
-	return store, closePostgres, nil
+	return storeBackend{store: store, pg: pg, close: closePostgres}, nil
+}
+
+// poolStats reports live pgx pool statistics for the metrics endpoint.
+func poolStats(pg *postgres.Store) func() httpapi.DBStats {
+	return func() httpapi.DBStats {
+		stat := pg.Pool().Stat()
+		return httpapi.DBStats{
+			Acquired: stat.AcquiredConns(),
+			Idle:     stat.IdleConns(),
+			Total:    stat.TotalConns(),
+			Max:      stat.MaxConns(),
+		}
+	}
 }
 
 // migrationGate counts pending migrations for an existing schema and requires
@@ -233,9 +297,30 @@ func migrationGate(ctx context.Context, pg *postgres.Store, backupConfirmed bool
 func (s *Server) Handler() http.Handler { return s.api.Handler() }
 
 // Run serves HTTP until ctx is cancelled, then shuts down gracefully. The
-// store and its connection pool are closed exactly once on exit.
+// background job and the metrics listener stop before the store is closed.
 func (s *Server) Run(ctx context.Context) error {
 	defer func() { _ = s.Close() }()
+
+	jobCtx, stopJobs := context.WithCancel(ctx)
+	defer stopJobs()
+	jobDone := make(chan struct{})
+	go func() {
+		defer close(jobDone)
+		s.retention.Run(jobCtx)
+	}()
+	defer func() {
+		stopJobs()
+		<-jobDone
+	}()
+
+	metricsSrv, err := s.startMetrics()
+	if err != nil {
+		return err
+	}
+	if metricsSrv != nil {
+		defer s.shutdownHTTP(metricsSrv)
+	}
+
 	srv := &http.Server{
 		Addr:              s.cfg.Addr,
 		Handler:           s.Handler(),
@@ -263,6 +348,40 @@ func (s *Server) Run(ctx context.Context) error {
 			return nil
 		}
 		return err
+	}
+}
+
+// startMetrics binds the metrics listener synchronously so a bad or busy
+// BRAIN_METRICS_ADDR fails startup instead of failing silently later. It
+// returns nil when metrics are disabled.
+func (s *Server) startMetrics() (*http.Server, error) {
+	if s.metrics == nil {
+		return nil, nil
+	}
+	ln, err := net.Listen("tcp", s.cfg.MetricsAddr)
+	if err != nil {
+		return nil, fmt.Errorf("server: listen for metrics on %s: %w", s.cfg.MetricsAddr, err)
+	}
+	srv := &http.Server{
+		Handler:           s.metrics.Handler(),
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       10 * time.Second,
+		IdleTimeout:       time.Minute,
+	}
+	go func() {
+		if err := srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			s.logger.Error("metrics server failed", "error", err)
+		}
+	}()
+	s.logger.Info("metrics endpoint enabled", "addr", ln.Addr().String())
+	return srv, nil
+}
+
+func (s *Server) shutdownHTTP(srv *http.Server) {
+	ctx, cancel := context.WithTimeout(context.Background(), s.cfg.ShutdownTimeout)
+	defer cancel()
+	if err := srv.Shutdown(ctx); err != nil {
+		_ = srv.Close()
 	}
 }
 

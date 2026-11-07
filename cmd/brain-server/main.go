@@ -25,6 +25,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return 2
 	}
 	logger := slog.New(slog.NewTextHandler(stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	// Request records are JSON for log pipelines; other logs keep the text format.
+	cfg.RequestLogger = slog.New(slog.NewJSONHandler(stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	if cfg.Notice != "" {
 		logger.Warn(cfg.Notice)
 	}

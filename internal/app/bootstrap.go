@@ -53,6 +53,22 @@ func (a *App) Bootstrap(ctx context.Context, opts BootstrapOptions) (BootstrapRe
 	writePromptList(&out, "blocked", state.Blocked)
 	writePromptList(&out, "open_questions", state.OpenQuestions)
 
+	// The latest handoff comes before decisions and attempts: truncation to
+	// the budget cuts from the end, and the newest handoff matters most.
+	out.WriteString("\n## Latest handoff\n")
+	if len(handoffs) == 0 {
+		out.WriteString("- none recorded\n")
+	} else {
+		handoff := handoffs[0]
+		fmt.Fprintf(&out, "- %s\n", formatTime(handoff.CreatedAt))
+		if line := firstLine(handoff.Summary); line != "" {
+			fmt.Fprintf(&out, "  summary: %s\n", line)
+		}
+		if line := firstLine(handoff.NextAction); line != "" {
+			fmt.Fprintf(&out, "  next: %s\n", line)
+		}
+	}
+
 	out.WriteString("\n## Recent decisions\n")
 	if len(decisions) == 0 {
 		out.WriteString("- none recorded\n")
@@ -61,8 +77,8 @@ func (a *App) Bootstrap(ctx context.Context, opts BootstrapOptions) (BootstrapRe
 			if i >= maxListedItems {
 				break
 			}
-			fmt.Fprintf(&out, "- [%s] %s (%s)\n", decision.Status, decision.Title, formatDate(decision.CreatedAt))
-			if line := firstLine(decision.Context); line != "" {
+			fmt.Fprintf(&out, "- [%s] %s (%s)\n", decision.Status, SummarizeLine(decision.Title, promptLineRunes), formatDate(decision.CreatedAt))
+			if line := SummarizeLine(decision.Context, promptLineRunes); line != "" {
 				fmt.Fprintf(&out, "  %s\n", line)
 			}
 		}
@@ -82,20 +98,6 @@ func (a *App) Bootstrap(ctx context.Context, opts BootstrapOptions) (BootstrapRe
 			} else if line := firstLine(attempt.Result); line != "" {
 				fmt.Fprintf(&out, "  result: %s\n", line)
 			}
-		}
-	}
-
-	out.WriteString("\n## Latest handoff\n")
-	if len(handoffs) == 0 {
-		out.WriteString("- none recorded\n")
-	} else {
-		handoff := handoffs[0]
-		fmt.Fprintf(&out, "- %s\n", formatTime(handoff.CreatedAt))
-		if line := firstLine(handoff.Summary); line != "" {
-			fmt.Fprintf(&out, "  summary: %s\n", line)
-		}
-		if line := firstLine(handoff.NextAction); line != "" {
-			fmt.Fprintf(&out, "  next: %s\n", line)
 		}
 	}
 
@@ -120,18 +122,30 @@ func (a *App) loadState(ctx context.Context, projectID string) (domain.State, er
 	return state, nil
 }
 
+// promptLineRunes bounds one line of injected context.
+const promptLineRunes = 200
+
+// maxPromptListItems bounds a state list in injected context.
+const maxPromptListItems = 10
+
 func writePromptList(out *strings.Builder, label string, values []string) {
 	if len(values) == 0 {
 		fmt.Fprintf(out, "%s: none\n", label)
 		return
 	}
 	fmt.Fprintf(out, "%s:\n", label)
+	shown := 0
 	for _, value := range values {
-		line := firstLine(value)
+		line := SummarizeLine(value, promptLineRunes)
 		if line == "" {
 			continue
 		}
+		if shown == maxPromptListItems {
+			fmt.Fprintf(out, "- … %d more (brain state get)\n", len(values)-shown)
+			break
+		}
 		fmt.Fprintf(out, "- %s\n", line)
+		shown++
 	}
 }
 

@@ -349,7 +349,7 @@ func TestSearchRequiresAllTerms(t *testing.T) {
 	if hits := mustSearch(t, index, ports.Query{Text: "alpha beta"}); len(hits) != 1 {
 		t.Fatalf("two-term hits = %d, want 1", len(hits))
 	}
-	if hits := mustSearch(t, index, ports.Query{Text: "alpha missing"}); len(hits) != 0 {
+	if hits := mustSearch(t, index, ports.Query{Text: "missing"}); len(hits) != 0 {
 		t.Fatalf("missing-term hits = %d, want 0", len(hits))
 	}
 }
@@ -359,14 +359,13 @@ func TestSearchTreatsOperatorsAsText(t *testing.T) {
 	mustUpsert(t, index, testDocument("doc-1", "brain", "hello world"))
 
 	for _, query := range []string{`hello" OR "world`, `" OR 1=1`, "*", "NEAR(hello world)"} {
-		hits, err := index.Search(context.Background(), ports.Query{Text: query})
-		if err != nil {
+		if _, err := index.Search(context.Background(), ports.Query{Text: query}); err != nil {
 			t.Fatalf("Search(%q) error = %v, want none", query, err)
 		}
-		if query == "*" || query == `" OR 1=1` || query == "NEAR(hello world)" {
-			if len(hits) != 0 {
-				t.Fatalf("Search(%q) hits = %d, want 0", query, len(hits))
-			}
+	}
+	for _, query := range []string{`" OR 1=1`, "*"} {
+		if hits := mustSearch(t, index, ports.Query{Text: query}); len(hits) != 0 {
+			t.Fatalf("Search(%q) hits = %d, want 0", query, len(hits))
 		}
 	}
 }

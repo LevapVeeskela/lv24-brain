@@ -4,12 +4,15 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
+	"os/exec"
 	"sort"
 	"strings"
 	"time"
 	"unicode"
 
 	"github.com/levapveeskela/lv24-brain/internal/domain"
+	"github.com/levapveeskela/lv24-brain/internal/gitinfo"
 	"github.com/levapveeskela/lv24-brain/internal/ports"
 )
 
@@ -25,11 +28,13 @@ const (
 	FindingDecisionContradicted FindingKind = "decision-contradicted"
 	FindingStateExpired         FindingKind = "state-expired"
 	FindingStateBehindCommits   FindingKind = "state-behind-commits"
+	FindingDecisionCodeChanged  FindingKind = "decision-code-changed"
 )
 
 var findingKinds = []FindingKind{
 	FindingNextBehindHandoff, FindingNextMaybeDone, FindingQuestionAnswered,
 	FindingDecisionContradicted, FindingStateExpired, FindingStateBehindCommits,
+	FindingDecisionCodeChanged,
 }
 
 const (
@@ -101,6 +106,7 @@ type reviewInputs struct {
 	decisions []domain.Decision
 	attempts  []domain.Attempt
 	commits   []ports.JournalEntry // after the last state update, newest first
+	checkout  string               // local checkout, "" when this machine has none
 }
 
 // Findings runs the review heuristics: deterministic token-overlap checks, no
@@ -116,6 +122,7 @@ func (a *App) Findings(ctx context.Context, projectID string) ([]Finding, error)
 	findings = append(findings, nextActionFindings(in)...)
 	findings = append(findings, questionFindings(in)...)
 	findings = append(findings, decisionFindings(in)...)
+	findings = append(findings, decisionCodeFindings(ctx, in)...)
 	return findings, nil
 }
 
@@ -158,13 +165,17 @@ func (a *App) FixFindings(ctx context.Context, projectID string, kinds []Finding
 	}
 	if len(dropped) > 0 {
 		input.OpenQuestions = &questions
-		if err := a.noteDroppedQuestions(ctx, project.ID, dropped); err != nil {
-			return FixResult{}, err
-		}
 	}
 	updated, err := a.SetState(ctx, input)
 	if err != nil {
 		return FixResult{}, err
+	}
+	// The note is written after the state change succeeded, so it never
+	// reports a removal that did not happen.
+	if len(dropped) > 0 {
+		if err := a.noteDroppedQuestions(ctx, project.ID, dropped); err != nil {
+			return FixResult{Applied: applied, State: updated}, err
+		}
 	}
 	return FixResult{Applied: applied, State: updated}, nil
 }
@@ -188,6 +199,7 @@ func (a *App) reviewInputs(ctx context.Context, projectID string) (reviewInputs,
 		return reviewInputs{}, err
 	}
 	var in reviewInputs
+	in.checkout = checkoutDir(project)
 	if in.state, err = a.deps.Store.GetState(ctx, project.ID); err != nil && !errors.Is(err, domain.ErrNotFound) {
 		return reviewInputs{}, err
 	}
@@ -289,14 +301,17 @@ func questionFindings(in reviewInputs) []Finding {
 
 // answerFor finds a decision (any time) or a note written after the last
 // state update that covers the question.
+//
+// Removing a question is the one fix that drops owner-written text, so it
+// needs a stronger match than the report-only heuristics.
 func answerFor(question string, in reviewInputs) (string, bool) {
 	for _, decision := range in.decisions {
-		if similar(question, decision.Title+" "+decision.Context) {
+		if similarWith(question, decision.Title+" "+decision.Context, answerSharedTokens) {
 			return decision.ID, true
 		}
 	}
 	for _, note := range in.notes {
-		if note.CreatedAt.After(in.state.UpdatedAt) && similar(question, note.Title+" "+firstLine(note.Body)) {
+		if note.CreatedAt.After(in.state.UpdatedAt) && similarWith(question, note.Title+" "+firstLine(note.Body), answerSharedTokens) {
 			return note.ID, true
 		}
 	}
@@ -324,9 +339,75 @@ func decisionFindings(in reviewInputs) []Finding {
 	return findings
 }
 
+// commitsTouching lists the short hashes of commits after since that changed
+// any of paths, newest first. It is a variable so tests can fake git.
+var commitsTouching = gitCommitsTouching
+
+// decisionCodeFindings flags accepted or proposed decisions whose governed
+// paths changed in the checkout after the decision was last updated. It is
+// report-only: a person or agent must confirm or supersede the decision.
+func decisionCodeFindings(ctx context.Context, in reviewInputs) []Finding {
+	if in.checkout == "" {
+		return nil
+	}
+	var findings []Finding
+	for _, decision := range in.decisions {
+		if len(decision.Paths) == 0 || (decision.Status != domain.DecisionAccepted && decision.Status != domain.DecisionProposed) {
+			continue
+		}
+		hashes, err := commitsTouching(ctx, in.checkout, decision.UpdatedAt, decision.Paths)
+		if err != nil || len(hashes) == 0 {
+			// Not a git checkout, git missing or timed out: nothing to report.
+			continue
+		}
+		findings = append(findings, Finding{
+			Kind: FindingDecisionCodeChanged,
+			Message: fmt.Sprintf("decision %q governs %s; %d commits changed them since %s — confirm it still holds or supersede it",
+				SummarizeLine(decision.Title, 80), strings.Join(decision.Paths, ", "), len(hashes), decision.UpdatedAt.UTC().Format("2006-01-02")),
+			Evidence: hashes[0],
+		})
+	}
+	return findings
+}
+
+// checkoutDir returns the project's checkout on this machine, or "" when no
+// registered local path exists here.
+func checkoutDir(project domain.Project) string {
+	dir := firstPath(project)
+	if dir == "" {
+		return ""
+	}
+	if info, err := os.Stat(dir); err != nil || !info.IsDir() {
+		return ""
+	}
+	return dir
+}
+
+// gitCommitsTouching runs git log without a shell; the argument list is fixed
+// and the paths follow "--" so they are never read as options.
+func gitCommitsTouching(ctx context.Context, dir string, since time.Time, paths []string) ([]string, error) {
+	runCtx, cancel := context.WithTimeout(ctx, gitinfo.Timeout)
+	defer cancel()
+	args := []string{"-C", dir, "log", "--since=" + since.UTC().Format(time.RFC3339), "--format=%h", "--"}
+	args = append(args, paths...)
+	out, err := exec.CommandContext(runCtx, "git", args...).Output()
+	if err != nil {
+		return nil, err
+	}
+	return strings.Fields(string(out)), nil
+}
+
 // similar reports whether b covers most of a's significant tokens (overlap
 // coefficient over stemmed tokens, at least minSharedTokens shared).
 func similar(a, b string) bool {
+	return similarWith(a, b, minSharedTokens)
+}
+
+// answerSharedTokens is the overlap an open question needs before --fix may
+// remove it.
+const answerSharedTokens = 3
+
+func similarWith(a, b string, minShared int) bool {
 	left, right := tokenSet(a), tokenSet(b)
 	if len(left) == 0 || len(right) == 0 {
 		return false
@@ -338,7 +419,7 @@ func similar(a, b string) bool {
 		}
 	}
 	smaller := min(len(left), len(right))
-	return shared >= minSharedTokens && float64(shared)/float64(smaller) >= similarityThreshold
+	return shared >= minShared && float64(shared)/float64(smaller) >= similarityThreshold
 }
 
 func tokenSet(text string) map[string]struct{} {

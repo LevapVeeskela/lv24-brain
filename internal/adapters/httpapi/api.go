@@ -9,7 +9,6 @@ import (
 	"log/slog"
 	"net/http"
 	"net/netip"
-	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -17,7 +16,6 @@ import (
 	"github.com/levapveeskela/lv24-brain/internal/auth"
 	"github.com/levapveeskela/lv24-brain/internal/domain"
 	"github.com/levapveeskela/lv24-brain/internal/ports"
-	"github.com/levapveeskela/lv24-brain/internal/version"
 )
 
 // BuildInfo is the version payload served at /version.
@@ -49,7 +47,12 @@ type Config struct {
 	ConnectorRunner ConnectorRunner
 	Now             func() time.Time
 	Logger          *slog.Logger
-	Build           BuildInfo
+	// RequestLogger receives one structured record per HTTP request. Nil uses
+	// Logger.
+	RequestLogger *slog.Logger
+	// Metrics enables request metrics. Nil disables them.
+	Metrics *Metrics
+	Build   BuildInfo
 }
 
 // API is the brain HTTP surface.
@@ -61,7 +64,10 @@ type API struct {
 	flows  *flowStore
 	mux    *http.ServeMux
 	logger *slog.Logger
-	limit  *loginLimiter
+	// requestLogger writes the structured per-request log.
+	requestLogger *slog.Logger
+	metrics       *Metrics
+	limit         *loginLimiter
 	// accountLimit bounds login attempts per account across all clients.
 	accountLimit *loginLimiter
 	sseTickets   *sseTickets
@@ -112,12 +118,10 @@ func New(cfg Config, store Store) (*API, error) {
 		cfg.Logger = slog.Default()
 	}
 	if cfg.Build.Version == "" {
-		cfg.Build = BuildInfo{
-			Version: version.Version,
-			Commit:  version.Commit,
-			Date:    version.Date,
-			Go:      runtime.Version(),
-		}
+		cfg.Build = CurrentBuildInfo()
+	}
+	if cfg.RequestLogger == nil {
+		cfg.RequestLogger = cfg.Logger
 	}
 
 	signer, err := auth.NewSigner(auth.SignerConfig{
@@ -145,18 +149,23 @@ func New(cfg Config, store Store) (*API, error) {
 		return nil, fmt.Errorf("httpapi: %w", err)
 	}
 	api := &API{
-		cfg:          cfg,
-		store:        store,
-		auth:         service,
-		broker:       newBroker(),
-		mux:          http.NewServeMux(),
-		logger:       cfg.Logger,
-		limit:        newLoginLimiter(cfg.LoginRateLimit, time.Minute, cfg.Now),
-		accountLimit: newLoginLimiter(cfg.LoginRateLimit, time.Minute, cfg.Now),
-		sseTickets:   newSSETickets(cfg.Now),
+		cfg:           cfg,
+		store:         store,
+		auth:          service,
+		broker:        newBroker(),
+		mux:           http.NewServeMux(),
+		logger:        cfg.Logger,
+		requestLogger: cfg.RequestLogger,
+		metrics:       cfg.Metrics,
+		limit:         newLoginLimiter(cfg.LoginRateLimit, time.Minute, cfg.Now),
+		accountLimit:  newLoginLimiter(cfg.LoginRateLimit, time.Minute, cfg.Now),
+		sseTickets:    newSSETickets(cfg.Now),
 	}
 	if cfg.OIDC != nil {
 		api.flows = newFlowStore(cfg.Now, oidcFlowTTL, 1024)
+	}
+	if cfg.Metrics != nil {
+		cfg.Metrics.SetSSEClients(api.broker.subscriberCount)
 	}
 	api.routes()
 	return api, nil
@@ -165,7 +174,7 @@ func New(cfg Config, store Store) (*API, error) {
 // Handler returns the composed HTTP handler.
 func (a *API) Handler() http.Handler {
 	a.handlerOnce.Do(func() {
-		var h http.Handler = a.mux
+		var h http.Handler = a.instrument(a.mux)
 		h = a.logRequests(h)
 		h = a.securityHeaders(h)
 		h = a.recoverPanics(h)
@@ -188,6 +197,8 @@ func (a *API) routes() {
 	a.mux.HandleFunc("POST /v1/auth/refresh", a.refresh)
 	a.authed("POST /v1/auth/logout", a.logout, domain.RoleViewer, false)
 	a.authed("GET /v1/auth/me", a.me, domain.RoleViewer, false)
+	a.authed("POST /v1/auth/password", a.changePassword, domain.RoleViewer, false)
+	a.authed("POST /v1/auth/sessions/revoke-all", a.revokeOwnSessions, domain.RoleViewer, false)
 	a.mux.HandleFunc("GET /v1/auth/oidc/login", a.oidcLogin)
 	a.mux.HandleFunc("GET /v1/auth/oidc/callback", a.oidcCallback)
 
@@ -196,6 +207,7 @@ func (a *API) routes() {
 	a.authed("GET /v1/users/{id}", a.getUser, domain.RoleAdmin, false)
 	a.authed("PATCH /v1/users/{id}", a.updateUser, domain.RoleAdmin, false)
 	a.authed("DELETE /v1/users/{id}", a.deleteUser, domain.RoleAdmin, false)
+	a.authed("POST /v1/users/{id}/sessions/revoke", a.revokeUserSessions, domain.RoleAdmin, false)
 
 	a.authed("GET /v1/tokens", a.listTokens, domain.RoleViewer, false)
 	a.authed("POST /v1/tokens", a.createToken, domain.RoleViewer, false)
@@ -311,6 +323,9 @@ func (a *API) withAuth(min domain.Role, allowTicket bool, next http.Handler) htt
 		ctx := context.WithValue(r.Context(), principalContextKey{}, principal)
 		ctx = ports.WithActor(ctx, principal.User.Login)
 		ctx = ports.WithActorID(ctx, principal.User.ID)
+		if state := requestStateFrom(ctx); state != nil {
+			state.userID = principal.User.ID
+		}
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
 }
@@ -437,25 +452,6 @@ func (a *API) recoverPanics(next http.Handler) http.Handler {
 			}
 		}()
 		next.ServeHTTP(w, r)
-	})
-}
-
-func (a *API) logRequests(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		started := a.cfg.Now()
-		recorder := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
-		next.ServeHTTP(recorder, r)
-		level := slog.LevelDebug
-		if recorder.status >= http.StatusInternalServerError {
-			level = slog.LevelError
-		}
-		a.logger.Log(r.Context(), level, "http request",
-			"request_id", requestIDFrom(r.Context()),
-			"method", r.Method,
-			"path", r.URL.Path,
-			"status", recorder.status,
-			"duration_ms", a.cfg.Now().Sub(started).Milliseconds(),
-		)
 	})
 }
 

@@ -4,24 +4,28 @@ import "testing"
 
 func TestMatchExpression(t *testing.T) {
 	tests := []struct {
-		name  string
-		input string
-		want  string
-		ok    bool
+		name   string
+		input  string
+		joiner string
+		want   string
+		ok     bool
 	}{
-		{name: "single term", input: "sqlite", want: `"sqlite"`, ok: true},
-		{name: "multiple terms", input: "sqlite index", want: `"sqlite" AND "index"`, ok: true},
-		{name: "cyrillic", input: "архитектура сервиса", want: `"архитектура" AND "сервиса"`, ok: true},
-		{name: "embedded quotes", input: `he said "hi"`, want: `"he" AND "said" AND "hi"`, ok: true},
-		{name: "operators are text", input: "* OR 1=1", want: `"OR" AND "1=1"`, ok: true},
-		{name: "empty", input: "", ok: false},
-		{name: "whitespace", input: "   ", ok: false},
-		{name: "punctuation only", input: "!!! ...", ok: false},
-		{name: "quotes only", input: `""`, ok: false},
+		{name: "single short term exact", input: "db", joiner: joinAll, want: `"db"`, ok: true},
+		{name: "long term is prefix", input: "sqlite", joiner: joinAll, want: `"sqlite"*`, ok: true},
+		{name: "multiple terms AND", input: "sqlite db", joiner: joinAll, want: `"sqlite"* AND "db"`, ok: true},
+		{name: "multiple terms OR", input: "sqlite db", joiner: joinAny, want: `"sqlite"* OR "db"`, ok: true},
+		{name: "cyrillic prefix", input: "архитектура сервиса", joiner: joinAll, want: `"архитектура"* AND "сервиса"*`, ok: true},
+		{name: "embedded quotes", input: `he said "hi"`, joiner: joinAll, want: `"he" AND "said"* AND "hi"`, ok: true},
+		{name: "operators are text", input: "* OR 1=1", joiner: joinAll, want: `"OR" AND "1=1"`, ok: true},
+		{name: "column filter is text", input: "title:x", joiner: joinAll, want: `"title:x"*`, ok: true},
+		{name: "empty", input: "", joiner: joinAll, ok: false},
+		{name: "whitespace", input: "   ", joiner: joinAll, ok: false},
+		{name: "punctuation only", input: "!!! ...", joiner: joinAll, ok: false},
+		{name: "quotes only", input: `""`, joiner: joinAll, ok: false},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			got, ok := matchExpression(test.input)
+			got, ok := matchExpression(test.input, test.joiner)
 			if ok != test.ok {
 				t.Fatalf("ok = %v, want %v", ok, test.ok)
 			}

@@ -139,14 +139,18 @@ func parseStatusLine(preamble string) domain.DecisionStatus {
 	return ""
 }
 
-func parseDecisionBody(body string) (string, domain.DecisionStatus, string, []string, []string, []string) {
-	sections := splitSections(body, "context", "alternatives", "consequences", "evidence")
+// decisionSections are the known "## " headings of a decision body.
+var decisionSections = []string{"context", "alternatives", "consequences", "evidence", "paths"}
+
+func parseDecisionBody(body string) (string, domain.DecisionStatus, string, []string, []string, []string, []string) {
+	sections := splitSections(body, decisionSections...)
 	return firstHeading(body),
-		parseStatusLine(bodyPreamble(body, "context", "alternatives", "consequences", "evidence")),
+		parseStatusLine(bodyPreamble(body, decisionSections...)),
 		strings.TrimSpace(sections["context"]),
 		parseListSection(sections["alternatives"]),
 		parseListSection(sections["consequences"]),
-		parseListSection(sections["evidence"])
+		parseListSection(sections["evidence"]),
+		parseListSection(sections["paths"])
 }
 
 func parseAttemptBody(body string) (string, string, string, string) {
@@ -314,7 +318,7 @@ func readDecisionFile(path string) (domain.Decision, error) {
 	if err := validateRecordFrontmatter(path, frontmatter.Frontmatter, "decision"); err != nil {
 		return domain.Decision{}, err
 	}
-	title, status, contextText, alternatives, consequences, evidence := parseDecisionBody(body)
+	title, status, contextText, alternatives, consequences, evidence, paths := parseDecisionBody(body)
 	if title == "" {
 		title = frontmatter.Title
 	}
@@ -333,6 +337,7 @@ func readDecisionFile(path string) (domain.Decision, error) {
 		Alternatives: alternatives,
 		Consequences: consequences,
 		Evidence:     evidence,
+		Paths:        paths,
 		Permalink:    frontmatter.Permalink,
 		CreatedAt:    frontmatter.CreatedAt.UTC(),
 		UpdatedAt:    frontmatter.UpdatedAt.UTC(),

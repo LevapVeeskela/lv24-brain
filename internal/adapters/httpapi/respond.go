@@ -59,6 +59,8 @@ func (a *API) writeError(w http.ResponseWriter, r *http.Request, err error) {
 		writeErrorCode(w, http.StatusNotFound, "not_found", "resource not found")
 	case errors.Is(err, domain.ErrConflict):
 		writeErrorCode(w, http.StatusConflict, "conflict", "resource already exists")
+	case errors.Is(err, domain.ErrLastAdmin):
+		writeErrorCode(w, http.StatusConflict, "last_admin", "cannot demote or delete the last admin; promote another admin first")
 	case errors.Is(err, domain.ErrUnsupported):
 		writeErrorCode(w, http.StatusNotImplemented, "unsupported", err.Error())
 	case errors.Is(err, auth.ErrInvalidCredentials),

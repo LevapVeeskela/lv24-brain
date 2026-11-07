@@ -14,6 +14,9 @@ var (
 	ErrConflict = errors.New("conflict")
 	// ErrUnsupported marks a feature or mode the engine does not support.
 	ErrUnsupported = errors.New("unsupported")
+	// ErrLastAdmin marks a change that would leave no admin account: demoting
+	// or deleting the last remaining admin.
+	ErrLastAdmin = errors.New("last admin")
 )
 
 // ValidationError describes one invalid field.

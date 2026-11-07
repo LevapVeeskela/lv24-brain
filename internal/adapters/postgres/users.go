@@ -2,6 +2,7 @@ package postgres
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -178,6 +179,12 @@ func (s *Store) UpdateUser(ctx context.Context, user domain.User, expected int64
 	var revision domain.SyncRevision
 
 	err = s.withTx(ctx, func(tx pgx.Tx) error {
+		if err := lockAdminGuard(ctx, tx); err != nil {
+			return err
+		}
+		if err := ensureAdminRemains(ctx, tx, user.ID, user.Role != domain.RoleAdmin); err != nil {
+			return err
+		}
 		revisionID, err := insertRevisionTx(ctx, tx, actor, "user", user.ID, map[string]any{"role": string(user.Role)}, at)
 		if err != nil {
 			return err
@@ -332,6 +339,12 @@ func (s *Store) DeleteUser(ctx context.Context, id string, expected int64) (doma
 	var revision domain.SyncRevision
 
 	err := s.withTx(ctx, func(tx pgx.Tx) error {
+		if err := lockAdminGuard(ctx, tx); err != nil {
+			return err
+		}
+		if err := ensureAdminRemains(ctx, tx, id, true); err != nil {
+			return err
+		}
 		revisionID, err := insertRevisionTx(ctx, tx, actor, "user", id, nil, at)
 		if err != nil {
 			return err
@@ -356,6 +369,48 @@ func (s *Store) DeleteUser(ctx context.Context, id string, expected int64) (doma
 		return domain.SyncRevision{}, err
 	}
 	return revision, nil
+}
+
+// adminGuardLockSQL serializes every change that can remove an admin. The
+// lock is transaction-scoped; the admin count is read only after it is held,
+// and READ COMMITTED gives that read a fresh snapshot, so two concurrent
+// demotions or deletions cannot both see another admin still in place.
+const adminGuardLockSQL = `SELECT pg_advisory_xact_lock(hashtextextended('users:admin-guard', 0))`
+
+func lockAdminGuard(ctx context.Context, tx pgx.Tx) error {
+	if _, err := tx.Exec(ctx, adminGuardLockSQL); err != nil {
+		return mapPgError("lock admin guard", err)
+	}
+	return nil
+}
+
+// ensureAdminRemains returns domain.ErrLastAdmin when removing the admin role
+// (demoting or deleting the user id) would leave no other admin. It must run
+// under lockAdminGuard. A missing user or a non-admin target passes through so
+// the caller's own not-found and revision handling still applies.
+func ensureAdminRemains(ctx context.Context, tx pgx.Tx, id string, removesAdmin bool) error {
+	if !removesAdmin {
+		return nil
+	}
+	var role string
+	err := tx.QueryRow(ctx, `SELECT role FROM users WHERE id = $1`, id).Scan(&role)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return mapPgError("read user role", err)
+	}
+	if domain.Role(role) != domain.RoleAdmin {
+		return nil
+	}
+	var others int
+	if err := tx.QueryRow(ctx, `SELECT count(*) FROM users WHERE role = 'admin' AND id <> $1`, id).Scan(&others); err != nil {
+		return mapPgError("count other admins", err)
+	}
+	if others == 0 {
+		return domain.ErrLastAdmin
+	}
+	return nil
 }
 
 // ValidateOIDCPair checks that issuer and subject are either both empty or both

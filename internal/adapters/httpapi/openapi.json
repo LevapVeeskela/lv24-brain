@@ -279,6 +279,31 @@
         }
       }
     },
+    "/v1/auth/password": {
+      "post": {
+        "summary": "Change the caller's local password. Verifies the current password, then revokes every other login session of the account (the caller's current session is kept). API tokens and the current access token are not affected. Local accounts only.",
+        "requestBody": {
+          "required": true,
+          "content": { "application/json": { "schema": { "type": "object", "required": ["current_password", "new_password"], "properties": { "current_password": { "type": "string" }, "new_password": { "type": "string", "minLength": 10 } } } } }
+        },
+        "responses": {
+          "204": { "description": "Changed; other sessions revoked" },
+          "400": { "description": "New password fails policy or equals the current one", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } },
+          "401": { "description": "Unauthenticated" },
+          "403": { "description": "Wrong current password (code invalid_current_password) or account is not local (code forbidden)", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } },
+          "429": { "description": "Too many attempts for this account" }
+        }
+      }
+    },
+    "/v1/auth/sessions/revoke-all": {
+      "post": {
+        "summary": "Revoke every login session of the caller, including the current one. The current access token is rejected immediately. API tokens are not revoked.",
+        "responses": {
+          "204": { "description": "All login sessions revoked" },
+          "401": { "description": "Unauthenticated" }
+        }
+      }
+    },
     "/v1/auth/me": {
       "get": {
         "summary": "Current principal",
@@ -345,14 +370,25 @@
         }
       }
     },
+    "/v1/users/{id}/sessions/revoke": {
+      "post": {
+        "summary": "Revoke every login session of a user (admin). Their access tokens are rejected immediately; their API tokens are not revoked.",
+        "parameters": [ { "name": "id", "in": "path", "required": true, "schema": { "type": "string" } } ],
+        "responses": {
+          "204": { "description": "All login sessions of the user revoked" },
+          "403": { "description": "Admin role required" },
+          "404": { "description": "User not found", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } }
+        }
+      }
+    },
     "/v1/users/{id}": {
       "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }],
       "get": { "summary": "Get a user (admin)", "responses": { "200": { "description": "User" }, "404": { "description": "Not found" } } },
-      "patch": { "summary": "Update a user (admin)", "responses": { "200": { "description": "Updated" }, "409": { "description": "Revision conflict" } } },
+      "patch": { "summary": "Update a user (admin)", "responses": { "200": { "description": "Updated" }, "409": { "description": "Revision conflict (code conflict), or the change would leave no admin (code last_admin)" } } },
       "delete": {
         "summary": "Delete a user (admin)",
         "parameters": [{ "name": "revision", "in": "query", "schema": { "type": "integer", "format": "int64" } }],
-        "responses": { "204": { "description": "Deleted" }, "409": { "description": "Revision conflict" } }
+        "responses": { "204": { "description": "Deleted" }, "409": { "description": "Revision conflict (code conflict), or the change would leave no admin (code last_admin)" } }
       }
     },
     "/v1/tokens": {

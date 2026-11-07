@@ -274,6 +274,12 @@ func TestUsersCRUD(t *testing.T) {
 		t.Fatalf("password hash = %q", stored.PasswordHash)
 	}
 
+	// Demoting user_1 is only allowed while another admin remains (last-admin
+	// guard), so a second admin is seeded first.
+	if _, _, err := store.CreateUser(ctx, domain.User{ID: "user_2", Login: "bob", Role: domain.RoleAdmin, AuthSource: "local"}, ""); err != nil {
+		t.Fatalf("CreateUser user_2: %v", err)
+	}
+
 	profile := stored.User
 	profile.DisplayName = "Alice Example"
 	profile.Role = domain.RoleViewer
@@ -284,7 +290,7 @@ func TestUsersCRUD(t *testing.T) {
 	profileValue := revisionNumber(t, profileRevision)
 
 	users, err := store.ListUsers(ctx)
-	if err != nil || len(users) != 1 {
+	if err != nil || len(users) != 2 {
 		t.Fatalf("ListUsers = (%d, %v)", len(users), err)
 	}
 	roles, err := store.ListRoles(ctx)

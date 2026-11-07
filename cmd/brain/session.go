@@ -9,11 +9,13 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"regexp"
 	"strings"
 	"time"
 
 	"github.com/levapveeskela/lv24-brain/internal/app"
 	"github.com/levapveeskela/lv24-brain/internal/bootstrap"
+	"github.com/levapveeskela/lv24-brain/internal/domain"
 	"github.com/levapveeskela/lv24-brain/internal/gitinfo"
 )
 
@@ -154,7 +156,12 @@ func openSessionTarget(ctx context.Context, opts sessionOptions) (*bootstrap.Run
 	}
 	if err != nil {
 		_ = runtime.Close()
-		return nil, app.Resolved{}, errNotRegistered
+		// Only "this directory is not a project" is silent; a broken
+		// registry or store must be reported (on stderr, exit 0 in hook mode).
+		if errors.Is(err, domain.ErrValidation) {
+			return nil, app.Resolved{}, errNotRegistered
+		}
+		return nil, app.Resolved{}, err
 	}
 	return runtime, target, nil
 }
@@ -243,6 +250,8 @@ func sessionEnd(ctx context.Context, opts sessionOptions, stdout io.Writer) erro
 	}
 	defer func() { _ = runtime.Close() }()
 	a := runtime.App
+	// Decisions are captured even when the handoff below is skipped.
+	captureDecisions(ctx, a, target.Project.ID, finalMessage(opts))
 	_, _, handoffs, err := a.RecentRecords(ctx, target.Project.ID, 1)
 	if err != nil {
 		return err
@@ -277,19 +286,55 @@ func sessionEnd(ctx context.Context, opts sessionOptions, stdout io.Writer) erro
 // transcript is available, else a digest of what was recorded since the
 // latest handoff. Empty means there is nothing worth a handoff.
 func sessionSummary(ctx context.Context, a *app.App, target app.Resolved, opts sessionOptions) (string, error) {
-	if text := strings.Join(strings.Fields(opts.input.LastAssistantMessage), " "); text != "" {
+	if text := strings.Join(strings.Fields(finalMessage(opts)), " "); text != "" {
 		return text, nil
-	}
-	if opts.hook == "claude" && opts.input.TranscriptPath != "" {
-		if text := lastAssistantText(opts.input.TranscriptPath); text != "" {
-			return text, nil
-		}
 	}
 	catchup, err := a.Catchup(ctx, app.CatchupOptions{ProjectID: target.Project.ID, Limit: 5})
 	if err != nil || catchup.Empty() {
 		return "", err
 	}
 	return catchupDigest(catchup), nil
+}
+
+// finalMessage is the agent's last message as written (line breaks kept):
+// Codex passes it in the Stop input, Claude Code leaves it in the transcript.
+func finalMessage(opts sessionOptions) string {
+	if text := strings.TrimSpace(opts.input.LastAssistantMessage); text != "" {
+		return text
+	}
+	if opts.hook == "claude" && opts.input.TranscriptPath != "" {
+		return lastAssistantText(opts.input.TranscriptPath)
+	}
+	return ""
+}
+
+// capturedDecisionLine matches "Decision: ..." / "Решение: ..." lines (optionally
+// bulleted or bold) that agents put in their final message.
+var capturedDecisionLine = regexp.MustCompile(`(?im)^[ \t]*(?:[-*][ \t]+)?(?:\*\*)?(?:decision|решение)(?:\*\*)?[ \t]*:(?:\*\*)?[ \t]*(.+?)[ \t]*$`)
+
+// maxCapturedDecisions bounds what one session can propose.
+const maxCapturedDecisions = 5
+
+// captureDecisions records "Decision:" lines of the final message as
+// proposed decisions for the owner to accept (brain record status). Repeats
+// within the retry window are deduplicated by the app.
+func captureDecisions(ctx context.Context, a *app.App, projectID, message string) int {
+	captured := 0
+	for _, match := range capturedDecisionLine.FindAllStringSubmatch(message, -1) {
+		title := strings.TrimSpace(strings.Trim(match[1], "*` "))
+		if len([]rune(title)) < 8 || captured == maxCapturedDecisions {
+			continue
+		}
+		if _, err := a.Decision(ctx, app.DecisionInput{
+			ProjectID: projectID,
+			Title:     truncateRunes(title, 200),
+			Status:    domain.DecisionProposed,
+			Context:   "Captured from the agent's final message at session end; accept or reject with brain record status.",
+		}); err == nil {
+			captured++
+		}
+	}
+	return captured
 }
 
 func catchupDigest(result app.CatchupResult) string {
@@ -360,7 +405,7 @@ func assistantText(line []byte) string {
 			texts = append(texts, part.Text)
 		}
 	}
-	return strings.Join(strings.Fields(strings.Join(texts, " ")), " ")
+	return strings.TrimSpace(strings.Join(texts, "\n\n"))
 }
 
 func truncateRunes(text string, limit int) string {

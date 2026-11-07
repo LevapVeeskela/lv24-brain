@@ -70,6 +70,14 @@ runs as UID/GID `10001` and drops new privileges.
 | `BRAIN_DB_PASSWORD` | yes | Postgres password; keep in sync with the URL. |
 | `BRAIN_DATABASE_BACKUP_CONFIRMED` | conditional | Set to `1` to allow pending migrations on an existing schema after a backup. |
 | `BRAIN_DATABASE_TIMEOUT` | no | Database health/migration timeout, default `30s`. |
+| `BRAIN_DATABASE_MAX_CONNS` | no | pgx pool size per replica, default `10` (1-200). Keep the total across replicas under Postgres `max_connections`. |
+| `BRAIN_DATABASE_STATEMENT_TIMEOUT` | no | `statement_timeout` for every connection, default `30s`; `0` disables. Applies to startup migrations too. |
+| `BRAIN_METRICS_ENABLED` | no | Set to `1` to serve Prometheus metrics on `BRAIN_METRICS_ADDR`. Off by default. |
+| `BRAIN_METRICS_ADDR` | no | Metrics listener, default `127.0.0.1:9090`. Separate from the API port; the endpoint has no authentication. |
+| `BRAIN_RETENTION_DISABLED` | no | Set to `1` to stop the in-process retention job. |
+| `BRAIN_AUDIT_RETENTION` | no | Audit event retention, default `180d` (`Nd` or a Go duration). |
+| `BRAIN_REVISION_RETENTION` | no | Retention for revisions no audit event or entity still references, default `90d`. |
+| `BRAIN_RETENTION_INTERVAL` | no | Time between retention runs, default `6h`. |
 | `BRAIN_BOOTSTRAP_ADMIN_LOGIN` | no | First local administrator login. |
 | `BRAIN_BOOTSTRAP_ADMIN_PASSWORD` | no | First administrator password; set with the login. |
 | `BRAIN_OIDC_ISSUER` | no | OIDC issuer URL; empty disables OIDC. |

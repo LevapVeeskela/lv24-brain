@@ -100,6 +100,7 @@ type DecisionInput struct {
 	Context      string
 	Alternatives []string
 	Consequences []string
+	Paths        []string
 }
 
 // AttemptInput is an attempt record to append.
@@ -195,12 +196,13 @@ func (s *Server) coreTools() []tool {
 		},
 		{
 			Name:        "brain_decision",
-			Description: "Record a decision with its context, alternatives and consequences.",
+			Description: "Record a decision with its context, alternatives and consequences. Pass paths for decisions about specific code so review flags them when that code changes.",
 			InputSchema: objectSchema([]string{"title"}, map[string]any{
 				"title":        stringProp("Decision title."),
 				"context":      stringProp("Why the decision was needed."),
 				"alternatives": stringArrayProp("Options that were considered."),
 				"consequences": stringArrayProp("Expected consequences."),
+				"paths":        stringArrayProp("Repo-relative files or directories the decision governs (forward slashes, no absolute paths or \"..\")."),
 				"status":       enumProp("Lifecycle status.", decisionStatuses),
 				"project":      project,
 			}),
@@ -372,6 +374,7 @@ func (s *Server) decision(ctx context.Context, raw json.RawMessage) (toolResult,
 		Context      string   `json:"context"`
 		Alternatives []string `json:"alternatives"`
 		Consequences []string `json:"consequences"`
+		Paths        []string `json:"paths"`
 		Status       string   `json:"status"`
 		Project      string   `json:"project"`
 	}
@@ -396,6 +399,7 @@ func (s *Server) decision(ctx context.Context, raw json.RawMessage) (toolResult,
 		Context:      args.Context,
 		Alternatives: args.Alternatives,
 		Consequences: args.Consequences,
+		Paths:        args.Paths,
 	})
 	if err != nil {
 		return toolResult{}, err

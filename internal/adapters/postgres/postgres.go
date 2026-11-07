@@ -52,6 +52,9 @@ type Options struct {
 	MaxConnLifetime time.Duration
 	MaxConnIdleTime time.Duration
 	ApplicationName string
+	// StatementTimeout is applied to every connection as the statement_timeout
+	// runtime parameter. Zero leaves the PostgreSQL server default in place.
+	StatementTimeout time.Duration
 }
 
 // Store is the PostgreSQL implementation of the server persistence layer.
@@ -97,6 +100,9 @@ func Open(ctx context.Context, databaseURL string, opts Options) (*Store, error)
 		cfg.ConnConfig.RuntimeParams = map[string]string{}
 	}
 	cfg.ConnConfig.RuntimeParams["application_name"] = applicationName
+	if opts.StatementTimeout > 0 {
+		cfg.ConnConfig.RuntimeParams["statement_timeout"] = strconv.FormatInt(opts.StatementTimeout.Milliseconds(), 10)
+	}
 
 	pool, err := pgxpool.NewWithConfig(ctx, cfg)
 	if err != nil {

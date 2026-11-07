@@ -42,8 +42,10 @@ section. `--brief` prints only the project and state fields. The selector is an
 id, an alias, or a path. Without one, the project is resolved from the working
 directory: the longest registered path containing it, else the single
 registered project under it. Use `brain project list` to see the registry.
-Projects are created on first write; `brain project set` makes their metadata
-explicit.
+A write to an unknown project fails unless `--create` is passed (for example
+`brain note --create --project demo "..."`), which registers it; without the
+flag a typo or unregistered alias never starts a new project. `brain project set`
+makes the metadata of a registered project explicit.
 
 ### Write records
 
@@ -68,6 +70,16 @@ brain handoff "Session summary" --next "Run the migration dry run"
 - Records are Markdown files. In git mode they are shared with everyone who
   can read the data repository. Do not write secrets, tokens, or personal data
   into records.
+
+Decisions about specific code should name it with `--paths` (comma-separated,
+repo-relative files or directories with forward slashes, for example
+`--paths internal/wire/,cmd/brain/main.go`). Absolute paths and `..` segments
+are rejected. The same field is the `paths` array of `brain_decision`. When a
+project has a local checkout on the machine that runs `brain review`, the review
+reports each accepted or proposed decision whose paths changed in git after the
+decision was last updated (`decision-code-changed`). It is report-only: confirm
+the decision still holds or supersede it. Machines without the checkout, and
+projects that are not git repositories, are skipped silently.
 
 ### Record lifecycle (local and git mode)
 
@@ -113,6 +125,10 @@ brain journal --repair --dry-run   # records of the last 30 days without a journ
   mirror, so `brain search --project ims --kind dump "flaky"` finds that
   repository's issues. Connector runs index their dumps. Server mode applies
   `--kind` too (Postgres full-text search, ranked); it stores no dumps.
+- Local search (FTS5) matches each query term of 4 or more characters by
+  prefix, so `warm` finds `warmup`; shorter terms match exactly. It
+  first requires all terms; when that finds nothing, it falls back to records
+  that match any term.
 - Server mode also supports `brain record list|show|status|supersede`,
   `catchup`, `review` and `journal --repair` reads; trash and restore are
   local/git only.
@@ -231,10 +247,25 @@ brain discover --root <workspace> --apply   # register the new ones
 
 ## 3a2. MCP server for coding agents
 
-`brain mcp` serves the brain over stdio (MCP 2025-06-18) with the tools
-`brain_open`, `brain_search`, `brain_note`, `brain_decision`, `brain_attempt`,
-`brain_handoff`, `brain_journal`, `brain_projects`, `brain_state_get` and
-`brain_state_set`. Register it once per machine with an explicit config, because
+`brain mcp` serves the brain over stdio (MCP 2025-06-18) with these tools:
+
+- `brain_open` - load a project's state, recent decisions, attempts and last handoff.
+- `brain_search` - full-text search over notes, decisions, attempts and handoffs; connector dumps only with `include_dumps` or `kinds` containing `dump`.
+- `brain_note` - append a dated note.
+- `brain_decision` - record a decision with its context, alternatives and consequences.
+- `brain_attempt` - record an attempt with its result and reason.
+- `brain_handoff` - record a session handoff with a summary and next action.
+- `brain_journal` - list recent activity, newest first.
+- `brain_projects` - list registered projects with kind, paths and repository URL.
+- `brain_state_get` - read a project's goal, next action, active work, blockers and open questions.
+- `brain_state_set` - update the state; only the given fields change.
+- `brain_catchup` - what changed since the latest handoff (or the last `since_hours`).
+- `brain_review` - find stale or contradictory knowledge; read-only, `brain review --fix` applies fixes in a shell.
+- `brain_records` - list a project's records with ids and status, newest first.
+- `brain_record` - read one record in full by id.
+- `brain_decision_status` - accept, reject or supersede a decision.
+
+Register it once per machine with an explicit config, because
 agents may start servers without the variables that locate the default config:
 
 ```sh
@@ -280,6 +311,19 @@ the LaunchAgent `by.lv24.brain-daily` (`~/Library/LaunchAgents/`, script
 missed run; it runs in the login session, so git can use the keychain.
 Run it now with `launchctl kickstart gui/$(id -u)/by.lv24.brain-daily`. The instructions refer to `brain` on PATH,
 so they are identical on Windows and macOS.
+
+### Daily digest
+
+`brain digest` is the morning summary across all registered projects: what changed
+in the window (default `24h`; Go durations such as `90m` or `24h`, or `7d`), per
+project with activity, then a global "Needs you" section with proposed decisions
+(listed whatever their age), open questions, blocked items and review finding counts.
+Projects with nothing to report are omitted. Flags: `--project <id>` for one project,
+`--json` for the envelope, `--write` to save the human digest to
+`<data_dir>/digests/YYYY-MM-DD.md` (local/git mode; one file per day, overwritten on
+rerun). The digests directory syncs with the data repo by design. Optional: add
+`brain digest --write` to the nightly job (Windows `C:\0project\.brain\bin\brain-graphs.bat`,
+macOS `~/.local/bin/brain-daily.sh`); the scripts are not changed by brain.
 
 ## 4. Server-mode operations
 
@@ -369,6 +413,68 @@ API tokens (prefix `brain_`) are created and revoked through the API:
 - `GET /v1/tokens` lists the caller's tokens. Admins may pass `userId`, or
   `all=true` to list every token.
 - `DELETE /v1/tokens/{id}` revokes a token. Only the owner or an admin may do it.
+
+### Database pool, timeouts and request logs
+
+- `BRAIN_DATABASE_MAX_CONNS` (default 10, range 1-200) sizes the pgx pool of
+  each replica. Keep the sum across replicas below Postgres `max_connections`.
+- `BRAIN_DATABASE_STATEMENT_TIMEOUT` (default `30s`, `0` disables, range
+  1s-1h) is sent as `statement_timeout` on every connection. Startup migrations
+  use the same limit. Before a large migration on a big table, raise it in
+  `deploy/.env`, restart, and restore the value afterwards.
+- Invalid values stop the server at startup with an error that names the
+  variable.
+- Request logs are JSON records on stderr: `msg="http request"`, `request_id`,
+  `method`, `route` (the router pattern, never the raw path), `status`,
+  `duration_ms`, and `user_id` for authenticated requests. Tokens, headers,
+  query strings, and bodies are never logged. Server errors log at ERROR and
+  health probes at DEBUG. Other logs keep the text format.
+
+### Metrics
+
+Metrics are off by default. With `BRAIN_METRICS_ENABLED=1` a second listener
+serves Prometheus text format on `BRAIN_METRICS_ADDR` (default
+`127.0.0.1:9090`). The public API port never serves `/metrics`.
+
+- Series: `http_requests_total{method,route,code}`,
+  `http_request_duration_seconds{method,route}` (histogram with fixed buckets
+  from 5 ms to 10 s), `http_requests_in_flight`, `sse_clients`,
+  `db_pool_acquired_connections`, `db_pool_idle_connections`,
+  `db_pool_total_connections`, `db_pool_max_connections` (PostgreSQL only), and
+  `brain_build_info{version,commit,go_version}`.
+- Labels use the route pattern, such as `/v1/projects/{id}`. Unmatched paths
+  share the label `unmatched`, and non-standard methods share `OTHER`, so
+  cardinality stays bounded.
+- The endpoint has no authentication. Keep it on loopback or on a private
+  network. An address on a public interface exposes operational data.
+- In the Compose stack the listener lives inside the container. To scrape it
+  from another service on the same Compose network, set
+  `BRAIN_METRICS_ADDR=0.0.0.0:9090` and scrape `brain-server:9090`. Do not
+  publish the port to the host unless you need to.
+
+### Retention
+
+The retention job runs in every replica. The first run starts about one minute
+after boot, then every `BRAIN_RETENTION_INTERVAL` (default `6h`). A Postgres
+advisory lock lets only one replica sweep at a time. Set
+`BRAIN_RETENTION_DISABLED=1` to turn it off. It is skipped in memory mode.
+
+Each run deletes:
+
+| Data | Rule |
+|---|---|
+| `audit_events` | `created_at` older than `BRAIN_AUDIT_RETENTION` (default `180d`). |
+| `revisions` | `created_at` older than `BRAIN_REVISION_RETENTION` (default `90d`), and not referenced by any remaining audit event or as an entity's current revision. Audit rows are swept first, so revisions they held are freed in the same run. |
+| `refresh_tokens` | `expires_at` in the past. Revoked rows are removed when they expire. |
+| `auth_revocations` | `revoked_at` older than `BRAIN_REFRESH_TTL` (default `720h`). Tokens guarded by a tombstone have expired by then. |
+| `api_tokens` | `expires_at` more than 30 days in the past. Tokens without an expiry are never removed. |
+
+Effects to expect: `/v1/revisions` and SSE replay cover a shorter history. A
+client that reconnects with an older `Last-Event-ID` receives only the events
+that remain. Deletes run in batches of 1000 rows per statement, at most 500
+batches per table per run, so locks stay short. Leftover rows go to the next
+run. Each run logs `retention completed` with per-table counts, or
+`retention failed` with the error.
 
 ### Audit log
 

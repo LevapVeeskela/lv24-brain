@@ -72,3 +72,10 @@ func (b *broker) close() {
 	b.closed = true
 	close(b.done)
 }
+
+// subscriberCount reports the number of connected event-stream subscribers.
+func (b *broker) subscriberCount() int {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return len(b.subs)
+}

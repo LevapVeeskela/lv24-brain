@@ -2,6 +2,7 @@ package domain
 
 import (
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -54,9 +55,34 @@ type Decision struct {
 	Alternatives []string       `json:"alternatives,omitempty"`
 	Consequences []string       `json:"consequences,omitempty"`
 	Evidence     []string       `json:"evidence,omitempty"`
-	Permalink    string         `json:"permalink,omitempty"`
-	CreatedAt    time.Time      `json:"createdAt"`
-	UpdatedAt    time.Time      `json:"updatedAt"`
+	// Paths are repo-relative files or directories the decision governs.
+	Paths     []string  `json:"paths,omitempty"`
+	Permalink string    `json:"permalink,omitempty"`
+	CreatedAt time.Time `json:"createdAt"`
+	UpdatedAt time.Time `json:"updatedAt"`
+}
+
+// NormalizePaths trims each path, converts backslashes to forward slashes and
+// drops empty entries. It rejects absolute paths (POSIX or drive-letter) and
+// any ".." segment, so a decision can only govern files inside its checkout.
+func NormalizePaths(paths []string) ([]string, error) {
+	out := make([]string, 0, len(paths))
+	for _, raw := range paths {
+		clean := strings.ReplaceAll(strings.TrimSpace(raw), "\\", "/")
+		if clean == "" {
+			continue
+		}
+		if strings.HasPrefix(clean, "/") || (len(clean) >= 2 && clean[1] == ':') {
+			return nil, NewValidationError("decision.paths", fmt.Sprintf("path %q must be relative to the project checkout", raw))
+		}
+		for _, segment := range strings.Split(clean, "/") {
+			if segment == ".." {
+				return nil, NewValidationError("decision.paths", fmt.Sprintf("path %q must not contain \"..\"", raw))
+			}
+		}
+		out = append(out, clean)
+	}
+	return out, nil
 }
 
 // Validate checks required decision fields.
@@ -70,7 +96,8 @@ func (d Decision) Validate() error {
 	if d.Status != "" && !d.Status.Valid() {
 		return NewValidationError("decision.status", fmt.Sprintf("unknown status %q", d.Status))
 	}
-	return nil
+	_, err := NormalizePaths(d.Paths)
+	return err
 }
 
 // Attempt records a hypothesis and why it did or did not work.

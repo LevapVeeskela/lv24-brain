@@ -274,6 +274,11 @@ func TestStoreUsersAndOIDC(t *testing.T) {
 	if err != nil || len(roles) != 3 {
 		t.Fatalf("ListRoles = (%d, %v)", len(roles), err)
 	}
+	// Deleting the only admin is refused by the last-admin guard, so a second
+	// admin is seeded before user_1 is removed.
+	if _, _, err := store.CreateUser(ctx, domain.User{ID: "user_2", Login: "bob", Role: domain.RoleAdmin, AuthSource: "local"}, ""); err != nil {
+		t.Fatalf("CreateUser user_2: %v", err)
+	}
 	if _, err := store.DeleteUser(ctx, "user_1", 0); err != nil {
 		t.Fatalf("DeleteUser: %v", err)
 	}

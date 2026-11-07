@@ -240,6 +240,9 @@ func (m *MemoryStore) UpdateUser(ctx context.Context, user domain.User, expected
 			Entity: "user", ID: user.ID, Expected: expected, Current: current.Revision,
 		}
 	}
+	if current.Role == domain.RoleAdmin && user.Role != domain.RoleAdmin && !m.otherAdminLocked(user.ID) {
+		return UserRecord{}, domain.SyncRevision{}, domain.ErrLastAdmin
+	}
 	revision := m.nextRevisionLocked(ctx, "user", user.ID, "update", map[string]any{"role": string(user.Role)})
 	current.User.DisplayName = user.DisplayName
 	current.User.Role = user.Role
@@ -296,6 +299,9 @@ func (m *MemoryStore) DeleteUser(ctx context.Context, id string, expected int64)
 			Entity: "user", ID: id, Expected: expected, Current: current.Revision,
 		}
 	}
+	if current.Role == domain.RoleAdmin && !m.otherAdminLocked(id) {
+		return domain.SyncRevision{}, domain.ErrLastAdmin
+	}
 	revision := m.nextRevisionLocked(ctx, "user", id, "delete", nil)
 	delete(m.users, id)
 	delete(m.userLogins, strings.ToLower(current.Login))
@@ -314,6 +320,71 @@ func (m *MemoryStore) DeleteUser(ctx context.Context, id string, expected int64)
 		delete(m.revokedFamilies, record.FamilyID)
 	}
 	return revision, nil
+}
+
+// otherAdminLocked reports whether any admin other than id exists. The caller
+// must hold m.mu.
+func (m *MemoryStore) otherAdminLocked(id string) bool {
+	for otherID, record := range m.users {
+		if otherID != id && record.Role == domain.RoleAdmin {
+			return true
+		}
+	}
+	return false
+}
+
+// UpdateUserPasswordHash replaces the stored hash of a user.
+func (m *MemoryStore) UpdateUserPasswordHash(ctx context.Context, id, passwordHash string, expected int64) (domain.SyncRevision, error) {
+	if strings.TrimSpace(id) == "" {
+		return domain.SyncRevision{}, domain.NewValidationError("user.id", "is required")
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	current, ok := m.users[id]
+	if !ok {
+		return domain.SyncRevision{}, domain.ErrNotFound
+	}
+	if expected > 0 && current.Revision != expected {
+		return domain.SyncRevision{}, &ConflictError{
+			Entity: "user", ID: id, Expected: expected, Current: current.Revision,
+		}
+	}
+	revision := m.nextRevisionLocked(ctx, "user", id, "password", nil)
+	current.PasswordHash = passwordHash
+	current.Revision = revisionValue(revision)
+	current.UpdatedAt = revision.At
+	m.users[id] = current
+	return revision, nil
+}
+
+// RevokeUserSessions revokes every refresh-token family of a user except
+// exceptFamilyID and records a family tombstone for each one.
+func (m *MemoryStore) RevokeUserSessions(_ context.Context, userID, exceptFamilyID string, now time.Time) (int, error) {
+	userID = strings.TrimSpace(userID)
+	exceptFamilyID = strings.TrimSpace(exceptFamilyID)
+	if userID == "" {
+		return 0, domain.NewValidationError("user.id", "is required")
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	families := make(map[string]struct{})
+	for _, record := range m.refresh {
+		if record.UserID != userID || (exceptFamilyID != "" && record.FamilyID == exceptFamilyID) {
+			continue
+		}
+		families[record.FamilyID] = struct{}{}
+	}
+	at := now.UTC()
+	for family := range families {
+		m.revokedFamilies[family] = struct{}{}
+	}
+	for hash, record := range m.refresh {
+		if _, ok := families[record.FamilyID]; ok && record.RevokedAt == nil {
+			record.RevokedAt = &at
+			m.refresh[hash] = record
+		}
+	}
+	return len(families), nil
 }
 
 // CreateAPIToken stores a hashed API token.

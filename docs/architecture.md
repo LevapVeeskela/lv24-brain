@@ -103,7 +103,10 @@ pulls commits from another machine, the engine sets `index/dirty`; sync then
 reindexes at once, and the next search repairs the index if that failed.
 `brain doctor` warns while the marker is set. A reindex removes entries whose
 source files are gone. The data revision (`CurrentRevision`) covers curated
-records only; connector dumps and runs, journals, the index and backups are
+the top-level data directory except `secrets/`, `index/`, `backups/`, `mail/`,
+`github/`, `gitlab/`, `connectors/` and `journal/`. So curated records and
+`brain.yaml`, `registry.json`, `global/` and `projects/` are covered, while
+secrets, the index, backups, connector dumps and runs, and journal lines are
 excluded, so mail syncs and journal lines do not change it.
 
 Listing never stops at one damaged file: unreadable, malformed or empty record
@@ -128,7 +131,7 @@ brain decision   append a decision
 brain attempt    append an attempt
 brain handoff    append a session handoff
 brain status     show mode, paths, schema, engine version
-brain review     state age, questions, evidence, attempts + findings (stale/contradictory knowledge); --fix applies safe state fixes
+brain review     state age, questions, evidence, attempts + findings (stale/contradictory knowledge); --fix applies heuristic state fixes (see below)
 brain catchup    what changed since the latest handoff
 brain record     list|show records; status|supersede decisions; trash|restore|trash-list (local/git)
 brain session    start|end handlers for agent session hooks
@@ -140,16 +143,28 @@ brain journal    show journal/<user>.jsonl activity, newest first (local/git)
 brain event      record an external event; `event commit` reads git for a post-commit hook
 brain hooks      install|uninstall|status the post-commit journal hook
 brain config     use <brain.yaml> | show | clear the user default config
+brain discover   find git checkouts under --root and register new projects (--apply)
+brain graphs     refresh graphify/codegraph indexes of registered projects
+brain agents     sync the shared agent instructions (agents sync [--check])
+brain mcp        serve the brain as an MCP server over stdio (for coding agents)
 brain connector  run a read-only GitHub, GitLab, or IMAP connector
-brain migrate    import a legacy .brain data directory
+brain migrate    import a legacy .brain data directory (--rollback reverts an import)
 brain secret     set, list, or remove OS-backed secrets
 brain login      authenticate against a server-mode brain (local account)
 brain logout     revoke the server session and clear stored tokens
+brain password   change your server password (reads current and new from stdin)
 brain doctor     check config, data/schema/index/git or server reachability
 brain update     check, apply, or roll back a release
 brain serve      run the HTTP server with development defaults
+brain completion print a bash, zsh, fish or PowerShell completion script
 brain version    print build identity
 ```
+
+`brain review` only reports. `brain review --fix` applies heuristic state fixes:
+it sets the next action to the one named by a later handoff, and removes open
+questions that later decisions or notes appear to answer (the removed text is
+kept in a review note). Run `brain review` first to see the findings and what
+`--fix` would change.
 
 Server mode selects the HTTP client at bootstrap. `brain login --config <path>
 --login <name> --password-stdin` (or `BRAIN_PASSWORD` without the flag, with

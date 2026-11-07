@@ -208,6 +208,79 @@ func (s *Store) RevokeFamily(ctx context.Context, familyID string, now time.Time
 	})
 }
 
+// RevokeUserSessions revokes every login family of one user, except
+// exceptFamilyID when it is non-empty, and records a durable family tombstone
+// for each. It returns the number of families it covered. The families are
+// locked in the same order as single-family revocations, and each tombstone
+// stops a concurrent rotation from inserting a row behind the revocation. A
+// login that starts after the family list is read is not covered.
+func (s *Store) RevokeUserSessions(ctx context.Context, userID, exceptFamilyID string, now time.Time) (int, error) {
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
+	userID = strings.TrimSpace(userID)
+	exceptFamilyID = strings.TrimSpace(exceptFamilyID)
+	if userID == "" {
+		return 0, domain.NewValidationError("user.id", "is required")
+	}
+	at := databaseTime(now)
+	var covered int
+	err := s.withTx(ctx, func(tx pgx.Tx) error {
+		families, err := userFamilies(ctx, tx, userID, exceptFamilyID)
+		if err != nil {
+			return err
+		}
+		if err := lockRefreshScopes(ctx, tx, families...); err != nil {
+			return err
+		}
+		for _, family := range families {
+			if _, err := tx.Exec(ctx, `
+				INSERT INTO auth_revocations (scope_kind, scope_id, revoked_at)
+				VALUES ('family', $1, $2)
+				ON CONFLICT (scope_kind, scope_id) DO NOTHING`,
+				family, at); err != nil {
+				return mapPgError("record user family revocation", err)
+			}
+			if _, err := tx.Exec(ctx,
+				`UPDATE refresh_tokens SET revoked_at = COALESCE(revoked_at, $2) WHERE family_id = $1`,
+				family, at); err != nil {
+				return mapPgError("revoke user family", err)
+			}
+		}
+		covered = len(families)
+		return nil
+	})
+	if err != nil {
+		return 0, err
+	}
+	return covered, nil
+}
+
+// userFamilies lists the distinct login families of one user, skipping
+// exceptFamilyID when it is set.
+func userFamilies(ctx context.Context, tx pgx.Tx, userID, exceptFamilyID string) ([]string, error) {
+	rows, err := tx.Query(ctx, `
+		SELECT DISTINCT family_id FROM refresh_tokens
+		WHERE user_id = $1 AND family_id <> $2
+		ORDER BY family_id`, userID, exceptFamilyID)
+	if err != nil {
+		return nil, mapPgError("list user families", err)
+	}
+	defer rows.Close()
+	var families []string
+	for rows.Next() {
+		var family string
+		if err := rows.Scan(&family); err != nil {
+			return nil, mapPgError("scan user family", err)
+		}
+		families = append(families, family)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, mapPgError("read user families", err)
+	}
+	return families, nil
+}
+
 // lockRefreshScopes takes transaction-scoped advisory locks for the given
 // scope ids in a stable order so concurrent rotations and revocations cannot
 // deadlock. Empty ids are skipped and duplicates are locked once.

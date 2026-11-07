@@ -315,6 +315,39 @@ func (a *Auth) Logout(ctx context.Context, _ string) error {
 	}
 }
 
+// ChangePassword changes the signed-in account's local password. The server
+// verifies the current one, then revokes the account's other login sessions.
+// The stored session stays valid because the server keeps the current family.
+func (a *Auth) ChangePassword(ctx context.Context, currentPassword, newPassword string) error {
+	if currentPassword == "" {
+		return domain.NewValidationError("auth.currentPassword", "is required")
+	}
+	if newPassword == "" {
+		return domain.NewValidationError("auth.newPassword", "is required")
+	}
+	return a.client.do(ctx, http.MethodPost, "/v1/auth/password", nil, struct {
+		CurrentPassword string `json:"current_password"`
+		NewPassword     string `json:"new_password"`
+	}{CurrentPassword: currentPassword, NewPassword: newPassword}, nil)
+}
+
+// RevokeAllSessions revokes every login session of the signed-in account,
+// including this one, then clears local credentials. Static API tokens are
+// not revoked; when one is stored it is reported like Logout does.
+func (a *Auth) RevokeAllSessions(ctx context.Context) error {
+	static, err := a.storedToken(ctx, SecretAccessToken)
+	if err != nil {
+		return err
+	}
+	if err := a.client.do(ctx, http.MethodPost, "/v1/auth/sessions/revoke-all", nil, nil, nil); err != nil && !errors.Is(err, ErrUnauthorized) {
+		return err
+	}
+	if static != "" {
+		return a.staticNotRevoked(ctx)
+	}
+	return a.clear(ctx)
+}
+
 // logoutStatic handles a store that only has the legacy static API token.
 func (a *Auth) logoutStatic(ctx context.Context, access string) error {
 	me, err := a.me(ctx, access)

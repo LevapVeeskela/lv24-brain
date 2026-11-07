@@ -7,6 +7,7 @@ import (
 	"github.com/levapveeskela/lv24-brain/internal/adapters/httpapi"
 	"github.com/levapveeskela/lv24-brain/internal/adapters/postgres"
 	"github.com/levapveeskela/lv24-brain/internal/auth"
+	"github.com/levapveeskela/lv24-brain/internal/domain"
 )
 
 // This file implements the auth.SessionStore and API-token half of
@@ -115,4 +116,16 @@ func (s *Store) RevokeFamily(ctx context.Context, familyID string, now time.Time
 func (s *Store) IsRevoked(ctx context.Context, familyID, sessionID string) (bool, error) {
 	revoked, err := s.pg.IsRevoked(ctx, familyID, sessionID)
 	return revoked, mapError(err)
+}
+
+// UpdateUserPasswordHash replaces the stored password hash of a local account.
+func (s *Store) UpdateUserPasswordHash(ctx context.Context, id, passwordHash string, expected int64) (domain.SyncRevision, error) {
+	revision, err := s.pg.UpdateUserPasswordHash(ctx, id, passwordHash, expected)
+	return revision, mapError(err)
+}
+
+// RevokeUserSessions revokes every refresh-token family of a user except one.
+func (s *Store) RevokeUserSessions(ctx context.Context, userID, exceptFamilyID string, now time.Time) (int, error) {
+	count, err := s.pg.RevokeUserSessions(ctx, userID, exceptFamilyID, now)
+	return count, mapError(err)
 }
