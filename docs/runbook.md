@@ -207,7 +207,15 @@ sync` writes it into a managed block (between `LV24_SHARED_START` and
 
 Text outside the markers is never touched. Edit the canonical file, run
 `brain sync --push`, then `brain agents sync` on each machine (`--check` reports
-drift without writing and exits 1). The instructions refer to `brain` on PATH,
+drift without writing and exits 1).
+
+Scheduled refresh: on Windows the nightly "Company Brain Graph Refresh" task
+runs graphs, connectors, `brain sync --push` and `brain agents sync`. On macOS
+the LaunchAgent `by.lv24.brain-daily` (`~/Library/LaunchAgents/`, script
+`~/.local/bin/brain-daily.sh`, log `~/Library/Logs/lv24-brain-daily.log`) runs
+`brain sync --push` and `brain agents sync` daily at 09:30 or on wake after a
+missed run; it runs in the login session, so git can use the keychain.
+Run it now with `launchctl kickstart gui/$(id -u)/by.lv24.brain-daily`. The instructions refer to `brain` on PATH,
 so they are identical on Windows and macOS.
 
 ## 4. Server-mode operations
