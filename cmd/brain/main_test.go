@@ -35,7 +35,7 @@ func TestMain(m *testing.M) {
 	if err != nil {
 		panic(err)
 	}
-	for _, name := range []string{"APPDATA", "XDG_CONFIG_HOME", "HOME"} {
+	for _, name := range []string{"APPDATA", "XDG_CONFIG_HOME", "HOME", "USERPROFILE"} {
 		_ = os.Setenv(name, isolated)
 	}
 	_ = os.Unsetenv("BRAIN_CONFIG")
