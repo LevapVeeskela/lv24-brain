@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 
 	"github.com/levapveeskela/lv24-brain/internal/config"
@@ -19,11 +20,32 @@ const defaultPointerName = "config-path"
 // (%APPDATA% on Windows, ~/Library/Application Support on macOS,
 // $XDG_CONFIG_HOME or ~/.config on Linux).
 func userPointerPath() (string, error) {
-	dir, err := os.UserConfigDir()
+	dir, err := userConfigDir()
 	if err != nil {
 		return "", err
 	}
 	return filepath.Join(dir, "lv24-brain", defaultPointerName), nil
+}
+
+// userConfigDir is os.UserConfigDir with a fallback for shells that start
+// without %APPDATA% (some embedded terminals and agent runners): the same
+// directory derived from the home directory.
+func userConfigDir() (string, error) {
+	if dir, err := os.UserConfigDir(); err == nil {
+		return dir, nil
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", err
+	}
+	switch runtime.GOOS {
+	case "windows":
+		return filepath.Join(home, "AppData", "Roaming"), nil
+	case "darwin":
+		return filepath.Join(home, "Library", "Application Support"), nil
+	default:
+		return filepath.Join(home, ".config"), nil
+	}
 }
 
 // defaultConfigPath resolves the config used when --config is not passed:
