@@ -26,12 +26,19 @@ func runJournal(args []string, stdout, stderr io.Writer) int {
 	since := fs.Duration("since", 0, "only entries newer than this duration, e.g. 24h")
 	limit := fs.Int("limit", 20, "maximum entries")
 	asJSON := fs.Bool("json", false, "print JSON")
+	repair := fs.Bool("repair", false, "append lines for recent records no journal mentions")
+	dryRun := fs.Bool("dry-run", false, "with --repair: list the missing lines without writing")
+	days := fs.Int("days", 30, "with --repair: how many days back to check")
 	cfgPath := configFlag(fs)
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
 	if fs.NArg() > 0 {
 		fmt.Fprintf(stderr, "brain journal: unexpected arguments: %s\n", strings.Join(fs.Args(), " "))
+		return 2
+	}
+	if *dryRun && !*repair {
+		fmt.Fprintln(stderr, "brain journal: --dry-run needs --repair")
 		return 2
 	}
 	if *limit < 0 || *since < 0 {
@@ -47,6 +54,9 @@ func runJournal(args []string, stdout, stderr io.Writer) int {
 		return reportError(stderr, "journal", err)
 	}
 	defer func() { _ = runtime.Close() }()
+	if *repair {
+		return runJournalRepair(runtime.App, *days, *dryRun, stdout, stderr)
+	}
 	query := ports.JournalQuery{Project: *project, User: *user, Event: *event, Limit: *limit}
 	if *since > 0 {
 		query.Since = time.Now().Add(-*since)
@@ -61,6 +71,34 @@ func runJournal(args []string, stdout, stderr io.Writer) int {
 	for _, entry := range entries {
 		fmt.Fprintln(stdout, formatJournalEntry(entry))
 	}
+	return 0
+}
+
+func runJournalRepair(a *app.App, days int, dryRun bool, stdout, stderr io.Writer) int {
+	if days <= 0 {
+		fmt.Fprintln(stderr, "brain journal: --days must be positive")
+		return 2
+	}
+	since := time.Now().Add(-time.Duration(days) * 24 * time.Hour)
+	ctx := context.Background()
+	var gaps []app.JournalGap
+	var err error
+	if dryRun {
+		gaps, err = a.JournalGaps(ctx, since)
+	} else {
+		gaps, err = a.RepairJournal(ctx, since)
+	}
+	if err != nil {
+		return reportError(stderr, "journal", err)
+	}
+	verb := "repaired"
+	if dryRun {
+		verb = "missing"
+	}
+	for _, gap := range gaps {
+		fmt.Fprintf(stdout, "%s  %s  %s  %s  %s\n", verb, gap.CreatedAt.Local().Format("2006-01-02 15:04"), gap.Event, gap.ProjectID, gap.Title)
+	}
+	fmt.Fprintf(stdout, "%s: %d\n", verb, len(gaps))
 	return 0
 }
 

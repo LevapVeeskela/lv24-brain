@@ -76,10 +76,16 @@ brain journal --since 24h --limit 50
 brain journal --project demo --event decision
 brain search "cache warmup" --project demo --limit 10
 brain index                 # refresh the local index after Markdown changed outside the CLI
+brain journal --repair --dry-run   # records of the last 30 days without a journal line
 ```
 
 - `brain journal` shows the per-user activity file `journal/<user>.jsonl`,
-  newest first. It works in local and git mode.
+  newest first. It works in local and git mode. A retried write is journaled
+  once. When a journal append failed after a record was stored, `brain
+  doctor` (check `journal`) reports it and `brain journal --repair` appends
+  the missing lines, timed at the record's creation and marked `repaired`.
+- `brain index` also drops index entries whose records are gone (deleted,
+  renamed or quarantined on another machine) and reports them as `pruned`.
 - `brain search` queries the local FTS5 index in local and git mode and calls
   `GET /v1/search` in server mode. It searches curated records by default;
   `--dumps` adds connector dumps (mail, GitHub/GitLab issues and PRs) and

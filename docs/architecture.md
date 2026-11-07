@@ -101,7 +101,10 @@ existing Markdown, and `brain index --rebuild` deletes the database and sidecar
 files before rebuilding. When a write cannot update the index, or `brain sync`
 pulls commits from another machine, the engine sets `index/dirty`; sync then
 reindexes at once, and the next search repairs the index if that failed.
-`brain doctor` warns while the marker is set.
+`brain doctor` warns while the marker is set. A reindex removes entries whose
+source files are gone. The data revision (`CurrentRevision`) covers curated
+records only; connector dumps and runs, journals, the index and backups are
+excluded, so mail syncs and journal lines do not change it.
 
 Listing never stops at one damaged file: unreadable, malformed or empty record
 files are skipped and reported by `brain doctor` (check `records`). A daily

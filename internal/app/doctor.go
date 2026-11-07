@@ -38,6 +38,7 @@ func (a *App) Doctor(ctx context.Context, opts DoctorOptions) (DoctorReport, err
 	checks = append(checks, a.doctorSchema())
 	checks = append(checks, a.doctorIndex(ctx))
 	checks = append(checks, a.doctorRecords(ctx))
+	checks = append(checks, a.doctorJournal(ctx))
 	checks = append(checks, a.doctorGit(ctx))
 	return DoctorReport{Checks: checks}, nil
 }
@@ -116,6 +117,25 @@ func (a *App) doctorSchema() DoctorCheck {
 		}
 	default:
 		return DoctorCheck{Name: "schema", Status: doctorOK, Message: fmt.Sprintf("schema %d", a.cfg.SchemaVersion)}
+	}
+}
+
+// doctorJournal reports recent records that no journal mentions.
+func (a *App) doctorJournal(ctx context.Context) DoctorCheck {
+	if a.deps.Journal == nil || a.deps.Store == nil {
+		return DoctorCheck{Name: "journal", Status: doctorOK, Message: "not used in this mode"}
+	}
+	gaps, err := a.JournalGaps(ctx, a.now().Add(-DefaultJournalRepairWindow))
+	if err != nil {
+		return DoctorCheck{Name: "journal", Status: doctorFail, Message: err.Error()}
+	}
+	if len(gaps) == 0 {
+		return DoctorCheck{Name: "journal", Status: doctorOK, Message: "every record of the last 30 days is journaled"}
+	}
+	return DoctorCheck{
+		Name:    "journal",
+		Status:  doctorWarn,
+		Message: fmt.Sprintf("%d records of the last 30 days have no journal line (first: %s %s); run brain journal --repair", len(gaps), gaps[0].Event, gaps[0].ID),
 	}
 }
 

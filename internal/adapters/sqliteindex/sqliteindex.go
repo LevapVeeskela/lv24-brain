@@ -117,6 +117,24 @@ func validateDocument(doc ports.Document) error {
 	return domain.ValidateRequired("index.document.projectId", doc.ProjectID)
 }
 
+// IDs returns the id of every indexed document (for pruning after a reindex).
+func (i *Index) IDs(ctx context.Context) ([]string, error) {
+	rows, err := i.db.QueryContext(ctx, `SELECT id FROM documents`)
+	if err != nil {
+		return nil, fmt.Errorf("sqliteindex: list ids: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("sqliteindex: list ids: %w", err)
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
+}
+
 // Delete removes a document from the index. Unknown ids are ignored.
 func (i *Index) Delete(ctx context.Context, id string) error {
 	if err := domain.ValidateRequired("index.document.id", id); err != nil {

@@ -27,7 +27,9 @@ type IndexResult struct {
 	Handoffs  int
 	Dumps     int
 	Documents int
-	Rebuild   bool
+	// Pruned counts documents removed because their source is gone.
+	Pruned  int
+	Rebuild bool
 }
 
 // Reindex rebuilds the local search projection from Markdown files. The caller
@@ -48,6 +50,11 @@ func (a *App) Reindex(ctx context.Context, opts IndexOptions) (IndexResult, erro
 	}
 
 	result := IndexResult{Rebuild: opts.Rebuild}
+	seen := map[string]struct{}{}
+	upsert := func(doc ports.Document) error {
+		seen[doc.ID] = struct{}{}
+		return a.deps.Index.Upsert(ctx, doc)
+	}
 	projects, err := a.deps.Store.ListProjects(ctx)
 	if err != nil {
 		return result, err
@@ -57,7 +64,7 @@ func (a *App) Reindex(ctx context.Context, opts IndexOptions) (IndexResult, erro
 		state, stateErr := a.deps.Store.GetState(ctx, project.ID)
 		switch {
 		case stateErr == nil:
-			if err := a.deps.Index.Upsert(ctx, stateDocument(project, state)); err != nil {
+			if err := upsert(stateDocument(project, state)); err != nil {
 				return result, fmt.Errorf("index state for %s: %w", project.ID, err)
 			}
 			result.States++
@@ -72,7 +79,7 @@ func (a *App) Reindex(ctx context.Context, opts IndexOptions) (IndexResult, erro
 			return result, err
 		}
 		for _, note := range notes {
-			if err := a.deps.Index.Upsert(ctx, noteDocument(note)); err != nil {
+			if err := upsert(noteDocument(note)); err != nil {
 				return result, fmt.Errorf("index note %s: %w", note.ID, err)
 			}
 			result.Notes++
@@ -84,7 +91,7 @@ func (a *App) Reindex(ctx context.Context, opts IndexOptions) (IndexResult, erro
 			return result, err
 		}
 		for _, decision := range decisions {
-			if err := a.deps.Index.Upsert(ctx, decisionDocument(decision)); err != nil {
+			if err := upsert(decisionDocument(decision)); err != nil {
 				return result, fmt.Errorf("index decision %s: %w", decision.ID, err)
 			}
 			result.Decisions++
@@ -96,7 +103,7 @@ func (a *App) Reindex(ctx context.Context, opts IndexOptions) (IndexResult, erro
 			return result, err
 		}
 		for _, attempt := range attempts {
-			if err := a.deps.Index.Upsert(ctx, attemptDocument(attempt)); err != nil {
+			if err := upsert(attemptDocument(attempt)); err != nil {
 				return result, fmt.Errorf("index attempt %s: %w", attempt.ID, err)
 			}
 			result.Attempts++
@@ -108,21 +115,50 @@ func (a *App) Reindex(ctx context.Context, opts IndexOptions) (IndexResult, erro
 			return result, err
 		}
 		for _, handoff := range handoffs {
-			if err := a.deps.Index.Upsert(ctx, handoffDocument(handoff)); err != nil {
+			if err := upsert(handoffDocument(handoff)); err != nil {
 				return result, fmt.Errorf("index handoff %s: %w", handoff.ID, err)
 			}
 			result.Handoffs++
 			result.Documents++
 		}
 	}
-	dumps, err := a.indexDumps(ctx, projects)
+	dumps, err := a.indexDumps(ctx, projects, upsert)
 	result.Dumps = dumps
 	result.Documents += dumps
 	if err != nil {
 		return result, err
 	}
+	pruned, err := a.pruneIndex(ctx, seen)
+	result.Pruned = pruned
+	if err != nil {
+		return result, err
+	}
 	a.clearIndexDirty()
 	return result, nil
+}
+
+// pruneIndex deletes documents a complete reindex did not produce: records
+// removed, renamed or quarantined since they were indexed.
+func (a *App) pruneIndex(ctx context.Context, seen map[string]struct{}) (int, error) {
+	lister, ok := a.deps.Index.(ports.IndexLister)
+	if !ok {
+		return 0, nil
+	}
+	ids, err := lister.IDs(ctx)
+	if err != nil {
+		return 0, err
+	}
+	pruned := 0
+	for _, id := range ids {
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		if err := a.deps.Index.Delete(ctx, id); err != nil {
+			return pruned, fmt.Errorf("prune index %s: %w", id, err)
+		}
+		pruned++
+	}
+	return pruned, nil
 }
 
 // IndexDumps refreshes the connector dumps in the search index, for example
@@ -135,14 +171,15 @@ func (a *App) IndexDumps(ctx context.Context) (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	count, err := a.indexDumps(ctx, projects)
+	upsert := func(doc ports.Document) error { return a.deps.Index.Upsert(ctx, doc) }
+	count, err := a.indexDumps(ctx, projects, upsert)
 	if err != nil {
 		a.markIndexDirty()
 	}
 	return count, err
 }
 
-func (a *App) indexDumps(ctx context.Context, projects []domain.Project) (int, error) {
+func (a *App) indexDumps(ctx context.Context, projects []domain.Project, upsert func(ports.Document) error) (int, error) {
 	lister, ok := a.deps.Store.(ports.DumpLister)
 	if !ok {
 		return 0, nil
@@ -153,7 +190,7 @@ func (a *App) indexDumps(ctx context.Context, projects []domain.Project) (int, e
 	}
 	byRepo := projectsByRepo(projects)
 	for i, dump := range dumps {
-		if err := a.deps.Index.Upsert(ctx, dumpDocument(dump, byRepo)); err != nil {
+		if err := upsert(dumpDocument(dump, byRepo)); err != nil {
 			return i, fmt.Errorf("index dump %s: %w", dump.Path, err)
 		}
 	}

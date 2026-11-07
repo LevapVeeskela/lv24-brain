@@ -96,6 +96,12 @@ type Index interface {
 	Search(ctx context.Context, query Query) ([]Hit, error)
 }
 
+// IndexLister is implemented by indexes that can enumerate their documents,
+// so a reindex can drop documents whose source files are gone.
+type IndexLister interface {
+	IDs(ctx context.Context) ([]string, error)
+}
+
 // SyncStatus is the read-only divergence state of a sync provider.
 type SyncStatus struct {
 	Provider  string

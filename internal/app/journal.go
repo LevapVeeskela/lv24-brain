@@ -38,6 +38,10 @@ func (a *App) journalWrite(ctx context.Context, event, projectID, id, title stri
 	if a.deps.Journal == nil {
 		return nil
 	}
+	// A retried write (see isRetry) must not log the same record twice.
+	if id != "" && a.journaled(ctx, event, projectID, id) {
+		return nil
+	}
 	return a.deps.Journal.Append(ctx, ports.JournalEntry{
 		Time:    a.now(),
 		Event:   event,

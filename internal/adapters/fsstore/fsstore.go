@@ -110,17 +110,15 @@ func (s *Store) revisionAfterWrite(ctx context.Context) (domain.SyncRevision, er
 	return revision, nil
 }
 
-// CurrentRevision hashes the relative path and bytes of every regular data file.
+// CurrentRevision hashes the relative path and bytes of every curated data file.
 // The value is "sha256:<hex>"; it is stable across runs and operating systems.
 // An empty data directory hashes the empty stream and reports a zero At time.
 // Temporary and lock files are excluded, so a write in progress does not change
 // the revision.
 //
-// TODO(perf): this walks and rereads the whole data directory on every write,
-// which is O(N) in the number of files. An incremental approach would keep a
-// per-file digest index (path, size, mtime, sha256) in memory or in a cache
-// file, rehash only the paths touched by the write, and fold the digests in
-// sorted path order. Not done yet: it changes the revision contract.
+// Connector dumps, run records and journals are excluded (see
+// isExcludedRootDir), so the cost is O(curated records), not O(all data).
+// A per-file digest cache would make it incremental if records grow large.
 func (s *Store) CurrentRevision(ctx context.Context) (domain.SyncRevision, error) {
 	if err := contextError(ctx); err != nil {
 		return domain.SyncRevision{}, err
@@ -201,7 +199,11 @@ func isExcludedRootDir(rel, name string) bool {
 		return false
 	}
 	switch strings.ToLower(name) {
-	case "secrets", "index", "backups":
+	// Derived or private data, and high-churn external or activity data
+	// (connector dumps and runs, journals): the revision tracks curated
+	// knowledge, so a nightly mail sync or a journal line does not change it
+	// and writes do not rehash every dump.
+	case "secrets", "index", "backups", "mail", "github", "gitlab", "connectors", "journal":
 		return true
 	default:
 		return false

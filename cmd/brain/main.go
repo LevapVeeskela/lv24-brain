@@ -1310,7 +1310,9 @@ func runIndex(args []string, stdout, stderr io.Writer) int {
 	fmt.Fprintf(stdout, "decisions: %d\n", result.Decisions)
 	fmt.Fprintf(stdout, "attempts: %d\n", result.Attempts)
 	fmt.Fprintf(stdout, "handoffs: %d\n", result.Handoffs)
+	fmt.Fprintf(stdout, "dumps: %d\n", result.Dumps)
 	fmt.Fprintf(stdout, "documents: %d\n", result.Documents)
+	fmt.Fprintf(stdout, "pruned: %d\n", result.Pruned)
 	fmt.Fprintf(stdout, "rebuilt: %t\n", result.Rebuild)
 	return 0
 }

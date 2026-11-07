@@ -356,3 +356,23 @@ func TestWritesAreAtomicAndFrontmatterComplete(t *testing.T) {
 		t.Fatalf("registry = %+v", registry)
 	}
 }
+
+func TestCurrentRevisionIgnoresDumpsAndJournals(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+	seedProject(t, store)
+	before, err := store.CurrentRevision(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, rel := range []string{"mail/me/inbox/2026-11-07-uid1-2.md", "github/acme/widgets.md", "connectors/runs/run.md", "journal/me.jsonl"} {
+		writeDump(t, store.root, rel, "external data\n")
+	}
+	after, err := store.CurrentRevision(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if before.Value != after.Value {
+		t.Fatalf("revision changed for dumps and journals: %s -> %s", before.Value, after.Value)
+	}
+}
