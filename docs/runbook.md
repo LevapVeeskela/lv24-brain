@@ -194,6 +194,24 @@ brain discover --root <workspace> --apply   # register the new ones
   directory or file, or `main/.git`), never modifies existing projects, and
   reports id conflicts instead of registering them.
 
+## 3a2. MCP server for coding agents
+
+`brain mcp` serves the brain over stdio (MCP 2025-06-18) with the tools
+`brain_open`, `brain_search`, `brain_note`, `brain_decision`, `brain_attempt`,
+`brain_handoff`, `brain_journal`, `brain_projects`, `brain_state_get` and
+`brain_state_set`. Register it once per machine with an explicit config, because
+agents may start servers without the variables that locate the default config:
+
+```sh
+claude mcp add --scope user lv24-brain -- <brain> mcp --config <data-dir>/brain.yaml
+codex mcp add lv24-brain -- <brain> mcp --config <data-dir>/brain.yaml
+```
+
+For OpenCode add the same command to the `mcp` section of
+`~/.config/opencode/opencode.json`. Projects resolve from the server's working
+directory (the agent's project root) or the `project` argument; writes never
+create projects.
+
 ## 3b. Shared agent instructions
 
 One file in the private data repository, `<data-dir>/global/AGENTS.md`, holds
