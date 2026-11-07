@@ -118,6 +118,12 @@ func runConfig(args []string, stdout, stderr io.Writer) int {
 			source = "user default (" + pointer + ")"
 		}
 		fmt.Fprintf(stdout, "config: %s\nsource: %s\n", resolved, source)
+		if source == "fallback" {
+			// Say where the pointer was looked for, so a shell that sees a
+			// different user config directory can be diagnosed.
+			_, statErr := os.Stat(pointer)
+			fmt.Fprintf(stdout, "pointer: %s (%v)\n", pointer, statErr)
+		}
 		return 0
 	case "clear":
 		if len(args) != 1 {
