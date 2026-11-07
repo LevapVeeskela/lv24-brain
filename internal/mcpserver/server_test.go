@@ -19,9 +19,7 @@ type fakeBackend struct {
 	handoffs     []HandoffInput
 	journalQuery JournalQuery
 	budget       int
-	searchQuery  string
-	searchProj   string
-	searchLimit  int
+	search       SearchInput
 }
 
 func (f *fakeBackend) Resolve(_ context.Context, selector string) (Target, error) {
@@ -40,8 +38,8 @@ func (f *fakeBackend) Bootstrap(_ context.Context, projectID string, budget int)
 	return "# " + projectID + " — bootstrap\nstate: ok", nil
 }
 
-func (f *fakeBackend) Search(_ context.Context, query, projectID string, limit int) ([]Hit, error) {
-	f.searchQuery, f.searchProj, f.searchLimit = query, projectID, limit
+func (f *fakeBackend) Search(_ context.Context, in SearchInput) ([]Hit, error) {
+	f.search = in
 	return []Hit{{ID: "note-alpha-1", ProjectID: "alpha", Kind: "note", Title: "Cache fix", Snippet: "fixed the cache"}}, nil
 }
 
@@ -280,16 +278,38 @@ func TestMCPServerToolsCallSearch(t *testing.T) {
 	if hit["id"] != "note-alpha-1" || hit["project_id"] != "alpha" || hit["kind"] != "note" || hit["snippet"] == "" {
 		t.Fatalf("hit = %v", hit)
 	}
-	if backend.searchQuery != "cache" || backend.searchProj != "alpha" || backend.searchLimit != 5 {
-		t.Fatalf("search call = %q %q %d", backend.searchQuery, backend.searchProj, backend.searchLimit)
+	if backend.search.Query != "cache" || backend.search.ProjectID != "alpha" || backend.search.Limit != 5 {
+		t.Fatalf("search call = %+v", backend.search)
+	}
+	if len(backend.search.Kinds) != 0 || backend.search.IncludeDumps {
+		t.Fatalf("default search passed filters = %+v", backend.search)
 	}
 }
 
 func TestMCPServerToolsCallSearchWithoutProjectSearchesAll(t *testing.T) {
 	backend := &fakeBackend{}
 	toolCall(t, backend, "brain_search", `{"query":"cache"}`)
-	if backend.searchProj != "" {
-		t.Fatalf("project = %q, want all projects", backend.searchProj)
+	if backend.search.ProjectID != "" {
+		t.Fatalf("project = %q, want all projects", backend.search.ProjectID)
+	}
+}
+
+func TestMCPServerToolsCallSearchPassesKindsAndDumps(t *testing.T) {
+	backend := &fakeBackend{}
+	toolCall(t, backend, "brain_search", `{"query":"cache","kinds":["note","dump"],"include_dumps":true}`)
+	if got := backend.search.Kinds; len(got) != 2 || got[0] != "note" || got[1] != "dump" {
+		t.Fatalf("Kinds = %v, want [note dump]", got)
+	}
+	if !backend.search.IncludeDumps {
+		t.Fatalf("IncludeDumps = false, want true")
+	}
+}
+
+func TestMCPServerToolsCallSearchRejectsUnknownArgs(t *testing.T) {
+	backend := &fakeBackend{}
+	result := toolCall(t, backend, "brain_search", `{"query":"cache","kinds":"note"}`)
+	if result["isError"] != true {
+		t.Fatalf("isError = %v, want true for non-array kinds", result["isError"])
 	}
 }
 

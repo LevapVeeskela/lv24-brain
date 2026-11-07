@@ -171,6 +171,75 @@ func TestSearchProjectFilter(t *testing.T) {
 	}
 }
 
+func kindDocument(id, projectID, kind string) ports.Document {
+	doc := testDocument(id, projectID, "kindmarker shared text")
+	doc.Kind = kind
+	return doc
+}
+
+func hitIDs(hits []ports.Hit) []string {
+	ids := make([]string, 0, len(hits))
+	for _, hit := range hits {
+		ids = append(ids, hit.ID)
+	}
+	return ids
+}
+
+func TestSearchKindsFilter(t *testing.T) {
+	index := newTestIndex(t)
+	mustUpsert(t, index,
+		kindDocument("note-1", "alpha", "note"),
+		kindDocument("decision-1", "alpha", "decision"),
+		kindDocument("dump-1", "alpha", "dump"),
+	)
+
+	hits := mustSearch(t, index, ports.Query{Text: "kindmarker", Kinds: []string{"note", "decision"}})
+	if got := hitIDs(hits); len(got) != 2 || got[0] != "decision-1" || got[1] != "note-1" {
+		t.Fatalf("Kinds hits = %v, want [decision-1 note-1]", got)
+	}
+	none := mustSearch(t, index, ports.Query{Text: "kindmarker", Kinds: []string{"bogus"}})
+	if len(none) != 0 {
+		t.Fatalf("unknown kind hits = %v, want none", hitIDs(none))
+	}
+}
+
+func TestSearchExcludeKindsFilter(t *testing.T) {
+	index := newTestIndex(t)
+	mustUpsert(t, index,
+		kindDocument("note-1", "alpha", "note"),
+		kindDocument("dump-1", "alpha", "dump"),
+	)
+
+	hits := mustSearch(t, index, ports.Query{Text: "kindmarker", ExcludeKinds: []string{"dump"}})
+	if got := hitIDs(hits); len(got) != 1 || got[0] != "note-1" {
+		t.Fatalf("ExcludeKinds hits = %v, want [note-1]", got)
+	}
+}
+
+func TestSearchKindsWithProjectFilter(t *testing.T) {
+	index := newTestIndex(t)
+	mustUpsert(t, index,
+		kindDocument("alpha-note", "alpha", "note"),
+		kindDocument("alpha-dump", "alpha", "dump"),
+		kindDocument("beta-note", "beta", "note"),
+		kindDocument("beta-dump", "beta", "dump"),
+	)
+
+	included := mustSearch(t, index, ports.Query{Text: "kindmarker", ProjectID: "beta", Kinds: []string{"dump"}})
+	if got := hitIDs(included); len(got) != 1 || got[0] != "beta-dump" {
+		t.Fatalf("Kinds+project hits = %v, want [beta-dump]", got)
+	}
+	excluded := mustSearch(t, index, ports.Query{
+		Text:         "kindmarker",
+		ProjectID:    "alpha",
+		Kinds:        []string{"note", "dump"},
+		ExcludeKinds: []string{"dump"},
+	})
+	if got := hitIDs(excluded); len(got) != 1 || got[0] != "alpha-note" {
+		t.Fatalf("Kinds+Exclude+project hits = %v, want [alpha-note]", got)
+	}
+}
+
 func TestSearchLimitDefaultsAndExplicitLimit(t *testing.T) {
 	index := newTestIndex(t)
 	docs := make([]ports.Document, 0, 25)

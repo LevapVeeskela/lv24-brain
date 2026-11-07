@@ -45,18 +45,15 @@ ON CONFLICT(id) DO UPDATE SET
 
 const deleteSQL = `DELETE FROM documents WHERE id = ?`
 
-const searchSQL = `SELECT d.id, d.project_id, d.kind, d.title,
+// searchSelectSQL is the FTS5 search prefix. Its four snippet placeholders
+// precede the MATCH placeholder; optional filters are appended by
+// buildSearchStatement. Values are only ever bound, never interpolated.
+const searchSelectSQL = `SELECT d.id, d.project_id, d.kind, d.title,
 	snippet(documents_fts, -1, ?, ?, ?, ?), bm25(documents_fts)
 FROM documents_fts
 JOIN documents d ON d.rowid = documents_fts.rowid
-WHERE documents_fts MATCH ?
-ORDER BY bm25(documents_fts), d.updated_at DESC, d.id ASC
-LIMIT ?`
+WHERE documents_fts MATCH ?`
 
-const searchProjectSQL = `SELECT d.id, d.project_id, d.kind, d.title,
-	snippet(documents_fts, -1, ?, ?, ?, ?), bm25(documents_fts)
-FROM documents_fts
-JOIN documents d ON d.rowid = documents_fts.rowid
-WHERE documents_fts MATCH ? AND d.project_id = ?
+const searchOrderSQL = `
 ORDER BY bm25(documents_fts), d.updated_at DESC, d.id ASC
 LIMIT ?`

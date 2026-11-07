@@ -3,6 +3,7 @@ package app_test
 import (
 	"context"
 	"errors"
+	"reflect"
 	"testing"
 
 	"github.com/levapveeskela/lv24-brain/internal/app"
@@ -43,8 +44,8 @@ func TestServerModeSearchDelegatesToSearcher(t *testing.T) {
 	if fake.calls != 1 {
 		t.Fatalf("searcher calls = %d, want 1", fake.calls)
 	}
-	want := ports.Query{Text: "release", ProjectID: "demo", Limit: app.DefaultSearchLimit}
-	if fake.query != want {
+	want := ports.Query{Text: "release", ProjectID: "demo", Limit: app.DefaultSearchLimit, ExcludeKinds: []string{app.KindDump}}
+	if !reflect.DeepEqual(fake.query, want) {
 		t.Fatalf("query = %+v, want %+v", fake.query, want)
 	}
 	if len(hits) != 1 || hits[0].ID != "n1" {

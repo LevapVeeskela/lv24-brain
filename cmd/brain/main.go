@@ -199,7 +199,7 @@ Commands:
   review     Build a review report; --fix applies the safe fixes
   sync       Pull, commit, and push brain data
   index      Rebuild or refresh the local search index
-  search     Search notes, decisions, attempts and handoffs
+  search     Search notes, decisions, attempts and handoffs (--dumps adds connector dumps)
   journal    Show the per-user activity journal (local/git)
   event      Record an external event, e.g. "event commit" from a git hook
   hooks      Install, remove or inspect the git post-commit journal hook
@@ -1319,11 +1319,14 @@ func runSearch(args []string, stdout, stderr io.Writer) int {
 	fs := newFlagSet("search", stderr)
 	project := fs.String("project", "", "project id filter")
 	limit := fs.Int("limit", app.DefaultSearchLimit, "maximum results")
+	kinds := fs.String("kind", "", "comma-separated kinds to keep: note, decision, attempt, handoff, dump")
+	dumps := fs.Bool("dumps", false, "include connector dumps (mail, GitHub/GitLab issues and PRs)")
 	asJSON := fs.Bool("json", false, "print JSON")
 	cfgPath := configFlag(fs)
 	flagArgs, queryParts := splitValueFlags(args, map[string]bool{
 		"project": true,
 		"limit":   true,
+		"kind":    true,
 		"config":  true,
 	})
 	if err := fs.Parse(flagArgs); err != nil {
@@ -1351,7 +1354,13 @@ func runSearch(args []string, stdout, stderr io.Writer) int {
 		return reportError(stderr, "search", err)
 	}
 	defer func() { _ = runtime.Close() }()
-	hits, err := runtime.App.Search(context.Background(), query, *project, *limit)
+	hits, err := runtime.App.SearchWith(context.Background(), app.SearchOptions{
+		Text:         query,
+		ProjectID:    *project,
+		Limit:        *limit,
+		Kinds:        splitList(*kinds),
+		IncludeDumps: *dumps,
+	})
 	if err != nil {
 		return reportError(stderr, "search", err)
 	}

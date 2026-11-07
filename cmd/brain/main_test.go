@@ -795,6 +795,23 @@ func TestIndexAndSearchCLI(t *testing.T) {
 	if code != 0 || !strings.Contains(stdout, "note/demo/") {
 		t.Fatalf("search after rebuild = %q, code = %d", stdout, code)
 	}
+
+	code, stdout, stderr = runForTest(t, "search", "--config", cfgPath, "--kind", "decision", "needle")
+	if code != 0 || !strings.Contains(stdout, "decision/demo/") || strings.Contains(stdout, "note/demo/") {
+		t.Fatalf("--kind decision stdout = %q, code = %d (stderr: %s)", stdout, code, stderr)
+	}
+	code, stdout, stderr = runForTest(t, "search", "--config", cfgPath, "--kind", "bogus", "needle")
+	if code != 0 || stdout != "" {
+		t.Fatalf("--kind bogus stdout = %q, code = %d (stderr: %s)", stdout, code, stderr)
+	}
+	code, stdout, stderr = runForTest(t, "search", "--config", cfgPath, "--dumps", "--kind", "note,decision", "needle")
+	if code != 0 || !strings.Contains(stdout, "note/demo/") || !strings.Contains(stdout, "decision/demo/") {
+		t.Fatalf("--dumps --kind stdout = %q, code = %d (stderr: %s)", stdout, code, stderr)
+	}
+	code, stdout, stderr = runForTest(t, "search", "--config", cfgPath, "--dumps", "needle")
+	if code != 0 || !strings.Contains(stdout, "note/demo/") {
+		t.Fatalf("--dumps stdout = %q, code = %d (stderr: %s)", stdout, code, stderr)
+	}
 }
 
 func TestConnectorRunCLI(t *testing.T) {

@@ -38,6 +38,17 @@ type Hit struct {
 	Snippet   string `json:"snippet"`
 }
 
+// SearchInput is one brain_search request after argument validation.
+type SearchInput struct {
+	Query     string
+	ProjectID string
+	Limit     int
+	// Kinds keeps only these kinds; empty keeps every non-excluded kind.
+	Kinds []string
+	// IncludeDumps adds connector dumps to an unfiltered search.
+	IncludeDumps bool
+}
+
 // Project is a registered project.
 type Project struct {
 	ID      string   `json:"id"`
@@ -107,8 +118,8 @@ type Backend interface {
 	// Bootstrap returns the bounded context summary of a project. budget zero
 	// selects the default size.
 	Bootstrap(ctx context.Context, projectID string, budget int) (string, error)
-	// Search runs full-text search. An empty projectID searches every project.
-	Search(ctx context.Context, query, projectID string, limit int) ([]Hit, error)
+	// Search runs full-text search. An empty ProjectID searches every project.
+	Search(ctx context.Context, in SearchInput) ([]Hit, error)
 	Note(ctx context.Context, in NoteInput) (Record, error)
 	Decision(ctx context.Context, in DecisionInput) (Record, error)
 	Attempt(ctx context.Context, in AttemptInput) (Record, error)
@@ -152,11 +163,13 @@ func (s *Server) coreTools() []tool {
 		},
 		{
 			Name:        "brain_search",
-			Description: "Full-text search over notes, decisions, attempts and handoffs. Searches every project unless project is given.",
+			Description: "Full-text search over notes, decisions, attempts and handoffs. Searches every project unless project is given. Connector dumps (mail, GitHub/GitLab issues and PRs) are excluded unless include_dumps is true or kinds contains \"dump\".",
 			InputSchema: objectSchema([]string{"query"}, map[string]any{
-				"query":   stringProp("Words to search for."),
-				"project": project,
-				"limit":   intProp("Maximum hits; 0 selects the default.", 0),
+				"query":         stringProp("Words to search for."),
+				"project":       project,
+				"limit":         intProp("Maximum hits; 0 selects the default.", 0),
+				"kinds":         stringArrayProp("Keep only these kinds: note, decision, attempt, handoff, dump. Omit for every kind."),
+				"include_dumps": boolProp("Include connector dumps in an unfiltered search."),
 			}),
 			run: s.search,
 		},
@@ -254,9 +267,11 @@ func (s *Server) open(ctx context.Context, raw json.RawMessage) (toolResult, err
 
 func (s *Server) search(ctx context.Context, raw json.RawMessage) (toolResult, error) {
 	var args struct {
-		Query   string `json:"query"`
-		Project string `json:"project"`
-		Limit   int    `json:"limit"`
+		Query        string   `json:"query"`
+		Project      string   `json:"project"`
+		Limit        int      `json:"limit"`
+		Kinds        []string `json:"kinds"`
+		IncludeDumps bool     `json:"include_dumps"`
 	}
 	if err := decodeArgs(raw, &args); err != nil {
 		return toolResult{}, err
@@ -272,7 +287,13 @@ func (s *Server) search(ctx context.Context, raw json.RawMessage) (toolResult, e
 	if err != nil {
 		return toolResult{}, err
 	}
-	hits, err := s.backend.Search(ctx, query, projectID, args.Limit)
+	hits, err := s.backend.Search(ctx, SearchInput{
+		Query:        query,
+		ProjectID:    projectID,
+		Limit:        args.Limit,
+		Kinds:        args.Kinds,
+		IncludeDumps: args.IncludeDumps,
+	})
 	if err != nil {
 		return toolResult{}, err
 	}
@@ -578,6 +599,10 @@ func stringArrayProp(description string) map[string]any {
 
 func intProp(description string, minimum int) map[string]any {
 	return map[string]any{"type": "integer", "description": description, "minimum": minimum}
+}
+
+func boolProp(description string) map[string]any {
+	return map[string]any{"type": "boolean", "description": description}
 }
 
 func enumProp(description string, values []string) map[string]any {

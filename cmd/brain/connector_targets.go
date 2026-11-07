@@ -142,5 +142,20 @@ func runLocalConnectors(ctx context.Context, cfg config.BrainConfig, plans []con
 			ok = false
 		}
 	}
+	refreshDumpIndex(ctx, cfg, stderr)
 	return ok
+}
+
+// refreshDumpIndex makes the new dumps searchable. It never fails the run:
+// on error the index is marked dirty and the next search repairs it.
+func refreshDumpIndex(ctx context.Context, cfg config.BrainConfig, stderr io.Writer) {
+	runtime, err := bootstrap.Build(cfg)
+	if err != nil {
+		fmt.Fprintf(stderr, "brain connector run: dumps not indexed: %v\n", err)
+		return
+	}
+	defer func() { _ = runtime.Close() }()
+	if _, err := runtime.App.IndexDumps(ctx); err != nil {
+		fmt.Fprintf(stderr, "brain connector run: dumps not indexed (the next search retries): %v\n", err)
+	}
 }

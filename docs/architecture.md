@@ -131,7 +131,7 @@ brain session    start|end handlers for agent session hooks
 brain state      get|set the project state
 brain sync       commit, rebase, optional push, or --status (local/git only)
 brain index      refresh the local FTS5 index, or --rebuild it (local/git only)
-brain search     query the local FTS5 index (local/git), or GET /v1/search (server)
+brain search     query the local FTS5 index (local/git), or GET /v1/search (server); --dumps adds connector dumps, --kind filters
 brain journal    show journal/<user>.jsonl activity, newest first (local/git)
 brain event      record an external event; `event commit` reads git for a post-commit hook
 brain hooks      install|uninstall|status the post-commit journal hook

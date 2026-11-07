@@ -18,6 +18,23 @@ type RecordProblem struct {
 	Reason string
 }
 
+// Dump is one connector dump file (mail, GitHub or GitLab) for indexing.
+type Dump struct {
+	// Path is relative to the data directory, with forward slashes.
+	Path string
+	// ProjectID is the frontmatter project_id ("github:owner/repo",
+	// "mail:account"); empty when the file has none.
+	ProjectID string
+	Title     string
+	Body      string
+	UpdatedAt time.Time
+}
+
+// DumpLister is implemented by stores that keep connector dumps as files.
+type DumpLister interface {
+	ListDumps(ctx context.Context) ([]Dump, error)
+}
+
 // ProblemReporter is implemented by stores whose listing skips damaged files.
 type ProblemReporter interface {
 	Problems(ctx context.Context, projectID string) ([]RecordProblem, error)
@@ -56,6 +73,10 @@ type Query struct {
 	Text      string
 	ProjectID string
 	Limit     int
+	// Kinds keeps only these document kinds; empty keeps every kind.
+	Kinds []string
+	// ExcludeKinds drops these kinds (applied after Kinds).
+	ExcludeKinds []string
 }
 
 // Hit is one search result.

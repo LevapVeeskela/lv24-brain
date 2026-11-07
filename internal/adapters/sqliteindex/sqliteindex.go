@@ -135,19 +135,8 @@ func (i *Index) Search(ctx context.Context, query ports.Query) ([]ports.Hit, err
 		return []ports.Hit{}, nil
 	}
 	limit := normalizeLimit(query.Limit)
-
-	var (
-		rows *sql.Rows
-		err  error
-	)
-	args := []any{snippetStart, snippetEnd, snippetEllipsis, snippetTokenSpan, match}
-	statement := searchSQL
-	if query.ProjectID != "" {
-		statement = searchProjectSQL
-		args = append(args, query.ProjectID)
-	}
-	args = append(args, limit)
-	rows, err = i.db.QueryContext(ctx, statement, args...)
+	statement, args := buildSearchStatement(query, match, limit)
+	rows, err := i.db.QueryContext(ctx, statement, args...)
 	if err != nil {
 		return nil, fmt.Errorf("sqliteindex: search: %w", err)
 	}
@@ -171,6 +160,46 @@ func (i *Index) Search(ctx context.Context, query ports.Query) ([]ports.Hit, err
 		return nil, fmt.Errorf("sqliteindex: read hits: %w", err)
 	}
 	return hits, nil
+}
+
+// buildSearchStatement assembles the FTS5 query. Project, include and exclude
+// kind filters are appended as bound placeholders in the same order as args.
+func buildSearchStatement(query ports.Query, match string, limit int) (string, []any) {
+	var builder strings.Builder
+	builder.WriteString(searchSelectSQL)
+	args := []any{snippetStart, snippetEnd, snippetEllipsis, snippetTokenSpan, match}
+
+	if query.ProjectID != "" {
+		builder.WriteString(" AND d.project_id = ?")
+		args = append(args, query.ProjectID)
+	}
+	if clause, kindArgs := kindCondition("d.kind", "IN", query.Kinds); clause != "" {
+		builder.WriteString(" AND " + clause)
+		args = append(args, kindArgs...)
+	}
+	if clause, kindArgs := kindCondition("d.kind", "NOT IN", query.ExcludeKinds); clause != "" {
+		builder.WriteString(" AND " + clause)
+		args = append(args, kindArgs...)
+	}
+
+	builder.WriteString(searchOrderSQL)
+	args = append(args, limit)
+	return builder.String(), args
+}
+
+// kindCondition returns "column OP (?,?,...)" with one placeholder per kind,
+// or an empty clause when there are no kinds to filter on.
+func kindCondition(column, operator string, kinds []string) (string, []any) {
+	if len(kinds) == 0 {
+		return "", nil
+	}
+	placeholders := make([]string, len(kinds))
+	args := make([]any, len(kinds))
+	for index, kind := range kinds {
+		placeholders[index] = "?"
+		args[index] = kind
+	}
+	return fmt.Sprintf("%s %s (%s)", column, operator, strings.Join(placeholders, ",")), args
 }
 
 func normalizeLimit(limit int) int {

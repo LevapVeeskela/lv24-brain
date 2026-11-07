@@ -81,7 +81,13 @@ brain index                 # refresh the local index after Markdown changed out
 - `brain journal` shows the per-user activity file `journal/<user>.jsonl`,
   newest first. It works in local and git mode.
 - `brain search` queries the local FTS5 index in local and git mode and calls
-  `GET /v1/search` in server mode.
+  `GET /v1/search` in server mode. It searches curated records by default;
+  `--dumps` adds connector dumps (mail, GitHub/GitLab issues and PRs) and
+  `--kind note,decision` (or `--kind dump`) filters by kind. GitHub/GitLab
+  dumps are indexed under the registered project whose `repo_url` they
+  mirror, so `brain search --project ims --kind dump "flaky"` finds that
+  repository's issues. Connector runs index their dumps; server mode ignores
+  `--kind`/`--dumps` for now.
 - Writes made through the CLI update the local index, and `brain sync`
   reindexes after pulling records from another machine. Markdown changed by
   hand needs `brain index` (or `brain index --rebuild` to rebuild it from
