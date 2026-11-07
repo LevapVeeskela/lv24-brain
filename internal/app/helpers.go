@@ -138,7 +138,7 @@ func (a *App) ensureState(ctx context.Context, projectID string) error {
 	} else if !errors.Is(err, domain.ErrNotFound) {
 		return err
 	}
-	if _, err := a.deps.Store.PutState(ctx, domain.State{ProjectID: projectID}); err != nil {
+	if _, err := a.deps.Store.PutState(ctx, domain.State{ProjectID: projectID, UpdatedAt: a.now()}); err != nil {
 		return fmt.Errorf("initialize state for %s: %w", projectID, err)
 	}
 	return nil

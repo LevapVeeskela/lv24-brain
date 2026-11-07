@@ -113,7 +113,7 @@ func TestWriteJSONEnvelope(t *testing.T) {
 func TestJSONOpen(t *testing.T) {
 	cfgPath := jsonTestBrain(t)
 	_, data := runJSONForTest(t, "open", "--json", "--project", "demo", "--config", cfgPath)
-	requireKeys(t, "open", data, "project", "state", "git", "graphs", "summary")
+	requireKeys(t, "open", data, "project", "state", "git", "graphs", "summary", "recent")
 
 	project := asObject(t, "project", data["project"])
 	requireKeys(t, "project", project, "id", "name", "kind", "paths", "aliases", "repo_url")
@@ -139,6 +139,11 @@ func TestJSONOpen(t *testing.T) {
 		t.Fatalf("git.is_repo = %v, want false for a project without a checkout", git["is_repo"])
 	}
 	asArray(t, "graphs", data["graphs"])
+	recent := asObject(t, "recent", data["recent"])
+	requireKeys(t, "recent", recent, "decisions", "attempts", "handoffs")
+	for _, key := range []string{"decisions", "attempts", "handoffs"} {
+		asArray(t, "recent."+key, recent[key])
+	}
 	summary, _ := data["summary"].(string)
 	if !strings.Contains(summary, "project_id: demo") {
 		t.Fatalf("summary does not carry the bootstrap text:\n%s", summary)

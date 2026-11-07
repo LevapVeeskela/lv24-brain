@@ -216,18 +216,45 @@ it up.
 
 The hook template is `integrations/opencode/brain-handoff.js`. The installer
 copies it to `%USERPROFILE%\.config\opencode\plugins\brain-handoff.js` and
-replaces three placeholders:
+replaces two placeholders:
 
 | Placeholder | Value |
 |---|---|
 | `__BRAIN_BIN__` | absolute path to `brain.exe` |
 | `__BRAIN_CONFIG__` | absolute path to `brain.yaml` |
-| `__HANDOFF_SUMMARY__` | short handoff summary |
 
-It appends a handoff on session idle (10-minute debounce) and on session close
-(1-minute debounce), and never blocks or breaks an OpenCode session. See
+On session idle (10-minute debounce) and session close (1-minute debounce) it
+runs `brain session end --hook opencode`, which writes an `[auto]` handoff only
+when something was recorded since the latest handoff and no handoff is younger
+than 30 minutes. It never blocks or breaks an OpenCode session. See
 `integrations/opencode/README.md` for manual installation and environment
-overrides (`BRAIN_BIN`, `BRAIN_CONFIG`, `BRAIN_HANDOFF_SUMMARY`).
+overrides (`BRAIN_BIN`, `BRAIN_CONFIG`).
+
+## Claude Code session hooks
+
+`brain session start|end --hook claude` are Claude Code hook handlers. Start
+reads the hook JSON on stdin, resolves the project from its `cwd` and returns
+the project context plus what changed since the latest handoff as
+`additionalContext`. End writes an `[auto]` handoff from the agent's last
+message in the transcript (skipped when a handoff is younger than 30 minutes).
+Both are silent for unregistered directories and always exit 0. Add them to
+`~/.claude/settings.json` as separate hook groups; SessionEnd needs an explicit
+timeout because the default is very short:
+
+```json
+{
+  "hooks": {
+    "SessionStart": [
+      {"hooks": [{"type": "command", "timeout": 10,
+        "command": "brain session start --hook claude --config <path-to-brain.yaml>"}]}
+    ],
+    "SessionEnd": [
+      {"hooks": [{"type": "command", "timeout": 10,
+        "command": "brain session end --hook claude --config <path-to-brain.yaml>"}]}
+    ]
+  }
+}
+```
 
 ## Updating and uninstalling
 

@@ -524,7 +524,6 @@ function Install-OpenCodeHook {
     $text = [IO.File]::ReadAllText($template)
     $text = $text.Replace('__BRAIN_BIN__', $BrainExe.Replace('\', '\\'))
     $text = $text.Replace('__BRAIN_CONFIG__', $ConfigPath.Replace('\', '\\'))
-    $text = $text.Replace('__HANDOFF_SUMMARY__', 'Auto handoff: OpenCode session checkpoint')
     $encoding = New-Object System.Text.UTF8Encoding($false)
     [IO.File]::WriteAllText($target, $text, $encoding)
     Write-Step "Installed the OpenCode handoff hook at $target"

@@ -2,17 +2,18 @@
  * LV24 Brain OpenCode handoff hook template.
  *
  * OpenCode loads the default export and calls `server(ctx)`. The returned
- * object's `event` hook appends a handoff when a session goes idle or closes.
+ * object's `event` hook runs `brain session end --hook opencode` when a session
+ * goes idle or closes. The engine writes a handoff only when something was
+ * recorded since the latest one and no handoff was written in the last 30
+ * minutes, so idle checkpoints no longer pile up placeholder handoffs.
  * Every failure is swallowed so the brain CLI can never break an OpenCode
  * session.
  *
  * Placeholders (replaced by installers/windows/install.ps1):
  *   __BRAIN_BIN__       absolute path to brain.exe (or `brain` on PATH)
  *   __BRAIN_CONFIG__    path to brain.yaml
- *   __HANDOFF_SUMMARY__ short handoff summary text
  *
- * Environment overrides are supported: BRAIN_BIN, BRAIN_CONFIG,
- * BRAIN_HANDOFF_SUMMARY.
+ * Environment overrides are supported: BRAIN_BIN, BRAIN_CONFIG.
  *
  * Hook evidence (OpenCode 2.1.4):
  *   - default export shape: { id, server(ctx) }
@@ -26,8 +27,6 @@ import { resolve, sep } from "node:path";
 
 const BRAIN_BIN = process.env.BRAIN_BIN || "__BRAIN_BIN__";
 const BRAIN_CONFIG = process.env.BRAIN_CONFIG || "__BRAIN_CONFIG__";
-const HANDOFF_SUMMARY =
-  process.env.BRAIN_HANDOFF_SUMMARY || "__HANDOFF_SUMMARY__";
 
 // Idle is a checkpoint; deleted/disposed are final signals.
 const HANDOFF_EVENTS = new Set([
@@ -70,8 +69,8 @@ function resolveProjectDirectory(ctx, event) {
   return process.cwd();
 }
 
-function handoffArgs() {
-  const args = ["handoff", "--summary", HANDOFF_SUMMARY];
+function handoffArgs(directory) {
+  const args = ["session", "end", "--hook", "opencode", "--cwd", directory];
   if (BRAIN_CONFIG && !BRAIN_CONFIG.startsWith("__")) {
     args.push("--config", BRAIN_CONFIG);
   }
@@ -82,7 +81,7 @@ function runBrainHandoff(directory) {
   return new Promise((resolvePromise) => {
     let child;
     try {
-      child = spawn(BRAIN_BIN, handoffArgs(), {
+      child = spawn(BRAIN_BIN, handoffArgs(directory), {
         cwd: directory,
         windowsHide: true,
         stdio: "ignore",

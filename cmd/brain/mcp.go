@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"time"
 
 	"github.com/levapveeskela/lv24-brain/internal/app"
 	"github.com/levapveeskela/lv24-brain/internal/bootstrap"
@@ -220,4 +221,43 @@ func toMCPState(state domain.State) mcpserver.State {
 		Active: nonNil(state.Active), Blocked: nonNil(state.Blocked), OpenQuestions: nonNil(state.OpenQuestions),
 		UpdatedAt: state.UpdatedAt, FreshUntil: state.FreshUntil,
 	}
+}
+
+// Catchup implements mcpserver.CatchupBackend.
+func (b mcpBackend) Catchup(ctx context.Context, projectID string, since time.Time, limit int) (mcpserver.Catchup, error) {
+	result, err := b.app.Catchup(ctx, app.CatchupOptions{ProjectID: projectID, Since: since, Limit: limit})
+	if err != nil {
+		return mcpserver.Catchup{}, err
+	}
+	return toMCPCatchup(result), nil
+}
+
+func toMCPCatchup(result app.CatchupResult) mcpserver.Catchup {
+	out := mcpserver.Catchup{
+		ProjectID:    result.Project.ID,
+		Since:        result.Since,
+		SinceSource:  result.SinceSource,
+		StateChanged: result.StateChanged,
+		Notes: mapAll(result.Notes, func(note domain.Note) mcpserver.CatchupItem {
+			return mcpserver.CatchupItem{Kind: "note", ID: note.ID, Title: catchupLine(firstNonEmpty(note.Title, note.Body)), CreatedAt: note.CreatedAt}
+		}),
+		Decisions: mapAll(result.Decisions, func(decision domain.Decision) mcpserver.CatchupItem {
+			return mcpserver.CatchupItem{Kind: "decision", ID: decision.ID, Title: catchupLine(decision.Title), CreatedAt: decision.UpdatedAt}
+		}),
+		Attempts: mapAll(result.Attempts, func(attempt domain.Attempt) mcpserver.CatchupItem {
+			return mcpserver.CatchupItem{Kind: "attempt", ID: attempt.ID, Title: catchupLine(attempt.Title), CreatedAt: attempt.CreatedAt}
+		}),
+		Handoffs: mapAll(result.Handoffs, func(handoff domain.Handoff) mcpserver.CatchupItem {
+			return mcpserver.CatchupItem{Kind: "handoff", ID: handoff.ID, Title: catchupLine(handoff.Summary), CreatedAt: handoff.CreatedAt}
+		}),
+		Journal: mapAll(result.Journal, formatJournalEntry),
+	}
+	if result.Baseline != nil {
+		out.BaselineSummary = catchupLine(result.Baseline.Summary)
+	}
+	if result.StateChanged {
+		state := toMCPState(result.State)
+		out.State = &state
+	}
+	return out
 }

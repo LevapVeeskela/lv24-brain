@@ -157,6 +157,14 @@ type jsonOpen struct {
 	Git     jsonGit     `json:"git"`
 	Graphs  []jsonGraph `json:"graphs"`
 	Summary string      `json:"summary"`
+	Recent  jsonRecent  `json:"recent"`
+}
+
+// jsonRecent lists the newest records of a project in `brain open --json`.
+type jsonRecent struct {
+	Decisions []jsonDecision `json:"decisions"`
+	Attempts  []jsonAttempt  `json:"attempts"`
+	Handoffs  []jsonHandoff  `json:"handoffs"`
 }
 
 // jsonBootstrap is `brain bootstrap --json`.

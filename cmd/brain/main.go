@@ -147,6 +147,10 @@ func runCommand(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return runAgents(rest, stdout, stderr)
 	case "state":
 		return runState(rest, stdout, stderr)
+	case "catchup":
+		return runCatchup(rest, stdout, stderr)
+	case "session":
+		return runSession(rest, stdin, stdout, stderr)
 	case "mcp":
 		return runMCP(rest, stdin, stdout, stderr)
 	case "connector":
@@ -204,6 +208,8 @@ Commands:
   graphs     Refresh graphify/codegraph indexes of registered projects
   agents     Sync the shared agent instructions (agents sync [--check])
   state      Get or set a project's goal, next action, blockers and questions
+  catchup    what changed since the latest handoff
+  session    start|end handlers for agent session hooks
   mcp        Serve the brain as an MCP server over stdio (for coding agents)
   connector  Run a read-only GitHub, GitLab, or IMAP connector
   migrate    Import a legacy .brain data directory; --rollback reverts an import
@@ -457,8 +463,17 @@ func runOpen(args []string, stdout, stderr io.Writer) int {
 		if err != nil {
 			return reportError(stderr, "open", err)
 		}
+		decisions, attempts, handoffs, err := useCase.App.RecentRecords(ctx, target.Project.ID, 5)
+		if err != nil {
+			return reportError(stderr, "open", err)
+		}
 		summary, graphs := gitAndGraphsFor(ctx, target)
 		return writeJSONReport(stdout, stderr, "open", jsonOpen{
+			Recent: jsonRecent{
+				Decisions: mapAll(decisions, toJSONDecision),
+				Attempts:  mapAll(attempts, toJSONAttempt),
+				Handoffs:  mapAll(handoffs, toJSONHandoff),
+			},
 			Project: toJSONProject(opened.Project),
 			State:   toJSONState(opened.State),
 			Git:     toJSONGit(summary),
@@ -2157,7 +2172,7 @@ func runUpdate(args []string, stdout, stderr io.Writer) int {
 // never block or change the exit code of the command the user asked for.
 func maybeDailyUpdateNotice(command string, args []string, stderr io.Writer) {
 	switch command {
-	case "serve", "init", "help", "-h", "--help", "version", "-v", "--version", "update", "event", "hooks", "config", "agents", "mcp":
+	case "serve", "init", "help", "-h", "--help", "version", "-v", "--version", "update", "event", "hooks", "config", "agents", "mcp", "session":
 		return
 	}
 	cfg, err := loadConfigOrDefault(configPathFromArgs(args))

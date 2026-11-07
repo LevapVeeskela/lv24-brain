@@ -82,7 +82,14 @@ func (s *Store) PutState(ctx context.Context, state domain.State) (domain.SyncRe
 	state.Active = nonNilStrings(state.Active)
 	state.Blocked = nonNilStrings(state.Blocked)
 	state.OpenQuestions = nonNilStrings(state.OpenQuestions)
-	state.UpdatedAt = s.nowUTC()
+	// Keep a timestamp chosen by the caller (the app clock) so state and the
+	// records written in the same operation share one timeline; stamp now only
+	// when none was given.
+	if state.UpdatedAt.IsZero() {
+		state.UpdatedAt = s.nowUTC()
+	} else {
+		state.UpdatedAt = state.UpdatedAt.UTC()
+	}
 
 	frontmatter := stateFrontmatter{
 		Frontmatter: markdown.Frontmatter{
