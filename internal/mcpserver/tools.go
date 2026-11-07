@@ -16,6 +16,16 @@ const DefaultJournalLimit = 20
 
 var decisionStatuses = []string{"proposed", "accepted", "rejected", "superseded"}
 
+// WorkspaceOverview is returned by Backend.Resolve when the selector (or the
+// working directory) is a workspace root holding several projects. brain_open
+// answers with the overview instead of an error so the agent can pick one.
+type WorkspaceOverview struct {
+	Text    string
+	Message string
+}
+
+func (w *WorkspaceOverview) Error() string { return w.Message }
+
 // Target is a project resolved from a selector.
 type Target struct {
 	ID string
@@ -248,6 +258,16 @@ func (s *Server) open(ctx context.Context, raw json.RawMessage) (toolResult, err
 		return toolResult{}, errors.New("budget must not be negative")
 	}
 	target, err := s.backend.Resolve(ctx, strings.TrimSpace(args.Project))
+	var overview *WorkspaceOverview
+	if errors.As(err, &overview) {
+		return toolResult{
+			Text: overview.Text,
+			Structured: struct {
+				Workspace bool   `json:"workspace"`
+				Overview  string `json:"overview"`
+			}{Workspace: true, Overview: overview.Text},
+		}, nil
+	}
 	if err != nil {
 		return toolResult{}, err
 	}

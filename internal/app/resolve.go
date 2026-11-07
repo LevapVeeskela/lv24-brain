@@ -86,8 +86,7 @@ func (a *App) ResolveSelector(ctx context.Context, selector string) (Resolved, e
 		return Resolved{}, domain.NewValidationError("project",
 			"\""+selector+"\" is not a registered project id or path; register it with: brain project set <id> --path <dir>")
 	default:
-		return Resolved{}, domain.NewValidationError("project",
-			"\""+selector+"\" is a parent of several registered projects; pass a project id")
+		return Resolved{}, &WorkspaceError{Dir: cleanPath(target), Projects: children}
 	}
 }
 

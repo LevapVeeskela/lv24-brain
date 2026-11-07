@@ -2,8 +2,10 @@ package app_test
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/levapveeskela/lv24-brain/internal/adapters/fsstore"
@@ -52,11 +54,21 @@ func TestResolveSelectorMatchesLegacyRules(t *testing.T) {
 			t.Errorf("ResolveSelector(%q) = %q, %v; want %q", tc.selector, got.Project.ID, err, tc.want)
 		}
 	}
-	// A parent of several projects is ambiguous; unrelated paths are unknown.
-	for _, selector := range []string{root, filepath.Join(t.TempDir(), "elsewhere")} {
-		if _, err := a.ResolveSelector(ctx, selector); err == nil {
-			t.Errorf("ResolveSelector(%q) succeeded, want an error", selector)
-		}
+	// A parent of several projects is a workspace: an error that carries the
+	// projects, rendered as an overview. Unrelated paths are unknown.
+	_, err = a.ResolveSelector(ctx, root)
+	workspace, ok := app.AsWorkspace(err)
+	if !ok || len(workspace.Projects) < 2 || !errors.Is(err, domain.ErrValidation) {
+		t.Fatalf("ResolveSelector(workspace root) = %v, want a WorkspaceError", err)
+	}
+	overview, err := a.WorkspaceOverview(ctx, workspace)
+	if err != nil || !strings.Contains(overview, "- lv24 ") || !strings.Contains(overview, "- lv24-harvest ") {
+		t.Fatalf("overview = %q, %v", overview, err)
+	}
+	if _, err := a.ResolveSelector(ctx, filepath.Join(t.TempDir(), "elsewhere")); err == nil {
+		t.Error("ResolveSelector(unrelated path) succeeded, want an error")
+	} else if _, ok := app.AsWorkspace(err); ok {
+		t.Error("unrelated path reported as a workspace")
 	}
 
 	// With several projects and no --project, writes use the working

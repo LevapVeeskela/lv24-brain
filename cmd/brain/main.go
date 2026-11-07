@@ -443,6 +443,15 @@ func runOpen(args []string, stdout, stderr io.Writer) int {
 	defer func() { _ = useCase.Close() }()
 	ctx := context.Background()
 	target, err := resolveTarget(ctx, useCase.App, *project, selector)
+	if workspace, ok := app.AsWorkspace(err); ok && !*asJSON {
+		// A workspace root: list its projects instead of failing.
+		text, overviewErr := useCase.App.WorkspaceOverview(ctx, workspace)
+		if overviewErr != nil {
+			return reportError(stderr, "open", overviewErr)
+		}
+		fmt.Fprint(stdout, text)
+		return 0
+	}
 	if err != nil {
 		return reportError(stderr, "open", err)
 	}

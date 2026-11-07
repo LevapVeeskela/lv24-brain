@@ -147,6 +147,11 @@ func openSessionTarget(ctx context.Context, opts sessionOptions) (*bootstrap.Run
 		}
 	}
 	target, err := runtime.App.ResolveSelector(ctx, dir)
+	if _, ok := app.AsWorkspace(err); ok {
+		// A workspace root: the runtime stays open for the overview; the
+		// caller closes it.
+		return runtime, app.Resolved{}, err
+	}
 	if err != nil {
 		_ = runtime.Close()
 		return nil, app.Resolved{}, errNotRegistered
@@ -156,6 +161,14 @@ func openSessionTarget(ctx context.Context, opts sessionOptions) (*bootstrap.Run
 
 func sessionStart(ctx context.Context, opts sessionOptions, stdout io.Writer) error {
 	runtime, target, err := openSessionTarget(ctx, opts)
+	if workspace, ok := app.AsWorkspace(err); ok {
+		defer func() { _ = runtime.Close() }()
+		text, err := runtime.App.WorkspaceOverview(ctx, workspace)
+		if err != nil {
+			return err
+		}
+		return writeStartContext(opts, stdout, text)
+	}
 	if errors.Is(err, errNotRegistered) && opts.hook != "" {
 		return nil
 	}
@@ -167,8 +180,13 @@ func sessionStart(ctx context.Context, opts sessionOptions, stdout io.Writer) er
 	if err != nil {
 		return err
 	}
+	return writeStartContext(opts, stdout, text)
+}
+
+// writeStartContext prints session-start context in the hook's format.
+func writeStartContext(opts sessionOptions, stdout io.Writer, text string) error {
 	if !jsonHook(opts.hook) {
-		_, err = io.WriteString(stdout, text)
+		_, err := io.WriteString(stdout, text)
 		return err
 	}
 	return json.NewEncoder(stdout).Encode(claudeStartOutput{HookSpecificOutput: claudeHookContext{
@@ -212,6 +230,11 @@ func sessionContext(ctx context.Context, a *app.App, target app.Resolved) (strin
 
 func sessionEnd(ctx context.Context, opts sessionOptions, stdout io.Writer) error {
 	runtime, target, err := openSessionTarget(ctx, opts)
+	if _, ok := app.AsWorkspace(err); ok {
+		// No single project to hand off from a workspace root.
+		_ = runtime.Close()
+		return nil
+	}
 	if errors.Is(err, errNotRegistered) && opts.hook != "" {
 		return nil
 	}
