@@ -240,12 +240,12 @@ func jsonHookBuild(exe, cfg string, specs []agentHookSpec) agentHookBuildFunc {
 // brainHookCommand builds the hook command. The exe is always double-quoted;
 // the config is quoted only when it contains whitespace.
 func brainHookCommand(exe, cfg string, spec agentHookSpec) string {
-	cfgArg := filepath.ToSlash(cfg)
+	cfgArg := forwardSlashes(cfg)
 	if strings.ContainsAny(cfgArg, " \t") {
 		cfgArg = `"` + cfgArg + `"`
 	}
 	return fmt.Sprintf(`"%s" session %s --hook %s --config %s`,
-		filepath.ToSlash(exe), spec.subcmd, spec.agent, cfgArg)
+		forwardSlashes(exe), spec.subcmd, spec.agent, cfgArg)
 }
 
 // agentHookMarker identifies a brain hook command regardless of exe and config paths.
@@ -316,7 +316,7 @@ func openCodePluginPath(opencodeDir string) string {
 
 func openCodePluginBuild(exe, cfg string) agentHookBuildFunc {
 	rendered := renderOpenCodePlugin(integrations.BrainHandoffPlugin,
-		filepath.ToSlash(exe), filepath.ToSlash(cfg))
+		forwardSlashes(exe), forwardSlashes(cfg))
 	return func(orig []byte) ([]byte, bool, error) {
 		data := []byte(rendered)
 		return data, !bytes.Equal(orig, data), nil
@@ -539,4 +539,10 @@ func quoteJSON(s string) string {
 	// Encoding a string cannot fail.
 	_ = enc.Encode(s)
 	return strings.TrimSuffix(buf.String(), "\n")
+}
+
+// forwardSlashes writes a path with "/" separators on every OS (hook files
+// written on Linux may name Windows paths, which filepath.ToSlash keeps).
+func forwardSlashes(path string) string {
+	return strings.ReplaceAll(path, `\`, "/")
 }
