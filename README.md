@@ -25,7 +25,7 @@ The engine has moved past the initial scaffold. Implemented and tested today:
 | Server-mode CLI | `brain login` / `brain logout`; one atomic OS secret-store bundle `server-session` (server URL, access token, refresh token) bound to the configured `server_url`; `server-token` remains an explicit static API-token fallback; the HTTP client refreshes once on `401` and retries; `BRAIN_TOKEN` overrides stored credentials |
 | Connectors | GitHub, GitLab, and IMAP adapters plus `brain connector run`; local/`git` writes Markdown dumps and run records under the data directory. Server mode runs through `POST /v1/connectors/run`, stores run records in PostgreSQL, and exports each run as Markdown at `GET /v1/connectors/runs/{id}/markdown` |
 | Auto-update | `brain update --check`, `--yes`, and `--rollback`; notify-only daily check; release check, Ed25519-signed manifest, SHA-256 verification, staged apply, previous binary kept; GoReleaser release workflow |
-| Installers | Windows PowerShell/BAT installer (with optional OpenCode handoff hook) and macOS/Linux bash installer |
+| Installers | npm (`npm i -g lv24-brain`, platform packages `@lv24/brain-<os>-<cpu>`, `brain update` defers to npm), Windows PowerShell/BAT installer (with optional OpenCode handoff hook) and macOS/Linux bash installer |
 | Migration | `brain migrate` imports legacy `.brain` knowledge (idempotent, dry-run, path validation), registers projects, and sets `schema_version`; every import writes a backup manifest and `brain migrate --rollback <manifest.json \| latest>` reverts it (edited files are kept) |
 
 API tokens and refresh-token families are durable in Postgres (migrations
@@ -169,6 +169,14 @@ also be stored with
 [docs/deploy.md](docs/deploy.md) before production use.
 
 ## Installers
+
+With Node.js 18+, the quickest install on Windows, macOS and Linux (x64 and
+arm64) is npm; it installs only the binary for your platform and runs no
+install scripts. Update with `npm i -g lv24-brain@latest`:
+
+```sh
+npm i -g lv24-brain
+```
 
 When a release is published, the Windows installer downloads the newest asset on
 the selected channel, verifies its SHA-256, installs under
