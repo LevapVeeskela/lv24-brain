@@ -40,6 +40,38 @@ type RecordDetail struct {
 	GitContext   string    `json:"git_context,omitempty"`
 	CreatedAt    time.Time `json:"created_at,omitzero"`
 	UpdatedAt    time.Time `json:"updated_at,omitzero"`
+	// Links are the record's [[id]] references with their targets resolved.
+	Links []RecordLink `json:"links"`
+	// Backlinks are the records of the same project that reference it.
+	Backlinks []RecordBacklink `json:"backlinks"`
+}
+
+// RecordLink is one outgoing [[id]] reference of a record.
+type RecordLink struct {
+	// Field is the record field holding the reference.
+	Field string `json:"field"`
+	// Ref is the reference as written ("id" or "project/id").
+	Ref       string `json:"ref"`
+	Text      string `json:"text,omitempty"`
+	ProjectID string `json:"project_id"`
+	ID        string `json:"id"`
+	// State is "found", "missing" or "unavailable".
+	State  string `json:"state"`
+	Detail string `json:"detail,omitempty"`
+	// Kind, Title and Status describe the target when it was found.
+	Kind   string `json:"kind,omitempty"`
+	Title  string `json:"title,omitempty"`
+	Status string `json:"status,omitempty"`
+}
+
+// RecordBacklink is a record that references another one.
+type RecordBacklink struct {
+	Field     string `json:"field"`
+	Kind      string `json:"kind"`
+	ID        string `json:"id"`
+	ProjectID string `json:"project_id"`
+	Title     string `json:"title"`
+	Status    string `json:"status,omitempty"`
 }
 
 // RecordQuery filters a record listing. Zero values match everything.
@@ -90,7 +122,7 @@ func (s *Server) recordTools() []tool {
 		},
 		{
 			Name:        "brain_record",
-			Description: "Read one record in full by id (note, decision, attempt or handoff), including its body, context, evidence or reason.",
+			Description: "Read one record in full by id (note, decision, attempt or handoff), including its body, context, evidence or reason, its [[id]] links (resolved) and backlinks from the same project.",
 			InputSchema: objectSchema([]string{"id"}, map[string]any{
 				"id":      stringProp("Record id, as returned by brain_records or brain_search."),
 				"project": project,
@@ -248,5 +280,38 @@ func detailText(detail RecordDetail) string {
 			lines = append(lines, field[0]+": "+field[1])
 		}
 	}
+	for _, link := range detail.Links {
+		lines = append(lines, "link: "+LinkLine(link))
+	}
+	for _, backlink := range detail.Backlinks {
+		lines = append(lines, "backlink: "+BacklinkLine(backlink))
+	}
 	return strings.Join(lines, "\n")
+}
+
+// LinkLine is the human form of an outgoing link:
+// `<ref> -> <kind> [<status>] <title>` or `<ref> -> missing (<detail>)`.
+func LinkLine(link RecordLink) string {
+	line := link.Ref
+	if link.Text != "" {
+		line += " (" + link.Text + ")"
+	}
+	if link.State != "found" {
+		return line + " -> " + link.State + " (" + link.Detail + ")"
+	}
+	line += " -> " + link.Kind
+	if link.Status != "" {
+		line += " [" + link.Status + "]"
+	}
+	return line + " " + link.Title
+}
+
+// BacklinkLine is the human form of a backlink:
+// `<kind> <id> [<status>] <title> (in <field>)`.
+func BacklinkLine(backlink RecordBacklink) string {
+	line := backlink.Kind + " " + backlink.ID
+	if backlink.Status != "" {
+		line += " [" + backlink.Status + "]"
+	}
+	return line + " " + backlink.Title + " (in " + backlink.Field + ")"
 }

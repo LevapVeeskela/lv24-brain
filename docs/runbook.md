@@ -100,6 +100,40 @@ brain record restore <id>
 - Agents get `brain_records`, `brain_record` and `brain_decision_status` over
   MCP; trash and restore stay CLI-only.
 
+### Links between records (since v0.8.0)
+
+Reference another record by writing `[[<id>]]`, `[[<id>|text]]` or, across
+projects, `[[<project>/<id>]]` in a note body, decision context, alternatives,
+consequences or evidence, attempt hypothesis, result or reason, or handoff
+summary or next action. Links inside inline code and code fences are ignored.
+
+```sh
+brain note "Rolled back, see [[decision-lv24-20261108-101500|the cache decision]]"
+brain record show <id>                 # adds Links and Backlinks sections
+brain links <id> [--project p] [--json]
+brain links --broken [--project p]     # references to missing records or projects
+```
+
+Backlinks are computed on read from the same project's records; nothing is
+stored and no migration is needed. MCP `brain_record` returns `links` (state
+found, missing or unavailable, with kind, title and status) and `backlinks`.
+
+### Review hygiene: broken links and near-duplicates (since v0.8.0)
+
+- `broken-link`: a `[[...]]` reference to a record or project that does not
+  exist. Fix the text by hand; there is no automatic fix.
+- `near-duplicate`: two records of the same kind in one project with nearly the
+  same text (3-word shingle similarity of at least 80%, or the same title and a
+  body of at least 60%; `[auto]` handoffs compare only the summary, at 90%).
+  The older id comes first. Keep one: for decisions
+  `brain record supersede <old> --by <new>`, otherwise
+  `brain record trash <id> --yes` (undo with `brain record restore <id>`). Only
+  the 500 most recent records per kind are compared; trashed, rejected and
+  superseded records are ignored. `brain doctor` shows a `duplicates` check
+  with counts per project.
+
+Both are report-only: `brain review --fix` never touches them.
+
 ### Journal and search
 
 ```sh

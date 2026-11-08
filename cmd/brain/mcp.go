@@ -319,11 +319,11 @@ func (b mcpBackend) ListRecords(ctx context.Context, query mcpserver.RecordQuery
 
 // GetRecord implements mcpserver.RecordBackend.
 func (b mcpBackend) GetRecord(ctx context.Context, projectID, id string) (mcpserver.RecordDetail, error) {
-	record, err := b.app.GetRecord(ctx, projectID, id)
+	links, err := b.app.RecordLinks(ctx, projectID, id)
 	if err != nil {
 		return mcpserver.RecordDetail{}, err
 	}
-	return toRecordDetail(record), nil
+	return toRecordDetailWithLinks(links), nil
 }
 
 // SetDecisionStatus implements mcpserver.RecordBackend.

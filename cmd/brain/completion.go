@@ -128,6 +128,7 @@ var completionTable = []completionCmd{
 		cmdLeaf("restore", valueFlag("project"), valueFlag("config")),
 		cmdLeaf("trash-list", valueFlag("project"), boolFlag("json"), valueFlag("config")),
 	),
+	cmdLeaf("links", valueFlag("project"), boolFlag("broken"), boolFlag("json"), valueFlag("config")),
 	cmdGroup("session",
 		cmdLeaf("start", choiceFlag("hook", "claude", "codex", "opencode"), valueFlag("cwd"), valueFlag("config")),
 		cmdLeaf("end", choiceFlag("hook", "claude", "codex", "opencode"), valueFlag("cwd"), valueFlag("config")),

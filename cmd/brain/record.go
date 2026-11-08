@@ -130,15 +130,16 @@ func runRecordShow(args []string, stdout, stderr io.Writer) int {
 		return code
 	}
 	defer func() { _ = runtime.Close() }()
-	record, err := runtime.App.GetRecord(ctx, target.Project.ID, positional[0])
+	links, err := runtime.App.RecordLinks(ctx, target.Project.ID, positional[0])
 	if err != nil {
 		return reportError(stderr, "record show", err)
 	}
-	detail := toRecordDetail(record)
+	detail := toRecordDetailWithLinks(links)
 	if *asJSON {
 		return writeJSONReport(stdout, stderr, "record show", jsonRecordShow{Kind: detail.Kind, Record: detail})
 	}
 	printRecordDetail(stdout, detail)
+	printLinkSections(stdout, detail.Links, detail.Backlinks)
 	return 0
 }
 

@@ -426,6 +426,7 @@ also accepts `--config <path>`.
 | `brain journal` | `--project`, `--user`, `--event <name>` (for example `note`, `decision`, `attempt`, `handoff`, `commit`), `--since <duration>` (for example `24h`), `--limit <n>` (default 20). Local and git mode. |
 | `brain event commit` | `--project <id>`, `--repo <path>` (default `.`), `--quiet` (print nothing on success; used by the hook). Local and git mode. |
 | `brain search <query>` | `--project <id>`, `--limit <n>` (default 20), `--kind <kind>`, `--dumps`, `--since <24h\|7d\|2w\|2026-11-01\|RFC3339>`. English and Russian word forms match as a prefix. |
+| `brain links <id>` | `--project <id>`, `--json`; `--broken` lists `[[id]]` references to missing records. Write `[[<id>]]`, `[[<id>\|text]]` or `[[<project>/<id>]]` in record text; `brain record show` lists Links and Backlinks. |
 | `brain context <task>` | `--project <id>`, `--budget <runes>` (default 4000), `--kind decision\|attempt\|note` (repeatable), `--since <24h\|7d\|2w\|date>`, `--json`. State, review findings, latest handoff, best-matching records and failed attempts for the task. MCP: `brain_context`. |
 | `brain sync` | `--status` (read-only divergence and conflict report), `--push` (push after committing) |
 | `brain index` | `--rebuild` (delete the local index and rebuild it from Markdown) |

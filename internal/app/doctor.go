@@ -40,6 +40,7 @@ func (a *App) Doctor(ctx context.Context, opts DoctorOptions) (DoctorReport, err
 	checks = append(checks, a.doctorRecords(ctx))
 	checks = append(checks, a.doctorJournal(ctx))
 	checks = append(checks, a.doctorIDs(ctx))
+	checks = append(checks, a.doctorDuplicates(ctx))
 	checks = append(checks, a.doctorGit(ctx))
 	return DoctorReport{Checks: checks}, nil
 }

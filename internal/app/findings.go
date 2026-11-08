@@ -34,7 +34,7 @@ const (
 var findingKinds = []FindingKind{
 	FindingNextBehindHandoff, FindingNextMaybeDone, FindingQuestionAnswered,
 	FindingDecisionContradicted, FindingStateExpired, FindingStateBehindCommits,
-	FindingDecisionCodeChanged,
+	FindingDecisionCodeChanged, FindingBrokenLink, FindingNearDuplicate,
 }
 
 const (
@@ -123,6 +123,10 @@ func (a *App) Findings(ctx context.Context, projectID string) ([]Finding, error)
 	findings = append(findings, questionFindings(in)...)
 	findings = append(findings, decisionFindings(in)...)
 	findings = append(findings, decisionCodeFindings(ctx, in)...)
+	findings = append(findings, a.linkFindings(ctx, in)...)
+	// Last, so the shorter lists (context, session start) show the state
+	// findings first.
+	findings = append(findings, nearDuplicateFindings(in)...)
 	return findings, nil
 }
 

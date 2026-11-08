@@ -151,6 +151,8 @@ func runCommand(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return runState(rest, stdout, stderr)
 	case "record":
 		return runRecord(rest, stdout, stderr)
+	case "links":
+		return runLinks(rest, stdout, stderr)
 	case "catchup":
 		return runCatchup(rest, stdout, stderr)
 	case "digest":
@@ -228,6 +230,7 @@ Commands:
   catchup    what changed since the latest handoff
   digest     Morning summary across projects: changes, and what needs you (--write saves it)
   record     List, show, change status, trash and restore records
+  links      [[id]] links and backlinks of a record; --broken lists dangling links
   session    start|end handlers for agent session hooks
   mcp        Serve the brain as an MCP server over stdio (for coding agents)
   connector  Run a read-only GitHub, GitLab, or IMAP connector
