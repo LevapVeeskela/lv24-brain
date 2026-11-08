@@ -89,6 +89,13 @@ test('generates main and platform packages from a fake dist', async (t) => {
     }
   }
 
+  const readme = await readFile(path.join(out, 'lv24-brain', 'README.md'), 'utf8');
+  assert.equal(readme, await readFile(path.join(here, 'README.md'), 'utf8'));
+  for (const platform of PLATFORMS) {
+    const platformReadme = await readFile(path.join(out, platform.packageName, 'README.md'), 'utf8');
+    assert.match(platformReadme, /npm i -g lv24-brain/);
+  }
+
   const launcherCopy = await readFile(path.join(out, 'lv24-brain', 'bin', 'brain.js'), 'utf8');
   assert.equal(launcherCopy, await readFile(path.join(here, 'bin', 'brain.js'), 'utf8'));
 });

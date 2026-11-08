@@ -17,6 +17,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const LICENSE_PATH = path.join(here, '..', 'LICENSE');
+const README_PATH = path.join(here, 'README.md');
 const LAUNCHER_PATH = path.join(here, 'bin', 'brain.js');
 
 export const MAIN_PACKAGE = 'lv24-brain';
@@ -117,6 +118,16 @@ export function platformPackageJson(platform, version) {
   };
 }
 
+export function platformReadme(platform) {
+  return `# ${platform.packageName}\n\n`
+    + `The LV24 Brain CLI binary for ${platform.os}/${platform.cpu}. Do not install it directly:\n`
+    + `install [\`${MAIN_PACKAGE}\`](https://www.npmjs.com/package/${MAIN_PACKAGE}), which picks the\n`
+    + `right platform package.\n\n`
+    + '```bash\n'
+    + `npm i -g ${MAIN_PACKAGE}\n`
+    + '```\n';
+}
+
 async function exists(filePath) {
   try {
     await access(filePath);
@@ -189,17 +200,17 @@ export async function generatePackages({ version, assetVersion = version, distDi
   const written = [];
   for (const { platform, data } of binaries) {
     const pkgDir = path.join(outDir, platform.packageName);
-    await writePackageFiles(
-      pkgDir,
-      platformPackageJson(platform, version),
-      [{ relPath: path.join('bin', platform.binaryName), data, executable: true }],
-    );
+    await writePackageFiles(pkgDir, platformPackageJson(platform, version), [
+      { relPath: path.join('bin', platform.binaryName), data, executable: true },
+      { relPath: 'README.md', data: platformReadme(platform) },
+    ]);
     written.push(pkgDir);
   }
 
   const mainDir = path.join(outDir, MAIN_PACKAGE);
   await writePackageFiles(mainDir, mainPackageJson(version), [
     { relPath: path.join('bin', 'brain.js'), source: LAUNCHER_PATH, executable: true },
+    { relPath: 'README.md', source: README_PATH },
   ]);
   written.push(mainDir);
   return written;
