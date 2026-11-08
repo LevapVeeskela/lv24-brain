@@ -97,16 +97,14 @@ func (a *App) resolveProject(ctx context.Context, projectID string) (domain.Proj
 func (a *App) ensureProject(ctx context.Context, projectID string, create bool) (domain.Project, error) {
 	id := strings.TrimSpace(projectID)
 	if id == "" {
-		project, err := a.resolveProject(ctx, "")
-		if err != nil {
-			return domain.Project{}, err
-		}
-		return project, a.ensureState(ctx, project.ID)
+		// Existing projects are returned as is: reading must not write a
+		// state file (a fresh state.md would look like a state change).
+		return a.resolveProject(ctx, "")
 	}
 	if project, ok, err := a.LookupProject(ctx, id); err != nil {
 		return domain.Project{}, err
 	} else if ok {
-		return project, a.ensureState(ctx, project.ID)
+		return project, nil
 	}
 	if !create {
 		return domain.Project{}, domain.NewValidationError("project",
@@ -254,7 +252,7 @@ func noteDocument(note domain.Note) ports.Document {
 		body = joinText(body, strings.Join(note.Tags, " "))
 	}
 	return ports.Document{
-		ID:        note.ID,
+		ID:        indexKey(note.ProjectID, note.ID),
 		ProjectID: note.ProjectID,
 		Kind:      "note",
 		Title:     fallbackTitle(note.Title, note.Body),
@@ -265,7 +263,7 @@ func noteDocument(note domain.Note) ports.Document {
 
 func decisionDocument(decision domain.Decision) ports.Document {
 	return ports.Document{
-		ID:        decision.ID,
+		ID:        indexKey(decision.ProjectID, decision.ID),
 		ProjectID: decision.ProjectID,
 		Kind:      "decision",
 		Title:     decision.Title,
@@ -281,7 +279,7 @@ func decisionDocument(decision domain.Decision) ports.Document {
 
 func attemptDocument(attempt domain.Attempt) ports.Document {
 	return ports.Document{
-		ID:        attempt.ID,
+		ID:        indexKey(attempt.ProjectID, attempt.ID),
 		ProjectID: attempt.ProjectID,
 		Kind:      "attempt",
 		Title:     attempt.Title,
@@ -292,7 +290,7 @@ func attemptDocument(attempt domain.Attempt) ports.Document {
 
 func handoffDocument(handoff domain.Handoff) ports.Document {
 	return ports.Document{
-		ID:        handoff.ID,
+		ID:        indexKey(handoff.ProjectID, handoff.ID),
 		ProjectID: handoff.ProjectID,
 		Kind:      "handoff",
 		Title:     handoffTitle(handoff),

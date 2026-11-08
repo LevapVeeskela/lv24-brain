@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/levapveeskela/lv24-brain/internal/config"
@@ -266,4 +268,22 @@ func stateDocument(project domain.Project, state domain.State) ports.Document {
 		),
 		UpdatedAt: updatedOrCreated(state.UpdatedAt, project.UpdatedAt),
 	}
+}
+
+// indexKey is the search index id of a record. Record ids are unique only
+// within their project (two projects may both have note-2026-01-01-setup), so
+// the index key is scoped by the project. Project ids never contain "/".
+// sqliteindex strips the scope again when it returns hits.
+func indexKey(projectID, recordID string) string {
+	return projectID + "/" + recordID
+}
+
+// MarkIndexDirty asks the next search to reindex the data directory. Bootstrap
+// uses it after the index was recreated empty by a schema change.
+func MarkIndexDirty(dataDir string) error {
+	path := filepath.Join(dataDir, filepath.FromSlash(indexDirtyMarker))
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	return os.WriteFile(path, []byte("schema upgrade\n"), 0o644)
 }

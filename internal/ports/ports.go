@@ -59,6 +59,15 @@ type Store interface {
 	CurrentRevision(ctx context.Context) (domain.SyncRevision, error)
 }
 
+// StateUpdater is an optional Store capability: it performs a read-modify-write
+// of one project's state atomically with respect to other writers of the same
+// store. change receives the stored state, or a zero state carrying projectID
+// when none is stored, and edits it in place; a non-nil error aborts the write.
+// Stores without this capability are updated with GetState and PutState.
+type StateUpdater interface {
+	UpdateState(ctx context.Context, projectID string, change func(*domain.State) error) (domain.State, error)
+}
+
 // Document is the indexed projection of one knowledge record.
 type Document struct {
 	ID        string

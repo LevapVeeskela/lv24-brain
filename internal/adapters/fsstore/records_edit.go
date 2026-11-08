@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -69,6 +70,15 @@ func (s *Store) UpdateDecision(ctx context.Context, decision domain.Decision) er
 		if err != nil {
 			return fmt.Errorf("fsstore: read decision %q: %w", decision.ID, err)
 		}
+		existing, err := os.ReadFile(path)
+		if err != nil {
+			return fmt.Errorf("fsstore: read decision %q: %w", decision.ID, err)
+		}
+		var oldFrontmatter decisionFrontmatter
+		oldBody, err := markdown.Parse(existing, &oldFrontmatter)
+		if err != nil {
+			return fmt.Errorf("fsstore: parse decision %q: %w", decision.ID, err)
+		}
 		frontmatter := decisionFrontmatter{
 			Frontmatter: markdown.Frontmatter{
 				ProjectID:     current.ProjectID,
@@ -82,6 +92,9 @@ func (s *Store) UpdateDecision(ctx context.Context, decision domain.Decision) er
 			Status:    decision.Status,
 			CreatedAt: current.CreatedAt,
 		}
+		if extras := decisionExtras(oldBody); extras != "" && !strings.Contains(decision.Context, extras) {
+			decision.Context = strings.TrimSpace(strings.TrimSpace(decision.Context) + "\n\n" + extras)
+		}
 		raw, err := markdown.Render(frontmatter, renderDecisionBody(decision))
 		if err != nil {
 			return fmt.Errorf("fsstore: render decision %q: %w", decision.ID, err)
@@ -91,6 +104,46 @@ func (s *Store) UpdateDecision(ctx context.Context, decision domain.Decision) er
 		}
 		return nil
 	})
+}
+
+// decisionListSections are the list sections; text after them that is not a
+// bullet under a known heading is dropped by parsing.
+var decisionListSections = []string{"alternatives", "consequences", "evidence", "paths"}
+
+// decisionExtras returns hand-written text that parsing a decision drops:
+// paragraphs between the title/status and the first section, and sections
+// with other headings placed after the list sections. UpdateDecision folds it
+// into Context, where it survives later reads and updates.
+func decisionExtras(body string) string {
+	var kept []string
+	started, afterLists, inExtra := false, false, false
+	for _, line := range strings.Split(body, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if heading, ok := strings.CutPrefix(trimmed, "## "); ok {
+			name := strings.ToLower(strings.TrimSpace(heading))
+			started = true
+			switch {
+			case slices.Contains(decisionListSections, name):
+				afterLists, inExtra = true, false
+			case slices.Contains(decisionSections, name):
+				inExtra = false
+			case afterLists:
+				inExtra = true
+				kept = append(kept, line)
+			}
+			continue
+		}
+		switch {
+		case inExtra:
+			kept = append(kept, line)
+		case !started:
+			lower := strings.ToLower(trimmed)
+			if trimmed != "" && !strings.HasPrefix(trimmed, "# ") && !strings.HasPrefix(lower, "status:") {
+				kept = append(kept, line)
+			}
+		}
+	}
+	return strings.TrimSpace(strings.Join(kept, "\n"))
 }
 
 // TrashRecord moves a record into projects/<id>/trash/<dir>/. Decisions,

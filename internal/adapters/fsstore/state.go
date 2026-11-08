@@ -2,6 +2,7 @@ package fsstore
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -74,6 +75,17 @@ func (s *Store) PutState(ctx context.Context, state domain.State) (domain.SyncRe
 	if err != nil {
 		return domain.SyncRevision{}, err
 	}
+	var revision domain.SyncRevision
+	err = withFileLock(ctx, filepath.Join(dir, stateFile), func() error {
+		revision, err = s.putStateLocked(ctx, dir, state)
+		return err
+	})
+	return revision, err
+}
+
+// putStateLocked writes state.md in dir. The caller must hold the lock of
+// state.md, so that a write cannot tear a concurrent rename of the same file.
+func (s *Store) putStateLocked(ctx context.Context, dir string, state domain.State) (domain.SyncRevision, error) {
 	project, err := s.loadProject(state.ProjectID)
 	if err != nil {
 		return domain.SyncRevision{}, err
@@ -150,4 +162,42 @@ func writeListItem(out *strings.Builder, item string) {
 	for _, line := range lines[1:] {
 		fmt.Fprintf(out, "  %s\n", line)
 	}
+}
+
+// UpdateState runs change on the stored state of projectID while holding the
+// file lock of state.md, then writes the result. Concurrent UpdateState calls
+// for one project therefore serialize and cannot lose each other's fields.
+// A missing state.md starts from an empty state. The project must exist.
+func (s *Store) UpdateState(ctx context.Context, projectID string, change func(*domain.State) error) (domain.State, error) {
+	if err := contextError(ctx); err != nil {
+		return domain.State{}, err
+	}
+	dir, err := s.projectDir(projectID)
+	if err != nil {
+		return domain.State{}, err
+	}
+	if _, err := s.loadProject(projectID); err != nil {
+		return domain.State{}, err
+	}
+	var updated domain.State
+	err = withFileLock(ctx, filepath.Join(dir, stateFile), func() error {
+		state, err := s.GetState(ctx, projectID)
+		if errors.Is(err, domain.ErrNotFound) {
+			state = domain.State{ProjectID: projectID}
+		} else if err != nil {
+			return err
+		}
+		if err := change(&state); err != nil {
+			return err
+		}
+		if _, err := s.putStateLocked(ctx, dir, state); err != nil {
+			return err
+		}
+		updated = state
+		return nil
+	})
+	if err != nil {
+		return domain.State{}, err
+	}
+	return updated, nil
 }

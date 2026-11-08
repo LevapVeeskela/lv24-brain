@@ -57,3 +57,19 @@ WHERE documents_fts MATCH ?`
 const searchOrderSQL = `
 ORDER BY bm25(documents_fts), d.updated_at DESC, d.id ASC
 LIMIT ?`
+
+// schemaVersion is stored in SQLite's user_version. Bump it when the document
+// id scheme or the table layout changes: the index is derived data, so a
+// mismatch drops it and the caller reindexes from the Markdown sources.
+// Version 2 scopes record ids by project ("<projectID>/<recordID>").
+const schemaVersion = 2
+
+// dropStatements remove everything schemaStatements creates. Triggers go
+// first because they reference the tables.
+var dropStatements = []string{
+	`DROP TRIGGER IF EXISTS documents_after_insert`,
+	`DROP TRIGGER IF EXISTS documents_after_delete`,
+	`DROP TRIGGER IF EXISTS documents_after_update`,
+	`DROP TABLE IF EXISTS documents_fts`,
+	`DROP TABLE IF EXISTS documents`,
+}

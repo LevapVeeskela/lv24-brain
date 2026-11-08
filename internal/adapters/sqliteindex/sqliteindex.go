@@ -38,6 +38,9 @@ const (
 // Index stores documents in SQLite with an FTS5 mirror for search.
 type Index struct {
 	db *sql.DB
+	// needsReindex is set when Open replaced an index with another schema
+	// version; the caller must reindex from the Markdown sources.
+	needsReindex bool
 }
 
 var _ ports.Index = (*Index)(nil)
@@ -60,7 +63,7 @@ func Open(path string) (*Index, error) {
 	db := sql.OpenDB(connector)
 	db.SetMaxOpenConns(1)
 	index := &Index{db: db}
-	if err := index.applySchema(context.Background()); err != nil {
+	if err := index.prepareSchema(context.Background()); err != nil {
 		_ = db.Close()
 		return nil, err
 	}
@@ -76,6 +79,38 @@ func dataSourceName(path string) string {
 		return "file::memory:" + pragmas
 	}
 	return "file:" + filepath.ToSlash(path) + pragmas
+}
+
+// prepareSchema creates the schema or, when the stored schemaVersion differs,
+// drops the derived tables and recreates them. The version is stored last, so
+// an interrupted rebuild is retried on the next open.
+func (i *Index) prepareSchema(ctx context.Context) error {
+	var version int
+	if err := i.db.QueryRowContext(ctx, "PRAGMA user_version").Scan(&version); err != nil {
+		return fmt.Errorf("sqliteindex: read schema version: %w", err)
+	}
+	if version == schemaVersion {
+		return i.applySchema(ctx)
+	}
+	for _, statement := range dropStatements {
+		if _, err := i.db.ExecContext(ctx, statement); err != nil {
+			return fmt.Errorf("sqliteindex: drop old schema: %w", err)
+		}
+	}
+	if err := i.applySchema(ctx); err != nil {
+		return err
+	}
+	if _, err := i.db.ExecContext(ctx, fmt.Sprintf("PRAGMA user_version = %d", schemaVersion)); err != nil {
+		return fmt.Errorf("sqliteindex: write schema version: %w", err)
+	}
+	i.needsReindex = true
+	return nil
+}
+
+// NeedsReindex reports whether Open recreated an index whose schema version
+// differed, so it is empty and must be refilled by a reindex.
+func (i *Index) NeedsReindex() bool {
+	return i.needsReindex
 }
 
 func (i *Index) applySchema(ctx context.Context) error {
@@ -182,6 +217,7 @@ func (i *Index) runSearch(ctx context.Context, query ports.Query, match string, 
 		if err := rows.Scan(&hit.ID, &hit.ProjectID, &hit.Kind, &hit.Title, &snippet, &rank); err != nil {
 			return nil, fmt.Errorf("sqliteindex: scan hit: %w", err)
 		}
+		hit.ID = recordID(hit.ProjectID, hit.ID)
 		hit.Snippet = snippet.String
 		hit.Score = -rank
 		hits = append(hits, hit)
@@ -240,4 +276,10 @@ func normalizeLimit(limit int) int {
 		return MaxLimit
 	}
 	return limit
+}
+
+// recordID returns the record id of an indexed document key, stripping the
+// project scope. Keys of other documents (state, dumps) are returned unchanged.
+func recordID(projectID, key string) string {
+	return strings.TrimPrefix(key, projectID+"/")
 }

@@ -269,7 +269,7 @@ func (a *App) TrashRecord(ctx context.Context, projectID, id string) (Record, er
 	}
 	journalErr := a.journalWrite(ctx, JournalTrash, summary.ProjectID, summary.ID, summary.Kind+": "+summary.Title)
 	if a.deps.Index != nil {
-		if err := a.deps.Index.Delete(ctx, summary.ID); err != nil {
+		if err := a.deps.Index.Delete(ctx, indexKey(summary.ProjectID, summary.ID)); err != nil {
 			a.markIndexDirty()
 			return record, fmt.Errorf("%s %s was trashed but the search index update failed: %w", summary.Kind, summary.ID, err)
 		}

@@ -234,5 +234,17 @@ func openFilesystem(dataDir string) (*fsstore.Store, *sqliteindex.Index, error) 
 		// The index is derived data; Markdown remains usable without it.
 		return store, nil, nil
 	}
+	if index.NeedsReindex() && hasProjects(dataDir) {
+		// The index is new or was recreated for another schema version while
+		// records exist (for example a fresh clone of the data repository):
+		// the next search refills it from Markdown.
+		_ = app.MarkIndexDirty(dataDir)
+	}
 	return store, index, nil
+}
+
+// hasProjects reports whether the data directory holds any project.
+func hasProjects(dataDir string) bool {
+	entries, err := os.ReadDir(filepath.Join(dataDir, "projects"))
+	return err == nil && len(entries) > 0
 }

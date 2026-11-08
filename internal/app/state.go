@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/levapveeskela/lv24-brain/internal/domain"
+	"github.com/levapveeskela/lv24-brain/internal/ports"
 )
 
 // JournalState is the journal event for a state update.
@@ -45,7 +46,9 @@ func (a *App) GetState(ctx context.Context, projectID string) (domain.Project, d
 
 // SetState merges input into the stored state of an existing project, writes
 // it, refreshes the search index and records a journal line. It never
-// creates a project.
+// creates a project. When the store supports ports.StateUpdater the
+// read-modify-write runs under the store's lock, so concurrent writers do not
+// lose each other's fields.
 func (a *App) SetState(ctx context.Context, input StateInput) (domain.State, error) {
 	input.redact()
 	if err := a.requireStore(); err != nil {
@@ -58,12 +61,51 @@ func (a *App) SetState(ctx context.Context, input StateInput) (domain.State, err
 	if err != nil {
 		return domain.State{}, err
 	}
-	state, err := a.deps.Store.GetState(ctx, project.ID)
+	var changed []string
+	apply := func(state *domain.State) error {
+		changed = applyStateInput(state, input, a.now())
+		state.ProjectID = project.ID
+		return state.Validate()
+	}
+	state, err := a.writeState(ctx, project.ID, apply)
+	if err != nil {
+		return domain.State{}, err
+	}
+	journalErr := a.journalWrite(ctx, JournalState, project.ID, "", "changed: "+strings.Join(changed, ", "))
+	if err := a.upsertIndex(ctx, stateDocument(project, state)); err != nil {
+		return state, fmt.Errorf("state of %s was written but the search index update failed: %w", project.ID, err)
+	}
+	if journalErr != nil {
+		return state, fmt.Errorf("state of %s was written but the journal append failed: %w", project.ID, journalErr)
+	}
+	return state, nil
+}
+
+// writeState applies change to the stored state of projectID and persists the
+// result. It uses the store's atomic StateUpdater when available and otherwise
+// falls back to GetState followed by PutState.
+func (a *App) writeState(ctx context.Context, projectID string, change func(*domain.State) error) (domain.State, error) {
+	if updater, ok := a.deps.Store.(ports.StateUpdater); ok {
+		return updater.UpdateState(ctx, projectID, change)
+	}
+	state, err := a.deps.Store.GetState(ctx, projectID)
 	if errors.Is(err, domain.ErrNotFound) {
-		state = domain.State{ProjectID: project.ID}
+		state = domain.State{ProjectID: projectID}
 	} else if err != nil {
 		return domain.State{}, err
 	}
+	if err := change(&state); err != nil {
+		return domain.State{}, err
+	}
+	if _, err := a.deps.Store.PutState(ctx, state); err != nil {
+		return domain.State{}, err
+	}
+	return state, nil
+}
+
+// applyStateInput copies the non-nil fields of input onto state and returns
+// the names of the changed fields.
+func applyStateInput(state *domain.State, input StateInput, now time.Time) []string {
 	changed := make([]string, 0, 6)
 	if input.Goal != nil {
 		state.Goal = strings.TrimSpace(*input.Goal)
@@ -89,22 +131,8 @@ func (a *App) SetState(ctx context.Context, input StateInput) (domain.State, err
 		state.FreshUntil = input.FreshUntil.UTC()
 		changed = append(changed, "fresh_until")
 	}
-	state.ProjectID = project.ID
-	state.UpdatedAt = a.now()
-	if err := state.Validate(); err != nil {
-		return domain.State{}, err
-	}
-	if _, err := a.deps.Store.PutState(ctx, state); err != nil {
-		return domain.State{}, err
-	}
-	journalErr := a.journalWrite(ctx, JournalState, project.ID, "", "changed: "+strings.Join(changed, ", "))
-	if err := a.upsertIndex(ctx, stateDocument(project, state)); err != nil {
-		return state, fmt.Errorf("state of %s was written but the search index update failed: %w", project.ID, err)
-	}
-	if journalErr != nil {
-		return state, fmt.Errorf("state of %s was written but the journal append failed: %w", project.ID, journalErr)
-	}
-	return state, nil
+	state.UpdatedAt = now
+	return changed
 }
 
 func cleanItems(items []string) []string {
