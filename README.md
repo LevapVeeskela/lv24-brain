@@ -1,10 +1,107 @@
+![LV24 Brain — shared memory for AI coding agents](.github/assets/banner.jpg)
+
 # LV24 Brain
 
-Shared project memory for humans and agents: project state, notes, decisions,
-attempts, and handoffs in Markdown, with local, Git-backed, and server modes.
+[![npm](https://img.shields.io/npm/v/lv24-brain?label=npm&color=cb3837&logo=npm)](https://www.npmjs.com/package/lv24-brain)
+[![downloads](https://img.shields.io/npm/dm/lv24-brain?color=cb3837)](https://www.npmjs.com/package/lv24-brain)
+[![release](https://img.shields.io/github/v/release/LevapVeeskela/lv24-brain?color=0b6b5f&logo=github)](https://github.com/LevapVeeskela/lv24-brain/releases)
+[![GHCR](https://img.shields.io/badge/GHCR-ghcr.io%2Flevapveeskela%2Flv24--brain--server-2496ED?logo=docker&logoColor=white)](https://github.com/LevapVeeskela/lv24-brain/pkgs/container/lv24-brain-server)
+[![docs](https://img.shields.io/badge/docs-brain.lv24.by-5fd4c4)](https://brain.lv24.by)
+[![license](https://img.shields.io/badge/license-Apache--2.0-2ea44f)](LICENSE)
+[![Go](https://img.shields.io/badge/Go-1.27-00ADD8?logo=go&logoColor=white)](go.mod)
 
-Documentation: https://brain.lv24.by · npm: https://www.npmjs.com/package/lv24-brain ·
-server image: `ghcr.io/levapveeskela/lv24-brain-server`
+**Documentation:** [English](https://brain.lv24.by) · [Русский](https://brain.lv24.by/ru/) · [中文](https://brain.lv24.by/zh/)
+
+> **Your coding agents forget everything between sessions. LV24 Brain doesn't.**
+> Claude Code, Codex and OpenCode read the same project memory at the start of
+> every session and write back what they decided, what failed and what comes
+> next — on every machine you work on. Plain Markdown in your own private git
+> repository: no cloud, no vendor lock-in, no database to run.
+
+> **Кратко по-русски.** Общая память проектов для ИИ-агентов и людей: состояние
+> проекта, решения, неудачные попытки и handoff'ы между сессиями. Claude Code,
+> Codex и OpenCode открывают сессию с контекстом проекта и оставляют итог в
+> конце — на всех ваших машинах. Данные — обычный Markdown в вашем приватном
+> git-репозитории. Установка: `npm i -g lv24-brain`, затем
+> `brain agents sync --hooks`. Документация на русском —
+> [brain.lv24.by/ru](https://brain.lv24.by/ru/).
+
+| 🚀 Start | 🧠 Use | 🛠 Run a team |
+| --- | --- | --- |
+| [Install](#install-in-a-minute) · [See it work](#see-it-work) · [Quickstart](docs/quickstart.md) | [Agent loop](https://brain.lv24.by/loop/) · [MCP tools](https://brain.lv24.by/agents/) · [Search](https://brain.lv24.by/search/) · [CLI](https://brain.lv24.by/reference/cli/) | [Server mode](docs/deploy.md) · [Security](docs/security.md) · [Runbook](docs/runbook.md) · [Update](docs/update.md) |
+
+## See it work
+
+Before a task, an agent (or you) asks for exactly the context it needs:
+
+```text
+$ brain context "add retry to sync push"
+
+# myapp — context
+goal: ship offline sync for the mobile client
+next_action: add retry with backoff to `sync push`
+
+## Review findings
+- none
+
+## Latest handoff
+- 2026-11-08 summary: queue drains on reconnect; push still fails on 502
+  next: add retry with backoff to `sync push`
+
+## Relevant records
+- [decision] Retry only idempotent pushes (accepted)
+- [note] 502s come from the proxy restart window, ~20 s
+
+## Failed attempts matching the task
+- [attempt] Infinite retry loop — hammered the API during the outage
+```
+
+One call: state, the last handoff, the decisions and notes that match the task,
+and the approaches that already failed — so the next session does not repeat
+them. At the end of the session the hook writes a handoff, and the `Decision:`
+lines of the agent's final message land in a review inbox.
+
+## Why LV24 Brain
+
+- **Memory that survives the session.** State, decisions, attempts and handoffs
+  are written as the work happens and read back at the next start — by any
+  agent, on any machine.
+- **Works with the agents you use.** Session hooks for Claude Code, Codex and
+  OpenCode, plus an MCP server with 16 tools (`brain_open`, `brain_context`,
+  `brain_search`, `brain_decision`, …) for anything that speaks MCP.
+- **Your data, your repository.** Markdown + YAML in a private git repo you
+  own, synced with plain git. Secrets are redacted on every write; this public
+  repository never holds brain data.
+- **Finds what you mean.** Full-text search that matches English and Russian
+  word forms (`decisions` → `decision`, `решений` → `решение`), plus
+  `[[id]]` links with backlinks between records.
+- **Keeps itself honest.** `brain review` flags stale next steps, answered
+  questions, decisions contradicted by later attempts or by changed code,
+  broken links and near-duplicates.
+- **Safe to keep updated.** Ed25519-signed releases, SHA-256-checked installs,
+  `brain update` with rollback, npm packages with provenance.
+- **Grows into a team server.** Optional `brain-server` with Postgres,
+  per-project access control, scoped API tokens and an audit log
+  (`ghcr.io/levapveeskela/lv24-brain-server`).
+
+## Install in a minute
+
+```sh
+npm i -g lv24-brain                               # or the signed installers in docs/install.md
+brain init --mode local --data-dir ~/brain        # or --mode git with a clone of your private data repo
+brain config use ~/brain/brain.yaml
+brain project set myapp --path ~/src/myapp
+brain agents sync --hooks                         # Claude Code, Codex and OpenCode start with this context
+cd ~/src/myapp && brain open
+```
+
+That is the whole loop: agents read `brain open` (or `brain context "<task>"`)
+at session start and leave a handoff at the end. Next steps:
+[quickstart](docs/quickstart.md) · [install options](docs/install.md) ·
+[git mode across machines](docs/quickstart.md#2-git-mode) ·
+[server mode](docs/deploy.md).
+
+---
 
 - Public engine (this repository): Apache-2.0.
 - Private data instance: a separate private data repository, never this repository.

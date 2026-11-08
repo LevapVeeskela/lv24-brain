@@ -1,4 +1,10 @@
+![LV24 Brain — shared memory for AI coding agents](https://raw.githubusercontent.com/LevapVeeskela/lv24-brain/main/.github/assets/banner.jpg)
+
 # lv24-brain
+
+> **Your coding agents forget everything between sessions. LV24 Brain doesn't.**
+> Claude Code, Codex and OpenCode start every session with the project's memory
+> and write back what they decided, what failed and what comes next.
 
 **LV24 Brain** is a curated project memory for coding agents and people:
 state, decisions, failed attempts and handoffs of every project, searchable
