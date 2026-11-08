@@ -28,9 +28,10 @@ Name check (2026-11-08): `lv24-brain` and `@lv24/brain` are free on npm;
   the platform package and `spawnSync`s its binary with the same args,
   stdio inherited and exit code passed through. `optionalDependencies`
   list every platform package at the exact same version.
-- `@lv24-brain/win32-x64`, `win32-arm64`, `darwin-x64`, `darwin-arm64`,
-  `linux-x64`, `linux-arm64` in the free npm organization `lv24-brain`
-  (unscoped names were rejected by npm spam detection) — each contains only the binary, with `os` and
+- `@lv24/brain-win32-x64`, `brain-win32-arm64`, `brain-darwin-x64`,
+  `brain-darwin-arm64`, `brain-linux-x64`, `brain-linux-arm64` in the free
+  npm organization `lv24` (unscoped names were rejected by npm spam
+  detection) — each contains only the binary, with `os` and
   `cpu` fields so npm installs just the matching one.
 - No `postinstall` download: works offline after install, survives
   `--ignore-scripts`, and nothing is fetched from outside npm.
@@ -68,8 +69,13 @@ and it duplicates the installer's signature logic.
 2. If a token: `gh secret set NPM_TOKEN --repo LevapVeeskela/lv24-brain` and
    paste it at the prompt in your own terminal. Done 2026-11-08 (granular
    publish token).
-3. Create the free npm organization `lv24-brain` (platform packages live
-   there) and make sure the token can publish to it.
+3. Create the free npm organization `lv24` (platform packages live there)
+   and make sure the token can publish to it. Done 2026-11-08.
+4. After the first publish, switch to Trusted Publishing for all seven
+   packages (repository `LevapVeeskela/lv24-brain`, workflows `release.yml`
+   and `npm-publish.yml`) and delete `NPM_TOKEN`. npm restricts tokens that
+   bypass 2FA: account changes from August 2026, direct publishing from
+   January 2027.
 
 ## 2. Homebrew tap and Scoop bucket
 
