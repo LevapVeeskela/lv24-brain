@@ -59,8 +59,9 @@ jobs:
           node-version: "24"
           registry-url: https://registry.npmjs.org
 
+      # npm Trusted Publishing: the job's OIDC token (id-token: write) is the
+      # only credential; each package trusts release.yml and npm-publish.yml.
       - name: Publish npm packages
         env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
           TAG: ${{ inputs.tag }}
         run: bash npm/publish.sh "${TAG#v}" npm-out

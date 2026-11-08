@@ -4,14 +4,43 @@
 # npm is skipped, so re-running is safe. Prereleases use the beta dist-tag.
 #
 # usage: npm/publish.sh VERSION OUT_DIR
-# env:   NODE_AUTH_TOKEN (npm token); empty skips publishing with a notice.
+#
+# Authentication, in order:
+#   1. npm Trusted Publishing (OIDC): in a GitHub Actions job with
+#      `id-token: write`, npm exchanges the job's OIDC token for a short-lived
+#      publish credential. Each package lists release.yml and npm-publish.yml
+#      as trusted publishers on npmjs.com. Needs npm >= 11.5.1.
+#   2. NODE_AUTH_TOKEN: a classic token, kept only as a manual fallback.
+# Without either, publishing is skipped with a notice.
 set -euo pipefail
 
 VERSION="${1:?usage: npm/publish.sh VERSION OUT_DIR}"
 OUT_DIR="${2:?usage: npm/publish.sh VERSION OUT_DIR}"
 
-if [ -z "${NODE_AUTH_TOKEN:-}" ]; then
-  echo "::notice title=npm::NPM_TOKEN is not set; npm publish skipped for $VERSION."
+# actions/setup-node exports this placeholder when registry-url is set and
+# no token was given; it is not a credential.
+SETUP_NODE_PLACEHOLDER="XXXXX-XXXXX-XXXXX-XXXXX"
+token="${NODE_AUTH_TOKEN:-}"
+if [ "$token" = "$SETUP_NODE_PLACEHOLDER" ]; then
+  token=""
+fi
+
+version_at_least() {
+  # version_at_least HAVE WANT: true when HAVE >= WANT (numeric x.y.z).
+  [ "$(printf '%s\n%s\n' "$2" "$1" | sort -t. -k1,1n -k2,2n -k3,3n | head -n1)" = "$2" ]
+}
+
+if [ -n "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" ] && [ -z "$token" ]; then
+  npm_version="$(npm --version)"
+  if ! version_at_least "$npm_version" "11.5.1"; then
+    echo "npm $npm_version is too old for Trusted Publishing (needs >= 11.5.1)" >&2
+    exit 1
+  fi
+  echo "npm: publishing with Trusted Publishing (OIDC), npm $npm_version"
+elif [ -n "$token" ]; then
+  echo "npm: publishing with NODE_AUTH_TOKEN"
+else
+  echo "::notice title=npm::no OIDC token (id-token: write) and no NODE_AUTH_TOKEN; npm publish skipped for $VERSION."
   exit 0
 fi
 

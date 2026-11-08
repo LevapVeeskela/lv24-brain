@@ -51,31 +51,45 @@ and it duplicates the installer's signature logic.
   `package.json` files from the tag version, copy each binary from `dist/`,
   verify its SHA-256 against the signed manifest, then `npm publish
   --provenance --access public` (platform packages first, main last).
-- Authentication — preferred: **npm Trusted Publishing** (OIDC from GitHub
-  Actions; no long-lived token at all). Configure once on npmjs.com per
-  package: repository `LevapVeeskela/lv24-brain`, workflow `release.yml`.
-  Fallback: a **granular access token** limited to "publish" on the
-  `lv24-brain` packages with an expiry (e.g. 90 days), stored only as the
-  repository secret `NPM_TOKEN`.
+- Authentication: **npm Trusted Publishing** (OIDC from GitHub Actions; no
+  long-lived token). Each of the seven packages trusts two workflows of
+  `LevapVeeskela/lv24-brain`: `release.yml` (every tag) and `npm-publish.yml`
+  (manual re-publish of an existing release). The jobs have
+  `id-token: write`; npm >= 11.5.1 is required (CI's Node 24 ships 11.19)
+  and provenance is attached automatically. `npm/publish.sh` uses OIDC when
+  the job has it and falls back to `NODE_AUTH_TOKEN` only when one is
+  passed explicitly; the workflows no longer pass `NPM_TOKEN`.
 - The workflow refuses to publish when the npm version already exists
   (immutable, like GitHub releases).
 - Dry run first: `npm pack` in CI on every PR (release-check job) to catch
   broken package files before a tag.
 
-**Owner steps (the token never goes into chat or files):**
-1. `npm login` locally once to confirm the account, then on npmjs.com
-   either set up Trusted Publishing for `lv24-brain` (preferred), or create
-   a granular publish token.
-2. If a token: `gh secret set NPM_TOKEN --repo LevapVeeskela/lv24-brain` and
-   paste it at the prompt in your own terminal. Done 2026-11-08 (granular
-   publish token).
-3. Create the free npm organization `lv24` (platform packages live there)
-   and make sure the token can publish to it. Done 2026-11-08.
-4. After the first publish, switch to Trusted Publishing for all seven
-   packages (repository `LevapVeeskela/lv24-brain`, workflows `release.yml`
-   and `npm-publish.yml`) and delete `NPM_TOKEN`. npm restricts tokens that
-   bypass 2FA: account changes from August 2026, direct publishing from
-   January 2027.
+**Owner steps:**
+1. Done 2026-11-08: npm account, free organization `lv24`, first publish
+   (v0.6.0) with a granular token in the `NPM_TOKEN` secret.
+2. **Trusted Publishing (before January 2027, when npm stops tokens that
+   bypass 2FA for direct publishing).** For each package — `lv24-brain`,
+   `@lv24/brain-win32-x64`, `@lv24/brain-win32-arm64`,
+   `@lv24/brain-darwin-x64`, `@lv24/brain-darwin-arm64`,
+   `@lv24/brain-linux-x64`, `@lv24/brain-linux-arm64` — open
+   npmjs.com → package → Settings → Trusted publishing → Add trusted
+   publisher → GitHub Actions, and enter (case-sensitive):
+   - Organization or user: `LevapVeeskela`
+   - Repository: `lv24-brain`
+   - Workflow filename: `release.yml`
+   - Environment: empty
+
+   Then add a second trusted publisher with the same values and workflow
+   filename `npm-publish.yml`. A new configuration must complete its first
+   publish within 2 days, so do this shortly before the next release.
+3. Release the next version. The log line
+   `npm: publishing with Trusted Publishing (OIDC)` and the seven
+   `+ <package>@<version>` lines confirm it worked. If it failed, fix the
+   trusted publisher fields and re-run `npm-publish.yml` for that tag.
+4. After a successful release: on each package, Settings → Publishing access
+   → "Require two-factor authentication and disallow tokens"; then delete the
+   secret (`gh secret delete NPM_TOKEN --repo LevapVeeskela/lv24-brain`) and
+   revoke the granular token on npmjs.com (Access Tokens).
 
 ## 2. Homebrew tap and Scoop bucket
 

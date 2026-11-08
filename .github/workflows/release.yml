@@ -18,7 +18,7 @@ jobs:
     timeout-minutes: 30
     permissions:
       contents: write
-      # npm provenance (OIDC) for the npm publish steps below.
+      # OIDC for npm Trusted Publishing and provenance in the steps below.
       id-token: write
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -171,9 +171,10 @@ jobs:
           node-version: "24"
           registry-url: https://registry.npmjs.org
 
+      # npm Trusted Publishing: the job's OIDC token (id-token: write) is the
+      # only credential; each package trusts release.yml and npm-publish.yml.
       - name: Publish npm packages
         env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
           TAG: ${{ github.ref_name }}
         run: bash npm/publish.sh "${TAG#v}" npm-out
 
