@@ -17,6 +17,7 @@ builds its own.
 | `go install` | works today | `go install github.com/levapveeskela/lv24-brain/cmd/brain@latest` |
 | Docker image (server) | live from v0.6.2 (release.yml `image` job) | `docker pull ghcr.io/levapveeskela/lv24-brain-server` |
 | Showcase site | built locally | GitHub Pages (free for public repos) |
+| Docs site | live | https://brain.lv24.by |
 
 Name check (2026-11-08): `lv24-brain` and `@lv24/brain` are free on npm;
 `brain-cli` is taken.

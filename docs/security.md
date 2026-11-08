@@ -106,7 +106,7 @@ Implemented in `internal/adapters/httpapi` and `internal/auth`:
   refresh-token reuse, deletion and role changes take effect immediately.
 - Rotating refresh tokens stored as SHA-256 hashes; reuse revokes the token
   family. In a Postgres deployment they are persisted by migrations
-  `0002_auth_tokens.sql` and `0003_auth_revocations.sql` (server schema 6), so
+  `0002_auth_tokens.sql` and `0003_auth_revocations.sql` (server schema 8), so
   restarts do not invalidate sessions. Revocation tombstones have no expiry, so
   pruning expired token rows cannot resurrect a revoked family or session.
 - Opaque API tokens with the `brain_` prefix, stored as SHA-256 hashes in the

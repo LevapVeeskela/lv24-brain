@@ -14,6 +14,8 @@ lives in a separate private repository or data directory. Never put secrets,
 tokens, passwords, `secrets/`, `index/`, or `backups/` into a brain data
 repository.
 
+The documentation site is https://brain.lv24.by.
+
 ## Requirements
 
 - Windows 10/11 with PowerShell 5.1 or newer; macOS or a current Linux
@@ -234,9 +236,8 @@ only after you have backed it up.
 ## npm
 
 The `lv24-brain` package on npm ships the same signed release binaries as
-GitHub Releases. It is published by the release workflow starting with the
-first release after the npm packaging merge (see
-[publishing-plan.md](publishing-plan.md)).
+GitHub Releases. Versions from v0.6.0 onward are published to npm by the release
+workflow (see [publishing-plan.md](publishing-plan.md)).
 
 ```sh
 npm i -g lv24-brain        # install the CLI globally

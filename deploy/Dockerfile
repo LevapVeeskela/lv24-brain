@@ -30,7 +30,9 @@ FROM alpine:3.22@sha256:bfe7ceb9f09ec0566c48fb93356e45a47a00be5a1dd14fa5b909e770
 
 LABEL org.opencontainers.image.source="https://github.com/LevapVeeskela/lv24-brain" \
       org.opencontainers.image.description="LV24 Brain server: team mode for the lv24-brain project memory" \
-      org.opencontainers.image.licenses="Apache-2.0"
+      org.opencontainers.image.licenses="Apache-2.0" \
+      org.opencontainers.image.documentation="https://brain.lv24.by" \
+      org.opencontainers.image.url="https://brain.lv24.by"
 
 RUN apk add --no-cache ca-certificates tzdata \
     && addgroup -S -g 10001 brain \

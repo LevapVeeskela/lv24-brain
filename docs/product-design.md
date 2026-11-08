@@ -203,7 +203,8 @@ script is a thin shell wrapper around the same release assets.
   Status: base images are pinned by digest in `deploy/` (`golang:1.27-alpine`,
   `alpine:3.22` in `deploy/Dockerfile`; `postgres:17-alpine` in
   `deploy/docker-compose.yml`), keeping the readable tag next to the
-  multi-arch index digest. The server image is built locally as
+  multi-arch index digest. Release images are published to GHCR
+  (`ghcr.io/levapveeskela/lv24-brain-server`); a local build is
   `lv24-brain-server:local`. See `docs/deploy.md` "Updating pinned images".
 - Update never mutates the private data repo automatically.
 - Release manifest `release.json`: version, channel, assets, checksums,

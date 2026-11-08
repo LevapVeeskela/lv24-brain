@@ -1,5 +1,7 @@
 # Deploy a brain server
 
+Documentation site: https://brain.lv24.by.
+
 The v1 server is single-node: one `brain-server` container plus Postgres,
 managed by Docker Compose. There is no cloud dependency and no paid service.
 
@@ -194,8 +196,8 @@ docker compose --env-file .env -f docker-compose.yml up -d brain-server
 Before an upgrade, take a backup. The server applies embedded migrations on
 startup; an existing schema with pending migrations refuses to start until
 `BRAIN_DATABASE_BACKUP_CONFIRMED=1` is set in the server environment. Upgrading
-a database to schema 6 (migrations `0002_auth_tokens.sql` through
-`0006_api_token_expiry.sql`) is such a migration: back up first, set the
+a database to schema 8 (migrations `0007_search_fulltext.sql` and
+`0008_project_access.sql` on top of the earlier ones) is such a migration: back up first, set the
 confirmation variable for the upgrade start, and unset it afterwards if you
 prefer to keep the gate explicit for the next migration. An update must not run
 while migrations or active jobs are in progress. Roll back by restoring the
@@ -240,8 +242,12 @@ users, projects, knowledge records, revisions, API tokens, refresh-token
 families, and audit events there. Compose always sets that URL, so this stack is
 durable.
 
-The server schema is version 6 (migrations `0001_init.sql` through
-`0006_api_token_expiry.sql`). Migration `0002_auth_tokens.sql` adds the
+The server schema is version 8 (migrations `0001_init.sql` through
+`0008_project_access.sql`). Migration `0007_search_fulltext.sql` adds
+PostgreSQL full-text search columns for `GET /v1/search`. Migration
+`0008_project_access.sql` adds per-project access control (restricted projects
+and their members) and API token scopes and project allow-lists; tokens minted
+before it stay unscoped. Migration `0002_auth_tokens.sql` adds the
 `api_tokens` and `refresh_tokens` tables, so API tokens and refresh sessions
 survive a restart; refresh rotation still revokes the whole family when a used
 token is presented again. Migration `0003_auth_revocations.sql` adds durable
@@ -255,7 +261,7 @@ Current limits:
 
 - Pending migrations on an existing schema require a backup and
   `BRAIN_DATABASE_BACKUP_CONFIRMED=1`; migrations are forward-only. Upgrading a
-  server to schema 6 therefore needs a backup first.
+  server to schema 8 therefore needs a backup first.
 - Multi-replica deployment is not supported: the SSE broker and login rate
   limiter are per-process, so events and throttling are not shared between
   instances. Durable tokens do not change that.

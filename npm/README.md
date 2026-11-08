@@ -6,6 +6,8 @@ and shared across machines. Works locally, through a private git repository,
 or against a team server. Claude Code, Codex and OpenCode use it through
 session hooks and an MCP server.
 
+**Documentation: <https://brain.lv24.by>**
+
 ## Install
 
 ```bash
@@ -45,5 +47,8 @@ Connect agents: `brain agents sync --hooks` installs session hooks, and
   review inbox.
 - `brain review`, `brain digest`, `brain catchup` keep the knowledge fresh.
 
-Documentation, changelog and source:
-<https://github.com/LevapVeeskela/lv24-brain>. License: Apache-2.0.
+Documentation: <https://brain.lv24.by>
+
+Team server image (linux/amd64, linux/arm64): `ghcr.io/levapveeskela/lv24-brain-server`.
+
+Source and changelog: <https://github.com/LevapVeeskela/lv24-brain>. License: Apache-2.0.

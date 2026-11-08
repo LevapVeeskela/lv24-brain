@@ -25,6 +25,7 @@ export const MAIN_PACKAGE = 'lv24-brain';
 // like lv24-brain-darwin-arm64 were rejected by npm's spam detection).
 export const PLATFORM_SCOPE = '@lv24';
 export const REPOSITORY_URL = 'https://github.com/LevapVeeskela/lv24-brain';
+export const DOCS_URL = 'https://brain.lv24.by';
 export const LICENSE = 'Apache-2.0';
 
 // goos/goarch are GoReleaser's names (asset file names); os/cpu are npm's.
@@ -91,7 +92,7 @@ export function mainPackageJson(version) {
     description: 'LV24 Brain: a curated project memory CLI (local, git or server mode)',
     license: LICENSE,
     repository: { type: 'git', url: `git+${REPOSITORY_URL}.git` },
-    homepage: `${REPOSITORY_URL}#readme`,
+    homepage: DOCS_URL,
     bugs: { url: `${REPOSITORY_URL}/issues` },
     keywords: ['brain', 'cli', 'memory', 'knowledge', 'agents'],
     bin: { brain: 'bin/brain.js' },
@@ -113,6 +114,7 @@ export function platformPackageJson(platform, version) {
     repository: { type: 'git', url: `git+${REPOSITORY_URL}.git` },
     os: [platform.os],
     cpu: [platform.cpu],
+    homepage: DOCS_URL,
     files: ['bin'],
     publishConfig: { access: 'public' },
   };
@@ -123,6 +125,7 @@ export function platformReadme(platform) {
     + `The LV24 Brain CLI binary for ${platform.os}/${platform.cpu}. Do not install it directly:\n`
     + `install [\`${MAIN_PACKAGE}\`](https://www.npmjs.com/package/${MAIN_PACKAGE}), which picks the\n`
     + `right platform package.\n\n`
+    + `Documentation: ${DOCS_URL}\n\n`
     + '```bash\n'
     + `npm i -g ${MAIN_PACKAGE}\n`
     + '```\n';

@@ -1,7 +1,7 @@
 # Quickstart
 
 Three ways to run LV24 Brain. Pick one, finish the smoke checks, then read the
-mode-specific document.
+mode-specific document. The documentation site is https://brain.lv24.by.
 
 ## Five-minute path (one machine, coding agents)
 
@@ -251,9 +251,10 @@ a token in the repository URL.
 The HTTP API and the token-authenticated CLI client are implemented. Postgres
 persistence is enabled by `BRAIN_DATABASE_URL` (or `DATABASE_URL`); without it
 the server falls back to an in-memory store and loses data on restart. Server
-schema 6 (migrations `0002_auth_tokens.sql` through `0006_api_token_expiry.sql`)
-stores API tokens, refresh-token families, the security audit log, and
-knowledge-record owners durably. See
+schema 8 (migrations `0002_auth_tokens.sql` through `0008_project_access.sql`)
+stores API tokens (with optional scopes and project allow-lists), refresh-token
+families, the security audit log, knowledge-record owners, and project access
+rules durably. See
 [deploy.md](deploy.md) for Compose, backups, and the migration gate.
 
 Start the server with an explicit signing key, one bootstrap administrator, and

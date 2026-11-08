@@ -3,6 +3,9 @@
 Shared project memory for humans and agents: project state, notes, decisions,
 attempts, and handoffs in Markdown, with local, Git-backed, and server modes.
 
+Documentation: https://brain.lv24.by · npm: https://www.npmjs.com/package/lv24-brain ·
+server image: `ghcr.io/levapveeskela/lv24-brain-server`
+
 - Public engine (this repository): Apache-2.0.
 - Private data instance: a separate private data repository, never this repository.
 - Product design (source of truth): [docs/product-design.md](docs/product-design.md).
@@ -21,7 +24,7 @@ The engine has moved past the initial scaffold. Implemented and tested today:
 | Storage | Markdown + YAML frontmatter (`fsstore`), SQLite FTS5 index, `registry.json` project index |
 | Local search | `brain index` refreshes FTS5 from Markdown; `brain index --rebuild` discards and rebuilds it; `brain search` queries it in local/`git` mode. `brain index` is local-only; `brain search` also works in server mode through `GET /v1/search` |
 | Git sync | `fetch`, `pull --rebase`, commit, optional push; read-only `--status`; conflict reporting |
-| HTTP server | Health/readiness/version, OpenAPI JSON, JWT + rotating refresh tokens, API tokens, durable auth tables (migrations `0002_auth_tokens.sql` and `0003_auth_revocations.sql`, server schema 6: `0004_security_audit.sql`, `0005_knowledge_owner.sql`, `0006_api_token_expiry.sql`), security audit log (`GET /v1/audit`, admin), local admin bootstrap, OIDC (PKCE/state/nonce), roles `admin\|member\|viewer`, SSE revision stream; Postgres when `BRAIN_DATABASE_URL` is set, in-memory fallback otherwise |
+| HTTP server | Health/readiness/version, OpenAPI JSON, JWT + rotating refresh tokens, API tokens with optional scopes (read/write/admin) and project allow-list, per-project ACL, durable auth tables (migrations `0002_auth_tokens.sql` and `0003_auth_revocations.sql`, server schema 8: `0004_security_audit.sql`, `0005_knowledge_owner.sql`, `0006_api_token_expiry.sql`, `0007_search_fulltext.sql`, `0008_project_access.sql`), security audit log (`GET /v1/audit`, admin), local admin bootstrap, OIDC (PKCE/state/nonce), roles `admin\|member\|viewer`, SSE revision stream; Postgres when `BRAIN_DATABASE_URL` is set, in-memory fallback otherwise |
 | Server-mode CLI | `brain login` / `brain logout`; one atomic OS secret-store bundle `server-session` (server URL, access token, refresh token) bound to the configured `server_url`; `server-token` remains an explicit static API-token fallback; the HTTP client refreshes once on `401` and retries; `BRAIN_TOKEN` overrides stored credentials |
 | Connectors | GitHub, GitLab, and IMAP adapters plus `brain connector run`; local/`git` writes Markdown dumps and run records under the data directory. Server mode runs through `POST /v1/connectors/run`, stores run records in PostgreSQL, and exports each run as Markdown at `GET /v1/connectors/runs/{id}/markdown` |
 | Auto-update | `brain update --check`, `--yes`, and `--rollback`; notify-only daily check; release check, Ed25519-signed manifest, SHA-256 verification, staged apply, previous binary kept; GoReleaser release workflow |
@@ -30,7 +33,7 @@ The engine has moved past the initial scaffold. Implemented and tested today:
 
 API tokens and refresh-token families are durable in Postgres (migrations
 `0002_auth_tokens.sql` and `0003_auth_revocations.sql`; the server schema is
-version 6 after `0006_api_token_expiry.sql`), so they survive restarts and refresh rotation still revokes the whole family on
+version 8 after `0008_project_access.sql`), so they survive restarts and refresh rotation still revokes the whole family on
 reuse. Revocation tombstones have no expiry, so pruning expired token rows
 cannot resurrect a revoked family or session. Without
 `BRAIN_DATABASE_URL`, `brain-server` still falls back to an in-memory store that
@@ -202,6 +205,7 @@ by `.github/workflows/release.yml` on `v*` tags. See
 
 ## Documentation
 
+- [Documentation site](https://brain.lv24.by)
 - [Quickstart](docs/quickstart.md)
 - [Install](docs/install.md)
 - [Update](docs/update.md)

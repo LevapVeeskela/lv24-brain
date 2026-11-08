@@ -653,10 +653,10 @@ break installed binaries:
 
 ## 6. Database migrations and the upgrade gate
 
-- Server schema version: **6** (`SchemaVersion` in
+- Server schema version: **8** (`SchemaVersion` in
   `internal/adapters/postgres/postgres.go`). Migrations are embedded from
   `internal/adapters/postgres/migrations/`, from `0001_init.sql` to
-  `0006_api_token_expiry.sql`.
+  `0008_project_access.sql`.
 - On startup the server applies embedded migrations to an empty database.
 - For an existing schema with pending migrations, the server refuses to start
   unless `BRAIN_DATABASE_BACKUP_CONFIRMED=1` is set. The message names the
