@@ -79,8 +79,12 @@ and it duplicates the installer's signature logic.
    - Workflow filename: `release.yml`
    - Environment: empty
 
+   - Allowed actions: check **Allow npm publish** (without it only
+     `npm stage publish` is allowed)
+
    Then add a second trusted publisher with the same values and workflow
-   filename `npm-publish.yml`. A new configuration must complete its first
+   filename `npm-publish.yml`. Done 2026-11-08 for all seven packages;
+   v0.7.1 was published through `npm-publish.yml` with OIDC. A new configuration must complete its first
    publish within 2 days, so do this shortly before the next release.
 3. Release the next version. The log line
    `npm: publishing with Trusted Publishing (OIDC)` and the seven
