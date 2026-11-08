@@ -32,7 +32,7 @@ publish() {
   npm publish "$dir" --provenance --access public "${tag_args[@]}"
 }
 
-for dir in "$OUT_DIR"/lv24-brain-*/; do
+for dir in "$OUT_DIR"/@lv24-brain/*/; do
   publish "${dir%/}"
 done
 publish "$OUT_DIR/lv24-brain"

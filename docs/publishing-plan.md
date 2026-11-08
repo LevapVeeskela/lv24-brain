@@ -28,8 +28,9 @@ Name check (2026-11-08): `lv24-brain` and `@lv24/brain` are free on npm;
   the platform package and `spawnSync`s its binary with the same args,
   stdio inherited and exit code passed through. `optionalDependencies`
   list every platform package at the exact same version.
-- `lv24-brain-win32-x64`, `-win32-arm64`, `-darwin-x64`, `-darwin-arm64`,
-  `-linux-x64`, `-linux-arm64` (unscoped, so no npm organization is needed) — each contains only the binary, with `os` and
+- `@lv24-brain/win32-x64`, `win32-arm64`, `darwin-x64`, `darwin-arm64`,
+  `linux-x64`, `linux-arm64` in the free npm organization `lv24-brain`
+  (unscoped names were rejected by npm spam detection) — each contains only the binary, with `os` and
   `cpu` fields so npm installs just the matching one.
 - No `postinstall` download: works offline after install, survives
   `--ignore-scripts`, and nothing is fetched from outside npm.
@@ -67,7 +68,8 @@ and it duplicates the installer's signature logic.
 2. If a token: `gh secret set NPM_TOKEN --repo LevapVeeskela/lv24-brain` and
    paste it at the prompt in your own terminal. Done 2026-11-08 (granular
    publish token).
-3. Package names are unscoped, so no npm organization is needed.
+3. Create the free npm organization `lv24-brain` (platform packages live
+   there) and make sure the token can publish to it.
 
 ## 2. Homebrew tap and Scoop bucket
 

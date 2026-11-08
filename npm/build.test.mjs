@@ -99,7 +99,7 @@ test('asset-version selects GoReleaser names while package version stays explici
 
   await generatePackages({ version: '0.0.0-ci', assetVersion: '0.0.1-next', distDir: dist, outDir: out });
 
-  const pkg = JSON.parse(await readFile(path.join(out, 'lv24-brain-linux-x64', 'package.json'), 'utf8'));
+  const pkg = JSON.parse(await readFile(path.join(out, '@lv24-brain/linux-x64', 'package.json'), 'utf8'));
   assert.equal(pkg.version, '0.0.0-ci');
 });
 
@@ -170,17 +170,17 @@ test('launcher maps every release platform to its package name', () => {
 
 test('resolveBinary points at bin/brain.exe on Windows and bin/brain elsewhere', () => {
   const manifest = (pkg) => () => path.join('/prefix', 'node_modules', pkg, 'package.json');
-  const win = launcher.resolveBinary('win32', 'x64', manifest('lv24-brain-win32-x64'));
-  assert.equal(win, path.join('/prefix', 'node_modules', 'lv24-brain-win32-x64', 'bin', 'brain.exe'));
-  const linux = launcher.resolveBinary('linux', 'arm64', manifest('lv24-brain-linux-arm64'));
-  assert.equal(linux, path.join('/prefix', 'node_modules', 'lv24-brain-linux-arm64', 'bin', 'brain'));
+  const win = launcher.resolveBinary('win32', 'x64', manifest('@lv24-brain/win32-x64'));
+  assert.equal(win, path.join('/prefix', 'node_modules', '@lv24-brain/win32-x64', 'bin', 'brain.exe'));
+  const linux = launcher.resolveBinary('linux', 'arm64', manifest('@lv24-brain/linux-arm64'));
+  assert.equal(linux, path.join('/prefix', 'node_modules', '@lv24-brain/linux-arm64', 'bin', 'brain'));
 });
 
 test('resolveBinary explains a missing platform package and an unsupported platform', () => {
   const missing = () => {
     throw Object.assign(new Error('not found'), { code: 'MODULE_NOT_FOUND' });
   };
-  assert.throws(() => launcher.resolveBinary('darwin', 'arm64', missing), /platform package lv24-brain-darwin-arm64 is not installed.*--no-optional/);
+  assert.throws(() => launcher.resolveBinary('darwin', 'arm64', missing), /platform package @lv24-brain\/darwin-arm64 is not installed.*--no-optional/);
   assert.throws(() => launcher.resolveBinary('linux', 'ia32', missing), /unsupported platform linux\/ia32/);
 });
 
@@ -194,7 +194,7 @@ test('runBrain forwards args, stdio policy and npm marker, and passes the exit s
   const code = launcher.runBrain(['open', '--json'], {
     platform: 'linux',
     arch: 'x64',
-    resolve: () => '/p/node_modules/lv24-brain-linux-x64/package.json',
+    resolve: () => '/p/node_modules/@lv24-brain/linux-x64/package.json',
     spawn,
     env: { PATH: '/bin' },
     stderr,
@@ -202,7 +202,7 @@ test('runBrain forwards args, stdio policy and npm marker, and passes the exit s
 
   assert.equal(code, 7);
   assert.equal(calls.length, 1);
-  assert.equal(calls[0].binary, path.join('/p/node_modules/lv24-brain-linux-x64', 'bin', 'brain'));
+  assert.equal(calls[0].binary, path.join('/p/node_modules/@lv24-brain/linux-x64', 'bin', 'brain'));
   assert.deepEqual(calls[0].args, ['open', '--json']);
   assert.equal(calls[0].options.stdio, 'inherit');
   assert.equal(calls[0].options.env.BRAIN_INSTALL_SOURCE, 'npm');
@@ -210,7 +210,7 @@ test('runBrain forwards args, stdio policy and npm marker, and passes the exit s
 });
 
 test('runBrain maps signals and spawn errors to exit status 1', () => {
-  const resolve = () => '/p/node_modules/lv24-brain-linux-x64/package.json';
+  const resolve = () => '/p/node_modules/@lv24-brain/linux-x64/package.json';
   const signalled = launcher.runBrain([], {
     platform: 'linux', arch: 'x64', resolve,
     spawn: () => ({ status: null, signal: 'SIGKILL' }),
@@ -237,7 +237,7 @@ test('runBrain prints a clear error and exits 1 when the platform package is mis
     stderr: { write: (text) => { message += text; } },
   });
   assert.equal(code, 1);
-  assert.match(message, /lv24-brain-win32-arm64 is not installed/);
+  assert.match(message, /@lv24-brain\/win32-arm64 is not installed/);
 });
 
 async function readdirSafe(dir) {

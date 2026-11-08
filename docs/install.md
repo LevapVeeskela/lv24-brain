@@ -247,7 +247,7 @@ npx lv24-brain open        # run once without a global install
 - Requires Node.js 18 or newer. Supported: Windows, macOS and Linux on x64
   and arm64.
 - The package has no install scripts and downloads nothing during install.
-  The binary comes in through a platform package (`lv24-brain-<os>-<cpu>`) in
+  The binary comes in through a platform package (`@lv24-brain/<os>-<cpu>`) in
   `optionalDependencies`. Do not install with `--no-optional` or
   `--omit=optional`, or no binary is linked.
 - Update with `npm i -g lv24-brain@latest`. Beta builds use the `beta` tag:

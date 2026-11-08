@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Generates the npm packages from GoReleaser release assets:
 //   lv24-brain                 launcher (bin/brain.js) + optionalDependencies
-//   lv24-brain-<os>-<cpu>      one package per platform, containing only the binary
+//   @lv24-brain/<os>-<cpu>      one package per platform, containing only the binary
 //
 // Usage:
 //   node npm/build.mjs --version 1.2.3 --dist release-assets --out npm-out
@@ -20,6 +20,9 @@ const LICENSE_PATH = path.join(here, '..', 'LICENSE');
 const LAUNCHER_PATH = path.join(here, 'bin', 'brain.js');
 
 export const MAIN_PACKAGE = 'lv24-brain';
+// Platform packages live in the lv24-brain npm organization (unscoped names
+// like lv24-brain-darwin-arm64 were rejected by npm's spam detection).
+export const PLATFORM_SCOPE = '@lv24-brain';
 export const REPOSITORY_URL = 'https://github.com/LevapVeeskela/lv24-brain';
 export const LICENSE = 'Apache-2.0';
 
@@ -37,7 +40,7 @@ export const PLATFORMS = Object.freeze(
     return Object.freeze({
       ...platform,
       exe,
-      packageName: `${MAIN_PACKAGE}-${platform.os}-${platform.cpu}`,
+      packageName: `${PLATFORM_SCOPE}/${platform.os}-${platform.cpu}`,
       binaryName: exe ? 'brain.exe' : 'brain',
     });
   }),

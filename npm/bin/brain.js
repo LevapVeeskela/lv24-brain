@@ -2,7 +2,7 @@
 'use strict';
 
 // npm launcher for the brain CLI. The binary ships in a platform package
-// (lv24-brain-<os>-<cpu>) pulled in through optionalDependencies, so nothing
+// (@lv24-brain/<os>-<cpu>) pulled in through optionalDependencies, so nothing
 // is downloaded or run at install time. Importing this file has no side
 // effects; the CLI runs only when it is executed directly.
 
@@ -10,12 +10,12 @@ const { spawnSync } = require('node:child_process');
 const path = require('node:path');
 
 const PLATFORM_PACKAGES = new Map([
-  ['win32-x64', 'lv24-brain-win32-x64'],
-  ['win32-arm64', 'lv24-brain-win32-arm64'],
-  ['darwin-x64', 'lv24-brain-darwin-x64'],
-  ['darwin-arm64', 'lv24-brain-darwin-arm64'],
-  ['linux-x64', 'lv24-brain-linux-x64'],
-  ['linux-arm64', 'lv24-brain-linux-arm64'],
+  ['win32-x64', '@lv24-brain/win32-x64'],
+  ['win32-arm64', '@lv24-brain/win32-arm64'],
+  ['darwin-x64', '@lv24-brain/darwin-x64'],
+  ['darwin-arm64', '@lv24-brain/darwin-arm64'],
+  ['linux-x64', '@lv24-brain/linux-x64'],
+  ['linux-arm64', '@lv24-brain/linux-arm64'],
 ]);
 
 class LauncherError extends Error {
