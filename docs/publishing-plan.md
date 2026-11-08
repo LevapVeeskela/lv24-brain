@@ -16,7 +16,6 @@ builds its own.
 | winget | later | `winget install LV24.Brain` |
 | `go install` | works today | `go install github.com/levapveeskela/lv24-brain/cmd/brain@latest` |
 | Docker image (server) | live from v0.6.2 (release.yml `image` job) | `docker pull ghcr.io/levapveeskela/lv24-brain-server` |
-| Showcase site | built locally | GitHub Pages (free for public repos) |
 | Docs site | live | https://brain.lv24.by |
 
 Name check (2026-11-08): `lv24-brain` and `@lv24/brain` are free on npm;
@@ -100,19 +99,17 @@ Free for public images. Multi-arch (amd64/arm64) via buildx.
 
 ## 5. Showcase site
 
-`lv24-brain-site` → GitHub Pages from a public repository (free). Needs a
-remote, a `pages` workflow (build + deploy, one Linux job), and sanitized
-`_source/` history first (owner name, private repository names and local
-paths currently appear in the copied docs).
+Live at https://brain.lv24.by since 2026-11-08: static files from
+`lv24-brain-site` served by the LV24 edge nginx (no cloud CI, no cost).
+Deploy with `scripts/deploy-lv24.sh` in the site repository. GitHub Pages is
+no longer planned.
 
 ## Order
 
 1. npm: engine install-source detection → package generator + PR dry run →
    Trusted Publishing setup → first publish with a minor release.
 2. Homebrew + Scoop (one GoReleaser change, one token).
-3. Server image on GHCR.
-4. Site on Pages after the content sanitization.
-5. winget.
+3. winget.
 
 Each step goes into its own release with docs (install.md, README, site)
 updated in the same cycle.
