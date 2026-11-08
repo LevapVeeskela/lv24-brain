@@ -1,0 +1,66 @@
+name: npm-publish
+
+# Publishes the npm packages for an existing GitHub release (for example when
+# the publish step of the release workflow failed). Manual only. Uses the
+# signed release assets: the manifest signature and every binary checksum are
+# verified before anything is published. Versions already on npm are skipped.
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag, e.g. v0.6.0"
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: npm-publish-${{ inputs.tag }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Download release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          case "$TAG" in v[0-9]*) ;; *) echo "tag must look like v1.2.3"; exit 1 ;; esac
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --dir release-assets
+
+      - name: Verify the signed manifest
+        run: |
+          go run ./internal/tools/releasesign verify \
+            -in release-assets/release.json -sig release-assets/release.json.sig
+
+      - name: Build npm packages
+        env:
+          TAG: ${{ inputs.tag }}
+        run: node npm/build.mjs --version "${TAG#v}" --dist release-assets --out npm-out
+
+      - name: Set up Node for npm publish
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "24"
+          registry-url: https://registry.npmjs.org
+
+      - name: Publish npm packages
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          TAG: ${{ inputs.tag }}
+        run: bash npm/publish.sh "${TAG#v}" npm-out

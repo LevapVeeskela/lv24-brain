@@ -175,31 +175,4 @@ jobs:
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
           TAG: ${{ github.ref_name }}
-        run: |
-          set -euo pipefail
-          VERSION="${TAG#v}"
-          if [ -z "${NODE_AUTH_TOKEN}" ]; then
-            echo "::notice title=npm::NPM_TOKEN is not set; npm publish skipped for $VERSION. The GitHub release is unaffected."
-            exit 0
-          fi
-          # Prereleases go to the beta dist-tag so `npm i -g lv24-brain` stays stable.
-          tag_args=()
-          case "$VERSION" in
-            *-*) tag_args=(--tag beta) ;;
-          esac
-
-          publish() {
-            local dir="$1"
-            local name
-            name="$(node -p "JSON.parse(require('fs').readFileSync('$dir/package.json', 'utf8')).name")"
-            if npm view "$name@$VERSION" version >/dev/null 2>&1; then
-              echo "$name@$VERSION already on npm; skipping"
-              return 0
-            fi
-            npm publish "$dir" --provenance --access public "${tag_args[@]}"
-          }
-
-          for dir in npm-out/lv24-brain-*/; do
-            publish "${dir%/}"
-          done
-          publish npm-out/lv24-brain
+        run: bash npm/publish.sh "${TAG#v}" npm-out
