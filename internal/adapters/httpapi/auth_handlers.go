@@ -470,6 +470,10 @@ type createTokenRequest struct {
 	// set means the token never expires.
 	ExpiresInDays *int    `json:"expiresInDays,omitempty"`
 	ExpiresAt     *string `json:"expiresAt,omitempty"`
+	// Scopes (read, write, admin) and ProjectIDs are optional. Omitted means
+	// unscoped / all projects, exactly like tokens minted before scopes.
+	Scopes     []string `json:"scopes,omitempty"`
+	ProjectIDs []string `json:"projectIds,omitempty"`
 }
 
 const (
@@ -560,19 +564,30 @@ func (a *API) createToken(w http.ResponseWriter, r *http.Request) {
 		a.writeError(w, r, err)
 		return
 	}
+	scopes, projectIDs, err := a.resolveTokenLimits(r, body, role)
+	if err != nil {
+		a.writeError(w, r, err)
+		return
+	}
+	expiresAt, ok := narrowTokenLimits(w, grantFrom(r.Context()), scopes, projectIDs, expiresAt)
+	if !ok {
+		return
+	}
 	raw, hash, display, err := auth.GenerateToken(a.cfg.TokenPrefix, 32)
 	if err != nil {
 		a.writeError(w, r, err)
 		return
 	}
 	record, err := a.store.CreateAPIToken(r.Context(), APITokenRecord{
-		UserID:    target.User.ID,
-		Name:      body.Name,
-		Role:      role,
-		Prefix:    display,
-		TokenHash: hash,
-		CreatedAt: now,
-		ExpiresAt: expiresAt,
+		UserID:     target.User.ID,
+		Name:       body.Name,
+		Role:       role,
+		Prefix:     display,
+		TokenHash:  hash,
+		CreatedAt:  now,
+		ExpiresAt:  expiresAt,
+		Scopes:     scopes,
+		ProjectIDs: projectIDs,
 	})
 	if err != nil {
 		a.writeError(w, r, err)
@@ -586,7 +601,9 @@ func (a *API) createToken(w http.ResponseWriter, r *http.Request) {
 		Action: AuditAPITokenCreated, EntityKind: auditEntityAPIToken, EntityID: record.ID,
 		Detail: map[string]any{
 			"owner": record.UserID, "role": string(record.Role), "name": record.Name,
-			"expires_at": auditExpiry,
+			"expires_at":  auditExpiry,
+			"scopes":      auditScopes(record.Scopes),
+			"project_ids": nonNilStrings(record.ProjectIDs),
 		},
 	})
 	writeJSON(w, http.StatusCreated, createTokenResponse{Token: raw, APIToken: record})

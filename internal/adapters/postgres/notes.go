@@ -48,7 +48,7 @@ func (s *Store) CreateNote(ctx context.Context, note domain.Note) (NoteRecord, d
 	var revision domain.SyncRevision
 
 	err := s.withTx(ctx, func(tx pgx.Tx) error {
-		revisionID, err := insertRevisionTx(ctx, tx, actor, "note", note.ID, nil, at)
+		revisionID, err := insertRevisionTx(ctx, tx, actor, "note", note.ID, projectDetail(note.ProjectID, nil), at)
 		if err != nil {
 			return err
 		}
@@ -119,7 +119,11 @@ func (s *Store) UpdateNote(ctx context.Context, note domain.Note, expected int64
 	var revision domain.SyncRevision
 
 	err := s.withTx(ctx, func(tx pgx.Tx) error {
-		revisionID, err := insertRevisionTx(ctx, tx, actor, "note", note.ID, nil, at)
+		projectID, err := entityProjectTx(ctx, tx, "notes", note.ID)
+		if err != nil {
+			return err
+		}
+		revisionID, err := insertRevisionTx(ctx, tx, actor, "note", note.ID, projectDetail(projectID, nil), at)
 		if err != nil {
 			return err
 		}
@@ -166,7 +170,11 @@ func (s *Store) DeleteNote(ctx context.Context, id string, expected int64) (doma
 	var revision domain.SyncRevision
 
 	err := s.withTx(ctx, func(tx pgx.Tx) error {
-		revisionID, err := insertRevisionTx(ctx, tx, actor, "note", id, nil, at)
+		projectID, err := entityProjectTx(ctx, tx, "notes", id)
+		if err != nil {
+			return err
+		}
+		revisionID, err := insertRevisionTx(ctx, tx, actor, "note", id, projectDetail(projectID, nil), at)
 		if err != nil {
 			return err
 		}

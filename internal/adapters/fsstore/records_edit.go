@@ -183,7 +183,7 @@ func (s *Store) TrashRecord(ctx context.Context, projectID, kind, id string) err
 		if err != nil {
 			return err
 		}
-		if err := os.Rename(path, target); err != nil {
+		if err := renameFile(path, target); err != nil {
 			return fmt.Errorf("fsstore: trash %s %q: %w", kind, id, err)
 		}
 		return nil
@@ -236,7 +236,7 @@ func (s *Store) RestoreRecord(ctx context.Context, projectID, kind, id string) e
 		if err := os.MkdirAll(liveDir, 0o755); err != nil {
 			return fmt.Errorf("fsstore: create %s: %w", liveDir, err)
 		}
-		if err := os.Rename(trashed, target); err != nil {
+		if err := renameFile(trashed, target); err != nil {
 			return fmt.Errorf("fsstore: restore %s %q: %w", kind, id, err)
 		}
 		return nil

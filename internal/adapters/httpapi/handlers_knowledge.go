@@ -15,6 +15,9 @@ type noteRequest struct {
 }
 
 func (a *API) listNotes(w http.ResponseWriter, r *http.Request) {
+	if _, ok := a.requireProject(w, r, r.PathValue("id"), levelRead); !ok {
+		return
+	}
 	limit, offset := limitOffset(r)
 	items, err := a.store.ListNotes(r.Context(), ListOptions{
 		ProjectID: r.PathValue("id"),
@@ -34,6 +37,9 @@ func (a *API) createNote(w http.ResponseWriter, r *http.Request) {
 		a.writeError(w, r, err)
 		return
 	}
+	if _, ok := a.requireProject(w, r, r.PathValue("id"), levelWrite); !ok {
+		return
+	}
 	record, revision, err := a.store.CreateNote(r.Context(), domain.Note{
 		ProjectID: r.PathValue("id"),
 		Title:     body.Title,
@@ -45,7 +51,7 @@ func (a *API) createNote(w http.ResponseWriter, r *http.Request) {
 		a.writeError(w, r, err)
 		return
 	}
-	a.publish(revision, "note", record.ID, "create")
+	a.publishProject(revision, "note", record.ID, "create", record.ProjectID)
 	writeJSON(w, http.StatusCreated, record)
 }
 
@@ -53,6 +59,9 @@ func (a *API) getNote(w http.ResponseWriter, r *http.Request) {
 	record, err := a.store.GetNote(r.Context(), r.PathValue("id"))
 	if err != nil {
 		a.writeError(w, r, err)
+		return
+	}
+	if _, ok := a.requireProject(w, r, record.ProjectID, levelRead); !ok {
 		return
 	}
 	writeJSON(w, http.StatusOK, record)
@@ -69,7 +78,7 @@ func (a *API) updateNote(w http.ResponseWriter, r *http.Request) {
 		a.writeError(w, r, err)
 		return
 	}
-	if !a.requireOwner(w, r, existing.CreatedBy) {
+	if !a.requireOwner(w, r, existing.ProjectID, existing.CreatedBy) {
 		return
 	}
 	record, revision, err := a.store.UpdateNote(r.Context(), domain.Note{
@@ -84,7 +93,7 @@ func (a *API) updateNote(w http.ResponseWriter, r *http.Request) {
 		a.writeError(w, r, err)
 		return
 	}
-	a.publish(revision, "note", record.ID, "update")
+	a.publishProject(revision, "note", record.ID, "update", existing.ProjectID)
 	writeJSON(w, http.StatusOK, record)
 }
 
@@ -94,7 +103,7 @@ func (a *API) deleteNote(w http.ResponseWriter, r *http.Request) {
 		a.writeError(w, r, err)
 		return
 	}
-	if !a.requireOwner(w, r, existing.CreatedBy) {
+	if !a.requireOwner(w, r, existing.ProjectID, existing.CreatedBy) {
 		return
 	}
 	revision, err := a.store.DeleteNote(r.Context(), existing.ID, queryInt64(r, "revision"))
@@ -102,7 +111,7 @@ func (a *API) deleteNote(w http.ResponseWriter, r *http.Request) {
 		a.writeError(w, r, err)
 		return
 	}
-	a.publish(revision, "note", r.PathValue("id"), "delete")
+	a.publishProject(revision, "note", existing.ID, "delete", existing.ProjectID)
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -118,6 +127,9 @@ type decisionRequest struct {
 }
 
 func (a *API) listDecisions(w http.ResponseWriter, r *http.Request) {
+	if _, ok := a.requireProject(w, r, r.PathValue("id"), levelRead); !ok {
+		return
+	}
 	limit, offset := limitOffset(r)
 	items, err := a.store.ListDecisions(r.Context(), ListOptions{
 		ProjectID: r.PathValue("id"),
@@ -137,6 +149,9 @@ func (a *API) createDecision(w http.ResponseWriter, r *http.Request) {
 		a.writeError(w, r, err)
 		return
 	}
+	if _, ok := a.requireProject(w, r, r.PathValue("id"), levelWrite); !ok {
+		return
+	}
 	record, revision, err := a.store.CreateDecision(r.Context(), domain.Decision{
 		ProjectID:    r.PathValue("id"),
 		Title:        body.Title,
@@ -151,7 +166,7 @@ func (a *API) createDecision(w http.ResponseWriter, r *http.Request) {
 		a.writeError(w, r, err)
 		return
 	}
-	a.publish(revision, "decision", record.ID, "create")
+	a.publishProject(revision, "decision", record.ID, "create", record.ProjectID)
 	writeJSON(w, http.StatusCreated, record)
 }
 
@@ -159,6 +174,9 @@ func (a *API) getDecision(w http.ResponseWriter, r *http.Request) {
 	record, err := a.store.GetDecision(r.Context(), r.PathValue("id"))
 	if err != nil {
 		a.writeError(w, r, err)
+		return
+	}
+	if _, ok := a.requireProject(w, r, record.ProjectID, levelRead); !ok {
 		return
 	}
 	writeJSON(w, http.StatusOK, record)
@@ -175,7 +193,7 @@ func (a *API) updateDecision(w http.ResponseWriter, r *http.Request) {
 		a.writeError(w, r, err)
 		return
 	}
-	if !a.requireOwner(w, r, existing.CreatedBy) {
+	if !a.requireOwner(w, r, existing.ProjectID, existing.CreatedBy) {
 		return
 	}
 	record, revision, err := a.store.UpdateDecision(r.Context(), domain.Decision{
@@ -193,7 +211,7 @@ func (a *API) updateDecision(w http.ResponseWriter, r *http.Request) {
 		a.writeError(w, r, err)
 		return
 	}
-	a.publish(revision, "decision", record.ID, "update")
+	a.publishProject(revision, "decision", record.ID, "update", existing.ProjectID)
 	writeJSON(w, http.StatusOK, record)
 }
 
@@ -203,7 +221,7 @@ func (a *API) deleteDecision(w http.ResponseWriter, r *http.Request) {
 		a.writeError(w, r, err)
 		return
 	}
-	if !a.requireOwner(w, r, existing.CreatedBy) {
+	if !a.requireOwner(w, r, existing.ProjectID, existing.CreatedBy) {
 		return
 	}
 	revision, err := a.store.DeleteDecision(r.Context(), existing.ID, queryInt64(r, "revision"))
@@ -211,7 +229,7 @@ func (a *API) deleteDecision(w http.ResponseWriter, r *http.Request) {
 		a.writeError(w, r, err)
 		return
 	}
-	a.publish(revision, "decision", r.PathValue("id"), "delete")
+	a.publishProject(revision, "decision", existing.ID, "delete", existing.ProjectID)
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -225,6 +243,9 @@ type attemptRequest struct {
 }
 
 func (a *API) listAttempts(w http.ResponseWriter, r *http.Request) {
+	if _, ok := a.requireProject(w, r, r.PathValue("id"), levelRead); !ok {
+		return
+	}
 	limit, offset := limitOffset(r)
 	items, err := a.store.ListAttempts(r.Context(), ListOptions{
 		ProjectID: r.PathValue("id"),
@@ -244,6 +265,9 @@ func (a *API) createAttempt(w http.ResponseWriter, r *http.Request) {
 		a.writeError(w, r, err)
 		return
 	}
+	if _, ok := a.requireProject(w, r, r.PathValue("id"), levelWrite); !ok {
+		return
+	}
 	record, revision, err := a.store.CreateAttempt(r.Context(), domain.Attempt{
 		ProjectID:  r.PathValue("id"),
 		Title:      body.Title,
@@ -256,7 +280,7 @@ func (a *API) createAttempt(w http.ResponseWriter, r *http.Request) {
 		a.writeError(w, r, err)
 		return
 	}
-	a.publish(revision, "attempt", record.ID, "create")
+	a.publishProject(revision, "attempt", record.ID, "create", record.ProjectID)
 	writeJSON(w, http.StatusCreated, record)
 }
 
@@ -264,6 +288,9 @@ func (a *API) getAttempt(w http.ResponseWriter, r *http.Request) {
 	record, err := a.store.GetAttempt(r.Context(), r.PathValue("id"))
 	if err != nil {
 		a.writeError(w, r, err)
+		return
+	}
+	if _, ok := a.requireProject(w, r, record.ProjectID, levelRead); !ok {
 		return
 	}
 	writeJSON(w, http.StatusOK, record)
@@ -280,7 +307,7 @@ func (a *API) updateAttempt(w http.ResponseWriter, r *http.Request) {
 		a.writeError(w, r, err)
 		return
 	}
-	if !a.requireOwner(w, r, existing.CreatedBy) {
+	if !a.requireOwner(w, r, existing.ProjectID, existing.CreatedBy) {
 		return
 	}
 	record, revision, err := a.store.UpdateAttempt(r.Context(), domain.Attempt{
@@ -296,7 +323,7 @@ func (a *API) updateAttempt(w http.ResponseWriter, r *http.Request) {
 		a.writeError(w, r, err)
 		return
 	}
-	a.publish(revision, "attempt", record.ID, "update")
+	a.publishProject(revision, "attempt", record.ID, "update", existing.ProjectID)
 	writeJSON(w, http.StatusOK, record)
 }
 
@@ -306,7 +333,7 @@ func (a *API) deleteAttempt(w http.ResponseWriter, r *http.Request) {
 		a.writeError(w, r, err)
 		return
 	}
-	if !a.requireOwner(w, r, existing.CreatedBy) {
+	if !a.requireOwner(w, r, existing.ProjectID, existing.CreatedBy) {
 		return
 	}
 	revision, err := a.store.DeleteAttempt(r.Context(), existing.ID, queryInt64(r, "revision"))
@@ -314,7 +341,7 @@ func (a *API) deleteAttempt(w http.ResponseWriter, r *http.Request) {
 		a.writeError(w, r, err)
 		return
 	}
-	a.publish(revision, "attempt", r.PathValue("id"), "delete")
+	a.publishProject(revision, "attempt", existing.ID, "delete", existing.ProjectID)
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -326,6 +353,9 @@ type handoffRequest struct {
 }
 
 func (a *API) listHandoffs(w http.ResponseWriter, r *http.Request) {
+	if _, ok := a.requireProject(w, r, r.PathValue("id"), levelRead); !ok {
+		return
+	}
 	limit, offset := limitOffset(r)
 	items, err := a.store.ListHandoffs(r.Context(), ListOptions{
 		ProjectID: r.PathValue("id"),
@@ -345,6 +375,9 @@ func (a *API) createHandoff(w http.ResponseWriter, r *http.Request) {
 		a.writeError(w, r, err)
 		return
 	}
+	if _, ok := a.requireProject(w, r, r.PathValue("id"), levelWrite); !ok {
+		return
+	}
 	record, revision, err := a.store.CreateHandoff(r.Context(), domain.Handoff{
 		ProjectID:  r.PathValue("id"),
 		Summary:    body.Summary,
@@ -356,7 +389,7 @@ func (a *API) createHandoff(w http.ResponseWriter, r *http.Request) {
 		a.writeError(w, r, err)
 		return
 	}
-	a.publish(revision, "handoff", record.ID, "create")
+	a.publishProject(revision, "handoff", record.ID, "create", record.ProjectID)
 	writeJSON(w, http.StatusCreated, record)
 }
 
@@ -364,6 +397,9 @@ func (a *API) getHandoff(w http.ResponseWriter, r *http.Request) {
 	record, err := a.store.GetHandoff(r.Context(), r.PathValue("id"))
 	if err != nil {
 		a.writeError(w, r, err)
+		return
+	}
+	if _, ok := a.requireProject(w, r, record.ProjectID, levelRead); !ok {
 		return
 	}
 	writeJSON(w, http.StatusOK, record)
@@ -375,7 +411,7 @@ func (a *API) deleteHandoff(w http.ResponseWriter, r *http.Request) {
 		a.writeError(w, r, err)
 		return
 	}
-	if !a.requireOwner(w, r, existing.CreatedBy) {
+	if !a.requireOwner(w, r, existing.ProjectID, existing.CreatedBy) {
 		return
 	}
 	revision, err := a.store.DeleteHandoff(r.Context(), existing.ID, queryInt64(r, "revision"))
@@ -383,21 +419,30 @@ func (a *API) deleteHandoff(w http.ResponseWriter, r *http.Request) {
 		a.writeError(w, r, err)
 		return
 	}
-	a.publish(revision, "handoff", r.PathValue("id"), "delete")
+	a.publishProject(revision, "handoff", existing.ID, "delete", existing.ProjectID)
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// requireOwner enforces "members change only their own knowledge": admins may
-// update or delete any note, decision, attempt or handoff; members only those
-// they created. Records with an unknown owner (created before ownership was
-// tracked) are admin-only. It writes 403 and returns false when denied.
-func (a *API) requireOwner(w http.ResponseWriter, r *http.Request, createdBy string) bool {
+// requireOwner enforces project access plus "members change only their own
+// knowledge": the caller needs write access to the record's project (404 when
+// it cannot even read it). Admins, and maintainers of a restricted project,
+// may update or delete any record there; members only those they created.
+// Records with an unknown owner (created before ownership was tracked) are
+// admin- or maintainer-only. It writes the error and returns false if denied.
+func (a *API) requireOwner(w http.ResponseWriter, r *http.Request, projectID, createdBy string) bool {
 	principal, ok := principalFrom(r.Context())
 	if !ok {
 		writeAuthError(w)
 		return false
 	}
+	access, ok := a.requireProject(w, r, projectID, levelWrite)
+	if !ok {
+		return false
+	}
 	if principal.User.Role == domain.RoleAdmin {
+		return true
+	}
+	if access.restricted && access.level >= levelMaintain {
 		return true
 	}
 	if createdBy != "" && createdBy == principal.User.ID {

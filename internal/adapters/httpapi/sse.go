@@ -49,11 +49,21 @@ func (a *API) events(w http.ResponseWriter, r *http.Request) {
 			a.logger.Warn("sse replay failed", "request_id", requestIDFrom(r.Context()), "error", err)
 			break
 		}
+		view, err := a.accessView(r.Context())
+		if err != nil {
+			a.logger.Warn("sse access check failed", "request_id", requestIDFrom(r.Context()), "error", err)
+			return
+		}
 		for _, record := range revisions {
+			// Skipped revisions still advance lastSent so they are never
+			// replayed or delivered later.
+			lastSent = record.ID
+			if !a.visibleRevision(r.Context(), view, record.EntityKind, record.EntityID, "", record.Detail) {
+				continue
+			}
 			if err := writeRevisionEvent(w, record); err != nil {
 				return
 			}
-			lastSent = record.ID
 		}
 		if len(revisions) < 500 {
 			break
@@ -71,6 +81,16 @@ func (a *API) events(w http.ResponseWriter, r *http.Request) {
 			return
 		case ev := <-events:
 			if ev.Revision <= lastSent {
+				continue
+			}
+			// Access is re-evaluated per event so a membership removed while
+			// the stream is open takes effect at once.
+			view, err := a.accessView(r.Context())
+			if err != nil {
+				a.logger.Warn("sse access check failed", "request_id", requestIDFrom(r.Context()), "error", err)
+				return
+			}
+			if !a.visibleRevision(r.Context(), view, ev.EntityKind, ev.EntityID, ev.ProjectID, nil) {
 				continue
 			}
 			payload, err := json.Marshal(ev)
@@ -92,7 +112,12 @@ func (a *API) events(w http.ResponseWriter, r *http.Request) {
 }
 
 func writeRevisionEvent(w http.ResponseWriter, record RevisionRecord) error {
+	projectID, _ := record.Detail[revisionProjectKey].(string)
+	if record.EntityKind == "project" || record.EntityKind == "project_state" {
+		projectID = record.EntityID
+	}
 	payload, err := json.Marshal(event{
+		ProjectID:  projectID,
 		Revision:   record.ID,
 		EntityKind: record.EntityKind,
 		EntityID:   record.EntityID,

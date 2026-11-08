@@ -43,6 +43,11 @@ type MemoryStore struct {
 
 	connectorRuns map[string]ConnectorRunRecord
 
+	// restricted marks projects closed to non-members; members holds
+	// project id -> user id -> membership.
+	restricted map[string]time.Time
+	members    map[string]map[string]domain.ProjectMember
+
 	// audit holds security events only (bounded); the in-memory store is a
 	// development fallback and does not mirror entity audit rows.
 	audit       []AuditEvent
@@ -71,6 +76,8 @@ func NewMemoryStore() *MemoryStore {
 		attempts:        make(map[string]AttemptRecord),
 		handoffs:        make(map[string]HandoffRecord),
 		connectorRuns:   make(map[string]ConnectorRunRecord),
+		restricted:      make(map[string]time.Time),
+		members:         make(map[string]map[string]domain.ProjectMember),
 		refresh:         make(map[string]auth.RefreshRecord),
 		revokedSessions: make(map[string]struct{}),
 		revokedFamilies: make(map[string]struct{}),
@@ -304,6 +311,9 @@ func (m *MemoryStore) DeleteUser(ctx context.Context, id string, expected int64)
 	}
 	revision := m.nextRevisionLocked(ctx, "user", id, "delete", nil)
 	delete(m.users, id)
+	for _, byUser := range m.members {
+		delete(byUser, id)
+	}
 	delete(m.userLogins, strings.ToLower(current.Login))
 	if current.OIDCIssuer != "" || current.OIDCSubject != "" {
 		delete(m.userOIDC, current.OIDCIssuer+"\x00"+current.OIDCSubject)
@@ -595,6 +605,8 @@ func (m *MemoryStore) DeleteProject(ctx context.Context, id string, expected int
 	revision := m.nextRevisionLocked(ctx, "project", id, "delete", nil)
 	delete(m.projects, id)
 	delete(m.states, id)
+	delete(m.restricted, id)
+	delete(m.members, id)
 	for noteID, record := range m.notes {
 		if record.ProjectID == id {
 			delete(m.notes, noteID)
@@ -688,7 +700,7 @@ func (m *MemoryStore) CreateNote(ctx context.Context, note domain.Note) (NoteRec
 	note.Tags = nonNilStrings(note.Tags)
 	note.CreatedAt = at
 	note.UpdatedAt = at
-	revision := m.nextRevisionLocked(ctx, "note", note.ID, "create", nil)
+	revision := m.nextRevisionLocked(ctx, "note", note.ID, "create", projectDetail(note.ProjectID, nil))
 	record := NoteRecord{Note: note, Revision: revisionValue(revision), CreatedBy: ports.ActorIDFromContext(ctx)}
 	m.notes[note.ID] = record
 	return record, revision, nil
@@ -742,7 +754,7 @@ func (m *MemoryStore) UpdateNote(ctx context.Context, note domain.Note, expected
 			Entity: "note", ID: note.ID, Expected: expected, Current: current.Revision,
 		}
 	}
-	revision := m.nextRevisionLocked(ctx, "note", note.ID, "update", nil)
+	revision := m.nextRevisionLocked(ctx, "note", note.ID, "update", projectDetail(current.ProjectID, nil))
 	current.Title = note.Title
 	current.Body = note.Body
 	current.Tags = nonNilStrings(note.Tags)
@@ -769,7 +781,7 @@ func (m *MemoryStore) DeleteNote(ctx context.Context, id string, expected int64)
 			Entity: "note", ID: id, Expected: expected, Current: current.Revision,
 		}
 	}
-	revision := m.nextRevisionLocked(ctx, "note", id, "delete", nil)
+	revision := m.nextRevisionLocked(ctx, "note", id, "delete", projectDetail(current.ProjectID, nil))
 	delete(m.notes, id)
 	return revision, nil
 }
@@ -803,7 +815,7 @@ func (m *MemoryStore) CreateDecision(ctx context.Context, decision domain.Decisi
 	decision.Evidence = nonNilStrings(decision.Evidence)
 	decision.CreatedAt = at
 	decision.UpdatedAt = at
-	revision := m.nextRevisionLocked(ctx, "decision", decision.ID, "create", map[string]any{"status": string(decision.Status)})
+	revision := m.nextRevisionLocked(ctx, "decision", decision.ID, "create", projectDetail(decision.ProjectID, map[string]any{"status": string(decision.Status)}))
 	record := DecisionRecord{Decision: decision, Revision: revisionValue(revision), CreatedBy: ports.ActorIDFromContext(ctx)}
 	m.decisions[decision.ID] = record
 	return record, revision, nil
@@ -865,7 +877,7 @@ func (m *MemoryStore) UpdateDecision(ctx context.Context, decision domain.Decisi
 			Entity: "decision", ID: decision.ID, Expected: expected, Current: current.Revision,
 		}
 	}
-	revision := m.nextRevisionLocked(ctx, "decision", decision.ID, "update", map[string]any{"status": string(decision.Status)})
+	revision := m.nextRevisionLocked(ctx, "decision", decision.ID, "update", projectDetail(current.ProjectID, map[string]any{"status": string(decision.Status)}))
 	current.Title = decision.Title
 	current.Status = decision.Status
 	current.Context = decision.Context
@@ -895,7 +907,7 @@ func (m *MemoryStore) DeleteDecision(ctx context.Context, id string, expected in
 			Entity: "decision", ID: id, Expected: expected, Current: current.Revision,
 		}
 	}
-	revision := m.nextRevisionLocked(ctx, "decision", id, "delete", nil)
+	revision := m.nextRevisionLocked(ctx, "decision", id, "delete", projectDetail(current.ProjectID, nil))
 	delete(m.decisions, id)
 	return revision, nil
 }
@@ -923,7 +935,7 @@ func (m *MemoryStore) CreateAttempt(ctx context.Context, attempt domain.Attempt)
 	at := m.nowUTC()
 	attempt.CreatedAt = at
 	attempt.UpdatedAt = at
-	revision := m.nextRevisionLocked(ctx, "attempt", attempt.ID, "create", nil)
+	revision := m.nextRevisionLocked(ctx, "attempt", attempt.ID, "create", projectDetail(attempt.ProjectID, nil))
 	record := AttemptRecord{Attempt: attempt, Revision: revisionValue(revision), CreatedBy: ports.ActorIDFromContext(ctx)}
 	m.attempts[attempt.ID] = record
 	return record, revision, nil
@@ -982,7 +994,7 @@ func (m *MemoryStore) UpdateAttempt(ctx context.Context, attempt domain.Attempt,
 			Entity: "attempt", ID: attempt.ID, Expected: expected, Current: current.Revision,
 		}
 	}
-	revision := m.nextRevisionLocked(ctx, "attempt", attempt.ID, "update", nil)
+	revision := m.nextRevisionLocked(ctx, "attempt", attempt.ID, "update", projectDetail(current.ProjectID, nil))
 	current.Title = attempt.Title
 	current.Hypothesis = attempt.Hypothesis
 	current.Result = attempt.Result
@@ -1010,7 +1022,7 @@ func (m *MemoryStore) DeleteAttempt(ctx context.Context, id string, expected int
 			Entity: "attempt", ID: id, Expected: expected, Current: current.Revision,
 		}
 	}
-	revision := m.nextRevisionLocked(ctx, "attempt", id, "delete", nil)
+	revision := m.nextRevisionLocked(ctx, "attempt", id, "delete", projectDetail(current.ProjectID, nil))
 	delete(m.attempts, id)
 	return revision, nil
 }
@@ -1036,7 +1048,7 @@ func (m *MemoryStore) CreateHandoff(ctx context.Context, handoff domain.Handoff)
 		return HandoffRecord{}, domain.SyncRevision{}, domain.ErrConflict
 	}
 	handoff.CreatedAt = m.nowUTC()
-	revision := m.nextRevisionLocked(ctx, "handoff", handoff.ID, "create", nil)
+	revision := m.nextRevisionLocked(ctx, "handoff", handoff.ID, "create", projectDetail(handoff.ProjectID, nil))
 	record := HandoffRecord{Handoff: handoff, Revision: revisionValue(revision), CreatedBy: ports.ActorIDFromContext(ctx)}
 	m.handoffs[handoff.ID] = record
 	return record, revision, nil
@@ -1092,7 +1104,7 @@ func (m *MemoryStore) DeleteHandoff(ctx context.Context, id string, expected int
 			Entity: "handoff", ID: id, Expected: expected, Current: current.Revision,
 		}
 	}
-	revision := m.nextRevisionLocked(ctx, "handoff", id, "delete", nil)
+	revision := m.nextRevisionLocked(ctx, "handoff", id, "delete", projectDetail(current.ProjectID, nil))
 	delete(m.handoffs, id)
 	return revision, nil
 }
@@ -1219,7 +1231,12 @@ func cloneConnectorRun(record ConnectorRunRecord) ConnectorRunRecord {
 }
 
 // Search performs a case-insensitive substring search across knowledge.
-func (m *MemoryStore) Search(_ context.Context, query ports.Query) ([]ports.Hit, error) {
+func (m *MemoryStore) Search(ctx context.Context, query ports.Query) ([]ports.Hit, error) {
+	return m.SearchScoped(ctx, query, ProjectScope{})
+}
+
+// SearchScoped is Search restricted to readable projects before the limit.
+func (m *MemoryStore) SearchScoped(_ context.Context, query ports.Query, scope ProjectScope) ([]ports.Hit, error) {
 	text := strings.ToLower(strings.TrimSpace(query.Text))
 	if text == "" {
 		return nil, domain.NewValidationError("search.text", "is required")
@@ -1237,6 +1254,9 @@ func (m *MemoryStore) Search(_ context.Context, query ports.Query) ([]ports.Hit,
 	hits := make([]ports.Hit, 0)
 	appendHit := func(id, projectID, kind, title, body string, content ...string) {
 		if query.ProjectID != "" && projectID != query.ProjectID {
+			return
+		}
+		if !scope.allows(projectID) {
 			return
 		}
 		if !query.AllowsKind(kind) {

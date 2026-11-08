@@ -66,6 +66,7 @@
           "kind": { "type": "string", "enum": ["app", "service", "repository", "infra", "other"] },
           "repoUrl": { "type": "string" },
           "defaultBranch": { "type": "string" },
+          "restricted": { "type": "boolean", "description": "Present (true) when only project members and admins can access the project." },
           "revision": { "type": "integer", "format": "int64" },
           "createdAt": { "type": "string", "format": "date-time" },
           "updatedAt": { "type": "string", "format": "date-time" }
@@ -410,16 +411,18 @@
                   "role": { "type": "string", "enum": ["admin", "member", "viewer"] },
                   "userId": { "type": "string" },
                   "expiresInDays": { "type": "integer", "minimum": 1, "maximum": 3650, "description": "Optional lifetime in days from now. Omit both expiry fields for a token that never expires." },
-                  "expiresAt": { "type": "string", "format": "date-time", "description": "Optional RFC 3339 expiry instant. Must be in the future and at most 10 years away. Cannot be combined with expiresInDays." }
+                  "expiresAt": { "type": "string", "format": "date-time", "description": "Optional RFC 3339 expiry instant. Must be in the future and at most 10 years away. Cannot be combined with expiresInDays." },
+                  "scopes": { "type": "array", "items": { "type": "string", "enum": ["read", "write", "admin"] }, "description": "Optional. Omitted means unscoped (the token carries its full role). read: GET only; write: knowledge, state and project writes; admin: admin-only endpoints (requires role admin). write and admin imply read. Scopes are checked before roles and project ACLs." },
+                  "projectIds": { "type": "array", "items": { "type": "string" }, "maxItems": 100, "description": "Optional project allow-list; every id must exist. Omitted means all projects the owner can access. Other projects answer 404." }
                 }
               }
             }
           }
         },
         "responses": {
-          "201": { "description": "Created token. The response is {token, apiToken}; apiToken.expiresAt is present only when the token expires." },
-          "400": { "description": "Validation error, for example both expiry fields set or an expiry out of range" },
-          "403": { "description": "Forbidden" }
+          "201": { "description": "Created token. The response is {token, apiToken}; apiToken.expiresAt is present only when the token expires, apiToken.scopes and apiToken.projectIds only when set." },
+          "400": { "description": "Validation error, for example both expiry fields set, an expiry out of range, an unknown scope or project" },
+          "403": { "description": "Forbidden. A token minted with an API token may only narrow it: scopes, project allow-list and expiry must be a subset of the calling token's." }
         }
       }
     },
@@ -501,6 +504,51 @@
       "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }],
       "get": { "summary": "Get a handoff", "responses": { "200": { "description": "Handoff" } } },
       "delete": { "summary": "Delete a handoff", "responses": { "204": { "description": "Deleted" } } }
+    },
+    "/v1/projects/{id}/members": {
+      "get": {
+        "summary": "Project access: restriction flag and members (admin)",
+        "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }],
+        "responses": {
+          "200": { "description": "{projectId, restricted, items: [{projectId, userId, login, role, createdAt, updatedAt}]}" },
+          "404": { "description": "Project not found or outside the token's project allow-list" }
+        }
+      }
+    },
+    "/v1/projects/{id}/members/{user}": {
+      "put": {
+        "summary": "Add or change a project member (admin, audited). Adding the first member restricts the project.",
+        "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }, { "name": "user", "in": "path", "required": true, "description": "User id or login", "schema": { "type": "string" } }],
+        "requestBody": {
+          "required": true,
+          "content": { "application/json": { "schema": { "type": "object", "required": ["role"], "properties": { "role": { "type": "string", "enum": ["viewer", "member", "maintainer"] } } } } }
+        },
+        "responses": {
+          "201": { "description": "Member added" },
+          "200": { "description": "Member role changed" },
+          "400": { "description": "Unknown role" },
+          "404": { "description": "Project or user not found" }
+        }
+      },
+      "delete": {
+        "summary": "Remove a project member (admin, audited). The project stays restricted even without members.",
+        "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }, { "name": "user", "in": "path", "required": true, "description": "User id or login", "schema": { "type": "string" } }],
+        "responses": { "204": { "description": "Removed" }, "404": { "description": "Not a member" } }
+      }
+    },
+    "/v1/projects/{id}/access": {
+      "put": {
+        "summary": "Restrict a project or reopen it to all users per their global role (admin, audited)",
+        "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }],
+        "requestBody": {
+          "required": true,
+          "content": { "application/json": { "schema": { "type": "object", "required": ["restricted"], "properties": { "restricted": { "type": "boolean" } } } } }
+        },
+        "responses": {
+          "200": { "description": "Current access record" },
+          "409": { "description": "Reopening a project that still has members" }
+        }
+      }
     },
     "/v1/search": {
       "get": {

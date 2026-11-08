@@ -10,7 +10,7 @@ builds its own.
 | Channel | State | Install command for users |
 |---|---|---|
 | GitHub Releases + installers | live | `install.ps1` / `install.sh` (docs/install.md) |
-| npm | planned (step 1) | `npm i -g lv24-brain` / `npx lv24-brain open` |
+| npm | ready, publishes on the next release | `npm i -g lv24-brain` / `npx lv24-brain open` |
 | Homebrew tap | planned | `brew install levapveeskela/tap/brain` |
 | Scoop bucket | planned | `scoop bucket add lv24 …; scoop install brain` |
 | winget | later | `winget install LV24.Brain` |
@@ -28,8 +28,8 @@ Name check (2026-11-08): `lv24-brain` and `@lv24/brain` are free on npm;
   the platform package and `spawnSync`s its binary with the same args,
   stdio inherited and exit code passed through. `optionalDependencies`
   list every platform package at the exact same version.
-- `@lv24-brain/win32-x64`, `win32-arm64`, `darwin-x64`, `darwin-arm64`,
-  `linux-x64`, `linux-arm64` — each contains only the binary, with `os` and
+- `lv24-brain-win32-x64`, `-win32-arm64`, `-darwin-x64`, `-darwin-arm64`,
+  `-linux-x64`, `-linux-arm64` (unscoped, so no npm organization is needed) — each contains only the binary, with `os` and
   `cpu` fields so npm installs just the matching one.
 - No `postinstall` download: works offline after install, survives
   `--ignore-scripts`, and nothing is fetched from outside npm.
@@ -65,9 +65,9 @@ and it duplicates the installer's signature logic.
    either set up Trusted Publishing for `lv24-brain` (preferred), or create
    a granular publish token.
 2. If a token: `gh secret set NPM_TOKEN --repo LevapVeeskela/lv24-brain` and
-   paste it at the prompt in your own terminal.
-3. For the first publish, the `@lv24-brain` scope must exist: create the
-   free npm organization `lv24-brain` (public packages are free).
+   paste it at the prompt in your own terminal. Done 2026-11-08 (granular
+   publish token).
+3. Package names are unscoped, so no npm organization is needed.
 
 ## 2. Homebrew tap and Scoop bucket
 

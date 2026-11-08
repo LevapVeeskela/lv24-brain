@@ -27,6 +27,8 @@ func toHTTPAPIToken(record postgres.APITokenRecord) httpapi.APITokenRecord {
 		ExpiresAt:  record.ExpiresAt,
 		LastUsedAt: record.LastUsedAt,
 		RevokedAt:  record.RevokedAt,
+		Scopes:     toTokenScopes(record.Scopes),
+		ProjectIDs: emptyAsNil(record.ProjectIDs),
 	}
 }
 
@@ -42,7 +44,35 @@ func fromHTTPAPIToken(record httpapi.APITokenRecord) postgres.APITokenRecord {
 		ExpiresAt:  record.ExpiresAt,
 		LastUsedAt: record.LastUsedAt,
 		RevokedAt:  record.RevokedAt,
+		Scopes:     fromTokenScopes(record.Scopes),
+		ProjectIDs: record.ProjectIDs,
 	}
+}
+
+func toTokenScopes(values []string) []domain.TokenScope {
+	if len(values) == 0 {
+		return nil
+	}
+	scopes := make([]domain.TokenScope, len(values))
+	for i, value := range values {
+		scopes[i] = domain.TokenScope(value)
+	}
+	return scopes
+}
+
+func fromTokenScopes(values []domain.TokenScope) []string {
+	out := make([]string, len(values))
+	for i, value := range values {
+		out[i] = string(value)
+	}
+	return out
+}
+
+func emptyAsNil(values []string) []string {
+	if len(values) == 0 {
+		return nil
+	}
+	return values
 }
 
 // CreateAPIToken stores a hashed API token.

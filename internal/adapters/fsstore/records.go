@@ -112,7 +112,7 @@ func notesFileParses(raw []byte) bool {
 
 func quarantine(path string, now time.Time) error {
 	aside := strings.TrimSuffix(path, ".md") + quarantineInfix + fmt.Sprint(now.UnixNano())
-	if err := os.Rename(path, aside); err != nil {
+	if err := renameFile(path, aside); err != nil {
 		return fmt.Errorf("fsstore: quarantine unparseable notes %s: %w", path, err)
 	}
 	return nil

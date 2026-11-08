@@ -45,7 +45,7 @@ func (s *Store) CreateHandoff(ctx context.Context, handoff domain.Handoff) (Hand
 	var revision domain.SyncRevision
 
 	err := s.withTx(ctx, func(tx pgx.Tx) error {
-		revisionID, err := insertRevisionTx(ctx, tx, actor, "handoff", handoff.ID, nil, at)
+		revisionID, err := insertRevisionTx(ctx, tx, actor, "handoff", handoff.ID, projectDetail(handoff.ProjectID, nil), at)
 		if err != nil {
 			return err
 		}
@@ -109,7 +109,11 @@ func (s *Store) DeleteHandoff(ctx context.Context, id string, expected int64) (d
 	var revision domain.SyncRevision
 
 	err := s.withTx(ctx, func(tx pgx.Tx) error {
-		revisionID, err := insertRevisionTx(ctx, tx, actor, "handoff", id, nil, at)
+		projectID, err := entityProjectTx(ctx, tx, "handoffs", id)
+		if err != nil {
+			return err
+		}
+		revisionID, err := insertRevisionTx(ctx, tx, actor, "handoff", id, projectDetail(projectID, nil), at)
 		if err != nil {
 			return err
 		}

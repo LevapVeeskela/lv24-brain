@@ -36,7 +36,7 @@ const (
 	// PostgreSQL integration tests. When it is unset those tests skip.
 	TestDatabaseURLEnv = "BRAIN_TEST_DATABASE_URL"
 	// SchemaVersion is the newest server schema this engine understands.
-	SchemaVersion = 7
+	SchemaVersion = 8
 
 	defaultApplicationName = "lv24-brain-server"
 	defaultListLimit       = 50

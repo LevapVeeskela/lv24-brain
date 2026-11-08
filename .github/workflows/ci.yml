@@ -218,6 +218,24 @@ jobs:
           PY
           ls -l release-assets
 
+      - name: setup node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "24"
+
+      # Dry run only: builds the npm packages from the snapshot assets and
+      # checks their file lists. Nothing is published from pull requests.
+      - name: npm packages dry run
+        run: |
+          set -euo pipefail
+          ASSET_VERSION="$(sed -n 's/.*[[:space:]]brain_\(.*\)_linux_amd64$/\1/p' release-assets/checksums.txt | head -n1)"
+          test -n "$ASSET_VERSION"
+          node npm/build.mjs --version 0.0.0-ci --asset-version "$ASSET_VERSION" --dist release-assets --out npm-out
+          node --test npm/build.test.mjs
+          for dir in npm-out/*/; do
+            (cd "$dir" && npm pack --dry-run)
+          done
+
   race:
     runs-on: ubuntu-latest
     timeout-minutes: 15

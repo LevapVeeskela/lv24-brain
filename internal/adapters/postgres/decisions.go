@@ -52,7 +52,7 @@ func (s *Store) CreateDecision(ctx context.Context, decision domain.Decision) (D
 	var revision domain.SyncRevision
 
 	err := s.withTx(ctx, func(tx pgx.Tx) error {
-		revisionID, err := insertRevisionTx(ctx, tx, actor, "decision", decision.ID, map[string]any{"status": string(decision.Status)}, at)
+		revisionID, err := insertRevisionTx(ctx, tx, actor, "decision", decision.ID, projectDetail(decision.ProjectID, map[string]any{"status": string(decision.Status)}), at)
 		if err != nil {
 			return err
 		}
@@ -135,7 +135,11 @@ func (s *Store) UpdateDecision(ctx context.Context, decision domain.Decision, ex
 	var revision domain.SyncRevision
 
 	err := s.withTx(ctx, func(tx pgx.Tx) error {
-		revisionID, err := insertRevisionTx(ctx, tx, actor, "decision", decision.ID, map[string]any{"status": string(decision.Status)}, at)
+		projectID, err := entityProjectTx(ctx, tx, "decisions", decision.ID)
+		if err != nil {
+			return err
+		}
+		revisionID, err := insertRevisionTx(ctx, tx, actor, "decision", decision.ID, projectDetail(projectID, map[string]any{"status": string(decision.Status)}), at)
 		if err != nil {
 			return err
 		}
@@ -186,7 +190,11 @@ func (s *Store) DeleteDecision(ctx context.Context, id string, expected int64) (
 	var revision domain.SyncRevision
 
 	err := s.withTx(ctx, func(tx pgx.Tx) error {
-		revisionID, err := insertRevisionTx(ctx, tx, actor, "decision", id, nil, at)
+		projectID, err := entityProjectTx(ctx, tx, "decisions", id)
+		if err != nil {
+			return err
+		}
+		revisionID, err := insertRevisionTx(ctx, tx, actor, "decision", id, projectDetail(projectID, nil), at)
 		if err != nil {
 			return err
 		}

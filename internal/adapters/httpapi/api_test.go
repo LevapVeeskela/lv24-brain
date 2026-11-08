@@ -696,6 +696,9 @@ func TestAuthInfrastructureFailureReturnsInternalServerError(t *testing.T) {
 		t.Fatalf("NewService: %v", err)
 	}
 	api.auth = service
+	// API tokens are resolved through the bridge (it also returns the token's
+	// scopes), so the infrastructure failure is injected there as well.
+	api.bridge = authBridge{store: failingUserStore{Store: store, findErr: errors.New("database unavailable")}}
 
 	resp, payload := jsonRequest(t, http.MethodGet, ts.URL+"/v1/projects", nil, "brain_infra_token")
 	requireStatus(t, resp, payload, http.StatusInternalServerError)

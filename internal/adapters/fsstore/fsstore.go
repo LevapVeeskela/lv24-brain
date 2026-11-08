@@ -327,7 +327,7 @@ func writeFileAtomic(path string, data []byte) error {
 	if err != nil {
 		return err
 	}
-	if err := os.Rename(tempName, path); err != nil {
+	if err := renameFile(tempName, path); err != nil {
 		_ = os.Remove(tempName)
 		return fmt.Errorf("fsstore: replace %s: %w", path, err)
 	}

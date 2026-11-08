@@ -18,6 +18,8 @@ jobs:
     timeout-minutes: 30
     permissions:
       contents: write
+      # npm provenance (OIDC) for the npm publish steps below.
+      id-token: write
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -151,3 +153,53 @@ jobs:
             --title "$TAG" \
             --generate-notes \
             "${prerelease_args[@]}"
+
+      # npm packages are built only from the verified, signed release assets
+      # above. Platform packages are published before the main launcher, and
+      # a version that already exists on npm is skipped, so a re-run is safe.
+      - name: Build npm packages
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          VERSION="${TAG#v}"
+          node npm/build.mjs --version "$VERSION" --dist release-assets --out npm-out
+
+      - name: Set up Node for npm publish
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "24"
+          registry-url: https://registry.npmjs.org
+
+      - name: Publish npm packages
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          VERSION="${TAG#v}"
+          if [ -z "${NODE_AUTH_TOKEN}" ]; then
+            echo "::notice title=npm::NPM_TOKEN is not set; npm publish skipped for $VERSION. The GitHub release is unaffected."
+            exit 0
+          fi
+          # Prereleases go to the beta dist-tag so `npm i -g lv24-brain` stays stable.
+          tag_args=()
+          case "$VERSION" in
+            *-*) tag_args=(--tag beta) ;;
+          esac
+
+          publish() {
+            local dir="$1"
+            local name
+            name="$(node -p "JSON.parse(require('fs').readFileSync('$dir/package.json', 'utf8')).name")"
+            if npm view "$name@$VERSION" version >/dev/null 2>&1; then
+              echo "$name@$VERSION already on npm; skipping"
+              return 0
+            fi
+            npm publish "$dir" --provenance --access public "${tag_args[@]}"
+          }
+
+          for dir in npm-out/lv24-brain-*/; do
+            publish "${dir%/}"
+          done
+          publish npm-out/lv24-brain

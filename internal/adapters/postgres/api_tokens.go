@@ -24,9 +24,14 @@ type APITokenRecord struct {
 	ExpiresAt  *time.Time
 	LastUsedAt *time.Time
 	RevokedAt  *time.Time
+	// Scopes narrows what the token may do (read, write, admin); empty means
+	// unscoped, the behaviour of every token minted before scopes existed.
+	Scopes []string
+	// ProjectIDs restricts the token to these projects; empty means all.
+	ProjectIDs []string
 }
 
-const apiTokenColumns = `id, user_id, name, prefix, token_hash, role, created_at, expires_at, last_used_at, revoked_at`
+const apiTokenColumns = `id, user_id, name, prefix, token_hash, role, created_at, expires_at, last_used_at, revoked_at, scopes, project_ids`
 
 // CreateAPIToken validates and stores a hashed API token. A user id that does
 // not exist is reported as domain.ErrNotFound, matching the in-memory adapter
@@ -62,11 +67,11 @@ func (s *Store) CreateAPIToken(ctx context.Context, token APITokenRecord) (APITo
 	}
 
 	record, err := scanAPIToken(s.pool.QueryRow(ctx, `
-		INSERT INTO api_tokens (id, user_id, name, prefix, token_hash, role, created_at, expires_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+		INSERT INTO api_tokens (id, user_id, name, prefix, token_hash, role, created_at, expires_at, scopes, project_ids)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
 		RETURNING `+apiTokenColumns,
 		token.ID, token.UserID, token.Name, token.Prefix, token.TokenHash, string(token.Role), token.CreatedAt,
-		databaseTimePtr(token.ExpiresAt),
+		databaseTimePtr(token.ExpiresAt), nonNilStrings(token.Scopes), nonNilStrings(token.ProjectIDs),
 	))
 	if err != nil {
 		return APITokenRecord{}, mapPgError("insert api token", err)
@@ -173,6 +178,7 @@ func scanAPIToken(row rowScanner) (APITokenRecord, error) {
 	err := row.Scan(
 		&record.ID, &record.UserID, &record.Name, &record.Prefix, &record.TokenHash,
 		&role, &record.CreatedAt, &record.ExpiresAt, &record.LastUsedAt, &record.RevokedAt,
+		&record.Scopes, &record.ProjectIDs,
 	)
 	if err != nil {
 		return APITokenRecord{}, err

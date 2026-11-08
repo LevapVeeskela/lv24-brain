@@ -231,6 +231,30 @@ only after you have backed it up.
 6. For server mode, obtain a token from `POST /v1/auth/login` and set
    `BRAIN_TOKEN` or store it with `brain secret set server-token`.
 
+## npm
+
+The `lv24-brain` package on npm ships the same signed release binaries as
+GitHub Releases. It is published by the release workflow starting with the
+first release after the npm packaging merge (see
+[publishing-plan.md](publishing-plan.md)).
+
+```sh
+npm i -g lv24-brain        # install the CLI globally
+brain version
+npx lv24-brain open        # run once without a global install
+```
+
+- Requires Node.js 18 or newer. Supported: Windows, macOS and Linux on x64
+  and arm64.
+- The package has no install scripts and downloads nothing during install.
+  The binary comes in through a platform package (`lv24-brain-<os>-<cpu>`) in
+  `optionalDependencies`. Do not install with `--no-optional` or
+  `--omit=optional`, or no binary is linked.
+- Update with `npm i -g lv24-brain@latest`. Beta builds use the `beta` tag:
+  `npm i -g lv24-brain@beta`.
+- Installs made with npm are managed by npm: update them with npm, not with
+  the installer.
+
 ## OpenCode handoff hook
 
 The hook template is `integrations/opencode/brain-handoff.js`. The installer

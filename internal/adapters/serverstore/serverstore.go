@@ -549,3 +549,37 @@ func (s *Store) ListAuditEvents(ctx context.Context, filter httpapi.AuditFilter)
 	}
 	return out, nil
 }
+
+// ProjectRestrictions maps every restricted project to userID's role in it
+// ("" when not a member). Projects absent from the map are open.
+func (s *Store) ProjectRestrictions(ctx context.Context, userID string) (map[string]domain.ProjectRole, error) {
+	out, err := s.pg.ProjectRestrictions(ctx, userID)
+	return out, mapError(err)
+}
+
+// GetProjectAccess loads a project's restriction flag and members.
+func (s *Store) GetProjectAccess(ctx context.Context, projectID string) (httpapi.ProjectAccessRecord, error) {
+	record, err := s.pg.GetProjectAccess(ctx, projectID)
+	if err != nil {
+		return httpapi.ProjectAccessRecord{}, mapError(err)
+	}
+	return httpapi.ProjectAccessRecord{ProjectID: record.ProjectID, Restricted: record.Restricted, Members: record.Members}, nil
+}
+
+// PutProjectMember adds or updates a membership and restricts the project.
+func (s *Store) PutProjectMember(ctx context.Context, member domain.ProjectMember) (domain.ProjectMember, domain.ProjectRole, error) {
+	stored, previous, err := s.pg.PutProjectMember(ctx, member)
+	return stored, previous, mapError(err)
+}
+
+// DeleteProjectMember removes a membership; the project stays restricted.
+func (s *Store) DeleteProjectMember(ctx context.Context, projectID, userID string) (domain.ProjectRole, error) {
+	role, err := s.pg.DeleteProjectMember(ctx, projectID, userID)
+	return role, mapError(err)
+}
+
+// SetProjectRestricted restricts or reopens a project.
+func (s *Store) SetProjectRestricted(ctx context.Context, projectID string, restricted bool) (bool, error) {
+	changed, err := s.pg.SetProjectRestricted(ctx, projectID, restricted)
+	return changed, mapError(err)
+}

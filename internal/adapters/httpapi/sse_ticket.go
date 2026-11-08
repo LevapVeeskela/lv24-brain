@@ -35,6 +35,7 @@ type sseTickets struct {
 
 type sseTicket struct {
 	principal auth.Principal
+	grant     *tokenGrant
 	expires   time.Time
 }
 
@@ -46,6 +47,12 @@ func newSSETickets(now func() time.Time) *sseTickets {
 }
 
 func (s *sseTickets) issue(principal auth.Principal) (string, time.Time, error) {
+	return s.issueGrant(principal, nil)
+}
+
+// issueGrant issues a ticket carrying the caller's API token grant, so a
+// stream opened with it keeps the token's scopes and project allow-list.
+func (s *sseTickets) issueGrant(principal auth.Principal, grant *tokenGrant) (string, time.Time, error) {
 	raw, err := auth.RandomToken(32)
 	if err != nil {
 		return "", time.Time{}, err
@@ -63,23 +70,29 @@ func (s *sseTickets) issue(principal auth.Principal) (string, time.Time, error) 
 		return "", time.Time{}, errTooManySSETickets
 	}
 	expires := now.Add(sseTicketTTL)
-	s.tickets[ticket] = sseTicket{principal: principal, expires: expires}
+	s.tickets[ticket] = sseTicket{principal: principal, grant: grant, expires: expires}
 	return ticket, expires, nil
 }
 
 // redeem consumes a ticket and returns its principal.
 func (s *sseTickets) redeem(ticket string) (auth.Principal, bool) {
+	principal, _, ok := s.redeemGrant(ticket)
+	return principal, ok
+}
+
+// redeemGrant consumes a ticket and returns its principal and token grant.
+func (s *sseTickets) redeemGrant(ticket string) (auth.Principal, *tokenGrant, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	entry, ok := s.tickets[ticket]
 	if !ok {
-		return auth.Principal{}, false
+		return auth.Principal{}, nil, false
 	}
 	delete(s.tickets, ticket)
 	if !s.now().Before(entry.expires) {
-		return auth.Principal{}, false
+		return auth.Principal{}, nil, false
 	}
-	return entry.principal, true
+	return entry.principal, entry.grant, true
 }
 
 func (a *API) createEventTicket(w http.ResponseWriter, r *http.Request) {
@@ -88,7 +101,7 @@ func (a *API) createEventTicket(w http.ResponseWriter, r *http.Request) {
 		writeAuthError(w)
 		return
 	}
-	ticket, expires, err := a.sseTickets.issue(principal)
+	ticket, expires, err := a.sseTickets.issueGrant(principal, grantFrom(r.Context()))
 	if errors.Is(err, errTooManySSETickets) {
 		writeErrorCode(w, http.StatusTooManyRequests, "rate_limited", "too many outstanding event-stream tickets")
 		return
@@ -102,17 +115,17 @@ func (a *API) createEventTicket(w http.ResponseWriter, r *http.Request) {
 
 // eventStreamPrincipal authenticates GET /v1/events: an Authorization header,
 // or a single-use ticket from POST /v1/events/ticket in the query string.
-func (a *API) eventStreamPrincipal(r *http.Request) (auth.Principal, error) {
+func (a *API) eventStreamPrincipal(r *http.Request) (auth.Principal, *tokenGrant, error) {
 	if bearerToken(r) != "" {
 		return a.authenticate(r)
 	}
 	ticket := strings.TrimSpace(r.URL.Query().Get("ticket"))
 	if ticket == "" {
-		return auth.Principal{}, auth.ErrInvalidToken
+		return auth.Principal{}, nil, auth.ErrInvalidToken
 	}
-	principal, ok := a.sseTickets.redeem(ticket)
+	principal, grant, ok := a.sseTickets.redeemGrant(ticket)
 	if !ok {
-		return auth.Principal{}, auth.ErrInvalidToken
+		return auth.Principal{}, nil, auth.ErrInvalidToken
 	}
-	return principal, nil
+	return principal, grant, nil
 }

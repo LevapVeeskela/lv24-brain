@@ -59,6 +59,7 @@ type Config struct {
 type API struct {
 	cfg    Config
 	store  Store
+	bridge authBridge
 	auth   *auth.Service
 	broker *broker
 	flows  *flowStore
@@ -151,6 +152,7 @@ func New(cfg Config, store Store) (*API, error) {
 	api := &API{
 		cfg:           cfg,
 		store:         store,
+		bridge:        bridge,
 		auth:          service,
 		broker:        newBroker(),
 		mux:           http.NewServeMux(),
@@ -218,6 +220,10 @@ func (a *API) routes() {
 	a.authed("GET /v1/projects/{id}", a.getProject, domain.RoleViewer, false)
 	a.authed("PATCH /v1/projects/{id}", a.updateProject, domain.RoleMember, false)
 	a.authed("DELETE /v1/projects/{id}", a.deleteProject, domain.RoleAdmin, false)
+	a.authed("GET /v1/projects/{id}/members", a.listProjectMembers, domain.RoleAdmin, false)
+	a.authed("PUT /v1/projects/{id}/members/{user}", a.putProjectMember, domain.RoleAdmin, false)
+	a.authed("DELETE /v1/projects/{id}/members/{user}", a.deleteProjectMember, domain.RoleAdmin, false)
+	a.authed("PUT /v1/projects/{id}/access", a.putProjectAccess, domain.RoleAdmin, false)
 
 	a.authed("GET /v1/projects/{id}/state", a.getState, domain.RoleViewer, false)
 	a.authed("PUT /v1/projects/{id}/state", a.putState, domain.RoleMember, false)
@@ -262,7 +268,7 @@ func (a *API) routes() {
 // allowTicket additionally accepts a single-use event-stream ticket in the
 // query string (GET /v1/events only); long-lived tokens are header-only.
 func (a *API) authed(pattern string, handler http.HandlerFunc, min domain.Role, allowTicket bool) {
-	a.mux.Handle(pattern, a.withAuth(min, allowTicket, handler))
+	a.mux.Handle(pattern, a.withAuth(min, requiredScope(pattern, min), allowTicket, handler))
 }
 
 func (a *API) health(w http.ResponseWriter, _ *http.Request) {
@@ -291,14 +297,15 @@ func principalFrom(ctx context.Context) (auth.Principal, bool) {
 	return principal, ok
 }
 
-func (a *API) withAuth(min domain.Role, allowTicket bool, next http.Handler) http.Handler {
+func (a *API) withAuth(min domain.Role, scope domain.TokenScope, allowTicket bool, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var principal auth.Principal
+		var grant *tokenGrant
 		var err error
 		if allowTicket {
-			principal, err = a.eventStreamPrincipal(r)
+			principal, grant, err = a.eventStreamPrincipal(r)
 		} else {
-			principal, err = a.authenticate(r)
+			principal, grant, err = a.authenticate(r)
 		}
 		if err != nil {
 			if !isCredentialError(err) {
@@ -316,11 +323,20 @@ func (a *API) withAuth(min domain.Role, allowTicket bool, next http.Handler) htt
 			writeAuthError(w)
 			return
 		}
+		// Token scopes are checked before the role so a narrowed token can
+		// never do more than its scopes allow.
+		if !grant.allowsScope(scope) {
+			writeErrorCode(w, http.StatusForbidden, "insufficient_scope", "api token lacks the "+string(scope)+" scope")
+			return
+		}
 		if !roleAtLeast(principal.User.Role, min) {
 			writeErrorCode(w, http.StatusForbidden, "forbidden", "insufficient role")
 			return
 		}
 		ctx := context.WithValue(r.Context(), principalContextKey{}, principal)
+		if grant != nil {
+			ctx = context.WithValue(ctx, grantContextKey{}, grant)
+		}
 		ctx = ports.WithActor(ctx, principal.User.Login)
 		ctx = ports.WithActorID(ctx, principal.User.ID)
 		if state := requestStateFrom(ctx); state != nil {
@@ -338,19 +354,22 @@ func isCredentialError(err error) bool {
 		errors.Is(err, auth.ErrInvalidRefresh)
 }
 
-func (a *API) authenticate(r *http.Request) (auth.Principal, error) {
+// authenticate resolves the bearer credential. API tokens also return their
+// grant (scopes, project allow-list); JWTs return a nil grant.
+func (a *API) authenticate(r *http.Request) (auth.Principal, *tokenGrant, error) {
 	raw := bearerToken(r)
 	if raw == "" {
-		return auth.Principal{}, auth.ErrInvalidToken
+		return auth.Principal{}, nil, auth.ErrInvalidToken
 	}
 	if strings.HasPrefix(raw, a.cfg.TokenPrefix) {
-		user, err := a.auth.AuthenticateAPIToken(r.Context(), raw)
+		user, record, err := a.bridge.authenticateAPIToken(r.Context(), raw)
 		if err != nil {
-			return auth.Principal{}, err
+			return auth.Principal{}, nil, err
 		}
-		return auth.Principal{User: user, AuthSource: "api_token"}, nil
+		return auth.Principal{User: user, AuthSource: "api_token"}, newTokenGrant(record), nil
 	}
-	return a.auth.AuthenticateJWT(r.Context(), raw)
+	principal, err := a.auth.AuthenticateJWT(r.Context(), raw)
+	return principal, nil, err
 }
 
 func bearerToken(r *http.Request) string {
@@ -383,10 +402,21 @@ func roleAtLeast(have, min domain.Role) bool {
 }
 
 func (a *API) publish(revision domain.SyncRevision, entityKind, entityID, action string) {
+	projectID := ""
+	if entityKind == "project" {
+		projectID = entityID
+	}
+	a.publishProject(revision, entityKind, entityID, action, projectID)
+}
+
+// publishProject publishes an event that belongs to projectID so the event
+// stream can drop it for subscribers who cannot read that project.
+func (a *API) publishProject(revision domain.SyncRevision, entityKind, entityID, action, projectID string) {
 	a.broker.publish(event{
 		Revision:   revisionValue(revision),
 		EntityKind: entityKind,
 		EntityID:   entityID,
+		ProjectID:  projectID,
 		Action:     action,
 		At:         revision.At,
 	})

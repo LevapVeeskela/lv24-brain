@@ -152,6 +152,11 @@ func (a *API) createProject(w http.ResponseWriter, r *http.Request) {
 		a.writeError(w, r, err)
 		return
 	}
+	// A project-limited token may only create projects on its allow-list.
+	if grant := grantFrom(r.Context()); grant.projectLimited() && !grant.allowsProject(project.ID) {
+		writeErrorCode(w, http.StatusForbidden, "forbidden", "api token is limited to other projects")
+		return
+	}
 	record, revision, err := a.store.CreateProject(r.Context(), project)
 	if err != nil {
 		a.writeError(w, r, err)
@@ -167,15 +172,34 @@ func (a *API) listProjects(w http.ResponseWriter, r *http.Request) {
 		a.writeError(w, r, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"items": projects})
+	view, err := a.accessView(r.Context())
+	if err != nil {
+		a.writeError(w, r, err)
+		return
+	}
+	visible := make([]ProjectRecord, 0, len(projects))
+	for _, project := range projects {
+		access := view.project(project.ID)
+		if access.level < levelRead {
+			continue
+		}
+		project.Restricted = access.restricted
+		visible = append(visible, project)
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"items": visible})
 }
 
 func (a *API) getProject(w http.ResponseWriter, r *http.Request) {
+	access, ok := a.requireProject(w, r, r.PathValue("id"), levelRead)
+	if !ok {
+		return
+	}
 	record, err := a.store.GetProject(r.Context(), r.PathValue("id"))
 	if err != nil {
 		a.writeError(w, r, err)
 		return
 	}
+	record.Restricted = access.restricted
 	writeJSON(w, http.StatusOK, record)
 }
 
@@ -193,6 +217,9 @@ func (a *API) updateProject(w http.ResponseWriter, r *http.Request) {
 	var body updateProjectRequest
 	if err := a.decodeJSON(w, r, &body); err != nil {
 		a.writeError(w, r, err)
+		return
+	}
+	if !a.requireProjectManage(w, r, r.PathValue("id")) {
 		return
 	}
 	record, err := a.store.GetProject(r.Context(), r.PathValue("id"))
@@ -233,6 +260,9 @@ func (a *API) updateProject(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *API) deleteProject(w http.ResponseWriter, r *http.Request) {
+	if _, ok := a.requireProject(w, r, r.PathValue("id"), levelMaintain); !ok {
+		return
+	}
 	revision, err := a.store.DeleteProject(r.Context(), r.PathValue("id"), queryInt64(r, "revision"))
 	if err != nil {
 		a.writeError(w, r, err)
@@ -243,6 +273,9 @@ func (a *API) deleteProject(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *API) getState(w http.ResponseWriter, r *http.Request) {
+	if _, ok := a.requireProject(w, r, r.PathValue("id"), levelRead); !ok {
+		return
+	}
 	record, err := a.store.GetState(r.Context(), r.PathValue("id"))
 	if err != nil {
 		a.writeError(w, r, err)
@@ -267,6 +300,9 @@ func (a *API) putState(w http.ResponseWriter, r *http.Request) {
 		a.writeError(w, r, err)
 		return
 	}
+	if _, ok := a.requireProject(w, r, r.PathValue("id"), levelWrite); !ok {
+		return
+	}
 	state := domain.State{
 		ProjectID:     r.PathValue("id"),
 		Goal:          body.Goal,
@@ -281,7 +317,7 @@ func (a *API) putState(w http.ResponseWriter, r *http.Request) {
 		a.writeError(w, r, err)
 		return
 	}
-	a.publish(revision, "project_state", state.ProjectID, "put")
+	a.publishProject(revision, "project_state", state.ProjectID, "put", state.ProjectID)
 	writeJSON(w, http.StatusOK, record)
 }
 
@@ -308,7 +344,15 @@ func (a *API) search(w http.ResponseWriter, r *http.Request) {
 		Kinds:        kinds,
 		ExcludeKinds: excludeKinds,
 	}
-	hits, err := a.store.Search(r.Context(), query)
+	scope, empty, ok := a.searchScope(w, r, query.ProjectID)
+	if !ok {
+		return
+	}
+	if empty {
+		writeJSON(w, http.StatusOK, map[string]any{"items": []ports.Hit{}})
+		return
+	}
+	hits, err := a.store.SearchScoped(r.Context(), query, scope)
 	if err != nil {
 		a.writeError(w, r, err)
 		return
@@ -354,7 +398,20 @@ func (a *API) listRevisions(w http.ResponseWriter, r *http.Request) {
 		a.writeError(w, r, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"items": records})
+	view, err := a.accessView(r.Context())
+	if err != nil {
+		a.writeError(w, r, err)
+		return
+	}
+	// Pages can be shorter than limit for callers that cannot read every
+	// project; clients page by revision id (after), not by page length.
+	visible := make([]RevisionRecord, 0, len(records))
+	for _, record := range records {
+		if a.visibleRevision(r.Context(), view, record.EntityKind, record.EntityID, "", record.Detail) {
+			visible = append(visible, record)
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"items": visible})
 }
 
 func derefTime(value *time.Time) time.Time {

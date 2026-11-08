@@ -169,6 +169,8 @@ func runCommand(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return runLogout(rest, stdout, stderr)
 	case "password":
 		return runPassword(rest, stdin, stdout, stderr)
+	case "token":
+		return runToken(rest, stdout, stderr)
 	case "serve":
 		return runServe(rest, stdout, stderr)
 	case "update":
@@ -183,8 +185,12 @@ func runCommand(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 }
 
 func printVersion(w io.Writer) {
-	fmt.Fprintf(w, "brain %s (commit %s, built %s, %s %s/%s)\n",
-		version.Version, version.Commit, version.Date, runtime.Version(), runtime.GOOS, runtime.GOARCH)
+	via := ""
+	if source := installSource(); source != "" {
+		via = ", installed via " + source
+	}
+	fmt.Fprintf(w, "brain %s (commit %s, built %s, %s %s/%s%s)\n",
+		version.Version, version.Commit, version.Date, runtime.Version(), runtime.GOOS, runtime.GOARCH, via)
 }
 
 func printUsage(w io.Writer) {
@@ -227,6 +233,7 @@ Commands:
   login      Authenticate against a server-mode brain
   logout     Revoke the server session and clear stored tokens (--all: every session)
   password   Change your server password (reads current and new from stdin)
+  token      Create a server API token, optionally scoped (read/write/admin, projects)
   serve      Run the HTTP server
   update     Check for, apply, or roll back engine updates
   completion Print a bash, zsh, fish or PowerShell completion script
@@ -577,6 +584,8 @@ func runProject(args []string, stdout, stderr io.Writer) int {
 		return runProjectShow(args[1:], stdout, stderr)
 	case "set":
 		return runProjectSet(args[1:], stdout, stderr)
+	case "members":
+		return runProjectMembers(args[1:], stdout, stderr)
 	default:
 		fmt.Fprintf(stderr, "brain project: unknown subcommand %q\n\n", args[0])
 		printProjectUsage(stderr)
@@ -858,6 +867,7 @@ func printProjectUsage(w io.Writer) {
                     [--kind app|service|repository|infra|other]
                     [--repo <url>] [--branch <b>]
                     [--clear-paths] [--clear-aliases] [--json]
+  brain project members <id> [add <login> --role viewer|member|maintainer | remove <login> | restrict | open]
 
 Repeat --path and --alias to replace the stored lists; --add-path appends to the
 stored paths (one checkout per machine, e.g. Windows and macOS). --clear-paths and
@@ -2354,6 +2364,12 @@ func runUpdate(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "brain update: --rollback cannot be combined with --check or --yes")
 		return 2
 	}
+	if source := installSource(); source != "" && !*check {
+		// The package manager owns these files; replacing them would leave
+		// it with a binary it did not install.
+		fmt.Fprintf(stderr, "brain update: this brain was installed via %s; update it with: %s\n", source, managerUpdateCommand(source))
+		return 2
+	}
 	cfg, err := loadConfigOrDefault(*cfgPath)
 	if err != nil {
 		return reportError(stderr, "update", err)
@@ -2414,7 +2430,11 @@ func maybeDailyUpdateNotice(command string, args []string, stderr io.Writer) {
 	if latest == "" || update.CompareVersions(latest, version.Version) <= 0 {
 		return
 	}
-	fmt.Fprintf(stderr, "brain %s is available; run: brain update --yes\n", latest)
+	hint := "brain update --yes"
+	if source := installSource(); source != "" {
+		hint = managerUpdateCommand(source)
+	}
+	fmt.Fprintf(stderr, "brain %s is available; run: %s\n", latest, hint)
 }
 
 // configPathFromArgs finds --config before flag parsing so the daily check uses

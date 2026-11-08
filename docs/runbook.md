@@ -345,7 +345,8 @@ Ownership rules:
 - A member may update or delete only the notes, decisions, and attempts they
   created, and delete only the handoffs they created. The owner is the creating
   user id, shown as `createdBy`.
-- Projects and project state are shared and member-writable.
+- Projects and project state are member-writable while a project is open
+  (has no members). A restricted project follows its membership (below).
 - Records with an unknown owner (created before ownership tracking) are
   admin-only.
 - Connector runs are created by admins only (`POST /v1/connectors/run`).
@@ -362,6 +363,40 @@ neither; the password must pass the server's password policy. The account is
 created once. On later starts an existing login is ignored, so the password
 variable is not needed after the first successful start. Remove it from the
 environment after that start.
+
+### Project members (restricted projects)
+
+A project without members is open to every user per their global role. Add
+members to restrict it; then only members and admins can see it at all
+(others get `404`, and it disappears from lists, search, revisions and SSE).
+The project role is capped by the global role: a global viewer stays
+read-only.
+
+| Project role | Can do in that project |
+|---|---|
+| `viewer` | read |
+| `member` | read, create records, put state, update/delete own records |
+| `maintainer` | member, plus edit project metadata and update/delete any record |
+
+Admin CLI (server mode, signed in as an admin):
+
+```sh
+brain project members acme                         # restriction state and members
+brain project members acme add alice --role maintainer
+brain project members acme add bob --role member   # same command changes a role
+brain project members acme remove bob
+brain project members acme restrict                # admin-only, no members yet
+brain project members acme open                    # reopen; refused while members exist
+```
+
+API: `GET /v1/projects/{id}/members`, `PUT /v1/projects/{id}/members/{user}`
+(`{"role": ...}`, user id or login), `DELETE /v1/projects/{id}/members/{user}`,
+`PUT /v1/projects/{id}/access` (`{"restricted": true|false}`). All are
+admin-only and audited (`GET /v1/audit?entityKind=project`).
+
+Removing the last member keeps the project restricted (admin-only); reopen it
+explicitly. Before restricting a busy project, add every member who still
+needs it, then check `brain project members <id>`.
 
 ### Login and logout (clients)
 
@@ -413,6 +448,21 @@ API tokens (prefix `brain_`) are created and revoked through the API:
 - `GET /v1/tokens` lists the caller's tokens. Admins may pass `userId`, or
   `all=true` to list every token.
 - `DELETE /v1/tokens/{id}` revokes a token. Only the owner or an admin may do it.
+- Scope a token with `scopes` (`read`, `write`, `admin`) and limit it to
+  projects with `projectIds`. Omitted means unscoped and all projects, which is
+  how every older token keeps working. `read` allows only GET requests, `write`
+  adds knowledge/state/project writes, `admin` (admin-role tokens only) adds
+  admin endpoints. Prefer the narrowest token for automation, for example a
+  read-only token for dashboards:
+
+  ```sh
+  brain token create --name dashboard --scope read --project acme --expires-in-days 90
+  brain token create --name ci-writer --scope write --project acme --project infra
+  ```
+
+  A token minted by another token can only narrow it (scopes, projects and
+  expiry within the caller's). Scopes and projects are recorded in the
+  `auth.token.created` audit event.
 
 ### Database pool, timeouts and request logs
 

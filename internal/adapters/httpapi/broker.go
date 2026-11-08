@@ -10,6 +10,7 @@ type event struct {
 	Revision   int64     `json:"revision"`
 	EntityKind string    `json:"entityKind,omitempty"`
 	EntityID   string    `json:"entityId,omitempty"`
+	ProjectID  string    `json:"projectId,omitempty"`
 	Action     string    `json:"action,omitempty"`
 	At         time.Time `json:"at"`
 }

@@ -24,6 +24,13 @@ const (
 // the true top N. When the query has no lexemes (only punctuation), it falls
 // back to a case-insensitive substring match. All input is parameterized.
 func (s *Store) Search(ctx context.Context, query ports.Query) ([]ports.Hit, error) {
+	return s.SearchScoped(ctx, query, httpapi.ProjectScope{})
+}
+
+// SearchScoped is Search restricted to the projects a caller may read: hits
+// outside scope.Only (when set) or inside scope.Exclude are dropped in SQL,
+// before ranking and LIMIT, so pages stay full and nothing leaks.
+func (s *Store) SearchScoped(ctx context.Context, query ports.Query, scope httpapi.ProjectScope) ([]ports.Hit, error) {
 	text := strings.TrimSpace(query.Text)
 	if text == "" {
 		return nil, domain.NewValidationError("search.text", "is required")
@@ -43,6 +50,8 @@ func (s *Store) Search(ctx context.Context, query ports.Query) ([]ports.Hit, err
 		optionalArray(query.Kinds),
 		optionalArray(query.ExcludeKinds),
 		limit,
+		optionalArray(scope.Only),
+		optionalArray(scope.Exclude),
 	)
 	if err != nil {
 		return nil, mapError(err)
@@ -74,7 +83,8 @@ func optionalArray(values []string) any {
 
 // searchSQL parameters: $1 project id (empty for all), $2 raw query text,
 // $3 ILIKE pattern for the fallback, $4 kinds (NULL = all), $5 excluded kinds
-// (NULL = none), $6 limit.
+// (NULL = none), $6 limit, $7 readable project ids (NULL = all), $8 unreadable
+// project ids (NULL = none).
 //
 // The CTEs are: query (the tsquery), items (union of the searchable tables),
 // matched (filters plus rank), page (ranked top N). Snippets are built only
@@ -111,6 +121,8 @@ WITH query AS (
     WHERE ($1 = '' OR items.project_id = $1)
       AND ($4::text[] IS NULL OR items.kind = ANY($4::text[]))
       AND ($5::text[] IS NULL OR NOT (items.kind = ANY($5::text[])))
+      AND ($7::text[] IS NULL OR items.project_id = ANY($7::text[]))
+      AND ($8::text[] IS NULL OR NOT (items.project_id = ANY($8::text[])))
       AND (
             (numnode(query.tsq) > 0 AND items.tsv @@ query.tsq)
          OR (numnode(query.tsq) = 0 AND (items.title || ' ' || items.content) ILIKE query.pattern ESCAPE '!')

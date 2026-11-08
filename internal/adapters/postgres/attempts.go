@@ -46,7 +46,7 @@ func (s *Store) CreateAttempt(ctx context.Context, attempt domain.Attempt) (Atte
 	var revision domain.SyncRevision
 
 	err := s.withTx(ctx, func(tx pgx.Tx) error {
-		revisionID, err := insertRevisionTx(ctx, tx, actor, "attempt", attempt.ID, nil, at)
+		revisionID, err := insertRevisionTx(ctx, tx, actor, "attempt", attempt.ID, projectDetail(attempt.ProjectID, nil), at)
 		if err != nil {
 			return err
 		}
@@ -117,7 +117,11 @@ func (s *Store) UpdateAttempt(ctx context.Context, attempt domain.Attempt, expec
 	var revision domain.SyncRevision
 
 	err := s.withTx(ctx, func(tx pgx.Tx) error {
-		revisionID, err := insertRevisionTx(ctx, tx, actor, "attempt", attempt.ID, nil, at)
+		projectID, err := entityProjectTx(ctx, tx, "attempts", attempt.ID)
+		if err != nil {
+			return err
+		}
+		revisionID, err := insertRevisionTx(ctx, tx, actor, "attempt", attempt.ID, projectDetail(projectID, nil), at)
 		if err != nil {
 			return err
 		}
@@ -166,7 +170,11 @@ func (s *Store) DeleteAttempt(ctx context.Context, id string, expected int64) (d
 	var revision domain.SyncRevision
 
 	err := s.withTx(ctx, func(tx pgx.Tx) error {
-		revisionID, err := insertRevisionTx(ctx, tx, actor, "attempt", id, nil, at)
+		projectID, err := entityProjectTx(ctx, tx, "attempts", id)
+		if err != nil {
+			return err
+		}
+		revisionID, err := insertRevisionTx(ctx, tx, actor, "attempt", id, projectDetail(projectID, nil), at)
 		if err != nil {
 			return err
 		}

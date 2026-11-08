@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/levapveeskela/lv24-brain/internal/auth"
@@ -64,12 +65,35 @@ type APITokenRecord struct {
 	ExpiresAt  *time.Time  `json:"expiresAt,omitempty"`
 	LastUsedAt *time.Time  `json:"lastUsedAt,omitempty"`
 	RevokedAt  *time.Time  `json:"revokedAt,omitempty"`
+	// Scopes narrows the token (read, write, admin). Empty means unscoped:
+	// the token may do everything its role allows, as before scopes existed.
+	Scopes []domain.TokenScope `json:"scopes,omitempty"`
+	// ProjectIDs restricts the token to these projects. Empty means all.
+	ProjectIDs []string `json:"projectIds,omitempty"`
 }
 
 // ProjectRecord is a project plus its current server revision.
 type ProjectRecord struct {
 	domain.Project
 	Revision int64 `json:"revision"`
+	// Restricted is set by the HTTP layer: true when only project members
+	// and admins can access the project.
+	Restricted bool `json:"restricted,omitempty"`
+}
+
+// ProjectAccessRecord is a project's access configuration. An open project
+// (Restricted false) has no members and follows global roles.
+type ProjectAccessRecord struct {
+	ProjectID  string                 `json:"projectId"`
+	Restricted bool                   `json:"restricted"`
+	Members    []domain.ProjectMember `json:"items"`
+}
+
+// ProjectScope limits a search to readable projects. Only (when non-empty)
+// keeps hits from these projects; Exclude drops hits from these projects.
+type ProjectScope struct {
+	Only    []string
+	Exclude []string
 }
 
 // StateRecord is project state plus its current server revision.
@@ -221,6 +245,25 @@ type Store interface {
 	DeleteHandoff(ctx context.Context, id string, expected int64) (domain.SyncRevision, error)
 
 	Search(ctx context.Context, query ports.Query) ([]ports.Hit, error)
+	// SearchScoped is Search limited by a project scope, applied before the
+	// result limit.
+	SearchScoped(ctx context.Context, query ports.Query, scope ProjectScope) ([]ports.Hit, error)
+
+	// ProjectRestrictions maps every restricted project id to userID's role in
+	// it ("" when not a member). Projects absent from the map are open.
+	ProjectRestrictions(ctx context.Context, userID string) (map[string]domain.ProjectRole, error)
+	// GetProjectAccess loads a project's restriction flag and members; a
+	// missing project is domain.ErrNotFound.
+	GetProjectAccess(ctx context.Context, projectID string) (ProjectAccessRecord, error)
+	// PutProjectMember adds or updates a membership and restricts the project.
+	// It returns the stored membership and the previous role ("" if new).
+	PutProjectMember(ctx context.Context, member domain.ProjectMember) (domain.ProjectMember, domain.ProjectRole, error)
+	// DeleteProjectMember removes a membership and returns its role. The
+	// project stays restricted even without members.
+	DeleteProjectMember(ctx context.Context, projectID, userID string) (domain.ProjectRole, error)
+	// SetProjectRestricted restricts or reopens a project and reports whether
+	// it changed. Reopening a project with members is domain.ErrConflict.
+	SetProjectRestricted(ctx context.Context, projectID string, restricted bool) (bool, error)
 	CurrentRevision(ctx context.Context) (domain.SyncRevision, error)
 	ListRevisions(ctx context.Context, filter RevisionFilter) ([]RevisionRecord, error)
 
@@ -268,6 +311,19 @@ func (b authBridge) FindUser(ctx context.Context, id string) (domain.User, error
 }
 
 func (b authBridge) AuthenticateAPIToken(ctx context.Context, rawToken string) (domain.User, error) {
+	user, _, err := b.authenticateAPIToken(ctx, rawToken)
+	return user, err
+}
+
+// authenticateAPIToken validates a raw API token and returns the narrowed
+// principal plus the token record (scopes, project allow-list, expiry).
+// Unknown, revoked or expired tokens are auth.ErrInvalidToken; storage
+// failures propagate so the caller answers 500.
+func (b authBridge) authenticateAPIToken(ctx context.Context, rawToken string) (domain.User, APITokenRecord, error) {
+	rawToken = strings.TrimSpace(rawToken)
+	if rawToken == "" {
+		return domain.User{}, APITokenRecord{}, auth.ErrInvalidToken
+	}
 	now := time.Now
 	if b.now != nil {
 		now = b.now
@@ -275,18 +331,18 @@ func (b authBridge) AuthenticateAPIToken(ctx context.Context, rawToken string) (
 	record, err := b.store.FindAPITokenByHash(ctx, auth.HashToken(rawToken), now().UTC())
 	if err != nil {
 		if errors.Is(err, domain.ErrNotFound) {
-			return domain.User{}, auth.ErrInvalidToken
+			return domain.User{}, APITokenRecord{}, auth.ErrInvalidToken
 		}
-		return domain.User{}, err
+		return domain.User{}, APITokenRecord{}, fmt.Errorf("authenticate api token: %w", err)
 	}
 	user, err := b.store.GetUser(ctx, record.UserID)
 	if err != nil {
 		if errors.Is(err, domain.ErrNotFound) {
-			return domain.User{}, auth.ErrInvalidToken
+			return domain.User{}, APITokenRecord{}, auth.ErrInvalidToken
 		}
 		// Database failures must surface as infrastructure errors, not as a
 		// rejected credential.
-		return domain.User{}, err
+		return domain.User{}, APITokenRecord{}, fmt.Errorf("authenticate api token: %w", err)
 	}
 	principal := user.User
 	// A token can narrow but never raise its owner's current privilege.
@@ -294,5 +350,5 @@ func (b authBridge) AuthenticateAPIToken(ctx context.Context, rawToken string) (
 		principal.Role = record.Role
 	}
 	principal.AuthSource = "api_token"
-	return principal, nil
+	return principal, record, nil
 }

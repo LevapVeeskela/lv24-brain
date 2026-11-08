@@ -114,7 +114,8 @@ Implemented in `internal/adapters/httpapi` and `internal/auth`:
   when minted. Tokens may carry an optional expiry (`expiresInDays` or
   `expiresAt` at mint time, migration `0006_api_token_expiry.sql`); an expired
   token is rejected exactly like a revoked one. Tokens without an expiry live
-  until revoked.
+  until revoked. Tokens may also carry scopes and a project allow-list
+  (migration `0008_project_access.sql`, see the authorization model below).
 - OIDC authorization code with PKCE, `state`, and `nonce`; issuer metadata is
   discovered over HTTPS (plain `http` is accepted only for loopback issuers)
   and ID tokens are verified. The `state` is also bound to the starting
@@ -134,12 +135,12 @@ Implemented in `internal/adapters/httpapi` and `internal/auth`:
   revision plus audit row, now with the authenticated actor. Audit writes are
   best-effort: a failed write is logged and never fails the request. The
   in-memory development store keeps only the last 10,000 security events.
-- Server-side authorization on every route. `viewer` reads, `member` writes,
-  `admin` manages users and destructive operations. Members create notes,
-  decisions, attempts and handoffs and may update or delete only their own
-  (owner = creating user id, `createdBy` in responses); shared entities
-  (projects, project state) stay member-writable. Records with an unknown
-  owner, created before ownership tracking, are admin-only. Connector execution is
+- Server-side authorization on every route (model below). `viewer` reads,
+  `member` writes, `admin` manages users and destructive operations. Members
+  create notes, decisions, attempts and handoffs and may update or delete only
+  their own (owner = creating user id, `createdBy` in responses). Records with
+  an unknown owner, created before ownership tracking, are admin-only (and
+  maintainer-only inside a restricted project). Connector execution is
   admin-only (`POST /v1/connectors/run`); viewers may list, read and export run
   records. The runner is bounded by `BRAIN_CONNECTOR_TIMEOUT` and uses the same
   environment/OS secret store as the CLI.
@@ -157,6 +158,52 @@ Implemented in `internal/adapters/httpapi` and `internal/auth`:
   (valid one minute) and pass it as `?ticket=`; access and API tokens are
   never accepted in the URL.
 
+### Authorization model
+
+Every authenticated request passes these checks in order:
+
+1. **Token scopes** (API tokens only). A token minted with `scopes` may do
+   only what they allow: `read` (GET requests and the event-stream ticket),
+   `write` (knowledge, state and project writes, token minting), `admin`
+   (admin-only endpoints: users, project members, audit log, connector runs,
+   project deletion; requires an admin-role token). `write` and `admin` imply
+   `read`. A missing scope answers `403 insufficient_scope` before any role or
+   ACL check. Tokens without scopes (every token minted before migration
+   `0008`) keep their full role, so nothing existing is widened or broken.
+2. **Global role**: the route's minimum role (`viewer`, `member`, `admin`).
+   An API token's own `role` can only narrow its owner's role.
+3. **Project access**, enforced in every project-scoped handler: projects,
+   state, notes/decisions/attempts/handoffs (list, create, read, update,
+   delete by id), search, the revision trail and the SSE event stream.
+   - A token `projectIds` allow-list hides every other project (admins too).
+   - A project **without a restriction** is open to every authenticated user
+     per their global role: the behaviour before project ACLs, so existing
+     deployments are unchanged after the upgrade.
+   - Adding the first member **restricts** the project. Then only its members
+     and global admins can access it. The per-project role (`viewer`,
+     `member`, `maintainer`) is capped by the global role: a global viewer is
+     read-only in every project, a global member can act as member or
+     maintainer where the project grants it. `maintainer` adds editing project
+     metadata and updating or deleting other members' records in that project.
+     Admins bypass membership.
+   - Removing the last member keeps the project restricted (admin-only), and
+     deleting a user removes only that user's memberships. A project is
+     reopened only explicitly (`PUT /v1/projects/{id}/access`), and only when
+     it has no members, so a cleanup never silently opens a project.
+   - An unreadable project answers `404`, never `403`, so its existence does
+     not leak. Lists and search drop unreadable projects in the query (before
+     the limit, no titles or snippets leak); revisions and SSE events of
+     unreadable projects are not delivered. Knowledge revisions carry
+     `project_id`; older delete revisions without it are shown only to callers
+     who can read every project.
+
+Membership changes (`project.member.added/updated/removed`,
+`project.access.restricted/opened`) and token creation (with its scopes and
+project allow-list) are written to the security audit log. A token minted by
+an API token may only narrow it: its scopes, project allow-list and expiry
+must be within the calling token's. Project ACLs never change global roles, so
+the last-admin guard is unaffected.
+
 Current limits, stated plainly:
 
 - Without `BRAIN_DATABASE_URL`, `brain-server` uses the in-memory store and
@@ -164,7 +211,7 @@ Current limits, stated plainly:
   applies embedded migrations on startup; startup logs redact the database URL.
 - An existing Postgres schema with pending migrations refuses to start until a
   backup is taken and `BRAIN_DATABASE_BACKUP_CONFIRMED=1` is set. Migrations are
-  forward-only; every upgrade (currently to schema 6) is gated this way.
+  forward-only; every upgrade (currently to schema 8) is gated this way.
 - API tokens and refresh-token families are durable in Postgres (migrations
   `0002_auth_tokens.sql` and `0003_auth_revocations.sql`), so restart no longer
   forces re-authentication.
