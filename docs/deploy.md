@@ -7,7 +7,7 @@ managed by Docker Compose. There is no cloud dependency and no paid service.
 
 | File | Purpose |
 |---|---|
-| `deploy/Dockerfile` | Multi-stage build of `brain-server`; non-root Alpine runtime. |
+| `deploy/Dockerfile` | Multi-stage build of `brain-server`; non-root Alpine runtime. Release images are published from it to `ghcr.io/levapveeskela/lv24-brain-server`. |
 | `deploy/docker-compose.yml` | `brain-server` + Postgres, healthchecks, volumes. |
 | `deploy/.env.example` | Environment template. Copy to `deploy/.env`; never commit it. |
 | `deploy/goreleaser.yaml` | Release binaries used by the CLI updater. |
@@ -32,6 +32,23 @@ docker compose --env-file .env -f docker-compose.yml ps
 ```
 
 PowerShell uses the same commands.
+
+### Prebuilt image
+
+Every release publishes `ghcr.io/levapveeskela/lv24-brain-server` for
+`linux/amd64` and `linux/arm64` with tags `X.Y.Z`, `X.Y` and `latest` (stable
+releases only). To skip the local build, pin a release in `.env`:
+
+```sh
+BRAIN_SERVER_IMAGE=ghcr.io/levapveeskela/lv24-brain-server:0.6.2
+```
+
+then pull and start without `--build`:
+
+```sh
+docker compose --env-file .env -f docker-compose.yml pull brain-server
+docker compose --env-file .env -f docker-compose.yml up -d
+```
 
 Generate local secrets (never reuse these examples):
 
@@ -159,7 +176,15 @@ docker compose --env-file .env -f docker-compose.yml start
 
 Server auto-update is not implemented; `BRAIN_SERVER_AUTO_UPDATE` is a
 reserved placeholder. For containers, pin the image tag or digest and roll
-back by starting the previous one:
+back by starting the previous one. With a published image, change the tag in
+`BRAIN_SERVER_IMAGE` (back to the previous tag to roll back), then:
+
+```sh
+docker compose --env-file .env -f docker-compose.yml pull brain-server
+docker compose --env-file .env -f docker-compose.yml up -d brain-server
+```
+
+With the local build:
 
 ```sh
 docker compose --env-file .env -f docker-compose.yml build brain-server

@@ -10,12 +10,12 @@ builds its own.
 | Channel | State | Install command for users |
 |---|---|---|
 | GitHub Releases + installers | live | `install.ps1` / `install.sh` (docs/install.md) |
-| npm | ready, publishes on the next release | `npm i -g lv24-brain` / `npx lv24-brain open` |
+| npm | live since v0.6.0 | `npm i -g lv24-brain` / `npx lv24-brain open` |
 | Homebrew tap | planned | `brew install levapveeskela/tap/brain` |
 | Scoop bucket | planned | `scoop bucket add lv24 …; scoop install brain` |
 | winget | later | `winget install LV24.Brain` |
 | `go install` | works today | `go install github.com/levapveeskela/lv24-brain/cmd/brain@latest` |
-| Docker image (server) | planned | `docker pull ghcr.io/levapveeskela/brain-server` |
+| Docker image (server) | live from v0.6.2 (release.yml `image` job) | `docker pull ghcr.io/levapveeskela/lv24-brain-server` |
 | Showcase site | built locally | GitHub Pages (free for public repos) |
 
 Name check (2026-11-08): `lv24-brain` and `@lv24/brain` are free on npm;

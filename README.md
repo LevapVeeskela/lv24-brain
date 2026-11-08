@@ -166,7 +166,9 @@ credentials; while it is set, `brain login` refuses to run and `brain logout`
 leaves a stored session untouched and exits non-zero. A static API token can
 also be stored with
 `printf '%s\n' '<token>' | brain secret set server-token`. See
-[docs/deploy.md](docs/deploy.md) before production use.
+[docs/deploy.md](docs/deploy.md) before production use. Each release also
+publishes the server image `ghcr.io/levapveeskela/lv24-brain-server`
+(linux/amd64 and linux/arm64).
 
 ## Installers
 

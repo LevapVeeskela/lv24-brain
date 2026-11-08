@@ -1,7 +1,10 @@
 # syntax=docker/dockerfile:1
 # LV24 Brain server image. Build from the repository root:
 #   docker build -f deploy/Dockerfile -t lv24-brain-server:local .
-FROM golang:1.27-alpine@sha256:fa3d596898d9f126af7c01d14ee7597bab3f39cccf392ef36b69fe77cd681f18 AS build
+# Release images (linux/amd64, linux/arm64) are published to
+# ghcr.io/levapveeskela/lv24-brain-server by .github/workflows/release.yml.
+# The build stage runs on the build host and cross-compiles for TARGETARCH.
+FROM --platform=$BUILDPLATFORM golang:1.27-alpine@sha256:fa3d596898d9f126af7c01d14ee7597bab3f39cccf392ef36b69fe77cd681f18 AS build
 
 WORKDIR /src
 COPY go.mod go.sum ./
@@ -13,7 +16,9 @@ COPY internal ./internal
 ARG VERSION=dev
 ARG COMMIT=dev
 ARG DATE=unknown
-RUN CGO_ENABLED=0 GOOS=linux go build \
+ARG TARGETOS=linux
+ARG TARGETARCH
+RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build \
     -trimpath \
     -ldflags "-s -w \
       -X github.com/levapveeskela/lv24-brain/internal/version.Version=${VERSION} \
@@ -22,6 +27,10 @@ RUN CGO_ENABLED=0 GOOS=linux go build \
     -o /out/brain-server ./cmd/brain-server
 
 FROM alpine:3.22@sha256:bfe7ceb9f09ec0566c48fb93356e45a47a00be5a1dd14fa5b909e7709c66b034
+
+LABEL org.opencontainers.image.source="https://github.com/LevapVeeskela/lv24-brain" \
+      org.opencontainers.image.description="LV24 Brain server: team mode for the lv24-brain project memory" \
+      org.opencontainers.image.licenses="Apache-2.0"
 
 RUN apk add --no-cache ca-certificates tzdata \
     && addgroup -S -g 10001 brain \

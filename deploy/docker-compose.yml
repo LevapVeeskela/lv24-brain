@@ -22,7 +22,10 @@ services:
     build:
       context: ..
       dockerfile: deploy/Dockerfile
-    image: lv24-brain-server:local
+    # Default: build locally. Set BRAIN_SERVER_IMAGE (for example
+    # ghcr.io/levapveeskela/lv24-brain-server:0.6.2) and run
+    # `docker compose pull brain-server` to use a published release image.
+    image: ${BRAIN_SERVER_IMAGE:-lv24-brain-server:local}
     restart: unless-stopped
     depends_on:
       postgres:
