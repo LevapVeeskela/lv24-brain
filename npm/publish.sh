@@ -60,7 +60,13 @@ publish() {
     echo "$name@$VERSION already on npm; skipping"
     return 0
   fi
-  npm publish "$dir" --provenance --access public "${tag_args[@]}"
+  if ! npm publish "$dir" --provenance --access public "${tag_args[@]}"; then
+    # npm logs why the OIDC exchange failed only in its debug log.
+    echo "npm publish failed for $name; OIDC lines from the npm debug log:" >&2
+    grep -ihE "oidc|trusted|id.token|exchange" "$HOME"/.npm/_logs/*-debug-*.log 2>/dev/null \
+      | grep -viE "bearer|authorization|_authtoken" | tail -n 20 >&2 || true
+    return 1
+  fi
 }
 
 for dir in "$OUT_DIR"/@lv24/*/; do
