@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/levapveeskela/lv24-brain/internal/adapters/httpapi"
 	"github.com/levapveeskela/lv24-brain/internal/adapters/postgres"
@@ -19,7 +20,9 @@ const (
 
 // Search runs a PostgreSQL full-text search over notes, decisions, attempts
 // and handoffs. Matching uses the generated search_tsv columns (migration
-// 0007) with websearch_to_tsquery, so quoted phrases, OR and exclusion work.
+// 0007) with websearch_to_tsquery, so quoted phrases, OR and exclusion work;
+// plain words additionally match their word-form stem as a prefix (see
+// buildTSQuery), and query.Since drops older items.
 // Ranking and LIMIT happen in SQL before snippets are built, so the result is
 // the true top N. When the query has no lexemes (only punctuation), it falls
 // back to a case-insensitive substring match. All input is parameterized.
@@ -43,16 +46,18 @@ func (s *Store) SearchScoped(ctx context.Context, query ports.Query, scope httpa
 		limit = maxSearchLimit
 	}
 
-	rows, err := s.pg.Pool().Query(ctx, searchSQL,
+	tsquery, tsArgs := buildTSQuery(text, searchFirstTSParam)
+	args := append([]any{
 		query.ProjectID,
-		text,
-		"%"+escapeLike(text)+"%",
+		optionalTime(query.Since),
+		"%" + escapeLike(text) + "%",
 		optionalArray(query.Kinds),
 		optionalArray(query.ExcludeKinds),
 		limit,
 		optionalArray(scope.Only),
 		optionalArray(scope.Exclude),
-	)
+	}, tsArgs...)
+	rows, err := s.pg.Pool().Query(ctx, searchStatement(tsquery), args...)
 	if err != nil {
 		return nil, mapError(err)
 	}
@@ -72,6 +77,21 @@ func (s *Store) SearchScoped(ctx context.Context, query ports.Query, scope httpa
 	return hits, nil
 }
 
+// optionalTime binds the zero time as SQL NULL ("no filter").
+func optionalTime(value time.Time) any {
+	if value.IsZero() {
+		return nil
+	}
+	return value.UTC()
+}
+
+// searchStatement returns searchSQL with the tsquery expression built by
+// buildTSQuery. The expression holds only fixed SQL and $N placeholders, never
+// user text.
+func searchStatement(tsquery string) string {
+	return strings.Replace(searchSQL, searchTSQueryMarker, tsquery, 1)
+}
+
 // optionalArray binds an empty filter as SQL NULL, which the query treats as
 // "no filter"; a non-empty slice binds as text[].
 func optionalArray(values []string) any {
@@ -81,17 +101,24 @@ func optionalArray(values []string) any {
 	return values
 }
 
-// searchSQL parameters: $1 project id (empty for all), $2 raw query text,
-// $3 ILIKE pattern for the fallback, $4 kinds (NULL = all), $5 excluded kinds
-// (NULL = none), $6 limit, $7 readable project ids (NULL = all), $8 unreadable
-// project ids (NULL = none).
+// searchTSQueryMarker is replaced by the tsquery expression of buildTSQuery.
+const searchTSQueryMarker = "{{tsquery}}"
+
+// searchFirstTSParam is the first placeholder the tsquery expression uses.
+const searchFirstTSParam = 9
+
+// searchSQL parameters: $1 project id (empty for all), $2 since (NULL = no
+// time filter), $3 ILIKE pattern for the fallback, $4 kinds (NULL = all), $5
+// excluded kinds (NULL = none), $6 limit, $7 readable project ids (NULL =
+// all), $8 unreadable project ids (NULL = none), $9 onwards the tsquery
+// fragments of buildTSQuery.
 //
 // The CTEs are: query (the tsquery), items (union of the searchable tables),
 // matched (filters plus rank), page (ranked top N). Snippets are built only
 // for the N rows in page, with ts_headline, bounded to MaxWords.
 const searchSQL = `
 WITH query AS (
-    SELECT websearch_to_tsquery('simple', $2) AS tsq, $3::text AS pattern
+    SELECT {{tsquery}} AS tsq, $3::text AS pattern
 ), items AS (
     SELECT id, project_id, 'note'::text AS kind, title,
            coalesce(body, '') AS content, updated_at, search_tsv AS tsv
@@ -123,6 +150,7 @@ WITH query AS (
       AND ($5::text[] IS NULL OR NOT (items.kind = ANY($5::text[])))
       AND ($7::text[] IS NULL OR items.project_id = ANY($7::text[]))
       AND ($8::text[] IS NULL OR NOT (items.project_id = ANY($8::text[])))
+      AND ($2::timestamptz IS NULL OR items.updated_at >= $2::timestamptz)
       AND (
             (numnode(query.tsq) > 0 AND items.tsv @@ query.tsq)
          OR (numnode(query.tsq) = 0 AND (items.title || ' ' || items.content) ILIKE query.pattern ESCAPE '!')

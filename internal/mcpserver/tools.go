@@ -57,6 +57,10 @@ type SearchInput struct {
 	Kinds []string
 	// IncludeDumps adds connector dumps to an unfiltered search.
 	IncludeDumps bool
+	// Since keeps only documents updated since this point: a duration (24h,
+	// 7d), a date (2026-11-01) or an RFC3339 time; empty keeps everything.
+	// The backend parses and validates it.
+	Since string
 }
 
 // Project is a registered project.
@@ -157,7 +161,9 @@ type tool struct {
 }
 
 func (s *Server) toolList() []tool {
-	return slices.Concat(s.coreTools(), s.stateTools(), s.catchupTools(), s.reviewTools(), s.recordTools())
+	core := s.coreTools()
+	// brain_context sits right after brain_open: both load context.
+	return slices.Concat(core[:1], s.contextTools(), core[1:], s.stateTools(), s.catchupTools(), s.reviewTools(), s.recordTools())
 }
 
 func (s *Server) coreTools() []tool {
@@ -181,6 +187,7 @@ func (s *Server) coreTools() []tool {
 				"limit":         intProp("Maximum hits; 0 selects the default.", 0),
 				"kinds":         stringArrayProp("Keep only these kinds: note, decision, attempt, handoff, dump. Omit for every kind."),
 				"include_dumps": boolProp("Include connector dumps in an unfiltered search."),
+				"since":         stringProp("Only documents updated since: a duration (24h, 7d), a date (2026-11-01) or an RFC3339 time. Omit for all time."),
 			}),
 			run: s.search,
 		},
@@ -294,6 +301,7 @@ func (s *Server) search(ctx context.Context, raw json.RawMessage) (toolResult, e
 		Limit        int      `json:"limit"`
 		Kinds        []string `json:"kinds"`
 		IncludeDumps bool     `json:"include_dumps"`
+		Since        string   `json:"since"`
 	}
 	if err := decodeArgs(raw, &args); err != nil {
 		return toolResult{}, err
@@ -315,6 +323,7 @@ func (s *Server) search(ctx context.Context, raw json.RawMessage) (toolResult, e
 		Limit:        args.Limit,
 		Kinds:        args.Kinds,
 		IncludeDumps: args.IncludeDumps,
+		Since:        strings.TrimSpace(args.Since),
 	})
 	if err != nil {
 		return toolResult{}, err

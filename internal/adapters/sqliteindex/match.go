@@ -3,6 +3,8 @@ package sqliteindex
 import (
 	"strings"
 	"unicode"
+
+	"github.com/levapveeskela/lv24-brain/internal/searchnorm"
 )
 
 const (
@@ -49,13 +51,37 @@ func searchTerms(text string) []string {
 }
 
 // ftsTerm quotes a single term and adds the FTS5 prefix operator when the term
-// is long enough. The prefix operator sits outside the quotes.
+// is long enough. The prefix operator sits outside the quotes. When the term
+// has a shorter word-form stem (decisions -> decision, решений -> решен), the
+// stem is ORed in as a prefix: the stem is a prefix of the term, so the result
+// matches everything the term alone matched, and documents containing the
+// exact form match both alternatives and rank higher in bm25.
 func ftsTerm(term string) string {
 	quoted := `"` + term + `"`
-	if tokenRuneCount(term) >= prefixMinRunes {
-		return quoted + "*"
+	if tokenRuneCount(term) < prefixMinRunes {
+		return quoted
 	}
-	return quoted
+	if stem, ok := stemOf(term); ok {
+		return `("` + term + `"* OR "` + stem + `"*)`
+	}
+	return quoted + "*"
+}
+
+// stemOf returns the word-form stem of term when it differs from the term.
+// Terms that look like operators (-exclude) are left exact.
+func stemOf(term string) (string, bool) {
+	if strings.HasPrefix(term, "-") {
+		return "", false
+	}
+	stem, ok := searchnorm.Stem(term)
+	if !ok || stem == strings.ToLower(strings.TrimFunc(term, notTokenRune)) {
+		return "", false
+	}
+	return stem, true
+}
+
+func notTokenRune(r rune) bool {
+	return !unicode.IsLetter(r) && !unicode.IsDigit(r)
 }
 
 func hasTokenRune(value string) bool {

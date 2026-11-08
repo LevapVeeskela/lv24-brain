@@ -337,12 +337,18 @@ func (a *API) search(w http.ResponseWriter, r *http.Request) {
 		a.writeError(w, r, err)
 		return
 	}
+	since, err := searchSinceParam(r)
+	if err != nil {
+		a.writeError(w, r, err)
+		return
+	}
 	query := ports.Query{
 		Text:         text,
 		ProjectID:    queryString(r, "projectId"),
 		Limit:        queryInt(r, "limit"),
 		Kinds:        kinds,
 		ExcludeKinds: excludeKinds,
+		Since:        since,
 	}
 	scope, empty, ok := a.searchScope(w, r, query.ProjectID)
 	if !ok {
@@ -365,6 +371,20 @@ func (a *API) search(w http.ResponseWriter, r *http.Request) {
 // search simply finds no documents of those kinds.
 var searchKinds = map[string]struct{}{
 	"note": {}, "decision": {}, "attempt": {}, "handoff": {}, "state": {}, "dump": {},
+}
+
+// searchSinceParam reads the optional since query parameter (RFC3339). An
+// empty value means no time filter; a malformed one is a validation error.
+func searchSinceParam(r *http.Request) (time.Time, error) {
+	raw := queryString(r, "since")
+	if raw == "" {
+		return time.Time{}, nil
+	}
+	since, err := time.Parse(time.RFC3339Nano, raw)
+	if err != nil {
+		return time.Time{}, domain.NewValidationError("search.since", "must be an RFC3339 time")
+	}
+	return since.UTC(), nil
 }
 
 // searchKindParams reads repeated kind query parameters. Blank values are

@@ -55,7 +55,8 @@ func TestSearchEnglishPrefix(t *testing.T) {
 	)
 
 	assertResultIDs(t, mustSearch(t, index, ports.Query{Text: "cach"}), "en-1", "en-2")
-	assertResultIDs(t, mustSearch(t, index, ports.Query{Text: "caching"}), "en-1")
+	// "caching" is stemmed to the prefix "cach", so it also finds "cache".
+	assertResultIDs(t, mustSearch(t, index, ports.Query{Text: "caching"}), "en-1", "en-2")
 }
 
 func TestSearchShortTermIsNotPrefix(t *testing.T) {

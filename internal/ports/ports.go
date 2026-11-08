@@ -87,6 +87,15 @@ type Query struct {
 	Kinds []string
 	// ExcludeKinds drops these kinds (applied after Kinds).
 	ExcludeKinds []string
+	// Since keeps only documents updated at or after this time; the zero
+	// time keeps every document.
+	Since time.Time
+}
+
+// AllowsSince reports whether a document updated at updatedAt passes the
+// Since filter. Adapters without SQL use it; SQL adapters apply the same rule.
+func (q Query) AllowsSince(updatedAt time.Time) bool {
+	return q.Since.IsZero() || !updatedAt.Before(q.Since)
 }
 
 // AllowsKind reports whether a hit of kind passes the Kinds and ExcludeKinds

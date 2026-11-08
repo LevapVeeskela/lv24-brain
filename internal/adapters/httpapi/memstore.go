@@ -1252,8 +1252,11 @@ func (m *MemoryStore) SearchScoped(_ context.Context, query ports.Query, scope P
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	hits := make([]ports.Hit, 0)
-	appendHit := func(id, projectID, kind, title, body string, content ...string) {
+	appendHit := func(id, projectID, kind string, updatedAt time.Time, title, body string, content ...string) {
 		if query.ProjectID != "" && projectID != query.ProjectID {
+			return
+		}
+		if !query.AllowsSince(updatedAt) {
 			return
 		}
 		if !scope.allows(projectID) {
@@ -1280,18 +1283,18 @@ func (m *MemoryStore) SearchScoped(_ context.Context, query ports.Query, scope P
 		})
 	}
 	for _, record := range m.notes {
-		appendHit(record.ID, record.ProjectID, "note", record.Title, record.Body)
+		appendHit(record.ID, record.ProjectID, "note", record.UpdatedAt, record.Title, record.Body)
 	}
 	for _, record := range m.decisions {
-		appendHit(record.ID, record.ProjectID, "decision", record.Title, record.Context,
+		appendHit(record.ID, record.ProjectID, "decision", record.UpdatedAt, record.Title, record.Context,
 			strings.Join(record.Alternatives, "\n"), strings.Join(record.Consequences, "\n"), strings.Join(record.Evidence, "\n"))
 	}
 	for _, record := range m.attempts {
-		appendHit(record.ID, record.ProjectID, "attempt", record.Title,
+		appendHit(record.ID, record.ProjectID, "attempt", record.UpdatedAt, record.Title,
 			record.Hypothesis+"\n"+record.Result+"\n"+record.Reason)
 	}
 	for _, record := range m.handoffs {
-		appendHit(record.ID, record.ProjectID, "handoff", record.Summary,
+		appendHit(record.ID, record.ProjectID, "handoff", record.CreatedAt, record.Summary,
 			record.GitContext+"\n"+record.NextAction)
 	}
 	sort.Slice(hits, func(i, j int) bool {

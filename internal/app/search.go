@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/levapveeskela/lv24-brain/internal/config"
 	"github.com/levapveeskela/lv24-brain/internal/domain"
@@ -33,6 +34,9 @@ type SearchOptions struct {
 	Kinds []string
 	// IncludeDumps adds connector dumps to an unfiltered search.
 	IncludeDumps bool
+	// Since keeps only documents updated at or after this time; zero keeps
+	// everything.
+	Since time.Time
 }
 
 // Search queries curated records (no dumps); see SearchWith.
@@ -70,7 +74,7 @@ func (a *App) search(ctx context.Context, opts SearchOptions, run func(context.C
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	query := ports.Query{Text: text, ProjectID: strings.TrimSpace(opts.ProjectID), Limit: limit}
+	query := ports.Query{Text: text, ProjectID: strings.TrimSpace(opts.ProjectID), Limit: limit, Since: opts.Since}
 	for _, kind := range opts.Kinds {
 		if kind = strings.TrimSpace(kind); kind != "" {
 			query.Kinds = append(query.Kinds, kind)

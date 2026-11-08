@@ -6,6 +6,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/levapveeskela/lv24-brain/internal/ports"
 )
@@ -17,8 +18,8 @@ type searchResponse struct {
 }
 
 // Search runs a full-text search on the server through GET /v1/search. The
-// server reads q, projectId, limit, and the repeated kind and exclude_kind
-// filters; empty optional parameters are omitted so the server applies its
+// server reads q, projectId, limit, since (RFC3339), and the repeated kind and
+// exclude_kind filters; empty optional parameters are omitted so the server applies its
 // own defaults.
 func (c *Client) Search(ctx context.Context, query ports.Query) ([]ports.Hit, error) {
 	text := strings.TrimSpace(query.Text)
@@ -35,6 +36,9 @@ func (c *Client) Search(ctx context.Context, query ports.Query) ([]ports.Hit, er
 	}
 	addKinds(params, "kind", query.Kinds)
 	addKinds(params, "exclude_kind", query.ExcludeKinds)
+	if !query.Since.IsZero() {
+		params.Set("since", query.Since.UTC().Format(time.RFC3339Nano))
+	}
 	var payload searchResponse
 	if err := c.do(ctx, http.MethodGet, "/v1/search", params, nil, &payload); err != nil {
 		return nil, err

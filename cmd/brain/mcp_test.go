@@ -100,8 +100,11 @@ func TestMCPServesBrainTools(t *testing.T) {
 	}
 
 	tools := mcpResult(t, responses[1])["tools"].([]any)
-	if len(tools) != 15 { // 8 core tools + brain_state_get/brain_state_set + brain_catchup + brain_review + brain_records/brain_record/brain_decision_status
-		t.Fatalf("tools = %d, want 15", len(tools))
+	if len(tools) != 16 { // 8 core tools + brain_context + brain_state_get/brain_state_set + brain_catchup + brain_review + brain_records/brain_record/brain_decision_status
+		t.Fatalf("tools = %d, want 16", len(tools))
+	}
+	if name := tools[1].(map[string]any)["name"]; name != "brain_context" {
+		t.Fatalf("tool 1 = %v, want brain_context next to brain_open", name)
 	}
 
 	noteResult := mcpResult(t, responses[2])

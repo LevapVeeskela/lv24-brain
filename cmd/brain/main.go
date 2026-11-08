@@ -113,6 +113,8 @@ func runCommand(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return runProject(rest, stdout, stderr)
 	case "bootstrap":
 		return runBootstrap(rest, stdout, stderr)
+	case "context":
+		return runContext(rest, stdout, stderr)
 	case "note":
 		return runNote(rest, stdout, stderr)
 	case "decision":
@@ -205,6 +207,7 @@ Commands:
   open       Open a project context
   project    Manage the project registry (list, show, set)
   bootstrap  Build agent context for a project
+  context    Context for one task: state, findings, handoff, matching records
   note       Append a dated note
   decision   Append a decision record
   attempt    Append an attempt record
@@ -1356,12 +1359,14 @@ func runSearch(args []string, stdout, stderr io.Writer) int {
 	limit := fs.Int("limit", app.DefaultSearchLimit, "maximum results")
 	kinds := fs.String("kind", "", "comma-separated kinds to keep: note, decision, attempt, handoff, dump")
 	dumps := fs.Bool("dumps", false, "include connector dumps (mail, GitHub/GitLab issues and PRs)")
+	since := fs.String("since", "", "only documents updated since: duration (24h, 7d), date (2026-11-01) or RFC3339 time")
 	asJSON := fs.Bool("json", false, "print JSON")
 	cfgPath := configFlag(fs)
 	flagArgs, queryParts := splitValueFlags(args, map[string]bool{
 		"project": true,
 		"limit":   true,
 		"kind":    true,
+		"since":   true,
 		"config":  true,
 	})
 	if err := fs.Parse(flagArgs); err != nil {
@@ -1373,6 +1378,11 @@ func runSearch(args []string, stdout, stderr io.Writer) int {
 	}
 	if *limit < 0 {
 		fmt.Fprintln(stderr, "brain search: --limit must not be negative")
+		return 2
+	}
+	sinceTime, err := domain.ParseSince(*since, time.Now())
+	if err != nil {
+		fmt.Fprintf(stderr, "brain search: --%v\n", err)
 		return 2
 	}
 	query := strings.TrimSpace(strings.Join(queryParts, " "))
@@ -1395,6 +1405,7 @@ func runSearch(args []string, stdout, stderr io.Writer) int {
 		Limit:        *limit,
 		Kinds:        splitList(*kinds),
 		IncludeDumps: *dumps,
+		Since:        sinceTime,
 	})
 	if err != nil {
 		return reportError(stderr, "search", err)

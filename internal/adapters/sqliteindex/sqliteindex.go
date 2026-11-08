@@ -229,7 +229,7 @@ func (i *Index) runSearch(ctx context.Context, query ports.Query, match string, 
 }
 
 // buildSearchStatement assembles the FTS5 query. Project, include and exclude
-// kind filters are appended as bound placeholders in the same order as args.
+// kind, and since filters are appended as bound placeholders in the same order as args.
 func buildSearchStatement(query ports.Query, match string, limit int) (string, []any) {
 	var builder strings.Builder
 	builder.WriteString(searchSelectSQL)
@@ -246,6 +246,10 @@ func buildSearchStatement(query ports.Query, match string, limit int) (string, [
 	if clause, kindArgs := kindCondition("d.kind", "NOT IN", query.ExcludeKinds); clause != "" {
 		builder.WriteString(" AND " + clause)
 		args = append(args, kindArgs...)
+	}
+	if !query.Since.IsZero() {
+		builder.WriteString(" AND d.updated_at >= ?")
+		args = append(args, query.Since.UnixNano())
 	}
 
 	builder.WriteString(searchOrderSQL)

@@ -21,6 +21,18 @@ Approve the new brain hooks in Codex once (Codex keeps hooks disabled until
 they are trusted). That is the whole loop: agents read `brain open` at session
 start and leave an `[auto]` handoff at the end.
 
+Before starting a specific task, ask for just the context it needs:
+
+```sh
+brain context "add retry to sync push"
+brain context "token expiry" --kind decision --since 30d --json
+```
+
+It prints the project state, review findings, the latest handoff, the records
+that best match the task (decisions rank above attempts and notes, newer above
+older) and failed attempts to avoid repeating, bounded by `--budget` (default
+4000 runes). Agents call the same thing through the MCP tool `brain_context`.
+
 | Mode | Storage | Sync | Best for |
 |---|---|---|---|
 | `local` | Markdown on this machine | none | one person |
@@ -149,6 +161,17 @@ the CLI (including a migration import) needs an explicit reindex:
 into the local index. `brain index --rebuild` first deletes `index/brain.db`
 (and its sidecar files), then rebuilds from Markdown. `brain index` is local and
 `git` mode only; `brain search` also works in server mode.
+
+Search matches common English and Russian word forms (plural, case and verb
+endings) as a prefix, and exact forms rank first; `--since` keeps documents
+updated within a window:
+
+```sh
+brain search decisions                 # also finds "decision"
+brain search "решений"                 # also finds "решение", "решения"
+brain search deploy --since 2026-11-01 # only records updated since 1 November
+brain search deploy --since 7d --kind decision
+```
 
 `brain search` prints one block per hit:
 
@@ -402,7 +425,8 @@ also accepts `--config <path>`.
 | `brain handoff [summary]` | `--project`, `--summary`, `--next <text>` (next action), `--git-context <text>` (default: read from the project checkout), `--no-git` (record no git context) |
 | `brain journal` | `--project`, `--user`, `--event <name>` (for example `note`, `decision`, `attempt`, `handoff`, `commit`), `--since <duration>` (for example `24h`), `--limit <n>` (default 20). Local and git mode. |
 | `brain event commit` | `--project <id>`, `--repo <path>` (default `.`), `--quiet` (print nothing on success; used by the hook). Local and git mode. |
-| `brain search <query>` | `--project <id>`, `--limit <n>` (default 20) |
+| `brain search <query>` | `--project <id>`, `--limit <n>` (default 20), `--kind <kind>`, `--dumps`, `--since <24h\|7d\|2w\|2026-11-01\|RFC3339>`. English and Russian word forms match as a prefix. |
+| `brain context <task>` | `--project <id>`, `--budget <runes>` (default 4000), `--kind decision\|attempt\|note` (repeatable), `--since <24h\|7d\|2w\|date>`, `--json`. State, review findings, latest handoff, best-matching records and failed attempts for the task. MCP: `brain_context`. |
 | `brain sync` | `--status` (read-only divergence and conflict report), `--push` (push after committing) |
 | `brain index` | `--rebuild` (delete the local index and rebuild it from Markdown) |
 

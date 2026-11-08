@@ -250,7 +250,8 @@ brain discover --root <workspace> --apply   # register the new ones
 `brain mcp` serves the brain over stdio (MCP 2025-06-18) with these tools:
 
 - `brain_open` - load a project's state, recent decisions, attempts and last handoff.
-- `brain_search` - full-text search over notes, decisions, attempts and handoffs; connector dumps only with `include_dumps` or `kinds` containing `dump`.
+- `brain_context` - context for one task: state, review findings, latest handoff, best-matching decisions/attempts/notes and failed attempts to avoid (`query`, optional `project`, `budget`, `kinds`, `since`).
+- `brain_search` - full-text search over notes, decisions, attempts and handoffs (English and Russian word forms match; optional `since`); connector dumps only with `include_dumps` or `kinds` containing `dump`.
 - `brain_note` - append a dated note.
 - `brain_decision` - record a decision with its context, alternatives and consequences.
 - `brain_attempt` - record an attempt with its result and reason.

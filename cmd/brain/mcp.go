@@ -73,12 +73,17 @@ func (b mcpBackend) Bootstrap(ctx context.Context, projectID string, budget int)
 }
 
 func (b mcpBackend) Search(ctx context.Context, in mcpserver.SearchInput) ([]mcpserver.Hit, error) {
+	since, err := domain.ParseSince(in.Since, time.Now())
+	if err != nil {
+		return nil, err
+	}
 	hits, err := b.app.SearchWith(ctx, app.SearchOptions{
 		Text:         in.Query,
 		ProjectID:    in.ProjectID,
 		Limit:        in.Limit,
 		Kinds:        in.Kinds,
 		IncludeDumps: in.IncludeDumps,
+		Since:        since,
 	})
 	if err != nil {
 		return nil, err

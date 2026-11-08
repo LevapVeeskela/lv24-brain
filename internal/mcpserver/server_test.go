@@ -20,6 +20,7 @@ type fakeBackend struct {
 	journalQuery JournalQuery
 	budget       int
 	search       SearchInput
+	contextIn    ContextInput
 }
 
 func (f *fakeBackend) Resolve(_ context.Context, selector string) (Target, error) {
@@ -41,6 +42,15 @@ func (f *fakeBackend) Bootstrap(_ context.Context, projectID string, budget int)
 func (f *fakeBackend) Search(_ context.Context, in SearchInput) ([]Hit, error) {
 	f.search = in
 	return []Hit{{ID: "note-alpha-1", ProjectID: "alpha", Kind: "note", Title: "Cache fix", Snippet: "fixed the cache"}}, nil
+}
+
+func (f *fakeBackend) Context(_ context.Context, in ContextInput) (TaskContext, error) {
+	f.contextIn = in
+	return TaskContext{
+		ProjectID: in.ProjectID, Query: in.Query, Budget: in.Budget,
+		Records: []ContextRecord{{ID: "decision-alpha-1", Kind: "decision", Title: "Cache in SQLite", Score: 0.9}},
+		Summary: "# " + in.ProjectID + " — context\ntask: " + in.Query,
+	}, nil
 }
 
 func (f *fakeBackend) Note(_ context.Context, in NoteInput) (Record, error) {
@@ -211,7 +221,7 @@ func TestMCPServerPing(t *testing.T) {
 func TestMCPServerToolsListSchemas(t *testing.T) {
 	responses := session(t, &fakeBackend{}, `{"jsonrpc":"2.0","id":1,"method":"tools/list"}`)
 	tools := responses[0]["result"].(map[string]any)["tools"].([]any)
-	want := []string{"brain_open", "brain_search", "brain_note", "brain_decision", "brain_attempt", "brain_handoff", "brain_journal", "brain_projects"}
+	want := []string{"brain_open", "brain_context", "brain_search", "brain_note", "brain_decision", "brain_attempt", "brain_handoff", "brain_journal", "brain_projects"}
 	if len(tools) != len(want) {
 		t.Fatalf("tools = %d, want %d", len(tools), len(want))
 	}
