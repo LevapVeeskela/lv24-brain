@@ -1,16 +1,24 @@
 name: npm-publish
 
-# Publishes the npm packages for an existing GitHub release (for example when
-# the publish step of the release workflow failed). Manual only. Uses the
+# Publishes the npm packages for an existing GitHub release. Called by
+# release.yml after each tag release, and runnable by hand to re-publish a tag
+# (for example after a failed publish). Uses the
 # signed release assets: the manifest signature and every binary checksum are
 # verified before anything is published. Versions already on npm are skipped.
 
 on:
+  workflow_call:
+    inputs:
+      tag:
+        description: "Release tag, e.g. v0.8.0"
+        required: true
+        type: string
   workflow_dispatch:
     inputs:
       tag:
-        description: "Release tag, e.g. v0.6.0"
+        description: "Release tag, e.g. v0.8.0"
         required: true
+        type: string
 
 permissions:
   contents: read
