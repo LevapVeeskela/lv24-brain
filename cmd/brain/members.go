@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"flag"
 	"fmt"
 	"io"
 	"strings"
@@ -126,97 +125,5 @@ func printProjectAccess(stdout, stderr io.Writer, access httpclient.ProjectAcces
 	for _, member := range access.Members {
 		fmt.Fprintf(stdout, "  %-30s %s\n", member.Login, member.Role)
 	}
-	return 0
-}
-
-func printTokenUsage(w io.Writer) {
-	fmt.Fprint(w, `Usage (server mode):
-  brain token create --name <name> [--scope read|write|admin]... [--project <id>]...
-                     [--role admin|member|viewer] [--expires-in-days N] [--json]
-
-Without --scope the token carries its full role (unscoped). read allows GET
-requests, write allows knowledge/state/project writes, admin allows admin
-endpoints; write and admin imply read. --project limits the token to those
-projects. The raw token is printed once.
-`)
-}
-
-type repeatedFlag []string
-
-func (r *repeatedFlag) String() string     { return strings.Join(*r, ",") }
-func (r *repeatedFlag) Set(v string) error { *r = append(*r, v); return nil }
-
-var _ flag.Value = (*repeatedFlag)(nil)
-
-func runToken(args []string, stdout, stderr io.Writer) int {
-	if len(args) == 0 {
-		printTokenUsage(stderr)
-		return 2
-	}
-	switch args[0] {
-	case "help", "-h", "--help":
-		printTokenUsage(stdout)
-		return 0
-	case "create":
-		return runTokenCreate(args[1:], stdout, stderr)
-	default:
-		fmt.Fprintf(stderr, "brain token: unknown subcommand %q\n\n", args[0])
-		printTokenUsage(stderr)
-		return 2
-	}
-}
-
-func runTokenCreate(args []string, stdout, stderr io.Writer) int {
-	fs := newFlagSet("token create", stderr)
-	name := fs.String("name", "", "token name")
-	role := fs.String("role", "", "token role (defaults to your role)")
-	days := fs.Int("expires-in-days", 0, "expire after N days (0 = never)")
-	asJSON := fs.Bool("json", false, "print JSON")
-	var scopes, projects repeatedFlag
-	fs.Var(&scopes, "scope", "read, write or admin (repeatable)")
-	fs.Var(&projects, "project", "allowed project id (repeatable)")
-	cfgPath := configFlag(fs)
-	if err := fs.Parse(args); err != nil {
-		return 2
-	}
-	if fs.NArg() > 0 || strings.TrimSpace(*name) == "" || *days < 0 {
-		printTokenUsage(stderr)
-		return 2
-	}
-	if _, err := domain.NormalizeTokenScopes(scopes); err != nil {
-		fmt.Fprintf(stderr, "brain token create: %v\n", err)
-		return 2
-	}
-	client, ok := serverAdminClient(*cfgPath, "token create", stderr)
-	if !ok {
-		return 1
-	}
-	req := httpclient.APITokenRequest{
-		Name: strings.TrimSpace(*name), Role: strings.TrimSpace(*role),
-		Scopes: scopes, ProjectIDs: projects,
-	}
-	if *days > 0 {
-		req.ExpiresInDays = days
-	}
-	raw, record, err := client.CreateAPIToken(context.Background(), req)
-	if err != nil {
-		return reportError(stderr, "token create", err)
-	}
-	if *asJSON {
-		if err := encodeJSON(stdout, map[string]any{"token": raw, "apiToken": record}); err != nil {
-			return reportError(stderr, "token create", err)
-		}
-		return 0
-	}
-	scopeText := "unscoped"
-	if len(record.Scopes) > 0 {
-		scopeText = strings.Join(record.Scopes, ",")
-	}
-	projectText := "all projects"
-	if len(record.ProjectIDs) > 0 {
-		projectText = strings.Join(record.ProjectIDs, ",")
-	}
-	fmt.Fprintf(stdout, "token %s (%s, %s, %s)\n%s\nStore it now; it is not shown again.\n",
-		record.ID, record.Role, scopeText, projectText, raw)
 	return 0
 }

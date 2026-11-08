@@ -456,9 +456,20 @@ API tokens (prefix `brain_`) are created and revoked through the API:
   read-only token for dashboards:
 
   ```sh
-  brain token create --name dashboard --scope read --project acme --expires-in-days 90
-  brain token create --name ci-writer --scope write --project acme --project infra
+  brain token create --name dashboard --scope read --project acme --expires 90d
+  brain token create --name ci-writer --scope write --project acme --project infra --expires 720h
+  brain token list            # admins: every user's tokens; others: their own
+  brain token revoke <token-id>
   ```
+
+  `create` prints the raw token once; it cannot be shown again. `list` never
+  returns secrets or hashes, only id, name, owner, role, scopes, projects,
+  created/expires/last-used time and status (active/expired/revoked).
+  `--expires` takes days (`30d`) or a Go duration (`720h`), at most 3650 days;
+  omit it for a token that never expires (`--expires-in-days N` still works).
+  `--json` uses the standard `{schema, data}` envelope (`data.token`,
+  `data.api_token`); since v0.6.3, v0.6.x printed `{token, apiToken}`. In local
+  or git mode these commands exit 2.
 
   A token minted by another token can only narrow it (scopes, projects and
   expiry within the caller's). Scopes and projects are recorded in the

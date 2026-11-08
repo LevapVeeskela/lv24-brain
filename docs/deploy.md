@@ -298,3 +298,6 @@ refresh token and no binding; `server-refresh-token` and `server-auth-url` are
 no longer read, so a legacy unbound JWT pair requires `brain login` again. A
 static API token cannot be revoked by logout: it clears local credentials,
 warns, and exits non-zero.
+
+Manage API tokens with `brain token list|create|revoke` (server mode); see
+[runbook: API tokens](runbook.md) for scopes, project allow-lists and expiry.

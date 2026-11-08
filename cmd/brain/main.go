@@ -233,7 +233,7 @@ Commands:
   login      Authenticate against a server-mode brain
   logout     Revoke the server session and clear stored tokens (--all: every session)
   password   Change your server password (reads current and new from stdin)
-  token      Create a server API token, optionally scoped (read/write/admin, projects)
+  token      List, create (scoped read/write/admin, projects, expiry) and revoke server API tokens
   serve      Run the HTTP server
   update     Check for, apply, or roll back engine updates
   completion Print a bash, zsh, fish or PowerShell completion script

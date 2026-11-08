@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/url"
+	"strings"
 	"time"
 
 	"github.com/levapveeskela/lv24-brain/internal/domain"
@@ -71,6 +72,9 @@ type APITokenRequest struct {
 	Scopes        []string `json:"scopes,omitempty"`
 	ProjectIDs    []string `json:"projectIds,omitempty"`
 	ExpiresInDays *int     `json:"expiresInDays,omitempty"`
+	// ExpiresAt is an RFC 3339 instant; the server rejects it together with
+	// ExpiresInDays.
+	ExpiresAt *string `json:"expiresAt,omitempty"`
 }
 
 // APIToken is a minted token's public record.
@@ -84,6 +88,8 @@ type APIToken struct {
 	ProjectIDs []string   `json:"projectIds,omitempty"`
 	CreatedAt  time.Time  `json:"createdAt"`
 	ExpiresAt  *time.Time `json:"expiresAt,omitempty"`
+	LastUsedAt *time.Time `json:"lastUsedAt,omitempty"`
+	RevokedAt  *time.Time `json:"revokedAt,omitempty"`
 }
 
 // CreateAPIToken mints a token for the signed-in user and returns the raw
@@ -100,4 +106,32 @@ func (c *Client) CreateAPIToken(ctx context.Context, req APITokenRequest) (strin
 		return "", APIToken{}, err
 	}
 	return out.Token, out.APIToken, nil
+}
+
+// ListAPITokens lists API token records; the server never returns secrets.
+// With all set, an admin sees every user's tokens; for other callers the
+// server ignores it and returns only their own.
+func (c *Client) ListAPITokens(ctx context.Context, all bool) ([]APIToken, error) {
+	var query url.Values
+	if all {
+		query = url.Values{"all": {"true"}}
+	}
+	var out struct {
+		Items []APIToken `json:"items"`
+	}
+	if err := c.do(ctx, http.MethodGet, "/v1/tokens", query, nil, &out); err != nil {
+		return nil, err
+	}
+	if out.Items == nil {
+		out.Items = []APIToken{}
+	}
+	return out.Items, nil
+}
+
+// RevokeAPIToken revokes a token by id. Revoking a revoked token succeeds.
+func (c *Client) RevokeAPIToken(ctx context.Context, id string) error {
+	if err := requireValue("token.id", id); err != nil {
+		return err
+	}
+	return c.do(ctx, http.MethodDelete, "/v1/tokens/"+url.PathEscape(strings.TrimSpace(id)), nil, nil, nil)
 }
