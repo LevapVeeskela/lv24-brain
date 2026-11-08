@@ -56,8 +56,9 @@ jobs:
       - name: Set up Node for npm publish
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
+          # No registry-url: it writes an .npmrc with a placeholder
+          # NODE_AUTH_TOKEN that npm would send instead of using OIDC.
           node-version: "24"
-          registry-url: https://registry.npmjs.org
 
       # npm Trusted Publishing: the job's OIDC token (id-token: write) is the
       # only credential; each package trusts release.yml and npm-publish.yml.

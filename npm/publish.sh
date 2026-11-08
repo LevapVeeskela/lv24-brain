@@ -36,6 +36,8 @@ if [ -n "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" ] && [ -z "$token" ]; then
     echo "npm $npm_version is too old for Trusted Publishing (needs >= 11.5.1)" >&2
     exit 1
   fi
+  # A configured token (even a placeholder) would be sent instead of OIDC.
+  unset NODE_AUTH_TOKEN
   echo "npm: publishing with Trusted Publishing (OIDC), npm $npm_version"
 elif [ -n "$token" ]; then
   echo "npm: publishing with NODE_AUTH_TOKEN"
