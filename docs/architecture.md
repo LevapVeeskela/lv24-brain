@@ -36,6 +36,7 @@ internal/adapters/
   serverstore/             bridge from postgres.Store to httpapi.Store
   oidc/                    generic OIDC discovery and code exchange
   secrets/                 environment + OS secret store
+  sourceoauth/             PKCE loopback, GitHub device flow, token refresh
   github/, gitlab/         read-only repository connectors
   imap/                    read-only IMAP connector
   folders/                 Markdown/Obsidian/Logseq folders
