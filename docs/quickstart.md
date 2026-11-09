@@ -242,11 +242,13 @@ per-stream checkpoints (`connectors/<id>/checkpoints/*.json`), tombstones for
 reported deletes, index update, and a run record. Sources do not infer
 deletes from absence (`Deletes` is false without authoritative tombstones).
 
-`--since <RFC3339>` limits items by update time; `--limit <n>` caps each
+The legacy `brain connector run --name ...` snapshot path uses
+`--since <RFC3339>` to limit items by update time and `--limit <n>` to cap each
 collection. The command prints source, status, counts, and a sanitized error.
-In local or `git` mode it also writes dumps below the data directory and
-persists each run as Markdown under `connectors/runs/`. In server mode the same
-command calls `POST /v1/connectors/run`; with PostgreSQL the server persists
+In local or `git` mode it writes dumps below the data directory and
+persists each run as Markdown under `connectors/runs/`; `connection run`
+instead writes raw items/checkpoints under `connectors/<id>/`. In server mode the same
+snapshot command calls `POST /v1/connectors/run`; with PostgreSQL the server persists
 raw items and checkpoints (schema 9) plus the run record, while the in-memory
 development store has no raw zone and rejects the run as unsupported. Pass
 `--brain-project <id>` to map items to a project; unmapped items stay stored but
