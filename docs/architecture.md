@@ -361,7 +361,7 @@ sources read catalogs only and never user rows; RSS/web revalidate with HTTP
 validators. The `web` source defaults to the sitemap's host and port, honors
 `robots.txt`, and never follows redirects.
 
-The Phase 3 `mcp` source (v0.12.0, in development) connects to Model Context
+The Phase 3 `mcp` source (v0.12.0) connects to Model Context
 Protocol servers over stdio or streamable HTTP and maps read-only
 search/list tools to items. It requires an explicit tool allow-list heuristic
 (destructive names are always denied), bounds calls/results, and marks output

@@ -284,7 +284,7 @@ brain discover --root <workspace> --apply   # register the new ones
   when non-empty and falls back to the legacy targets above when empty.
   `--name` stays legacy snapshot (Markdown dumps); it is not native
   item-level. Deletes are never inferred.
-- OAuth (v0.12.0, in development): `brain connection auth <id>` runs GitHub's
+- OAuth (v0.12.0): `brain connection auth <id>` runs GitHub's
   device flow or GitLab's PKCE loopback flow (port 47615) using a public client
   ID from `--client-id` or `BRAIN_OAUTH_CLIENT_ID`. The bundle is stored only
   in the OS secret store (`conn/<id>/oauth` plus token-free metadata), never in

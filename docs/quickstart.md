@@ -259,7 +259,7 @@ one, and `GET /v1/connectors/runs/{id}/markdown` exports it as Markdown.
 The CLI allows `1h10s` for this synchronous request, including persistence;
 ordinary API and authentication requests retain the `30s` default timeout.
 
-### OAuth for GitHub and GitLab (v0.12.0, in development)
+### OAuth for GitHub and GitLab (v0.12.0)
 
 Public-client OAuth uses the system browser and never ships a client secret.
 Pass `--client-id` or set `BRAIN_OAUTH_CLIENT_ID`; GitHub uses the device flow,
@@ -379,7 +379,7 @@ These providers are available through `brain connection run`/`brain connector ru
 the legacy snapshot `brain connector run --name` still accepts only
 `github`, `gitlab` and `imap`.
 
-`brain agent` (WP2.1/WP2.2, in development) runs configured connections in the
+`brain agent` (WP2.1/WP2.2, v0.12.0) runs configured connections in the
 background with persisted `Schedule` values:
 
 ```sh
