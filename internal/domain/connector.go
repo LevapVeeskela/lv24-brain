@@ -25,6 +25,11 @@ func (s ConnectorStatus) Valid() bool {
 }
 
 // ConnectorRun records one connector execution, including counts and errors.
+//
+// Legacy runs (ports.Connector) fill Source and Counts only. Item-level runs
+// (ports.Source) also set ConnectionID and Stats; Source then holds the
+// provider name so existing listings by source keep working. Both new fields
+// are omitted from JSON when empty, so legacy records are byte-identical.
 type ConnectorRun struct {
 	ID         string          `json:"id"`
 	Source     string          `json:"source"`
@@ -33,6 +38,10 @@ type ConnectorRun struct {
 	Status     ConnectorStatus `json:"status"`
 	Counts     map[string]int  `json:"counts,omitempty"`
 	Error      string          `json:"error,omitempty"`
+	// ConnectionID is the Connection.ID of an item-level run.
+	ConnectionID string `json:"connectionId,omitempty"`
+	// Stats are item-level counts of an item-level run.
+	Stats *RunStats `json:"stats,omitempty"`
 }
 
 // Validate checks required connector run fields.
@@ -42,6 +51,16 @@ func (c ConnectorRun) Validate() error {
 	}
 	if !c.Status.Valid() {
 		return NewValidationError("connectorRun.status", fmt.Sprintf("unknown status %q", c.Status))
+	}
+	if c.ConnectionID != "" {
+		if err := ValidateConnectionID("connectorRun.connectionId", c.ConnectionID); err != nil {
+			return err
+		}
+	}
+	if c.Stats != nil {
+		if err := c.Stats.Validate(); err != nil {
+			return err
+		}
 	}
 	return nil
 }

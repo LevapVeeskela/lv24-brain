@@ -176,7 +176,9 @@ type ConnectorOptions struct {
 	Limit    int
 }
 
-// Connector imports metadata from an external source.
+// Connector imports metadata from an external source as Markdown snapshots.
+// It is the legacy contract; new integrations implement Source
+// (ingestion.go). connectorbuild.LegacySource runs a Connector as a Source.
 type Connector interface {
 	Name() string
 	Run(ctx context.Context, opts ConnectorOptions) (domain.ConnectorRun, error)
