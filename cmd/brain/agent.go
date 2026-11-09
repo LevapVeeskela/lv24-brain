@@ -120,6 +120,7 @@ func runAgentForeground(cfg config.BrainConfig, parentPID int, stdout, stderr io
 		Runs:        ingestion.Ingestion.Runs,
 		Projects:    inspection.App,
 		Updater:     inspection.Updater,
+		Locker:      ingestion.Ingestion.Locker,
 		Version:     version.Version,
 	})
 	if err != nil {

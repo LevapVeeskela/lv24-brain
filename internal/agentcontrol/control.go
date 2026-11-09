@@ -46,6 +46,7 @@ type Options struct {
 	Runs        ports.ConnectorRunStore
 	Projects    Projects
 	Updater     Updater
+	Locker      ports.ConnectionLocker
 	Version     string
 	Now         func() time.Time
 	Agent       *daemon.Agent
@@ -112,7 +113,7 @@ func (c *Control) Start(ctx context.Context, runtime daemon.Runtime) (int, error
 		Now:         c.opts.Now,
 		Heartbeat:   15 * time.Second,
 		Status:      "running",
-		Connections: connectionService{store: c.opts.Connections, agent: agent},
+		Connections: connectionService{store: c.opts.Connections, agent: agent, locker: c.opts.Locker},
 		Sources: sourceRegistry{
 			registry: c.opts.Registry,
 			deps:     c.opts.Deps,
@@ -185,8 +186,9 @@ func (c *Control) Port() int {
 // connectionService guards catalogue deletion against an active run, matching
 // the CLI's per-connection lock behavior.
 type connectionService struct {
-	store ports.ConnectionStore
-	agent *daemon.Agent
+	store  ports.ConnectionStore
+	agent  *daemon.Agent
+	locker ports.ConnectionLocker
 }
 
 func (s connectionService) List(ctx context.Context) ([]domain.Connection, error) {
@@ -212,6 +214,18 @@ func (s connectionService) Delete(ctx context.Context, id string) error {
 				return fmt.Errorf("%w: connection has a queued or running job", domain.ErrConflict)
 			}
 		}
+	}
+	if s.locker != nil {
+		// Match `brain connection remove`: a CLI or another process may hold
+		// the cross-process run lock.
+		release, err := s.locker.TryLock(ctx, id)
+		if err != nil {
+			if errors.Is(err, domain.ErrConflict) {
+				return fmt.Errorf("%w: connection is busy", domain.ErrConflict)
+			}
+			return err
+		}
+		defer func() { _ = release() }()
 	}
 	return s.store.Delete(ctx, id)
 }
