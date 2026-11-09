@@ -408,6 +408,23 @@ func TestRSSForeignRedirectNotFollowed(t *testing.T) {
 	}
 }
 
+// TestRSSRedirectPolicyOverridesClient asserts that even a client configured
+// to follow redirects cannot make the source fetch a foreign host.
+func TestRSSRedirectPolicyOverridesClient(t *testing.T) {
+	g := newRSSServer(t)
+	conn := rssConnection(g, "/redirect")
+	source, err := NewRSS(conn, &http.Client{Timeout: 5 * time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := source.Check(context.Background()); err == nil {
+		t.Fatal("Check succeeded on a redirecting feed")
+	}
+	if *g.foreignHits != 0 {
+		t.Fatalf("foreign server hits = %d, want 0", *g.foreignHits)
+	}
+}
+
 // TestRSSBodyBounds caps huge entries at the domain body bound.
 func TestRSSBodyBounds(t *testing.T) {
 	g := newRSSServer(t)

@@ -19,6 +19,15 @@ type IngestionRuntime struct {
 // Close releases the derived search index.
 func (r *IngestionRuntime) Close() error { return r.runtime.Close() }
 
+// Services exposes the runtime services the agent control API shares
+// (secrets, projects, updater). It is nil only for a zero IngestionRuntime.
+func (r *IngestionRuntime) Services() *Runtime {
+	if r == nil {
+		return nil
+	}
+	return r.runtime
+}
+
 // BuildIngestion composes a connection catalogue, raw-zone stores, process
 // lock, credential resolver, run history and index for local/git ingestion.
 func BuildIngestion(cfg config.BrainConfig, opts Options) (*IngestionRuntime, error) {

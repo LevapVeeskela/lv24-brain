@@ -46,8 +46,10 @@ internal/adapters/
   dbschema/                PostgreSQL/SQLite catalog-only schema snapshots
   feeds/                   RSS/Atom and sitemap-driven web pages
   connectorbuild/          source registry and native factory wiring
-  localapi/                local control API (WP2.2, not wired yet)
+  localapi/                authenticated loopback control API
 internal/connectors/       shared run records, retry/rate-limit helpers, redaction
+internal/daemon/           background engine: scheduler, queue, runtime, logs
+internal/agentcontrol/     local control API composition (daemon <-> localapi)
 internal/migrate/          legacy .brain importer
 internal/server/           server config and process wiring
 internal/update/           release check, verify, stage, apply, rollback
@@ -317,6 +319,26 @@ Persistence:
 `deploy/docker-compose.yml` provisions `brain-server` and Postgres with
 healthchecks and internal-only database networking; Compose supplies
 `BRAIN_DATABASE_URL`, so the stack uses Postgres. Never publish port 5432.
+
+## Background agent and local control API
+
+`brain agent` (local/git mode) is the foreground background engine: one process
+per data dir (OS lock), a persisted schedule state, a bounded worker pool, a
+parent-PID watchdog and rotating redacted logs under `<data-dir>/agent/`
+(0600, self-ignored). The scheduler reads `Connection.Schedule` from the
+catalogue each pass and skips overlapping runs of the same connection.
+
+The same process owns the local control API. `internal/agentcontrol` wires the
+daemon to `internal/adapters/localapi`; the API binds an ephemeral IPv4
+loopback port and publishes `{port, token, pid, version}` in the owner-only
+`agent/runtime.json`. Every request needs the bearer token and the exact
+loopback `Host`; any `Origin` or `Referer` is rejected, CORS is not implemented,
+and request bodies are size-limited. The API exposes health, connection
+CRUD/test/run/credentials, run history with SSE logs, schedules, projects,
+non-secret settings, an explicitly confirmed engine update and graceful
+shutdown. Run and log identifiers are job IDs for the current process and
+persisted run IDs afterwards; job details and logs are sanitized by the
+ingestion host and the handler.
 
 ## Connectors and secrets
 

@@ -51,6 +51,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -196,13 +197,13 @@ func NewSource(conn domain.Connection, credentials ports.CredentialProvider, cli
 	if httpClient == nil {
 		httpClient = &http.Client{Timeout: 30 * time.Second}
 	}
-	if httpClient.CheckRedirect == nil {
-		cloned := *httpClient
-		cloned.CheckRedirect = func(req *http.Request, via []*http.Request) error {
-			return http.ErrUseLastResponse
-		}
-		httpClient = &cloned
+	// Always override the redirect policy so a caller-supplied client can
+	// never forward the Authorization header to another host.
+	cloned := *httpClient
+	cloned.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+		return http.ErrUseLastResponse
 	}
+	httpClient = &cloned
 	return &Source{
 		connection:  conn,
 		baseURL:     normalized,
@@ -560,6 +561,9 @@ func (s *Source) readStreamPage(ctx context.Context, token string, def streamDef
 	}
 	if state.Offset < len(results) {
 		return true, nil
+	}
+	if hasMore && nextCursor == nil {
+		return false, errors.New("notion: pagination response omitted its next cursor")
 	}
 	if hasMore && nextCursor != nil {
 		// For search, the bound check already stopped older pages; a page

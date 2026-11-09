@@ -55,15 +55,25 @@ type realClock struct{}
 func (realClock) Now() time.Time                         { return time.Now() }
 func (realClock) After(d time.Duration) <-chan time.Time { return time.After(d) }
 
+// Control is the authenticated loopback API started together with the agent.
+// Start must bind its listener before returning the selected port; serving
+// continues until ctx is canceled. Stop drains the listener on shutdown.
+type Control interface {
+	Start(ctx context.Context, runtime Runtime) (port int, err error)
+	Stop(ctx context.Context) error
+}
+
 // Options configures an Agent. DataDir is the local data directory, Runner
 // and Connections are supplied by the composition root. ParentPID <= 0
-// disables the optional parent watchdog.
+// disables the optional parent watchdog. Control, when set, is the local
+// control API started after the runtime record is ready.
 type Options struct {
 	DataDir      string
 	Version      string
 	ParentPID    int
 	Connections  ports.ConnectionStore
 	Runner       Runner
+	Control      Control
 	Clock        Clock
 	Workers      int
 	QueueSize    int
@@ -128,8 +138,11 @@ type Agent struct {
 
 type job struct {
 	view   JobView
+	opts   app.RunConnectionOptions
 	ctx    context.Context
 	cancel context.CancelFunc
+	run    domain.ConnectorRun
+	hasRun bool
 }
 
 // New validates dependencies and creates the private agent state directory.
@@ -232,9 +245,21 @@ func (a *Agent) Run(ctx context.Context) error {
 	if err := a.recoverRuntime(); err != nil {
 		return err
 	}
+	root, cancel := context.WithCancel(ctx)
+	defer cancel()
+	a.mu.Lock()
+	a.cancel = cancel
+	a.mu.Unlock()
 	runtime, err := newRuntime(a.opts.Version, a.clock.Now())
 	if err != nil {
 		return err
+	}
+	if a.opts.Control != nil {
+		port, err := a.opts.Control.Start(root, runtime)
+		if err != nil {
+			return fmt.Errorf("daemon: start local control API: %w", err)
+		}
+		runtime.Port = port
 	}
 	a.mu.Lock()
 	a.runtime = runtime
@@ -249,12 +274,9 @@ func (a *Agent) Run(ctx context.Context) error {
 	}
 	a.logger.Printf("agent started pid=%d version=%s", runtime.PID, runtime.Version)
 
-	root, cancel := context.WithCancel(ctx)
 	a.mu.Lock()
-	a.cancel = cancel
 	a.queue = make(chan *job, a.opts.QueueSize)
 	a.mu.Unlock()
-	defer cancel()
 	var workers sync.WaitGroup
 	for i := 0; i < a.opts.Workers; i++ {
 		workers.Add(1)
@@ -274,6 +296,13 @@ func (a *Agent) Run(ctx context.Context) error {
 	a.cancelAllJobs()
 	workers.Wait()
 	tasks.Wait()
+	if a.opts.Control != nil {
+		stopCtx, stopCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		if err := a.opts.Control.Stop(stopCtx); err != nil {
+			a.logger.Printf("local control API stop failed: %v", err)
+		}
+		stopCancel()
+	}
 	a.removeRuntime()
 	a.logger.Printf("agent stopped")
 	return nil
@@ -336,9 +365,19 @@ func (a *Agent) cancelAllJobs() {
 // QueueConnection adds a run to the bounded job queue and returns a job ID.
 // The same connection cannot be queued or executing twice in this agent.
 func (a *Agent) QueueConnection(ctx context.Context, connectionID string) (string, error) {
+	return a.QueueConnectionOptions(ctx, connectionID, app.RunConnectionOptions{})
+}
+
+// QueueConnectionOptions queues a run with bounded read options (since,
+// limit, window). The connection ID in opts is overwritten by connectionID.
+func (a *Agent) QueueConnectionOptions(ctx context.Context, connectionID string, opts app.RunConnectionOptions) (string, error) {
 	if err := domain.ValidateConnectionID("connection.id", connectionID); err != nil {
 		return "", err
 	}
+	if opts.Limit < 0 || opts.MaxBatches < 0 || opts.InitialWindow < 0 {
+		return "", domain.NewValidationError("run.options", "limit, maxBatches and initialWindow must not be negative")
+	}
+	opts.ConnectionID = connectionID
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -353,7 +392,7 @@ func (a *Agent) QueueConnection(ctx context.Context, connectionID string) (strin
 	}
 	jobID := fmt.Sprintf("%s-%d", connectionID, a.clock.Now().UnixNano())
 	jobCtx, cancel := context.WithCancel(ctx)
-	j := &job{view: JobView{ID: jobID, ConnectionID: connectionID, Status: "queued"}, ctx: jobCtx, cancel: cancel}
+	j := &job{view: JobView{ID: jobID, ConnectionID: connectionID, Status: "queued"}, opts: opts, ctx: jobCtx, cancel: cancel}
 	a.jobs[jobID] = j
 	a.active[connectionID] = jobID
 	queue := a.queue
@@ -428,7 +467,12 @@ func (a *Agent) runJob(agentCtx context.Context, j *job) {
 				a.logger.Printf("job panic connection=%s job=%s", j.view.ConnectionID, j.view.ID)
 			}
 		}()
-		result, err := a.opts.Runner.RunConnection(jobCtx, app.RunConnectionOptions{ConnectionID: j.view.ConnectionID})
+		result, err := a.opts.Runner.RunConnection(jobCtx, j.opts)
+		if result.Run.ID != "" {
+			a.mu.Lock()
+			j.run, j.hasRun = result.Run, true
+			a.mu.Unlock()
+		}
 		if err != nil {
 			status = "failed"
 			message = "connection run failed"
@@ -490,6 +534,44 @@ func (a *Agent) Status(ctx context.Context) (Status, error) {
 	a.mu.Unlock()
 	sort.Slice(status.Jobs, func(i, j int) bool { return status.Jobs[i].ID < status.Jobs[j].ID })
 	return status, nil
+}
+
+// JobDetail is one job with its connector run record, once the runner
+// produced one. The record is credential-free and redacted by the ingestion
+// host.
+type JobDetail struct {
+	View   JobView
+	Run    domain.ConnectorRun
+	HasRun bool
+}
+
+// JobDetails returns one job and its run record, if the job is known.
+func (a *Agent) JobDetails(jobID string) (JobDetail, bool) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	j, ok := a.jobs[jobID]
+	if !ok {
+		return JobDetail{}, false
+	}
+	return JobDetail{View: j.view, Run: j.run, HasRun: j.hasRun}, true
+}
+
+// RecentJobs returns a snapshot of in-memory jobs ordered by start time and
+// ID (newest last), bounded by maxJobHistory.
+func (a *Agent) RecentJobs() []JobDetail {
+	a.mu.Lock()
+	out := make([]JobDetail, 0, len(a.jobs))
+	for _, j := range a.jobs {
+		out = append(out, JobDetail{View: j.view, Run: j.run, HasRun: j.hasRun})
+	}
+	a.mu.Unlock()
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].View.StartedAt.Equal(out[j].View.StartedAt) {
+			return out[i].View.ID < out[j].View.ID
+		}
+		return out[i].View.StartedAt.Before(out[j].View.StartedAt)
+	})
+	return out
 }
 
 // Stop requests graceful shutdown and waits until Run exits or ctx expires.

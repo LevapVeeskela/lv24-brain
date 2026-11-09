@@ -96,6 +96,11 @@ type responseMetadata struct {
 	NextCursor string `json:"next_cursor"`
 }
 
+type slackEdited struct {
+	User string `json:"user"`
+	TS   string `json:"ts"`
+}
+
 type slackMessage struct {
 	Type        string         `json:"type"`
 	Text        string         `json:"text"`
@@ -105,6 +110,7 @@ type slackMessage struct {
 	UserProfile profile        `json:"user_profile"`
 	ReplyCount  int            `json:"reply_count"`
 	ThreadTS    string         `json:"thread_ts"`
+	Edited      *slackEdited   `json:"edited,omitempty"`
 	Files       []slackFile    `json:"files,omitempty"`
 	Messages    []slackMessage `json:"messages,omitempty"`
 }
@@ -519,11 +525,17 @@ func (s *Source) toItem(ctx context.Context, token, connectionID, channel string
 	}
 	title = capUTF8(title, 16<<10)
 	created := parseSlackTS(root.TS)
+	updated := created
+	if root.Edited != nil && validSlackTS(root.Edited.TS) {
+		if edited := parseSlackTS(root.Edited.TS); edited.After(updated) {
+			updated = edited
+		}
+	}
 	item := domain.Item{
 		Ref:  domain.ItemRef{ConnectionID: connectionID, ExternalID: channel + "/" + root.TS},
 		Kind: domain.ItemMessage, Title: title, Body: body,
 		URL: slackMessageURL(channel, root.TS), Author: displayAuthor(root),
-		CreatedAt: created, UpdatedAt: created,
+		CreatedAt: created, UpdatedAt: updated,
 	}
 	return item, nil
 }

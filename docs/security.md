@@ -103,6 +103,31 @@ matching `.gitignore` into the data directory.
   contains only status, counts and the sanitized error. Connector events are
   telemetry about the run, not message content.
 
+## Local control API
+
+`brain agent` (local/git mode) serves an authenticated API on an ephemeral IPv4
+loopback listener; it is never bound to a public interface and there is no
+reverse-proxy or browser mode.
+
+- The bearer token is a 256-bit per-process secret in
+  `<data-dir>/agent/runtime.json`. The file is written with owner-only
+  permissions (0600/ACL), the parent `agent/` directory is self-ignored, and the
+  runtime file is removed on a clean shutdown. Tokens are compared in constant
+  time and never returned by an endpoint, status output or log line.
+- Every request must carry exactly one `Authorization: Bearer` header and the
+  exact loopback `Host` for the selected port. Any `Origin` or `Referer` is
+  rejected; there are no CORS headers, so a web page cannot call the API even
+  after DNS rebinding. Request bodies are size-limited and decoded strictly.
+- Connection endpoints validate the provider descriptor; secret fields are
+  rejected in connection settings and can only be written through
+  `POST /v1/connections/{id}/credentials/{field}`. Responses never include
+  secret values, and run/log output is redacted by the ingestion host and the
+  handler.
+- `POST /v1/engine/update` requires explicit `{"confirm":true}` and uses the
+  same signed-manifest verification as `brain update`; `POST /v1/shutdown` only
+  requests the graceful stop of the local agent. Settings persist non-secret UI
+  values only.
+
 ## Server hardening
 
 Implemented in `internal/adapters/httpapi` and `internal/auth`:

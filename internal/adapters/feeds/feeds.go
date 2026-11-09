@@ -75,8 +75,11 @@ const (
 	// maxURLBytes bounds one configured URL.
 	maxURLBytes = 2048
 
-	// maxSitemapChildren bounds the child sitemaps read per sitemap-index.
-	maxSitemapChildren = 20
+	// maxSitemapChildren bounds the child sitemaps read per sitemap-index
+	// chunk (the cursor resumes at the next child); maxSitemapChildOffset
+	// bounds the persisted resume position.
+	maxSitemapChildren    = 20
+	maxSitemapChildOffset = 10000
 
 	// defaultMaxPages is the per-sitemap page cap when maxpages is unset;
 	// maxMaxPages is the largest accepted value.
@@ -134,13 +137,13 @@ func validateSourceURL(field, raw string) (string, error) {
 	}
 	parsed, err := url.Parse(raw)
 	if err != nil || parsed.Host == "" {
-		return "", domain.NewValidationError(field, fmt.Sprintf("%q must be an absolute URL", raw))
+		return "", domain.NewValidationError(field, "must be an absolute URL")
 	}
 	if parsed.User != nil {
-		return "", domain.NewValidationError(field, fmt.Sprintf("%q must not contain credentials", raw))
+		return "", domain.NewValidationError(field, "must not contain credentials")
 	}
 	if parsed.Fragment != "" {
-		return "", domain.NewValidationError(field, fmt.Sprintf("%q must not contain a fragment", raw))
+		return "", domain.NewValidationError(field, "must not contain a fragment")
 	}
 	switch parsed.Scheme {
 	case "https":
@@ -151,12 +154,10 @@ func validateSourceURL(field, raw string) (string, error) {
 		}
 		ip := net.ParseIP(host)
 		if ip == nil || !ip.IsLoopback() {
-			return "", domain.NewValidationError(field,
-				fmt.Sprintf("%q must be https; http is allowed only for loopback hosts", raw))
+			return "", domain.NewValidationError(field, "must be https; http is allowed only for loopback hosts")
 		}
 	default:
-		return "", domain.NewValidationError(field,
-			fmt.Sprintf("%q must use the https scheme; http is allowed only for loopback hosts", raw))
+		return "", domain.NewValidationError(field, "must use the https scheme; http is allowed only for loopback hosts")
 	}
 	return parsed.String(), nil
 }
@@ -212,16 +213,14 @@ func newFetcher(client *http.Client, maxBodyBytes int64) *fetcher {
 	if client == nil {
 		client = &http.Client{Timeout: 30 * time.Second}
 	}
-	if client.CheckRedirect == nil {
-		// Never follow redirects: the response answer lets callers decide,
-		// and a redirect to a foreign host is never fetched.
-		cloned := *client
-		cloned.CheckRedirect = func(*http.Request, []*http.Request) error {
-			return http.ErrUseLastResponse
-		}
-		client = &cloned
+	// Always override the redirect policy: a caller-supplied client must not
+	// be able to follow a redirect (possibly to a foreign host or with
+	// credentials attached).
+	cloned := *client
+	cloned.CheckRedirect = func(*http.Request, []*http.Request) error {
+		return http.ErrUseLastResponse
 	}
-	return &fetcher{client: client, maxBodyBytes: maxBodyBytes}
+	return &fetcher{client: &cloned, maxBodyBytes: maxBodyBytes}
 }
 
 // readBounded reads at most max bytes.

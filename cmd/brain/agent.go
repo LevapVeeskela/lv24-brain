@@ -10,6 +10,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/levapveeskela/lv24-brain/internal/agentcontrol"
 	"github.com/levapveeskela/lv24-brain/internal/app"
 	"github.com/levapveeskela/lv24-brain/internal/bootstrap"
 	"github.com/levapveeskela/lv24-brain/internal/config"
@@ -24,7 +25,9 @@ func printAgentUsage(w io.Writer) {
   brain agent stop [--config <path>]
 
 Without a subcommand, agent runs in the foreground. A parent PID makes the
-agent stop when its supervisor exits. The local control API is not enabled yet.
+agent stop when its supervisor exits. The local control API listens on an
+ephemeral loopback port published in the agent runtime record; its bearer token
+is written only to the owner-readable runtime file.
 `)
 }
 
@@ -103,16 +106,37 @@ func runAgentForeground(cfg config.BrainConfig, parentPID int, stdout, stderr io
 		return reportError(stderr, "agent", err)
 	}
 	defer ingestion.Close()
+	inspection := ingestion.Services()
+	if inspection == nil {
+		fmt.Fprintln(stderr, "brain agent: runtime services are unavailable")
+		return 1
+	}
+	control, err := agentcontrol.New(agentcontrol.Options{
+		DataDir:     cfg.DataDir,
+		Connections: ingestion.Ingestion.Connections,
+		Secrets:     inspection.Secrets,
+		Registry:    ingestion.Ingestion.Registry,
+		Deps:        ingestion.Ingestion.Deps,
+		Runs:        ingestion.Ingestion.Runs,
+		Projects:    inspection.App,
+		Updater:     inspection.Updater,
+		Version:     version.Version,
+	})
+	if err != nil {
+		return reportError(stderr, "agent", err)
+	}
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 	engine, err := daemon.New(daemon.Options{
 		DataDir: cfg.DataDir, Version: version.Version, ParentPID: parentPID,
 		Connections: ingestion.Ingestion.Connections,
 		Runner:      ingestionRunner{host: ingestion.Ingestion},
+		Control:     control,
 	})
 	if err != nil {
 		return reportError(stderr, "agent", err)
 	}
+	control.BindAgent(engine)
 	err = engine.Run(ctx)
 	if err != nil {
 		if errors.Is(err, daemon.ErrAlreadyRunning) {

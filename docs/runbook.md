@@ -344,6 +344,44 @@ For OpenCode add the same command to the `mcp` section of
 directory (the agent's project root) or the `project` argument; writes never
 create projects.
 
+## 3a3. Background agent and local control API
+
+`brain agent` runs in the foreground and is the single background engine for a
+data directory; a second instance exits because the OS lock is held.
+
+```sh
+brain agent --config <data-dir>/brain.yaml
+brain agent status --config <data-dir>/brain.yaml
+brain agent stop --config <data-dir>/brain.yaml
+```
+
+- Private state lives in `<data-dir>/agent/` (0600, self-ignored):
+  `runtime.json`, `schedule.json`, `stop.json`, `settings.json`, `agent.log`
+  (rotated) and the process lock. Nothing in that directory is published.
+- `runtime.json` holds `{port, token, pid, version, started_at}`. The token is
+  a per-process 256-bit bearer secret; never log it, paste it into tickets or
+  commit it. The file is removed on a clean shutdown.
+- Schedules come from `Connection.Schedule` (`manual`, `@hourly`, `@daily`,
+  `@every <duration>`, minimum 1m). The scheduler catches up once after sleep
+  and never replays a backlog; a run that is already queued or running for the
+  connection is skipped.
+- The local API is loopback-only and ephemeral: use the port and token from
+  `runtime.json`. It requires exactly one `Authorization: Bearer` header, the
+  exact loopback `Host`, rejects `Origin`/`Referer`, has no CORS and bounds
+  request bodies. It exposes:
+  `GET /v1/health`; connections CRUD, `POST /v1/connections/{id}/test|run`,
+  `POST /v1/connections/{id}/credentials/{field}`; `GET /v1/runs`,
+  `GET /v1/runs/{id}`, `GET /v1/runs/{id}/log` (SSE); schedules, projects,
+  non-secret settings; `POST /v1/engine/update` with `{"confirm":true}`;
+  `POST /v1/shutdown`. Consumers should not cache the token across restarts.
+- `POST /v1/engine/update` downloads, verifies and stages a signed release and
+  swaps the binary; the running process keeps the old image until restart, and
+  `brain update --rollback` remains the recovery path.
+- If the agent is unhealthy, check `agent status` first, then the tail of
+  `agent/agent.log`; a stale runtime/token after a crash is cleaned on the next
+  start while the lock is held. `brain agent stop` validates the PID is a brain
+  executable before requesting shutdown.
+
 ## 3b. Shared agent instructions
 
 One file in the private data repository, `<data-dir>/global/AGENTS.md`, holds

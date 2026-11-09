@@ -153,6 +153,16 @@ func NewSource(conn domain.Connection, credentials ports.CredentialProvider, cli
 	if now == nil {
 		now = time.Now
 	}
+	httpClient := client
+	if httpClient == nil {
+		httpClient = &http.Client{Timeout: 30 * time.Second}
+	}
+	// connectors.NewHTTP preserves an explicit CheckRedirect; force the
+	// no-redirect policy here so a caller-supplied client cannot forward the
+	// Authorization header to another host.
+	cloned := *httpClient
+	cloned.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	httpClient = &cloned
 	return &Source{
 		connection:  conn,
 		baseURL:     strings.TrimRight(parsed.String(), "/"),
@@ -162,7 +172,7 @@ func NewSource(conn domain.Connection, credentials ports.CredentialProvider, cli
 		environment: environment,
 		stream:      streamName(org, projects, environment),
 		credentials: credentials,
-		http:        connectors.NewHTTP(connectors.HTTPOptions{Client: client}),
+		http:        connectors.NewHTTP(connectors.HTTPOptions{Client: httpClient}),
 		now:         now,
 	}, nil
 }

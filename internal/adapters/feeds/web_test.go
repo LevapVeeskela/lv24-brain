@@ -194,6 +194,39 @@ func (f *fakeSite) servePage(w http.ResponseWriter, r *http.Request) {
 		page.title, page.body)
 }
 
+// serveLargeIndex renders one child sitemap per entry, so the source must
+// paginate children beyond the per-pass chunk.
+func (f *fakeSite) serveLargeIndex(w http.ResponseWriter, r *http.Request) {
+	f.mu.Lock()
+	count := len(f.entries)
+	f.mu.Unlock()
+	children := make([]string, 0, count)
+	for i := 0; i < count; i++ {
+		children = append(children, fmt.Sprintf("/sitemap-child-%d.xml", i))
+	}
+	f.serveIndex(w, r, children...)
+}
+
+// serveChildSitemap renders the single page named by the child index.
+func (f *fakeSite) serveChildSitemap(w http.ResponseWriter, r *http.Request) {
+	var index int
+	_, err := fmt.Sscanf(strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/sitemap-child-"), ".xml"), "%d", &index)
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if index < 0 || index >= len(f.entries) {
+		http.NotFound(w, r)
+		return
+	}
+	entry := f.entries[index]
+	w.Header().Set("Content-Type", "application/xml")
+	fmt.Fprintf(w, `<?xml version="1.0"?><urlset><url><loc>http://%s/page/%d</loc><lastmod>%s</lastmod></url></urlset>`,
+		r.Host, entry.id, entry.lastmod.UTC().Format(time.RFC3339))
+}
+
 // webServer owns the fixture servers used by the web tests.
 type webServer struct {
 	server      *httptest.Server
@@ -226,6 +259,10 @@ func newWebServer(t *testing.T) *webServer {
 			site.serveSitemap(w, r, 1)
 		case r.URL.Path == "/sitemap-index.xml":
 			site.serveIndex(w, r, "/sitemap-a.xml", "/sitemap-b.xml")
+		case r.URL.Path == "/sitemap-index-large.xml":
+			site.serveLargeIndex(w, r)
+		case strings.HasPrefix(r.URL.Path, "/sitemap-child-"):
+			site.serveChildSitemap(w, r)
 		case r.URL.Path == "/sitemap-index-foreign.xml":
 			site.serveIndex(w, r, foreign.URL+"/foreign-sitemap.xml")
 		case r.URL.Path == "/sitemap-foreign.xml":
@@ -394,6 +431,12 @@ func TestWebReadsPages(t *testing.T) {
 	}
 	if first.Ref.ConnectionID != "web-test" || first.Ref.ExternalID == "" {
 		t.Fatalf("ref = %+v", first.Ref)
+	}
+	if !first.CreatedAt.IsZero() {
+		t.Fatalf("sitemap lastmod must not become CreatedAt: %s", first.CreatedAt)
+	}
+	if first.UpdatedAt.IsZero() {
+		t.Fatal("sitemap lastmod should set UpdatedAt")
 	}
 }
 
@@ -643,6 +686,59 @@ func TestWebBodyBounds(t *testing.T) {
 	}
 	if len(batch.Items) != 1 || len(batch.Items[0].Body) != maxBodyBytes {
 		t.Fatalf("body bytes = %d, want %d", len(batch.Items[0].Body), maxBodyBytes)
+	}
+}
+
+// TestWebLargeSitemapIndexChunks asserts that every child of a large
+// sitemap-index is eventually read instead of being silently truncated.
+func TestWebLargeSitemapIndexChunks(t *testing.T) {
+	g := newWebServer(t)
+	g.site.AddMany(maxSitemapChildren + 2)
+	conn := webConnection(g, "/sitemap-index-large.xml")
+	source := webSource(g, conn)
+	checkpoints := map[string]domain.Checkpoint{}
+	seen := map[string]bool{}
+	batches := 0
+	for {
+		batches++
+		batch, err := source.Read(context.Background(), ports.ReadRequest{Connection: conn, Checkpoints: checkpoints})
+		if err != nil {
+			t.Fatalf("Read %d: %v", batches, err)
+		}
+		for _, item := range batch.Items {
+			seen[item.Ref.ExternalID] = true
+		}
+		for _, checkpoint := range batch.Checkpoints {
+			checkpoints[checkpoint.Stream] = checkpoint
+		}
+		if !batch.More {
+			break
+		}
+		if batches > 50 {
+			t.Fatal("More never cleared for a large sitemap-index")
+		}
+	}
+	if len(seen) != maxSitemapChildren+2 {
+		t.Fatalf("unique pages = %d, want %d across %d batches", len(seen), maxSitemapChildren+2, batches)
+	}
+	if batches < 3 {
+		t.Fatalf("expected child pagination across several reads, got %d", batches)
+	}
+}
+
+// TestWebSinceBound asserts that an explicit lower bound skips older pages.
+func TestWebSinceBound(t *testing.T) {
+	g := newWebServer(t)
+	g.site.AddMany(3)
+	conn := webConnection(g, "/sitemap.xml")
+	source := webSource(g, conn)
+	since := webFixtureBase.Add(90 * time.Minute)
+	batch, err := source.Read(context.Background(), ports.ReadRequest{Connection: conn, Since: &since})
+	if err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	if len(batch.Items) != 2 {
+		t.Fatalf("items = %d, want 2 pages at or after the bound", len(batch.Items))
 	}
 }
 

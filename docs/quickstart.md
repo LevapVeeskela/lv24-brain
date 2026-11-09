@@ -342,7 +342,7 @@ These providers are available through `brain connection run`/`brain connector ru
 the legacy snapshot `brain connector run --name` still accepts only
 `github`, `gitlab` and `imap`.
 
-`brain agent` (WP2.1, in development) runs configured connections in the
+`brain agent` (WP2.1/WP2.2, in development) runs configured connections in the
 background with persisted `Schedule` values:
 
 ```sh
@@ -351,10 +351,33 @@ background with persisted `Schedule` values:
 ./bin/brain agent stop --config ~/brain/brain.yaml
 ```
 
-The agent writes only private `agent/` state (runtime/schedule/stop/log files,
-0600 and excluded from git), keeps a parent-PID watchdog, serializes runs of the
-same connection and never logs credentials. The local control API (`brain agent`
-port) is a later work package; `port` is reserved in the runtime file.
+The agent writes only private `agent/` state (runtime/schedule/stop/log/settings
+files, 0600 and excluded from git), keeps a parent-PID watchdog, serializes runs
+of the same connection and never logs credentials. It also serves the
+authenticated local control API on an ephemeral loopback port. The runtime file
+`<data-dir>/agent/runtime.json` contains `{port, token, pid, version}`; it is
+written with owner-only permissions and removed on a clean shutdown. Treat the
+token like a password: never copy it into logs or commit it.
+
+```sh
+# Read the endpoint and token locally (PowerShell: Get-Content ...)
+port=$(jq -r .port ~/brain-data/agent/runtime.json)
+token=$(jq -r .token ~/brain-data/agent/runtime.json)
+curl -s -H "Authorization: Bearer $token" "http://127.0.0.1:$port/v1/health"
+curl -s -H "Authorization: Bearer $token" "http://127.0.0.1:$port/v1/connections"
+```
+
+Endpoints: `GET /v1/health`; `GET|POST /v1/connections`;
+`GET|PATCH|DELETE /v1/connections/{id}`; `POST /v1/connections/{id}/test`;
+`POST /v1/connections/{id}/run` (queues a backed run, returns `jobId`);
+`POST /v1/connections/{id}/credentials/{field}`; `GET /v1/runs`,
+`GET /v1/runs/{id}`, `GET /v1/runs/{id}/log` (SSE); `GET /v1/schedules`,
+`PUT /v1/schedules/{id}`; `GET /v1/projects`; `GET|PUT /v1/settings`;
+`POST /v1/engine/update` (requires `{"confirm":true}`);
+`POST /v1/shutdown`. Requests require exactly one `Authorization: Bearer`
+header, `Host` must be the loopback listener, and any `Origin`/`Referer` is
+rejected (no CORS, no browser access). The API is local-only; server mode has
+its own authenticated HTTP API.
 
 ## 2. Git mode
 

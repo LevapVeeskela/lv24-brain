@@ -60,6 +60,10 @@ type webCursor struct {
 	// to 0 once a sitemap's pages are fully consumed, and the next pass
 	// re-enters through the document validators.
 	URLIndex int `json:"urlIndex"`
+	// ChildOffset is the next child-sitemap index of a large sitemap-index;
+	// children are processed in bounded chunks so no later child is silently
+	// dropped.
+	ChildOffset int `json:"childOffset,omitempty"`
 	// ETag and LastModified are the sitemap document validators, reused for
 	// the conditional re-fetch that starts a pass.
 	ETag         string `json:"etag,omitempty"`
@@ -207,6 +211,7 @@ func (s *WebSource) Read(ctx context.Context, req ports.ReadRequest) (ports.Read
 	}
 	items := make([]domain.Item, 0, min(limit, 32))
 	var checkpoints []domain.Checkpoint
+	pendingMore := false
 	robots := newRobots()
 	pageBudget := pagesPerRead
 	for _, sitemapURL := range s.sitemapURLs {
@@ -239,6 +244,12 @@ func (s *WebSource) Read(ctx context.Context, req ports.ReadRequest) (ports.Read
 		pages := document.pages
 		for index := cursor.URLIndex; index < len(pages); index++ {
 			page := pages[index]
+			if req.Since != nil && page.lastmod != nil && page.lastmod.Before(*req.Since) {
+				// An explicit lower bound excludes older pages even on a
+				// fresh scan.
+				cursor.URLIndex = index + 1
+				continue
+			}
 			if watermark != nil && page.lastmod != nil && !page.lastmod.After(*watermark) {
 				// The sitemap says nothing newer than what was consumed.
 				cursor.URLIndex = index + 1
@@ -267,7 +278,16 @@ func (s *WebSource) Read(ctx context.Context, req ports.ReadRequest) (ports.Read
 			// pending page is resumed by URLIndex and must keep the old
 			// frontier.
 			cursor.URLIndex = 0
-			watermark = maxSeen
+			if document.moreChildren {
+				// A large sitemap-index is processed in bounded chunks.
+				// Later children are pending, so the watermark must not
+				// advance past pages this pass never saw.
+				cursor.ChildOffset = document.nextChildOffset
+				pendingMore = true
+			} else {
+				cursor.ChildOffset = 0
+				watermark = maxSeen
+			}
 		}
 		cursor.Watermark = watermark
 		data, err := json.Marshal(cursor)
@@ -279,7 +299,7 @@ func (s *WebSource) Read(ctx context.Context, req ports.ReadRequest) (ports.Read
 			return ports.ReadBatch{Items: items, Checkpoints: checkpoints, More: true}, nil
 		}
 	}
-	return ports.ReadBatch{Items: items, Checkpoints: checkpoints, More: false}, nil
+	return ports.ReadBatch{Items: items, Checkpoints: checkpoints, More: pendingMore}, nil
 }
 
 // webPage is one resolved sitemap URL with its lastmod.
@@ -302,8 +322,12 @@ type sitemapDocument struct {
 	// skipped: redirect/error/malformed; the cursor is kept as-is.
 	skipped bool
 	// pages in document order, truncated to the page cap.
-	pages      []webPage
-	validators validators
+	pages []webPage
+	// moreChildren is set when a sitemap-index has children beyond this
+	// bounded chunk; nextChildOffset is where the next Read resumes.
+	moreChildren    bool
+	nextChildOffset int
+	validators      validators
 }
 
 // resolve fetches the sitemap document (conditionally when the cursor marks
@@ -312,7 +336,7 @@ type sitemapDocument struct {
 // the run.
 func (s *WebSource) resolve(ctx context.Context, sitemapURL string, cursor webCursor) (sitemapDocument, error) {
 	document := sitemapDocument{validators: validators{etag: cursor.ETag, lastModified: cursor.LastModified}}
-	conditional := cursor.Watermark != nil && cursor.URLIndex == 0
+	conditional := cursor.Watermark != nil && cursor.URLIndex == 0 && cursor.ChildOffset == 0
 	header := plainHeaders()
 	if conditional {
 		header = conditionalHeaders(cursor.ETag, cursor.LastModified)
@@ -349,7 +373,15 @@ func (s *WebSource) resolve(ctx context.Context, sitemapURL string, cursor webCu
 		return sitemapDocument{skipped: true, validators: document.validators}, nil
 	}
 	if kind == sitemapKindIndex {
-		pages, err := s.expandIndex(ctx, entries)
+		start := cursor.ChildOffset
+		if start > len(entries) {
+			start = 0
+		}
+		end := start + maxSitemapChildren
+		if end > len(entries) {
+			end = len(entries)
+		}
+		pages, err := s.expandIndex(ctx, entries[start:end])
 		if err != nil {
 			return sitemapDocument{}, err
 		}
@@ -357,6 +389,8 @@ func (s *WebSource) resolve(ctx context.Context, sitemapURL string, cursor webCu
 			pages = pages[:s.pageLimit]
 		}
 		document.pages = pages
+		document.moreChildren = end < len(entries)
+		document.nextChildOffset = end
 		return document, nil
 	}
 	pages := make([]webPage, 0, len(entries))
@@ -477,7 +511,7 @@ func (s *WebSource) fetchPage(ctx context.Context, page webPage, robots *robots)
 	item.Body = capUTF8(htmlToText(string(result.Body)), maxBodyBytes)
 	item.URL = pageURL
 	if page.lastmod != nil {
-		item.CreatedAt = page.lastmod.UTC()
+		// The sitemap supplies a modification time, not a creation time.
 		item.UpdatedAt = page.lastmod.UTC()
 	}
 	return item, true, nil
@@ -537,6 +571,7 @@ func loadWebCursor(checkpoints map[string]domain.Checkpoint, stream string) (web
 	}
 	if cursor.SitemapHash != strings.TrimPrefix(stream, webStreamPrefix) ||
 		cursor.URLIndex < 0 || cursor.URLIndex > maxSitemapChildren*maxMaxPages ||
+		cursor.ChildOffset < 0 || cursor.ChildOffset > maxSitemapChildOffset ||
 		len(cursor.ETag) > maxURLBytes || len(cursor.LastModified) > maxURLBytes {
 		return cursor, domain.NewValidationError("web.checkpoint", "cursor does not belong to this sitemap")
 	}
