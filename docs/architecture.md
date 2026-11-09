@@ -365,8 +365,8 @@ The Phase 3 `mcp` source (v0.12.0, in development) connects to Model Context
 Protocol servers over stdio or streamable HTTP and maps read-only
 search/list tools to items. It requires an explicit tool allow-list heuristic
 (destructive names are always denied), bounds calls/results, and marks output
-as recent-results-only; stdio commands inherit the agent environment and must
-be trusted.
+as recent-results-only; stdio `command`/`args` are local credentials, never the
+synced catalogue, and inherit the agent environment (run only trusted servers).
 
 `brain connector run --name github|gitlab|imap` selects one adapter. In local or
 git mode it writes Markdown dumps under the data directory (`github/...`,
@@ -396,12 +396,20 @@ status, counts and the sanitized error.
 `BRAIN_SECRET_<NAME>` first and the platform store second: Windows Credential
 Manager, macOS Keychain, or Linux Secret Service. A key such as `github/token`
 maps to `BRAIN_SECRET_GITHUB_TOKEN`. Environment-provided values shadow the OS
-store and cannot be overwritten through the store API.
-`brain secret set|list|remove` manages the OS store; `set` reads the value from
+store and cannot be overwritten through the store API. `brain secret
+set|list|remove` manages the OS store; `set` reads the value from
 stdin and prints only the secret name. Connection credentials use the
 `conn/<id>/<field>` namespace (`brain connection secret set <id> <field>`
 reads the value from stdin); the catalogue `connectors/connections.json`
 stores settings only, never secrets.
+
+OAuth foundation (Phase 3.1): `internal/adapters/sourceoauth` implements the
+RFC 8252 loopback PKCE flow, GitHub device flow, a validated token bundle in
+the secret store, and serialized refresh with rotation persisted before the new
+access token is returned. It is not wired into provider adapters or the CLI yet;
+PATs and provider tokens remain the supported path until the desktop OAuth flow
+is added. GitHub device flow is the preferred public-client path; GitLab uses
+PKCE; Atlassian/Notion stay token-based for MVP.
 
 Raw zone (v0.9.0): in local/git mode the ingestion host stores one
 Markdown file per item at `connectors/<id>/items/<40 hex>.md` (provenance

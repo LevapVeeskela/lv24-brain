@@ -13,6 +13,11 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
+const (
+	maximumExtractedRecords = 2000
+	maximumExtractDepth     = 32
+)
+
 func resultRecords(result *mcp.CallToolResult) ([]any, error) {
 	var value any
 	if result.StructuredContent != nil {
@@ -48,18 +53,27 @@ func resultRecords(result *mcp.CallToolResult) ([]any, error) {
 		return nil, errOversizedResult
 	}
 	var records []any
-	collectRecords(value, &records)
+	collectRecords(value, &records, 0)
 	if len(records) == 0 {
 		return []any{value}, nil
+	}
+	if len(records) > maximumExtractedRecords {
+		records = records[:maximumExtractedRecords]
 	}
 	return records, nil
 }
 
-func collectRecords(value any, records *[]any) {
+func collectRecords(value any, records *[]any, depth int) {
+	if depth > maximumExtractDepth || len(*records) >= maximumExtractedRecords {
+		return
+	}
 	switch current := value.(type) {
 	case []any:
 		for _, entry := range current {
-			collectRecords(entry, records)
+			collectRecords(entry, records, depth+1)
+			if len(*records) >= maximumExtractedRecords {
+				return
+			}
 		}
 	case map[string]any:
 		if looksLikeRecord(current) {
@@ -72,25 +86,45 @@ func collectRecords(value any, records *[]any) {
 		}
 		sort.Strings(keys)
 		for _, key := range keys {
-			collectRecords(current[key], records)
+			collectRecords(current[key], records, depth+1)
+			if len(*records) >= maximumExtractedRecords {
+				return
+			}
 		}
 	}
 }
 
 func looksLikeRecord(record map[string]any) bool {
-	for _, key := range []string{"title", "name", "subject", "id", "text", "content", "description", "body", "summary"} {
+	hasID := false
+	for _, key := range []string{"id", "uuid", "key", "number", "slug"} {
 		if value, ok := lookup(record, key); ok {
 			switch entry := value.(type) {
 			case string:
 				if strings.TrimSpace(entry) != "" {
-					return true
+					hasID = true
 				}
 			case float64, json.Number:
-				if key == "id" {
-					return true
-				}
+				hasID = true
 			}
 		}
+	}
+	for _, key := range []string{"title", "name", "subject", "text", "content", "description", "body", "summary"} {
+		if value, ok := lookup(record, key); ok {
+			if entry, ok := value.(string); ok && strings.TrimSpace(entry) != "" {
+				return true
+			}
+		}
+	}
+	if hasID {
+		// An id plus nested containers is usually an envelope such as
+		// {"id":"request-1","results":[...]}; recurse into it.
+		for _, value := range record {
+			switch value.(type) {
+			case []any, map[string]any:
+				return false
+			}
+		}
+		return true
 	}
 	return false
 }

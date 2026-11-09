@@ -303,14 +303,15 @@ brain discover --root <workspace> --apply   # register the new ones
   web source never follows redirects or leaves the sitemap's host/port unless
   `allowhosts` permits it.
 - The Phase 3 `mcp` source (v0.12.0, local/git only) connects to MCP servers:
-  `transport=stdio` with `command` and newline-separated `args`, or
-  `transport=http` with an https `url` (loopback http for tests) and an
-  optional `token` secret. Optional `tools` is an exact read-tool allow-list;
-  without it the source selects names containing search/list/recent/query/find
-  and always denies create/update/delete/write/send/execute/run/call/set.
-  `maxitems` (default 100, max 500), `query` (default `*`) and `timeout`
-  (default 30s, max 5m) are bounded. Results are marked recent-only, and stdio
-  commands inherit the agent environment: run only trusted servers.
+  `transport=stdio` with `command` and newline-separated `args` stored as local
+  credentials (never in the synced catalogue), or `transport=http` with an
+  https `url` (loopback http for tests) and an optional `token` secret.
+  Optional `tools` is an exact read-tool allow-list; without it the source
+  selects names containing search/list/recent/query/find and always denies the
+  destructive verbs or a destructive annotation. `maxitems` (default 100, max
+  500), `query` (default `*`) and `timeout` (default 30s, max 5m) are bounded.
+  Results are marked recent-only, and stdio commands inherit the agent
+  environment: run only trusted servers.
 - `brain graphs` runs `graphify` and `codegraph` only where their indexes
   already exist (`--init` creates missing ones), skips missing tools, and logs
   tool output to `<user cache dir>/lv24-brain/graphs.log`, outside the data

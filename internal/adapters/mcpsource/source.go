@@ -17,6 +17,7 @@ import (
 	"net/url"
 	"os/exec"
 	"runtime"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -58,8 +59,8 @@ func Descriptor() domain.SourceDescriptor {
 		PersonalData:   true,
 		ConfigFields: []domain.ConfigField{
 			{Key: "transport", Label: "Transport", Required: true, Help: "stdio or http."},
-			{Key: "command", Label: "Command", Help: "Required for stdio. Executable path or PATH name; invoked without a shell."},
-			{Key: "args", Label: "Arguments", Help: "Optional newline-separated argv; each line is one literal argument, with no shell interpolation."},
+			{Key: "command", Label: "Command", Secret: true, Help: "Required for stdio. Stored in the local credential store, never in the synced catalogue; executable path or PATH name, invoked without a shell."},
+			{Key: "args", Label: "Arguments", Secret: true, Help: "Optional for stdio, stored in the local credential store. Newline-separated argv; each line is one literal argument, with no shell interpolation."},
 			{Key: "url", Label: "Streamable HTTP URL", Help: "Required for http. HTTPS, or HTTP to loopback only; URL credentials, query and fragment are forbidden."},
 			{Key: "token", Label: "Bearer token", Secret: true, Help: "Optional HTTP Bearer token. Never sent to stdio servers."},
 			{Key: "tools", Label: "Read tools", Help: "Optional exact comma/newline-separated names (letters, digits, '_', '-', '.'). Without this, names matching search/list/recent/query/find are selected, except names containing destructive verbs (create/update/delete/remove/write/send/execute/run/call/set/add/insert/upsert/upload/post/put/patch/archive/purge/destroy/drop/truncate/approve/merge/assign/move/rename/edit/save/commit/push/reset/revoke/grant/publish/deploy/invite/share/cancel/close/reopen/disable/enable/lock/unlock/mark/mute/kick/ban/track/untrack) or a destructive annotation."},
@@ -90,8 +91,6 @@ type Source struct {
 
 type settings struct {
 	transport string
-	command   string
-	args      []string
 	url       string
 	tools     []string
 	query     string
@@ -117,11 +116,12 @@ func NewSource(conn domain.Connection, credentials ports.CredentialProvider, now
 	if now == nil {
 		now = time.Now
 	}
-	identity := parsed.transport + "\x00"
+	identity := parsed.transport
 	if parsed.transport == "http" {
-		identity += parsed.url
+		identity += "\x00" + parsed.url
 	} else {
-		identity += parsed.command + "\x00" + strings.Join(parsed.args, "\x00")
+		// The command is local-only; connection identity is the stable part.
+		identity += "\x00" + conn.ID
 	}
 	return &Source{
 		connection: conn, credentials: credentials, now: now,
@@ -180,6 +180,9 @@ func (s *Source) Read(ctx context.Context, req ports.ReadRequest) (ports.ReadBat
 	items := make([]domain.Item, 0)
 	seen := make(map[string]struct{})
 	var newest time.Time
+	now := s.now().UTC()
+	futureBound := now.Add(pageOverlap)
+	successes := 0
 	for _, tool := range selected {
 		if err := ctx.Err(); err != nil {
 			return ports.ReadBatch{}, err
@@ -193,19 +196,37 @@ func (s *Source) Read(ctx context.Context, req ports.ReadRequest) (ports.ReadBat
 		result, callErr := session.CallTool(callCtx, &mcp.CallToolParams{Name: tool.Name, Arguments: args})
 		cancel()
 		if callErr != nil || result == nil || result.IsError {
-			return ports.ReadBatch{}, errors.New("mcp read: tool call failed")
+			if ctx.Err() != nil {
+				return ports.ReadBatch{}, ctx.Err()
+			}
+			// One broken tool must not block the others; report it and
+			// continue. All tools failing is still an error.
+			skipped = append(skipped, tool.Name)
+			continue
 		}
+		successes++
 		records, err := resultRecords(result)
 		if err != nil {
 			return ports.ReadBatch{}, errors.New("mcp read: tool result could not be normalized")
 		}
-		if len(records) > s.settings.maxItems {
-			records = records[:s.settings.maxItems]
-		}
+		toolItems := make([]domain.Item, 0, len(records))
 		for _, record := range records {
-			item := s.item(req.Connection.ID, tool.Name, record)
-			if item.UpdatedAt.After(newest) {
-				newest = item.UpdatedAt.UTC()
+			toolItems = append(toolItems, s.item(req.Connection.ID, tool.Name, record))
+		}
+		// Keep the newest records when a tool returns more than maxitems;
+		// this source is recent-results-only by contract. Otherwise preserve
+		// the server's deterministic order.
+		if len(toolItems) > s.settings.maxItems {
+			sort.SliceStable(toolItems, func(i, j int) bool {
+				return toolItems[i].UpdatedAt.After(toolItems[j].UpdatedAt)
+			})
+			toolItems = toolItems[:s.settings.maxItems]
+		}
+		for _, item := range toolItems {
+			if item.UpdatedAt.After(futureBound) {
+				// A hostile or broken server must not poison the watermark
+				// with a far-future timestamp.
+				continue
 			}
 			if olderThanBounds(item.UpdatedAt, cur.Watermark, req.Since) {
 				continue
@@ -214,13 +235,23 @@ func (s *Source) Read(ctx context.Context, req ports.ReadRequest) (ports.ReadBat
 				continue
 			}
 			seen[item.Ref.ExternalID] = struct{}{}
+			if item.UpdatedAt.After(newest) {
+				newest = item.UpdatedAt.UTC()
+			}
 			items = append(items, item)
 		}
+	}
+	if len(selected) > 0 && successes == 0 {
+		s.recordSkipped(skipped)
+		return ports.ReadBatch{}, errors.New("mcp read: all selected tools failed")
 	}
 	s.recordSkipped(skipped)
 
 	if cur.LastScan > len(items) {
-		return ports.ReadBatch{}, domain.NewValidationError("mcp.checkpoint", "lastScan position is invalid")
+		// The server returned fewer records between batches. Restart the
+		// pagination rather than failing forever; already stored items are
+		// deduplicated by hash upstream.
+		cur.LastScan = 0
 	}
 	limit := req.Limit
 	if limit <= 0 || limit > maximumReadItems {
@@ -237,10 +268,15 @@ func (s *Source) Read(ctx context.Context, req ports.ReadRequest) (ports.ReadBat
 		cur.LastScan = end
 	} else {
 		cur.LastScan = 0
-		if newest.IsZero() {
-			newest = s.now().UTC()
+		if !newest.IsZero() {
+			// Advance monotonically and never beyond the observed present.
+			if newest.After(now) {
+				newest = now
+			}
+			if cur.Watermark == nil || newest.After(*cur.Watermark) {
+				cur.Watermark = timePointer(newest)
+			}
 		}
-		cur.Watermark = timePointer(newest)
 	}
 	data, err := json.Marshal(cur)
 	if err != nil {
@@ -318,13 +354,17 @@ func (s *Source) connect(ctx context.Context) (*mcp.ClientSession, func(), error
 			cleanup = func() {}
 		}
 	} else if s.settings.transport == "stdio" {
-		cmd := exec.CommandContext(ctx, s.settings.command, s.settings.args...)
+		command, args, err := s.stdioConfig(ctx)
+		if err != nil {
+			return nil, func() {}, err
+		}
+		cmd := exec.CommandContext(ctx, command, args...)
 		transport = &mcp.CommandTransport{Command: cmd}
 	} else {
 		httpClient := newHTTPClient(token)
 		transport = &mcp.StreamableClientTransport{
 			Endpoint: s.settings.url, HTTPClient: httpClient,
-			DisableStandaloneSSE: true, MaxRetries: 0,
+			DisableStandaloneSSE: true, MaxRetries: -1,
 		}
 		cleanup = httpClient.CloseIdleConnections
 	}
@@ -355,6 +395,47 @@ func (s *Source) httpToken(ctx context.Context) (string, error) {
 		return "", domain.NewValidationError("mcp.credentials", "token contains invalid characters")
 	}
 	return token, nil
+}
+
+// stdioConfig loads the executable and argv from the local credential store.
+// Keeping them out of Connection.Settings prevents a synced (shared) catalogue
+// from introducing an executable command on another machine.
+func (s *Source) stdioConfig(ctx context.Context) (string, []string, error) {
+	if s.credentials == nil {
+		return "", nil, errors.New("mcp stdio: credential store is unavailable")
+	}
+	command, err := s.credentials.Get(ctx, s.connection.ID, "command")
+	if errors.Is(err, domain.ErrNotFound) {
+		return "", nil, domain.NewValidationError("mcp.command", "is not configured in the local credential store")
+	}
+	if err != nil {
+		return "", nil, errors.New("mcp stdio: command could not be retrieved")
+	}
+	command = strings.TrimSpace(command)
+	if err := validateCommand(command); err != nil {
+		return "", nil, err
+	}
+	argsRaw, err := s.credentials.Get(ctx, s.connection.ID, "args")
+	if errors.Is(err, domain.ErrNotFound) {
+		argsRaw = ""
+	} else if err != nil {
+		return "", nil, errors.New("mcp stdio: arguments could not be retrieved")
+	}
+	if len(argsRaw) > 64<<10 || strings.ContainsRune(argsRaw, 0) {
+		return "", nil, domain.NewValidationError("mcp.args", "must be at most 65536 bytes and contain no NUL")
+	}
+	argsRaw = strings.ReplaceAll(strings.ReplaceAll(argsRaw, "\r\n", "\n"), "\r", "\n")
+	argsRaw = strings.TrimRight(argsRaw, "\n")
+	var args []string
+	if argsRaw != "" {
+		for _, arg := range strings.Split(argsRaw, "\n") {
+			if len(arg) > 4096 || len(args) >= 64 {
+				return "", nil, domain.NewValidationError("mcp.args", "at most 64 arguments of 4096 bytes each are allowed")
+			}
+			args = append(args, arg)
+		}
+	}
+	return command, args, nil
 }
 
 func (s *Source) listTools(ctx context.Context, session *mcp.ClientSession) ([]*mcp.Tool, error) {
@@ -446,25 +527,11 @@ func parseSettings(conn domain.Connection) (settings, error) {
 	}
 	switch out.transport {
 	case "stdio":
-		out.command = strings.TrimSpace(conn.Settings["command"])
-		if err := validateCommand(out.command); err != nil {
-			return settings{}, err
+		if strings.TrimSpace(conn.Settings["command"]) != "" || strings.TrimSpace(conn.Settings["args"]) != "" {
+			return settings{}, domain.NewValidationError("mcp.command", "must be stored in the credential store, not connection settings")
 		}
 		if strings.TrimSpace(conn.Settings["url"]) != "" {
 			return settings{}, domain.NewValidationError("mcp.url", "must be empty for stdio")
-		}
-		argsRaw := conn.Settings["args"]
-		if len(argsRaw) > 64<<10 || strings.ContainsRune(argsRaw, 0) {
-			return settings{}, domain.NewValidationError("mcp.args", "must be at most 65536 bytes and contain no NUL")
-		}
-		if argsRaw != "" {
-			argsRaw = strings.ReplaceAll(strings.ReplaceAll(argsRaw, "\r\n", "\n"), "\r", "\n")
-			for _, arg := range strings.Split(argsRaw, "\n") {
-				if len(arg) > 4096 || len(out.args) >= 64 {
-					return settings{}, domain.NewValidationError("mcp.args", "at most 64 arguments of 4096 bytes each are allowed")
-				}
-				out.args = append(out.args, arg)
-			}
 		}
 	case "http":
 		rawURL := strings.TrimSpace(conn.Settings["url"])
@@ -474,7 +541,7 @@ func parseSettings(conn domain.Connection) (settings, error) {
 		}
 		out.url = parsed.String()
 		if strings.TrimSpace(conn.Settings["command"]) != "" || strings.TrimSpace(conn.Settings["args"]) != "" {
-			return settings{}, domain.NewValidationError("mcp.command", "command and args must be empty for http")
+			return settings{}, domain.NewValidationError("mcp.command", "must be stored in the credential store, not connection settings")
 		}
 	default:
 		return settings{}, domain.NewValidationError("mcp.transport", "must be stdio or http")
@@ -631,13 +698,23 @@ func deriveArguments(schema any, query string, maxItems int) (map[string]any, bo
 		if !ok {
 			continue
 		}
+		if sensitiveInput(name) || deniedTool(name) {
+			if required[name] {
+				return nil, false
+			}
+			continue
+		}
 		if value, ok := property["default"]; ok {
-			args[name] = value
+			// Only send defaults for required fields; optional flags such as
+			// "confirm" or "method" must not be injected by a hostile schema.
+			if required[name] {
+				args[name] = value
+			}
 			continue
 		}
 		if required[name] {
 			typeName, _ := property["type"].(string)
-			if typeName != "string" || sensitiveInput(name) {
+			if typeName != "string" || !searchFieldName(name) {
 				return nil, false
 			}
 			args[name] = query
@@ -650,6 +727,19 @@ func deriveArguments(schema any, query string, maxItems int) (map[string]any, bo
 	}
 	_ = maxItems // Output caps are enforced locally; tool schemas may define incompatible limits.
 	return args, true
+}
+
+func searchFieldName(name string) bool {
+	name = normalizedField(name)
+	if name == "q" || name == "query" {
+		return true
+	}
+	for _, marker := range []string{"search", "keyword", "term", "text", "filter", "query", "name", "title"} {
+		if strings.Contains(name, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 func sensitiveInput(name string) bool {
@@ -682,7 +772,22 @@ func (s *Source) item(connectionID, toolName string, record any) domain.Item {
 		body = capUTF8(body, domain.MaxItemBodyBytes)
 	}
 	hash := sha256.Sum256([]byte(canonical))
-	externalID := "mcp/" + streamName(s.identity)[4:] + "/" + toolName + "/" + hex.EncodeToString(hash[:])
+	identityPart := ""
+	if id := firstString(values, "id", "uuid", "key", "number", "slug"); id != "" {
+		id = strings.Map(func(r rune) rune {
+			if r < ' ' || r == 127 {
+				return -1
+			}
+			return r
+		}, id)
+		if id != "" {
+			identityPart = "id/" + url.PathEscape(capUTF8(id, 512))
+		}
+	}
+	if identityPart == "" {
+		identityPart = "sha256/" + hex.EncodeToString(hash[:])
+	}
+	externalID := "mcp/" + streamName(s.identity)[4:] + "/" + toolName + "/" + identityPart
 	item := domain.Item{
 		Ref:  domain.ItemRef{ConnectionID: connectionID, ExternalID: externalID},
 		Kind: domain.ItemDocument, Title: capUTF8(name, 512), Body: body,

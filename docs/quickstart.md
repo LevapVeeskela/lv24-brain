@@ -344,6 +344,15 @@ printf '%s\n' '<read-only-password>' | ./bin/brain connection secret set app-sch
 printf '%s\n' '<mcp-bearer-token>' | ./bin/brain connection secret set mcp-docs token \
   --config ~/brain/brain.yaml
 ./bin/brain connection run mcp-docs --limit 50 --config ~/brain/brain.yaml
+
+# Or a local stdio server: command/args are local secrets, never synced
+./bin/brain connection add mcp --id mcp-local --setting transport=stdio \
+  --config ~/brain/brain.yaml
+printf '%s\n' '/usr/local/bin/mcp-server' | ./bin/brain connection secret set mcp-local command \
+  --config ~/brain/brain.yaml
+printf '%s\n' '--root=/notes' | ./bin/brain connection secret set mcp-local args \
+  --config ~/brain/brain.yaml
+./bin/brain connection run mcp-local --config ~/brain/brain.yaml
 ```
 
 These providers are available through `brain connection run`/`brain connector run --all`;

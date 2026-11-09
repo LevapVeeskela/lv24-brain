@@ -176,8 +176,8 @@ Known gaps, stated plainly:
   filters by extracted timestamps. Only tools matching the read allow-list are
   called, destructive names are denied unconditionally, and required tool
   inputs the source cannot safely synthesize cause that tool to be skipped.
-  stdio servers inherit the agent process environment; run only trusted
-  commands.
+  stdio commands and args are local credentials (never the synced catalogue),
+  inherit the agent process environment, and must be trusted.
 - Raw-zone items are excluded from default search; opt in with
   `brain search <query> --kind item` (legacy dumps: `--dumps` / `--kind dump`).
 - Providers do not infer deletes: a missing item is not a tombstone unless

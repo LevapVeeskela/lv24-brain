@@ -40,18 +40,15 @@ func TestDescriptorAndSettingsValidation(t *testing.T) {
 		t.Fatal("token field must be secret")
 	}
 
-	valid := stdioConnection(map[string]string{"command": "node", "args": "one\ntwo", "tools": "search_docs,find_docs", "timeout": "5m", "maxitems": "500"})
+	valid := stdioConnection(map[string]string{"tools": "search_docs,find_docs", "timeout": "5m", "maxitems": "500"})
 	if _, err := NewSource(valid, nil, nil); err != nil {
 		t.Fatalf("valid stdio settings: %v", err)
 	}
 	for name, mutate := range map[string]func(domain.Connection){
-		"missing transport": func(c domain.Connection) { delete(c.Settings, "transport") },
-		"unknown transport": func(c domain.Connection) { c.Settings["transport"] = "socket" },
-		"missing command":   func(c domain.Connection) { c.Settings["command"] = "" },
-		"relative path":     func(c domain.Connection) { c.Settings["command"] = "./server" },
-		"command newline":   func(c domain.Connection) { c.Settings["command"] = "node\nevil" },
-		"args nul":          func(c domain.Connection) { c.Settings["args"] = "a\x00b" },
-		"too many args":     func(c domain.Connection) { c.Settings["args"] = strings.Repeat("x\n", 65) },
+		"missing transport":   func(c domain.Connection) { delete(c.Settings, "transport") },
+		"unknown transport":   func(c domain.Connection) { c.Settings["transport"] = "socket" },
+		"command in settings": func(c domain.Connection) { c.Settings["command"] = "node" },
+		"args in settings":    func(c domain.Connection) { c.Settings["args"] = "one" },
 		"too many tools": func(c domain.Connection) {
 			names := make([]string, maximumTools+1)
 			for i := range names {
@@ -127,8 +124,11 @@ func TestToolSelectionAndSchemaArguments(t *testing.T) {
 	}
 	schema["required"] = []any{"q"}
 	args, ok := deriveArguments(schema, "term", 100)
-	if !ok || args["q"] != "term" || args["limit"] != float64(4) {
+	if !ok || args["q"] != "term" {
 		t.Fatalf("derived args = %#v, %v", args, ok)
+	}
+	if _, exists := args["limit"]; exists {
+		t.Fatalf("optional default was injected: %#v", args)
 	}
 	if _, ok := deriveArguments(objectSchema(map[string]any{"api_token": map[string]any{"type": "string"}}, "api_token"), "*", 100); ok {
 		t.Fatal("secret-like required string was synthesized from the query")
@@ -206,11 +206,14 @@ func TestReadFiltersExtractsAndPaginates(t *testing.T) {
 	if item.URL != "https://example.org/one" || item.Author != "Alice" || !item.CreatedAt.Equal(base) || !item.UpdatedAt.Equal(base) {
 		t.Fatalf("item metadata mismatch: %+v", item)
 	}
-	if strings.Contains(item.Ref.ExternalID, "one") || !strings.HasPrefix(item.Ref.ExternalID, "mcp/") {
-		t.Fatalf("external ID should be hashed and namespaced: %q", item.Ref.ExternalID)
+	if !strings.Contains(item.Ref.ExternalID, "/one") || !strings.HasPrefix(item.Ref.ExternalID, "mcp/") {
+		t.Fatalf("external ID should use the stable provider id and be namespaced: %q", item.Ref.ExternalID)
 	}
-	if gotArgs["q"] != "*" || gotArgs["page"] != float64(2) {
+	if gotArgs["q"] != "*" {
 		t.Fatalf("schema args = %#v", gotArgs)
+	}
+	if _, ok := gotArgs["page"]; ok {
+		t.Fatalf("optional schema default was injected: %#v", gotArgs)
 	}
 	if got := source.SkippedTools(); !reflect.DeepEqual(got, []string{"search_and_delete", "find_by_number"}) {
 		t.Fatalf("skipped tools = %v", got)
@@ -373,12 +376,8 @@ func TestStdioCommandTransport(t *testing.T) {
 		t.Skip("stdio test helper process is skipped on Windows")
 	}
 	t.Setenv("LV24_MCP_STDIO_HELPER", "1")
-	conn := stdioConnection(map[string]string{
-		"command": os.Args[0],
-		"args":    "-test.run=^TestMCPStdioHelper$",
-		"tools":   "stdio_search",
-	})
-	credentials := &countingCredentials{}
+	conn := stdioConnection(map[string]string{"tools": "stdio_search"})
+	credentials := stdioCredentials{command: os.Args[0], args: "-test.run=^TestMCPStdioHelper$"}
 	source, err := NewSource(conn, credentials, nil)
 	if err != nil {
 		t.Fatalf("NewSource: %v", err)
@@ -389,9 +388,6 @@ func TestStdioCommandTransport(t *testing.T) {
 	}
 	if len(batch.Items) != 1 || batch.Items[0].Title != "stdio item" {
 		t.Fatalf("stdio items = %+v", batch.Items)
-	}
-	if credentials.calls != 0 {
-		t.Fatalf("stdio read credential store %d times", credentials.calls)
 	}
 }
 
@@ -543,7 +539,7 @@ func testMCPServer(t *testing.T, build func(*mcp.Server), wrap func(http.Handler
 }
 
 func stdioConnection(extra map[string]string) domain.Connection {
-	settings := map[string]string{"transport": "stdio", "command": "fake-server"}
+	settings := map[string]string{"transport": "stdio"}
 	for key, value := range extra {
 		settings[key] = value
 	}
@@ -591,5 +587,122 @@ func TestDenyListAndToolNameValidation(t *testing.T) {
 	}
 	if destructiveTool(&mcp.Tool{Name: "search_pages"}) {
 		t.Fatal("plain read tool was denied")
+	}
+}
+
+func TestStdioCommandComesFromCredentials(t *testing.T) {
+	cases := []struct {
+		name    string
+		command string
+		args    string
+		wantErr bool
+	}{
+		{"valid", "/usr/local/bin/server", "--root\n/notes", false},
+		{"missing", "", "", true},
+		{"relative path", "./server", "", true},
+		{"newline", "/usr/bin/a\nb", "", true},
+		{"args nul", "/usr/bin/server", "a\x00b", true},
+		{"too many args", "/usr/bin/server", strings.Repeat("x\n", 65), true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			conn := stdioConnection(nil)
+			source, err := NewSource(conn, stdioCredentials{command: tc.command, args: tc.args}, nil)
+			if err != nil {
+				t.Fatalf("NewSource: %v", err)
+			}
+			command, args, err := source.stdioConfig(context.Background())
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("stdioConfig = %q, %q; want error", command, args)
+				}
+				return
+			}
+			if err != nil || command != tc.command || len(args) != 2 || args[0] != "--root" || args[1] != "/notes" {
+				t.Fatalf("stdioConfig = %q, %q, %v", command, args, err)
+			}
+		})
+	}
+}
+
+type stdioCredentials struct{ command, args string }
+
+func (c stdioCredentials) Get(_ context.Context, _ string, field string) (string, error) {
+	switch field {
+	case "command":
+		if c.command == "" {
+			return "", domain.ErrNotFound
+		}
+		return c.command, nil
+	case "args":
+		return c.args, nil
+	default:
+		return "", domain.ErrNotFound
+	}
+}
+
+func TestWatermarkDoesNotAdvanceOnEmptyOrFutureScans(t *testing.T) {
+	base := time.Date(2026, 11, 9, 8, 0, 0, 0, time.UTC)
+	calls := 0
+	source := mustMemorySource(t, stdioConnection(nil), func(server *mcp.Server) {
+		addServerTool(server, "list_records", objectSchema(nil), func(context.Context, *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+			calls++
+			if calls == 1 {
+				return &mcp.CallToolResult{StructuredContent: map[string]any{"records": []any{}}}, nil
+			}
+			return &mcp.CallToolResult{StructuredContent: map[string]any{"records": []any{
+				map[string]any{"id": "future", "title": "Future", "updated_at": base.Add(48 * time.Hour).Format(time.RFC3339)},
+			}}}, nil
+		})
+	}, func() time.Time { return base })
+	first, err := source.Read(context.Background(), ports.ReadRequest{Connection: stdioConnection(nil)})
+	if err != nil {
+		t.Fatalf("first Read: %v", err)
+	}
+	checkpoints := map[string]domain.Checkpoint{}
+	for _, checkpoint := range first.Checkpoints {
+		checkpoints[checkpoint.Stream] = checkpoint
+	}
+	var cur cursor
+	if err := json.Unmarshal(first.Checkpoints[0].Data, &cur); err != nil {
+		t.Fatal(err)
+	}
+	if cur.Watermark != nil {
+		t.Fatalf("empty scan advanced the watermark: %s", cur.Watermark)
+	}
+	second, err := source.Read(context.Background(), ports.ReadRequest{Connection: stdioConnection(nil), Checkpoints: checkpoints})
+	if err != nil {
+		t.Fatalf("second Read: %v", err)
+	}
+	if len(second.Items) != 0 {
+		t.Fatalf("future record was emitted: %+v", second.Items)
+	}
+	if err := json.Unmarshal(second.Checkpoints[0].Data, &cur); err != nil {
+		t.Fatal(err)
+	}
+	if cur.Watermark != nil {
+		t.Fatalf("future record advanced the watermark: %s", cur.Watermark)
+	}
+}
+
+func TestOneFailingToolDoesNotAbortTheRead(t *testing.T) {
+	base := time.Date(2026, 11, 9, 12, 0, 0, 0, time.UTC)
+	source := mustMemorySource(t, stdioConnection(nil), func(server *mcp.Server) {
+		addServerTool(server, "list_broken", objectSchema(nil), func(context.Context, *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+			return &mcp.CallToolResult{IsError: true, Content: []mcp.Content{&mcp.TextContent{Text: "boom"}}}, nil
+		})
+		addServerTool(server, "list_good", objectSchema(nil), func(context.Context, *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+			return &mcp.CallToolResult{StructuredContent: []any{map[string]any{"id": "good", "title": "Good", "updated_at": base.Format(time.RFC3339)}}}, nil
+		})
+	}, func() time.Time { return base.Add(time.Hour) })
+	batch, err := source.Read(context.Background(), ports.ReadRequest{Connection: stdioConnection(nil)})
+	if err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	if len(batch.Items) != 1 || batch.Items[0].Title != "Good" {
+		t.Fatalf("items = %+v", batch.Items)
+	}
+	if got := source.SkippedTools(); !reflect.DeepEqual(got, []string{"list_broken"}) {
+		t.Fatalf("skipped tools = %v", got)
 	}
 }
