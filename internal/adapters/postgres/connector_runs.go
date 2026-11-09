@@ -2,6 +2,7 @@ package postgres
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
@@ -11,7 +12,7 @@ import (
 	"github.com/levapveeskela/lv24-brain/internal/domain"
 )
 
-const connectorRunColumns = `id, source, started_at, finished_at, status, counts, error_message, revision`
+const connectorRunColumns = `id, source, started_at, finished_at, status, counts, error_message, revision, connection_id, stats`
 
 // ConnectorRunRecord is a connector run plus its current server revision.
 type ConnectorRunRecord struct {
@@ -62,6 +63,10 @@ func (s *Store) CreateConnectorRun(ctx context.Context, run domain.ConnectorRun)
 	if err != nil {
 		return ConnectorRunRecord{}, domain.SyncRevision{}, err
 	}
+	stats, err := marshalRunStats(run.Stats)
+	if err != nil {
+		return ConnectorRunRecord{}, domain.SyncRevision{}, err
+	}
 	record := ConnectorRunRecord{ConnectorRun: run}
 	var revision domain.SyncRevision
 
@@ -74,9 +79,10 @@ func (s *Store) CreateConnectorRun(ctx context.Context, run domain.ConnectorRun)
 		if _, err := tx.Exec(
 			ctx,
 			`INSERT INTO connector_runs
-			 (id, source, started_at, finished_at, status, counts, error_message, revision)
-			 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+			 (id, source, started_at, finished_at, status, counts, error_message, revision, connection_id, stats)
+			 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NULLIF($9, ''), $10)`,
 			run.ID, run.Source, run.StartedAt, run.FinishedAt, string(run.Status), counts, run.Error, revisionID,
+			run.ConnectionID, stats,
 		); err != nil {
 			return mapPgError("create connector run", err)
 		}
@@ -99,6 +105,12 @@ func (s *Store) CreateConnectorRun(ctx context.Context, run domain.ConnectorRun)
 // FinishConnectorRun records the final status, counts and error of a run.
 // expected is the caller's last seen revision; zero skips the optimistic check.
 func (s *Store) FinishConnectorRun(ctx context.Context, id string, status domain.ConnectorStatus, counts map[string]int, errorMessage string, expected int64) (ConnectorRunRecord, domain.SyncRevision, error) {
+	return s.FinishConnectorRunStats(ctx, id, status, counts, nil, errorMessage, expected)
+}
+
+// FinishConnectorRunStats is FinishConnectorRun for item-level runs: a
+// non-nil stats replaces the stored RunStats, nil keeps them unchanged.
+func (s *Store) FinishConnectorRunStats(ctx context.Context, id string, status domain.ConnectorStatus, counts map[string]int, stats *domain.RunStats, errorMessage string, expected int64) (ConnectorRunRecord, domain.SyncRevision, error) {
 	if strings.TrimSpace(id) == "" {
 		return ConnectorRunRecord{}, domain.SyncRevision{}, domain.NewValidationError("connectorRun.id", "is required")
 	}
@@ -109,6 +121,15 @@ func (s *Store) FinishConnectorRun(ctx context.Context, id string, status domain
 		counts = map[string]int{}
 	}
 	encodedCounts, err := marshalJSON(counts)
+	if err != nil {
+		return ConnectorRunRecord{}, domain.SyncRevision{}, err
+	}
+	if stats != nil {
+		if err := stats.Validate(); err != nil {
+			return ConnectorRunRecord{}, domain.SyncRevision{}, err
+		}
+	}
+	encodedStats, err := marshalRunStats(stats)
 	if err != nil {
 		return ConnectorRunRecord{}, domain.SyncRevision{}, err
 	}
@@ -126,9 +147,10 @@ func (s *Store) FinishConnectorRun(ctx context.Context, id string, status domain
 		tag, err := tx.Exec(
 			ctx,
 			`UPDATE connector_runs
-			 SET finished_at = $1, status = $2, counts = $3, error_message = $4, revision = $5
+			 SET finished_at = $1, status = $2, counts = $3, error_message = $4, revision = $5,
+			     stats = coalesce($8::jsonb, stats)
 			 WHERE id = $6 AND ($7 = 0 OR revision = $7)`,
-			at, string(status), encodedCounts, errorMessage, revisionID, id, expected,
+			at, string(status), encodedCounts, errorMessage, revisionID, id, expected, encodedStats,
 		)
 		if err != nil {
 			return mapPgError("finish connector run", err)
@@ -234,6 +256,18 @@ func (s *Store) DeleteConnectorRun(ctx context.Context, id string, expected int6
 	return revision, nil
 }
 
+// marshalRunStats encodes stats as jsonb, or SQL NULL when stats is nil.
+func marshalRunStats(stats *domain.RunStats) (any, error) {
+	if stats == nil {
+		return nil, nil
+	}
+	raw, err := json.Marshal(stats)
+	if err != nil {
+		return nil, fmt.Errorf("encode connector run stats: %w", err)
+	}
+	return raw, nil
+}
+
 func getConnectorRun(ctx context.Context, q dbQuerier, id string) (ConnectorRunRecord, error) {
 	record, err := scanConnectorRun(q.QueryRow(ctx, `SELECT `+connectorRunColumns+` FROM connector_runs WHERE id = $1`, id))
 	if err != nil {
@@ -246,12 +280,23 @@ func scanConnectorRun(row rowScanner) (ConnectorRunRecord, error) {
 	var record ConnectorRunRecord
 	var status string
 	var finishedAt *time.Time
-	var counts []byte
+	var counts, stats []byte
+	var connectionID *string
 	if err := row.Scan(
 		&record.ID, &record.Source, &record.StartedAt, &finishedAt, &status,
-		&counts, &record.Error, &record.Revision,
+		&counts, &record.Error, &record.Revision, &connectionID, &stats,
 	); err != nil {
 		return ConnectorRunRecord{}, err
+	}
+	if connectionID != nil {
+		record.ConnectionID = *connectionID
+	}
+	if len(stats) > 0 && string(stats) != "null" {
+		var decoded domain.RunStats
+		if err := json.Unmarshal(stats, &decoded); err != nil {
+			return ConnectorRunRecord{}, fmt.Errorf("decode connector run stats: %w", err)
+		}
+		record.Stats = &decoded
 	}
 	record.Status = domain.ConnectorStatus(status)
 	decodedCounts, err := unmarshalJSON(counts, map[string]int{})

@@ -8,6 +8,8 @@
 //	projects/<id>/decisions/YYYY-MM-DD-<slug>.md
 //	projects/<id>/attempts/YYYY-MM-DD-<slug>.md
 //	projects/<id>/handoffs/YYYY-MM-DD-HHMMSS.md
+//	connectors/<connectionID>/items/<40 hex>.md        raw-zone items (items.go)
+//	connectors/<connectionID>/checkpoints/<stream>.json source cursors (checkpoints.go)
 //
 // registry.json keeps the project index (the legacy {"version":1,"projects":[]}
 // shape). Every user-facing Markdown file starts with YAML frontmatter carrying
@@ -200,7 +202,8 @@ func isExcludedRootDir(rel, name string) bool {
 	}
 	switch strings.ToLower(name) {
 	// Derived or private data, and high-churn external or activity data
-	// (connector dumps and runs, journals): the revision tracks curated
+	// (connector dumps and runs, raw-zone items and checkpoints under
+	// connectors/<connectionID>/, journals): the revision tracks curated
 	// knowledge, so a nightly mail sync or a journal line does not change it
 	// and writes do not rehash every dump.
 	case "secrets", "index", "backups", "mail", "github", "gitlab", "connectors", "journal":

@@ -28,6 +28,8 @@ type IndexResult struct {
 	Attempts  int
 	Handoffs  int
 	Dumps     int
+	// Items counts live raw-zone items (connectors/<id>/items).
+	Items     int
 	Documents int
 	// Pruned counts documents removed because their source is gone.
 	Pruned  int
@@ -130,6 +132,12 @@ func (a *App) Reindex(ctx context.Context, opts IndexOptions) (IndexResult, erro
 	if err != nil {
 		return result, err
 	}
+	items, err := a.indexAllItems(ctx, upsert)
+	result.Items = items
+	result.Documents += items
+	if err != nil {
+		return result, err
+	}
 	pruned, err := a.pruneIndex(ctx, seen)
 	result.Pruned = pruned
 	if err != nil {
@@ -216,6 +224,200 @@ func dumpDocument(dump ports.Dump, byRepo map[string]string) ports.Document {
 		Title:     dump.Title,
 		Body:      dump.Body,
 		UpdatedAt: dump.UpdatedAt,
+	}
+}
+
+// KindItem is the index kind of raw-zone items. Like dumps, items are left
+// out of curated search unless dumps are requested or kinds names "item".
+const KindItem = "item"
+
+// itemDocumentPrefix starts the index id of every item: "item:<Item.Key()>".
+const itemDocumentPrefix = "item:"
+
+// itemPageSize is the page size used when the indexer walks a connection.
+const itemPageSize = 500
+
+// ItemZone is implemented by stores with a local raw zone (fsstore). The
+// indexer discovers it by type assertion on Dependencies.Store, so stores
+// without items (server mode) simply index none.
+type ItemZone interface {
+	// ItemConnections lists connection IDs that have stored items.
+	ItemConnections(ctx context.Context) ([]string, error)
+	// ItemZone returns the item store.
+	ItemZone() ports.ItemStore
+	// ItemByKey returns the item or tombstone stored under an Item.Key(),
+	// or domain.ErrNotFound.
+	ItemByKey(ctx context.Context, key string) (domain.Item, error)
+}
+
+// ItemIndexResult reports an incremental item index refresh.
+type ItemIndexResult struct {
+	// Indexed counts live items written to the index.
+	Indexed int
+	// Removed counts documents deleted for tombstoned, missing or (on a
+	// whole-connection refresh) no longer stored items.
+	Removed int
+}
+
+// IndexItems refreshes the index for items of one connection after a run.
+// With keys, only those items are touched: live items are upserted,
+// tombstones and unknown keys are removed from the index. Keys not belonging
+// to connectionID are rejected. Without keys, the whole connection is
+// re-indexed and documents of items no longer stored (after Purge) are
+// pruned. Items absent from a partial read are never removed: only an
+// explicit tombstone or a missing file deletes a document. Server mode and
+// stores without a raw zone index nothing.
+func (a *App) IndexItems(ctx context.Context, connectionID string, keys []string) (ItemIndexResult, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	zone, ok := a.deps.Store.(ItemZone)
+	if !ok || a.deps.Index == nil || a.cfg.Mode == config.ModeServer {
+		return ItemIndexResult{}, nil
+	}
+	if err := domain.ValidateConnectionID("connection.id", connectionID); err != nil {
+		return ItemIndexResult{}, err
+	}
+	var (
+		result ItemIndexResult
+		err    error
+	)
+	if len(keys) == 0 {
+		result, err = a.reindexConnection(ctx, zone, connectionID)
+	} else {
+		result, err = a.indexItemKeys(ctx, zone, connectionID, keys)
+	}
+	if err != nil {
+		a.markIndexDirty()
+	}
+	return result, err
+}
+
+func (a *App) indexItemKeys(ctx context.Context, zone ItemZone, connectionID string, keys []string) (ItemIndexResult, error) {
+	var result ItemIndexResult
+	prefix := connectionID + "/"
+	for _, key := range keys {
+		if !strings.HasPrefix(key, prefix) {
+			return result, domain.NewValidationError("item.key", fmt.Sprintf("%q does not belong to connection %q", key, connectionID))
+		}
+	}
+	for _, key := range keys {
+		item, err := zone.ItemByKey(ctx, key)
+		switch {
+		case err == nil && !item.Deleted:
+			if err := a.deps.Index.Upsert(ctx, itemDocument(item)); err != nil {
+				return result, fmt.Errorf("index item %s: %w", key, err)
+			}
+			result.Indexed++
+		case err == nil || errors.Is(err, domain.ErrNotFound):
+			if err := a.deps.Index.Delete(ctx, itemDocumentPrefix+key); err != nil {
+				return result, fmt.Errorf("remove item %s: %w", key, err)
+			}
+			result.Removed++
+		default:
+			return result, fmt.Errorf("read item %s: %w", key, err)
+		}
+	}
+	return result, nil
+}
+
+func (a *App) reindexConnection(ctx context.Context, zone ItemZone, connectionID string) (ItemIndexResult, error) {
+	var result ItemIndexResult
+	seen := map[string]struct{}{}
+	count, err := indexConnectionItems(ctx, zone.ItemZone(), connectionID, func(doc ports.Document) error {
+		seen[doc.ID] = struct{}{}
+		return a.deps.Index.Upsert(ctx, doc)
+	})
+	result.Indexed = count
+	if err != nil {
+		return result, err
+	}
+	lister, ok := a.deps.Index.(ports.IndexLister)
+	if !ok {
+		return result, nil
+	}
+	ids, err := lister.IDs(ctx)
+	if err != nil {
+		return result, err
+	}
+	prefix := itemDocumentPrefix + connectionID + "/"
+	for _, id := range ids {
+		if _, kept := seen[id]; kept || !strings.HasPrefix(id, prefix) {
+			continue
+		}
+		if err := a.deps.Index.Delete(ctx, id); err != nil {
+			return result, fmt.Errorf("prune index %s: %w", id, err)
+		}
+		result.Removed++
+	}
+	return result, nil
+}
+
+// indexAllItems upserts every live item of every connection (full reindex);
+// the caller's prune removes documents of tombstoned or purged items.
+func (a *App) indexAllItems(ctx context.Context, upsert func(ports.Document) error) (int, error) {
+	zone, ok := a.deps.Store.(ItemZone)
+	if !ok {
+		return 0, nil
+	}
+	connections, err := zone.ItemConnections(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("list item connections: %w", err)
+	}
+	total := 0
+	for _, connectionID := range connections {
+		count, err := indexConnectionItems(ctx, zone.ItemZone(), connectionID, upsert)
+		total += count
+		if err != nil {
+			return total, err
+		}
+	}
+	return total, nil
+}
+
+func indexConnectionItems(ctx context.Context, store ports.ItemStore, connectionID string, upsert func(ports.Document) error) (int, error) {
+	count := 0
+	cursor := ""
+	for {
+		page, err := store.List(ctx, connectionID, ports.ItemListOptions{Cursor: cursor, Limit: itemPageSize})
+		if err != nil {
+			return count, fmt.Errorf("list items of %s: %w", connectionID, err)
+		}
+		for _, item := range page.Items {
+			if item.Deleted {
+				continue
+			}
+			if err := upsert(itemDocument(item)); err != nil {
+				return count, fmt.Errorf("index item %s: %w", item.Key(), err)
+			}
+			count++
+		}
+		if page.NextCursor == "" {
+			return count, nil
+		}
+		cursor = page.NextCursor
+	}
+}
+
+// itemDocument projects a live item. Title and body are searchable together
+// with URL, author and labels; an unmapped item is filed under the synthetic
+// project "connection:<id>", like unmapped dumps keep "mail:<account>".
+func itemDocument(item domain.Item) ports.Document {
+	projectID := strings.TrimSpace(item.ProjectID)
+	if projectID == "" {
+		projectID = "connection:" + item.Ref.ConnectionID
+	}
+	updated := item.UpdatedAt
+	if updated.IsZero() {
+		updated = updatedOrCreated(item.ObservedAt, item.CreatedAt)
+	}
+	return ports.Document{
+		ID:        itemDocumentPrefix + item.Key(),
+		ProjectID: projectID,
+		Kind:      KindItem,
+		Title:     fallbackTitle(item.Title, item.Body),
+		Body:      joinText(item.Body, item.URL, item.Author, strings.Join(item.Labels, " ")),
+		UpdatedAt: updated.UTC(),
 	}
 }
 

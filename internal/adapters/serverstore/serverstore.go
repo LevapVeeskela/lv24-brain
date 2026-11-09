@@ -475,6 +475,16 @@ func (s *Store) FinishConnectorRun(ctx context.Context, id string, status domain
 	return connectorRunRecord(record), revision, nil
 }
 
+// FinishConnectorRunStats records the final state of an item-level run,
+// including its RunStats (nil keeps the stored stats).
+func (s *Store) FinishConnectorRunStats(ctx context.Context, id string, status domain.ConnectorStatus, counts map[string]int, stats *domain.RunStats, errorMessage string, expected int64) (httpapi.ConnectorRunRecord, domain.SyncRevision, error) {
+	record, revision, err := s.pg.FinishConnectorRunStats(ctx, id, status, counts, stats, errorMessage, expected)
+	if err != nil {
+		return httpapi.ConnectorRunRecord{}, revision, mapError(err)
+	}
+	return connectorRunRecord(record), revision, nil
+}
+
 // GetConnectorRun loads one connector run.
 func (s *Store) GetConnectorRun(ctx context.Context, id string) (httpapi.ConnectorRunRecord, error) {
 	record, err := s.pg.GetConnectorRun(ctx, id)

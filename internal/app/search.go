@@ -32,7 +32,8 @@ type SearchOptions struct {
 	// Kinds keeps only these kinds (note, decision, attempt, handoff, state,
 	// dump); naming "dump" includes dumps.
 	Kinds []string
-	// IncludeDumps adds connector dumps to an unfiltered search.
+	// IncludeDumps adds connector dumps and raw-zone items (kind "item") to
+	// an unfiltered search.
 	IncludeDumps bool
 	// Since keeps only documents updated at or after this time; zero keeps
 	// everything.
@@ -51,7 +52,9 @@ func (a *App) SearchWith(ctx context.Context, opts SearchOptions) ([]ports.Hit, 
 		if a.deps.Searcher == nil {
 			return nil, fmt.Errorf("%w: server search client is not available", domain.ErrUnsupported)
 		}
-		return a.search(ctx, opts, a.deps.Searcher.Search)
+		// Servers before item support reject exclude_kind=item; a server
+		// treats an excluded "dump" as excluding its items too.
+		return a.search(ctx, opts, []string{KindDump}, a.deps.Searcher.Search)
 	}
 	if a.deps.Index == nil {
 		return nil, fmt.Errorf("%w: local search index is not available", domain.ErrUnsupported)
@@ -59,10 +62,12 @@ func (a *App) SearchWith(ctx context.Context, opts SearchOptions) ([]ports.Hit, 
 	// A stale projection is still searchable; a failed repair keeps the
 	// marker and is retried by the next search.
 	_ = a.repairIndexIfDirty(ctx)
-	return a.search(ctx, opts, a.deps.Index.Search)
+	return a.search(ctx, opts, []string{KindDump, KindItem}, a.deps.Index.Search)
 }
 
-func (a *App) search(ctx context.Context, opts SearchOptions, run func(context.Context, ports.Query) ([]ports.Hit, error)) ([]ports.Hit, error) {
+// search runs the query; rawKinds are excluded from an unfiltered search
+// unless opts.IncludeDumps is set.
+func (a *App) search(ctx context.Context, opts SearchOptions, rawKinds []string, run func(context.Context, ports.Query) ([]ports.Hit, error)) ([]ports.Hit, error) {
 	text := strings.TrimSpace(opts.Text)
 	if text == "" {
 		return nil, domain.NewValidationError("search.query", "is required")
@@ -81,7 +86,7 @@ func (a *App) search(ctx context.Context, opts SearchOptions, run func(context.C
 		}
 	}
 	if len(query.Kinds) == 0 && !opts.IncludeDumps {
-		query.ExcludeKinds = []string{KindDump}
+		query.ExcludeKinds = rawKinds
 	}
 	return run(ctx, query)
 }

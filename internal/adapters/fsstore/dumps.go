@@ -13,7 +13,9 @@ import (
 	"github.com/levapveeskela/lv24-brain/internal/ports"
 )
 
-// dumpRoots are the data-directory folders connectors write dumps to.
+// dumpRoots are the data-directory folders legacy connectors write dumps to.
+// Raw-zone items (connectors/<connectionID>/items, see items.go) are not
+// dumps: they are listed through ItemStore and indexed as kind "item".
 var dumpRoots = []string{"mail", "github", "gitlab"}
 
 // maxDumpBodyBytes bounds the indexed text of one dump file.

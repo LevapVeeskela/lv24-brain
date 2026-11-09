@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -47,15 +48,17 @@ func (s *Store) SearchScoped(ctx context.Context, query ports.Query, scope httpa
 	}
 
 	tsquery, tsArgs := buildTSQuery(text, searchFirstTSParam)
+	includeItems, kinds := itemSearchFilter(query)
 	args := append([]any{
 		query.ProjectID,
 		optionalTime(query.Since),
 		"%" + escapeLike(text) + "%",
-		optionalArray(query.Kinds),
+		optionalArray(kinds),
 		optionalArray(query.ExcludeKinds),
 		limit,
 		optionalArray(scope.Only),
 		optionalArray(scope.Exclude),
+		includeItems,
 	}, tsArgs...)
 	rows, err := s.pg.Pool().Query(ctx, searchStatement(tsquery), args...)
 	if err != nil {
@@ -75,6 +78,32 @@ func (s *Store) SearchScoped(ctx context.Context, query ports.Query, scope httpa
 		return nil, mapError(err)
 	}
 	return hits, nil
+}
+
+// Server-side raw-zone items are the server's "dumps": a search includes them
+// only when it asks for dumps or items, exactly like local dumps.
+const (
+	searchKindDump = "dump"
+	searchKindItem = "item"
+)
+
+// itemSearchFilter decides whether connector_items join the search and
+// returns the kinds filter to bind. Items are included when kinds names
+// "item" or "dump" ("dump" then also matches item hits), or when no kinds
+// are given and neither "dump" nor "item" is excluded. Clients send
+// exclude_kind=dump for a curated search, so items stay out by default.
+func itemSearchFilter(query ports.Query) (bool, []string) {
+	if len(query.Kinds) > 0 {
+		wantsDump := slices.Contains(query.Kinds, searchKindDump)
+		wantsItem := slices.Contains(query.Kinds, searchKindItem)
+		kinds := query.Kinds
+		if wantsDump && !wantsItem {
+			kinds = append(slices.Clone(query.Kinds), searchKindItem)
+		}
+		return wantsDump || wantsItem, kinds
+	}
+	excluded := slices.Contains(query.ExcludeKinds, searchKindDump) || slices.Contains(query.ExcludeKinds, searchKindItem)
+	return !excluded, nil
 }
 
 // optionalTime binds the zero time as SQL NULL ("no filter").
@@ -105,13 +134,17 @@ func optionalArray(values []string) any {
 const searchTSQueryMarker = "{{tsquery}}"
 
 // searchFirstTSParam is the first placeholder the tsquery expression uses.
-const searchFirstTSParam = 9
+const searchFirstTSParam = 10
 
 // searchSQL parameters: $1 project id (empty for all), $2 since (NULL = no
 // time filter), $3 ILIKE pattern for the fallback, $4 kinds (NULL = all), $5
 // excluded kinds (NULL = none), $6 limit, $7 readable project ids (NULL =
-// all), $8 unreadable project ids (NULL = none), $9 onwards the tsquery
-// fragments of buildTSQuery.
+// all), $8 unreadable project ids (NULL = none), $9 include raw-zone items,
+// $10 onwards the tsquery fragments of buildTSQuery.
+//
+// Items join only when $9 is true, only live ones mapped to an existing
+// project, and they pass the same project scope ($1, $7, $8) as curated
+// records before ranking. Upstream ACL tags are not enforced here.
 //
 // The CTEs are: query (the tsquery), items (union of the searchable tables),
 // matched (filters plus rank), page (ranked top N). Snippets are built only
@@ -139,6 +172,13 @@ WITH query AS (
            coalesce(git_context, '') || ' ' || coalesce(next_action, ''),
            created_at, search_tsv
     FROM handoffs
+    UNION ALL
+    SELECT 'item:' || ci.item_key, ci.project_id, 'item'::text, ci.title,
+           ci.body || ' ' || ci.url || ' ' || ci.author || ' ' || brain_search_join(ci.labels),
+           coalesce(ci.updated_at, ci.observed_at, ci.stored_at), ci.search_tsv
+    FROM connector_items ci
+    WHERE $9::boolean AND NOT ci.deleted AND ci.project_id <> ''
+      AND EXISTS (SELECT 1 FROM projects p WHERE p.id = ci.project_id)
 ), matched AS (
     SELECT items.id, items.project_id, items.kind, items.title, items.content,
            items.updated_at, query.tsq,

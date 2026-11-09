@@ -76,7 +76,7 @@ func TestBuildTSQuery(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			expr, args := buildTSQuery(test.text, searchFirstTSParam)
+			expr, args := buildTSQuery(test.text, 9)
 			if test.wantExpr != "" && expr != test.wantExpr {
 				t.Fatalf("expr = %s\nwant   %s", expr, test.wantExpr)
 			}
@@ -94,14 +94,14 @@ func TestBuildTSQuery(t *testing.T) {
 
 func TestBuildTSQueryLongQueryFallsBackToWholeText(t *testing.T) {
 	text := strings.Repeat("word ", maxTSClauses+1)
-	expr, args := buildTSQuery(text, searchFirstTSParam)
+	expr, args := buildTSQuery(text, 9)
 	if expr != "websearch_to_tsquery('simple', $9::text)" || len(args) != 1 || args[0] != text {
 		t.Fatalf("buildTSQuery(long) = %s %v", expr, args)
 	}
 }
 
 func TestBuildTSQueryEmptyKeepsWholeText(t *testing.T) {
-	expr, args := buildTSQuery("   ", searchFirstTSParam)
+	expr, args := buildTSQuery("   ", 9)
 	if expr != "websearch_to_tsquery('simple', $9::text)" || len(args) != 1 {
 		t.Fatalf("buildTSQuery(empty) = %s %v", expr, args)
 	}
