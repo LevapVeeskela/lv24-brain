@@ -173,7 +173,21 @@
         "type": "object",
         "properties": {
           "id": { "type": "string" },
-          "source": { "type": "string", "enum": ["github", "gitlab", "imap"] },
+          "source": { "type": "string", "description": "Registry provider name. Current built-in providers: github, gitlab, imap." },
+          "connectionId": { "type": "string", "description": "Configured connection ID, when the run belongs to a connection." },
+          "stats": {
+            "type": "object",
+            "description": "Item ingestion counters, when available.",
+            "properties": {
+              "seen": { "type": "integer", "minimum": 0 },
+              "upserted": { "type": "integer", "minimum": 0 },
+              "unchanged": { "type": "integer", "minimum": 0 },
+              "deleted": { "type": "integer", "minimum": 0 },
+              "skipped": { "type": "integer", "minimum": 0 },
+              "batches": { "type": "integer", "minimum": 0 },
+              "truncated": { "type": "string", "description": "Reason the run stopped before exhausting the source; omitted when complete." }
+            }
+          },
           "startedAt": { "type": "string", "format": "date-time" },
           "finishedAt": { "type": "string", "format": "date-time" },
           "status": { "type": "string", "enum": ["running", "success", "partial", "failed"] },
@@ -186,7 +200,8 @@
         "type": "object",
         "required": ["name"],
         "properties": {
-          "name": { "type": "string", "enum": ["github", "gitlab", "imap"] },
+          "name": { "type": "string", "description": "Registry provider name. Current built-in providers: github, gitlab, imap." },
+          "projectId": { "type": "string", "description": "Existing brain project for raw items; unmapped items are stored but excluded from server search." },
           "projects": { "type": "array", "items": { "type": "string" } },
           "since": { "type": "string", "format": "date-time" },
           "limit": { "type": "integer", "minimum": 0 }
@@ -557,8 +572,8 @@
           { "name": "q", "in": "query", "required": true, "schema": { "type": "string" } },
           { "name": "projectId", "in": "query", "schema": { "type": "string" } },
           { "name": "limit", "in": "query", "schema": { "type": "integer" } },
-          { "name": "kind", "in": "query", "description": "Keep only these kinds; repeatable", "schema": { "type": "string", "enum": ["note", "decision", "attempt", "handoff", "state", "dump"] } },
-          { "name": "exclude_kind", "in": "query", "description": "Drop these kinds; repeatable", "schema": { "type": "string", "enum": ["note", "decision", "attempt", "handoff", "state", "dump"] } }
+          { "name": "kind", "in": "query", "description": "Keep only these kinds; repeatable. Raw-zone external items (item) are excluded unless requested, like dumps.", "schema": { "type": "string", "enum": ["note", "decision", "attempt", "handoff", "state", "dump", "item"] } },
+          { "name": "exclude_kind", "in": "query", "description": "Drop these kinds; repeatable", "schema": { "type": "string", "enum": ["note", "decision", "attempt", "handoff", "state", "dump", "item"] } }
         ],
         "responses": {
           "200": { "description": "Hits" },

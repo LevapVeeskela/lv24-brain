@@ -5,6 +5,7 @@
 package connectorbuild
 
 import (
+	"fmt"
 	"os"
 	"strings"
 
@@ -44,15 +45,33 @@ type IMAPAccount struct {
 	Folders  []string
 }
 
-// Build selects a read-only connector. Credentials are resolved by the
-// connector at run time through Secrets; env configuration is read here so
-// both the CLI and the server use the same names.
+// snapshotBuilders constructs the legacy Markdown-dump connectors. The
+// provider names are still owned by the registry: Build resolves the name
+// through Registry.Lookup, and this map only adds the snapshot behaviour that
+// Registry.Build (an item Source) deliberately does not have.
+//
+// `brain connector run --name` must keep writing the dumps that
+// `brain search --dumps` and existing users rely on. The native item path is
+// `brain connection run <id>`; it is not a drop-in replacement for this
+// command. Keep this shim for v0.9.0 and remove it only with a dump-compatible
+// native path.
+var snapshotBuilders = map[string]func(Options) (ports.Connector, error){
+	github.Name: buildGitHubSnapshot,
+	gitlab.Name: buildGitLabSnapshot,
+	imap.Name:   buildIMAPSnapshot,
+}
+
+// Build selects a read-only Markdown-dump connector. Credentials are resolved
+// by the connector at run time through Secrets; env configuration is read here
+// so both the CLI and the server use the same names. Provider names come from
+// the same registry as the native ingestion path; the snapshot constructors
+// below preserve the legacy flags, environment and data-derived targets.
 func Build(opts Options) (ports.Connector, error) {
+	registry := Builtin()
 	name := strings.ToLower(strings.TrimSpace(opts.Name))
-	switch name {
-	case github.Name, gitlab.Name, imap.Name:
-	default:
-		return nil, domain.NewValidationError("connector.name", "must be github, gitlab, or imap")
+	entry, err := registry.Lookup(name)
+	if err != nil {
+		return nil, domain.NewValidationError("connector.name", "must be "+providerChoices(registry.Providers()))
 	}
 	if opts.Secrets == nil {
 		return nil, domain.NewValidationError("connector.secrets", "is required")
@@ -60,79 +79,98 @@ func Build(opts Options) (ports.Connector, error) {
 	if opts.Sink == nil {
 		return nil, domain.NewValidationError("connector.sink", "is required")
 	}
+	build, ok := snapshotBuilders[entry.Descriptor.Provider]
+	if !ok {
+		return nil, domain.NewValidationError("connector.name", fmt.Sprintf("%s has no snapshot connector; use brain connection run", entry.Descriptor.Provider))
+	}
+	return build(opts)
+}
 
-	switch name {
-	case github.Name:
-		repos := envList("BRAIN_GITHUB_REPOS")
-		if len(repos) == 0 {
-			repos = cleanList(opts.Projects)
-		}
-		if len(repos) == 0 {
-			repos = cleanList(opts.Repos)
-		}
-		if len(repos) == 0 {
-			return nil, domain.NewValidationError("github.repos", "set BRAIN_GITHUB_REPOS, pass a project filter, or register projects with GitHub repo URLs")
-		}
-		return github.New(github.Config{
-			BaseURL: strings.TrimSpace(os.Getenv("BRAIN_GITHUB_BASE_URL")),
-			Repos:   repos,
-			Secrets: opts.Secrets,
-			Sink:    opts.Sink,
-		})
-	case gitlab.Name:
-		projects := envList("BRAIN_GITLAB_PROJECTS")
-		if len(projects) == 0 {
-			projects = cleanList(opts.Projects)
-		}
-		if len(projects) == 0 {
-			projects = cleanList(opts.GitLabProjects)
-		}
-		if len(projects) == 0 {
-			return nil, domain.NewValidationError("gitlab.projects", "set BRAIN_GITLAB_PROJECTS, pass a project filter, or add gitlab.com remotes to registered checkouts")
-		}
-		return gitlab.New(gitlab.Config{
-			BaseURL:  strings.TrimSpace(os.Getenv("BRAIN_GITLAB_BASE_URL")),
-			Projects: projects,
-			Secrets:  opts.Secrets,
-			Sink:     opts.Sink,
-		})
-	case imap.Name:
-		account := strings.TrimSpace(os.Getenv("BRAIN_IMAP_ACCOUNT"))
-		address := strings.TrimSpace(os.Getenv("BRAIN_IMAP_ADDRESS"))
-		username := strings.TrimSpace(os.Getenv("BRAIN_IMAP_USERNAME"))
-		folders := envList("BRAIN_IMAP_FOLDERS")
-		if account == "" && opts.IMAP != nil {
-			account = strings.TrimSpace(opts.IMAP.Account)
-			address = strings.TrimSpace(opts.IMAP.Address)
-			username = strings.TrimSpace(opts.IMAP.Username)
-			folders = cleanList(opts.IMAP.Folders)
-		}
-		if account == "" {
-			return nil, domain.NewValidationError("imap.account", "set BRAIN_IMAP_ACCOUNT or pass --account from connectors/mail.json")
-		}
-		if address == "" {
-			return nil, domain.NewValidationError("imap.address", "set BRAIN_IMAP_ADDRESS (host:port)")
-		}
-		if username == "" {
-			return nil, domain.NewValidationError("imap.username", "set BRAIN_IMAP_USERNAME")
-		}
-		statePath := strings.TrimSpace(os.Getenv("BRAIN_IMAP_STATE"))
-		if statePath == "" {
-			statePath = strings.TrimSpace(opts.StatePath)
-		}
-		return imap.New(imap.Config{
-			Account:     account,
-			Address:     address,
-			Username:    username,
-			PasswordKey: strings.TrimSpace(os.Getenv("BRAIN_IMAP_PASSWORD_KEY")),
-			Secrets:     opts.Secrets,
-			Folders:     folders,
-			Sink:        opts.Sink,
-			StatePath:   statePath,
-			Limit:       opts.Limit,
-		})
+func buildGitHubSnapshot(opts Options) (ports.Connector, error) {
+	repos := envList("BRAIN_GITHUB_REPOS")
+	if len(repos) == 0 {
+		repos = cleanList(opts.Projects)
+	}
+	if len(repos) == 0 {
+		repos = cleanList(opts.Repos)
+	}
+	if len(repos) == 0 {
+		return nil, domain.NewValidationError("github.repos", "set BRAIN_GITHUB_REPOS, pass a project filter, or register projects with GitHub repo URLs")
+	}
+	return github.New(github.Config{
+		BaseURL: strings.TrimSpace(os.Getenv("BRAIN_GITHUB_BASE_URL")),
+		Repos:   repos,
+		Secrets: opts.Secrets,
+		Sink:    opts.Sink,
+	})
+}
+
+func buildGitLabSnapshot(opts Options) (ports.Connector, error) {
+	projects := envList("BRAIN_GITLAB_PROJECTS")
+	if len(projects) == 0 {
+		projects = cleanList(opts.Projects)
+	}
+	if len(projects) == 0 {
+		projects = cleanList(opts.GitLabProjects)
+	}
+	if len(projects) == 0 {
+		return nil, domain.NewValidationError("gitlab.projects", "set BRAIN_GITLAB_PROJECTS, pass a project filter, or add gitlab.com remotes to registered checkouts")
+	}
+	return gitlab.New(gitlab.Config{
+		BaseURL:  strings.TrimSpace(os.Getenv("BRAIN_GITLAB_BASE_URL")),
+		Projects: projects,
+		Secrets:  opts.Secrets,
+		Sink:     opts.Sink,
+	})
+}
+
+func buildIMAPSnapshot(opts Options) (ports.Connector, error) {
+	account := strings.TrimSpace(os.Getenv("BRAIN_IMAP_ACCOUNT"))
+	address := strings.TrimSpace(os.Getenv("BRAIN_IMAP_ADDRESS"))
+	username := strings.TrimSpace(os.Getenv("BRAIN_IMAP_USERNAME"))
+	folders := envList("BRAIN_IMAP_FOLDERS")
+	if account == "" && opts.IMAP != nil {
+		account = strings.TrimSpace(opts.IMAP.Account)
+		address = strings.TrimSpace(opts.IMAP.Address)
+		username = strings.TrimSpace(opts.IMAP.Username)
+		folders = cleanList(opts.IMAP.Folders)
+	}
+	if account == "" {
+		return nil, domain.NewValidationError("imap.account", "set BRAIN_IMAP_ACCOUNT or pass --account from connectors/mail.json")
+	}
+	if address == "" {
+		return nil, domain.NewValidationError("imap.address", "set BRAIN_IMAP_ADDRESS (host:port)")
+	}
+	if username == "" {
+		return nil, domain.NewValidationError("imap.username", "set BRAIN_IMAP_USERNAME")
+	}
+	statePath := strings.TrimSpace(os.Getenv("BRAIN_IMAP_STATE"))
+	if statePath == "" {
+		statePath = strings.TrimSpace(opts.StatePath)
+	}
+	return imap.New(imap.Config{
+		Account:     account,
+		Address:     address,
+		Username:    username,
+		PasswordKey: strings.TrimSpace(os.Getenv("BRAIN_IMAP_PASSWORD_KEY")),
+		Secrets:     opts.Secrets,
+		Folders:     folders,
+		Sink:        opts.Sink,
+		StatePath:   statePath,
+		Limit:       opts.Limit,
+	})
+}
+
+// providerChoices renders "github, gitlab, or imap" from the registry so the
+// error cannot drift from the registered providers.
+func providerChoices(providers []string) string {
+	switch len(providers) {
+	case 0:
+		return "registered provider"
+	case 1:
+		return providers[0]
 	default:
-		return nil, domain.NewValidationError("connector.name", "must be github, gitlab, or imap")
+		return strings.Join(providers[:len(providers)-1], ", ") + ", or " + providers[len(providers)-1]
 	}
 }
 

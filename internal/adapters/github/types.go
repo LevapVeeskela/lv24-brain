@@ -27,6 +27,7 @@ type user struct {
 type pullRequest struct {
 	Number    int        `json:"number"`
 	Title     string     `json:"title"`
+	Body      string     `json:"body"`
 	State     string     `json:"state"`
 	HTMLURL   string     `json:"html_url"`
 	User      user       `json:"user"`
@@ -46,6 +47,7 @@ type pullRequest struct {
 type issue struct {
 	Number      int        `json:"number"`
 	Title       string     `json:"title"`
+	Body        string     `json:"body"`
 	State       string     `json:"state"`
 	HTMLURL     string     `json:"html_url"`
 	User        user       `json:"user"`

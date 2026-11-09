@@ -180,12 +180,12 @@ func (s *Server) coreTools() []tool {
 		},
 		{
 			Name:        "brain_search",
-			Description: "Full-text search over notes, decisions, attempts and handoffs. Searches every project unless project is given. Connector dumps (mail, GitHub/GitLab issues and PRs) are excluded unless include_dumps is true or kinds contains \"dump\".",
+			Description: "Full-text search over notes, decisions, attempts and handoffs. Searches every project unless project is given. Connector dumps (mail, GitHub/GitLab issues and PRs) are excluded unless include_dumps is true or kinds contains \"dump\". Raw-zone external items are excluded unless kinds contains \"item\".",
 			InputSchema: objectSchema([]string{"query"}, map[string]any{
 				"query":         stringProp("Words to search for."),
 				"project":       project,
 				"limit":         intProp("Maximum hits; 0 selects the default.", 0),
-				"kinds":         stringArrayProp("Keep only these kinds: note, decision, attempt, handoff, dump. Omit for every kind."),
+				"kinds":         stringArrayProp("Keep only these kinds: note, decision, attempt, handoff, dump, item. Omit for curated kinds; raw-zone dumps and external items require an explicit request."),
 				"include_dumps": boolProp("Include connector dumps in an unfiltered search."),
 				"since":         stringProp("Only documents updated since: a duration (24h, 7d), a date (2026-11-01) or an RFC3339 time. Omit for all time."),
 			}),

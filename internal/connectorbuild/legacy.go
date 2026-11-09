@@ -87,9 +87,9 @@ func (s *LegacySource) Connector() ports.Connector { return s.connector }
 func Builtin() *Registry {
 	registry := NewRegistry()
 	for _, entry := range []Registration{
-		{Descriptor: GitHubDescriptor(), Factory: newLegacyGitHub},
-		{Descriptor: GitLabDescriptor(), Factory: newLegacyGitLab},
-		{Descriptor: IMAPDescriptor(), Factory: newLegacyIMAP},
+		{Descriptor: GitHubDescriptor(), Factory: newNativeGitHub},
+		{Descriptor: GitLabDescriptor(), Factory: newNativeGitLab},
+		{Descriptor: IMAPDescriptor(), Factory: newNativeIMAP},
 	} {
 		if err := registry.Register(entry.Descriptor, entry.Factory); err != nil {
 			panic("connectorbuild: invalid built-in provider: " + err.Error())
@@ -98,124 +98,27 @@ func Builtin() *Registry {
 	return registry
 }
 
-// GitHubDescriptor describes the GitHub provider. Capabilities describe the
-// item contract; the legacy snapshot connector has no checkpoints yet.
-func GitHubDescriptor() domain.SourceDescriptor {
-	return domain.SourceDescriptor{
-		Provider:       github.Name,
-		DisplayName:    "GitHub",
-		Capabilities:   domain.Capabilities{Backfill: true, AuthModes: []domain.AuthMode{domain.AuthToken, domain.AuthOAuthDevice}},
-		DefaultPublish: domain.PublishShared,
-		ConfigFields: []domain.ConfigField{
-			{Key: "repos", Label: "Repositories", Required: true, Help: "Comma-separated owner/name list."},
-			{Key: "token", Label: "Token", Required: true, Secret: true, Help: "Personal access token with read access."},
-		},
-	}
+// GitHubDescriptor describes the native GitHub provider.
+func GitHubDescriptor() domain.SourceDescriptor { return github.Descriptor() }
+
+// GitLabDescriptor describes the native GitLab provider.
+func GitLabDescriptor() domain.SourceDescriptor { return gitlab.Descriptor() }
+
+// IMAPDescriptor describes the native IMAP provider (local-only by default).
+func IMAPDescriptor() domain.SourceDescriptor { return imap.Descriptor() }
+
+func newNativeGitHub(conn domain.Connection, deps Deps) (ports.Source, error) {
+	return github.NewSource(conn, deps.Credentials, httpClient(deps), deps.Now)
 }
 
-// GitLabDescriptor describes the GitLab provider.
-func GitLabDescriptor() domain.SourceDescriptor {
-	return domain.SourceDescriptor{
-		Provider:       gitlab.Name,
-		DisplayName:    "GitLab",
-		Capabilities:   domain.Capabilities{Backfill: true, AuthModes: []domain.AuthMode{domain.AuthToken, domain.AuthOAuthPKCE}},
-		DefaultPublish: domain.PublishShared,
-		ConfigFields: []domain.ConfigField{
-			{Key: "projects", Label: "Projects", Required: true, Help: "Comma-separated namespace/project list."},
-			{Key: "token", Label: "Token", Required: true, Secret: true, Help: "Personal access token with read_api scope."},
-		},
-	}
+func newNativeGitLab(conn domain.Connection, deps Deps) (ports.Source, error) {
+	return gitlab.NewSource(conn, deps.Credentials, httpClient(deps), deps.Now)
 }
 
-// IMAPDescriptor describes the IMAP provider. Mail is local-only by default.
-func IMAPDescriptor() domain.SourceDescriptor {
-	return domain.SourceDescriptor{
-		Provider:       imap.Name,
-		DisplayName:    "IMAP mail",
-		Capabilities:   domain.Capabilities{Backfill: true, AuthModes: []domain.AuthMode{domain.AuthBasic}},
-		DefaultPublish: domain.PublishLocalOnly,
-		ConfigFields: []domain.ConfigField{
-			{Key: "username", Label: "Username", Required: true},
-			{Key: "folders", Label: "Folders", Help: "Comma-separated folder list; default INBOX."},
-			{Key: "password", Label: "Password", Required: true, Secret: true, Help: "App password; stored in the OS keychain."},
-		},
-	}
+func newNativeIMAP(conn domain.Connection, deps Deps) (ports.Source, error) {
+	return imap.NewSource(conn, deps.Credentials, nil, deps.Now)
 }
 
-func newLegacyGitHub(conn domain.Connection, deps Deps) (ports.Source, error) {
-	if err := requireLegacyDeps(deps); err != nil {
-		return nil, err
-	}
-	connector, err := github.New(github.Config{
-		BaseURL:    conn.BaseURL,
-		Repos:      splitList(conn.Settings["repos"]),
-		Secrets:    deps.Secrets,
-		Sink:       deps.Sink,
-		HTTPClient: httpClient(deps),
-		Now:        deps.Now,
-	})
-	if err != nil {
-		return nil, err
-	}
-	return NewLegacySource(GitHubDescriptor(), connector)
-}
-
-func newLegacyGitLab(conn domain.Connection, deps Deps) (ports.Source, error) {
-	if err := requireLegacyDeps(deps); err != nil {
-		return nil, err
-	}
-	connector, err := gitlab.New(gitlab.Config{
-		BaseURL:    conn.BaseURL,
-		Projects:   splitList(conn.Settings["projects"]),
-		Secrets:    deps.Secrets,
-		Sink:       deps.Sink,
-		HTTPClient: httpClient(deps),
-		Now:        deps.Now,
-	})
-	if err != nil {
-		return nil, err
-	}
-	return NewLegacySource(GitLabDescriptor(), connector)
-}
-
-func newLegacyIMAP(conn domain.Connection, deps Deps) (ports.Source, error) {
-	if err := requireLegacyDeps(deps); err != nil {
-		return nil, err
-	}
-	if strings.TrimSpace(conn.Account) == "" {
-		return nil, domain.NewValidationError("imap.account", "is required")
-	}
-	address, err := imapAddress(conn.BaseURL)
-	if err != nil {
-		return nil, err
-	}
-	connector, err := imap.New(imap.Config{
-		Account:   conn.Account,
-		Address:   address,
-		Username:  conn.Settings["username"],
-		Secrets:   deps.Secrets,
-		Folders:   splitList(conn.Settings["folders"]),
-		Sink:      deps.Sink,
-		StatePath: deps.StatePath,
-		Now:       deps.Now,
-	})
-	if err != nil {
-		return nil, err
-	}
-	return NewLegacySource(IMAPDescriptor(), connector)
-}
-
-func requireLegacyDeps(deps Deps) error {
-	if deps.Secrets == nil {
-		return domain.NewValidationError("connector.secrets", "is required")
-	}
-	if deps.Sink == nil {
-		return domain.NewValidationError("connector.sink", "is required")
-	}
-	return nil
-}
-
-// imapAddress maps imaps://host[:port] to host:port (default 993).
 func imapAddress(baseURL string) (string, error) {
 	parsed, err := url.Parse(strings.TrimSpace(baseURL))
 	if err != nil || parsed.Host == "" || !strings.EqualFold(parsed.Scheme, "imaps") {

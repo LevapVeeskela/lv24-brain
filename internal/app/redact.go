@@ -51,6 +51,44 @@ func Redact(text string) (string, int) {
 	return text, count
 }
 
+// ingestSecretPatterns extend secretPatterns for external text (issues, mail,
+// chat), which quotes HTTP traffic, logs and config far more often than
+// curated records do. They run after secretPatterns and never match a value
+// that starts with "[", so text already redacted is not counted twice.
+var ingestSecretPatterns = []*regexp.Regexp{
+	// A private key block cut before its END line.
+	regexp.MustCompile(`(?s)()-----BEGIN [A-Z ]*PRIVATE KEY-----.*`),
+	// Authorization headers and bearer tokens.
+	regexp.MustCompile(`(?i)(\bauthorization["']?\s*[:=]\s*["']?(?:bearer|basic|token|bot)\s+)[^\s"'\[]{8,}`),
+	regexp.MustCompile(`(?i)(\bbearer\s+)[A-Za-z0-9._~+/=-]{16,}`),
+	// Tokens in URL query strings.
+	regexp.MustCompile(`(?i)([?&](?:access_token|refresh_token|id_token|token|private_token|api_key|apikey|key|sig|signature|password|secret|client_secret)=)[^&#\s\[][^&#\s]*`),
+	// More provider token shapes.
+	regexp.MustCompile(`()\bxox[a-z](?:\.xox[a-z])?-[A-Za-z0-9-]{10,}`),
+	regexp.MustCompile(`()\bxapp-[A-Za-z0-9-]{10,}`),
+	regexp.MustCompile(`(https://hooks\.slack\.com/services/)[A-Za-z0-9/]+`),
+	regexp.MustCompile(`()\bgl(?:dt|rt|ptt|ft|soat|cbt|imt|oas|agent)-[A-Za-z0-9_-]{20,}`),
+	regexp.MustCompile(`()\bnpm_[A-Za-z0-9]{36}\b`),
+	regexp.MustCompile(`()\b(?:sk|rk)_live_[A-Za-z0-9]{16,}`),
+}
+
+// RedactIngest is Redact for ingested external text: the curated patterns
+// plus ingestSecretPatterns. The curated path (Redact) is unchanged.
+func RedactIngest(text string) (string, int) {
+	text, count := Redact(text)
+	if text == "" {
+		return text, count
+	}
+	for _, pattern := range ingestSecretPatterns {
+		text = pattern.ReplaceAllStringFunc(text, func(match string) string {
+			count++
+			groups := pattern.FindStringSubmatch(match)
+			return groups[1] + redactedMarker
+		})
+	}
+	return text, count
+}
+
 // redactAll redacts every string the pointers refer to and returns the total.
 func redactAll(values ...*string) int {
 	total := 0

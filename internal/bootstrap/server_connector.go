@@ -41,5 +41,5 @@ func RunServerConnector(ctx context.Context, cfg config.BrainConfig, opts Connec
 	if project := strings.TrimSpace(opts.Project); project != "" {
 		projects = append(projects, project)
 	}
-	return client.RunConnector(ctx, opts.Name, projects, since, opts.Limit)
+	return client.RunConnectorMapped(ctx, opts.Name, projects, since, opts.Limit, opts.BrainProject)
 }

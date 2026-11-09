@@ -59,3 +59,25 @@ func TestRunStoreWithoutStoreIsNoop(t *testing.T) {
 		t.Fatalf("AppendConnectorRun: %v", err)
 	}
 }
+
+type statsFinishStore struct {
+	*MemoryStore
+	stats *domain.RunStats
+}
+
+func (s *statsFinishStore) FinishConnectorRunStats(ctx context.Context, id string, status domain.ConnectorStatus, counts map[string]int, stats *domain.RunStats, message string, expected int64) (ConnectorRunRecord, domain.SyncRevision, error) {
+	s.stats = stats
+	return s.MemoryStore.FinishConnectorRun(ctx, id, status, counts, message, expected)
+}
+
+func TestRunStorePreservesItemStatsOnFinish(t *testing.T) {
+	store := &statsFinishStore{MemoryStore: NewMemoryStore()}
+	stats := &domain.RunStats{Seen: 1, Upserted: 1, Batches: 1}
+	run := domain.ConnectorRun{ID: "item-run", Source: "github", ConnectionID: "work", StartedAt: time.Now(), Status: domain.ConnectorSuccess, Stats: stats}
+	if err := (RunStore{Store: store}).AppendConnectorRun(context.Background(), run); err != nil {
+		t.Fatal(err)
+	}
+	if store.stats == nil || *store.stats != *stats {
+		t.Fatalf("lost stats: %+v", store.stats)
+	}
+}

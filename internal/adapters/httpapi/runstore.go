@@ -15,6 +15,10 @@ type RunStore struct {
 	Store Store
 }
 
+type connectorStatsFinisher interface {
+	FinishConnectorRunStats(context.Context, string, domain.ConnectorStatus, map[string]int, *domain.RunStats, string, int64) (ConnectorRunRecord, domain.SyncRevision, error)
+}
+
 var _ ports.ConnectorRunStore = RunStore{}
 
 // AppendConnectorRun creates a run record and, when the run already carries a
@@ -30,6 +34,10 @@ func (s RunStore) AppendConnectorRun(ctx context.Context, run domain.ConnectorRu
 	}
 	if run.Status == domain.ConnectorRunning {
 		return nil
+	}
+	if finisher, ok := s.Store.(connectorStatsFinisher); ok {
+		_, _, err = finisher.FinishConnectorRunStats(ctx, record.ID, run.Status, run.Counts, run.Stats, run.Error, revisionValue(rev))
+		return err
 	}
 	_, _, err = s.Store.FinishConnectorRun(ctx, record.ID, run.Status, run.Counts, run.Error, revisionValue(rev))
 	return err

@@ -14,18 +14,21 @@ import (
 
 // ConnectorOptions selects one read-only connector and its configuration hints.
 type ConnectorOptions struct {
-	Name    string
-	Project string
-	Limit   int
+	Name         string
+	Project      string
+	BrainProject string
+	Limit        int
 	// Data-derived targets; see connectorbuild.Options.
 	Repos          []string
 	GitLabProjects []string
 	IMAP           *connectorbuild.IMAPAccount
 }
 
-// BuildConnector selects a read-only connector and points its Markdown sink at
-// the brain data directory. Credentials are resolved by the connectors from the
-// environment/OS secret store at run time.
+// BuildConnector selects one legacy read-only Markdown-dump connector and
+// points its sink at the brain data directory. It backs `connector run --name`
+// and the empty-catalogue `connector run --all` fallback; the native
+// item-level path is `connection run` through BuildIngestion. Credentials are
+// resolved by the connectors from the environment/OS secret store at run time.
 func BuildConnector(cfg config.BrainConfig, opts ConnectorOptions, buildOpts Options) (ports.Connector, error) {
 	if cfg.Mode == config.ModeServer {
 		return nil, fmt.Errorf("%w: connectors require local or git mode with data_dir", domain.ErrUnsupported)

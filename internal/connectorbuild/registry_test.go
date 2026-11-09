@@ -136,8 +136,8 @@ func TestBuiltinRegistersLegacyProviders(t *testing.T) {
 	}
 }
 
-func TestBuiltinBuildsLegacySources(t *testing.T) {
-	deps := Deps{Secrets: fakeSecrets{}, Sink: connectors.DiscardSink{}, Now: func() time.Time { return time.Unix(0, 0) }}
+func TestBuiltinBuildsNativeSources(t *testing.T) {
+	deps := Deps{Credentials: SecretCredentials{Store: fakeSecrets{}}, Now: func() time.Time { return time.Unix(0, 0) }}
 	cases := map[string]domain.Connection{
 		"github": {ID: "gh", Provider: "github", Settings: map[string]string{"repos": "acme/widgets"}},
 		"gitlab": {ID: "gl", Provider: "gitlab", BaseURL: "https://gitlab.example.com/api/v4", Settings: map[string]string{"projects": "acme/api"}},
@@ -152,9 +152,9 @@ func TestBuiltinBuildsLegacySources(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Build() = %v", err)
 			}
-			legacy, ok := source.(*LegacySource)
-			if !ok || legacy.Connector().Name() != name {
-				t.Fatalf("source = %T, want *LegacySource for %s", source, name)
+			_, legacy := source.(*LegacySource)
+			if legacy || source.Descriptor().Provider != name || !source.Descriptor().Capabilities.Incremental {
+				t.Fatalf("source = %T, want native incremental %s", source, name)
 			}
 		})
 	}

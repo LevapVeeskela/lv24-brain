@@ -7,12 +7,15 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/levapveeskela/lv24-brain/internal/bootstrap"
 	"github.com/levapveeskela/lv24-brain/internal/config"
+	"github.com/levapveeskela/lv24-brain/internal/connectorbuild"
 	"github.com/levapveeskela/lv24-brain/internal/domain"
 	"github.com/levapveeskela/lv24-brain/internal/ports"
 )
@@ -146,6 +149,84 @@ func TestBuildConnectorRejectsUnknownName(t *testing.T) {
 	if !errors.Is(err, domain.ErrValidation) {
 		t.Fatalf("BuildConnector error = %v, want ErrValidation", err)
 	}
+}
+
+func TestBuildConnectorGitHubTargetPrecedence(t *testing.T) {
+	cases := []struct {
+		name    string
+		project string
+		repos   []string
+		want    string
+	}{
+		{name: "project filter beats derived repos", project: "proj/repo", repos: []string{"derived/repo"}, want: "proj/repo"},
+		{name: "derived repos are the last fallback", repos: []string{"derived/repo"}, want: "derived/repo"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var mu sync.Mutex
+			var paths []string
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				mu.Lock()
+				paths = append(paths, r.URL.Path)
+				mu.Unlock()
+				switch {
+				case strings.HasSuffix(r.URL.Path, "/pulls"), strings.HasSuffix(r.URL.Path, "/issues"), strings.HasSuffix(r.URL.Path, "/commits"):
+					writeTestJSON(w, `[]`)
+				case strings.HasPrefix(r.URL.Path, "/repos/"):
+					writeTestJSON(w, `{"full_name":"acme/widgets","default_branch":"main","open_issues_count":0,"updated_at":"2026-11-05T10:00:00Z"}`)
+				default:
+					http.NotFound(w, r)
+				}
+			}))
+			t.Cleanup(server.Close)
+			t.Setenv("BRAIN_GITHUB_BASE_URL", server.URL)
+			t.Setenv("BRAIN_GITHUB_REPOS", "")
+			dataDir := filepath.Join(t.TempDir(), "brain")
+			cfg := config.Default()
+			cfg.Mode = config.ModeLocal
+			cfg.DataDir = dataDir
+			connector, err := bootstrap.BuildConnector(cfg, bootstrap.ConnectorOptions{Name: "github", Project: tc.project, Repos: tc.repos}, bootstrap.Options{Secrets: &fakeSecretStore{values: map[string]string{"github/token": connectorTestToken}}})
+			if err != nil {
+				t.Fatalf("BuildConnector: %v", err)
+			}
+			run, err := connector.Run(context.Background(), ports.ConnectorOptions{Limit: 5})
+			if err != nil || run.Status != domain.ConnectorSuccess {
+				t.Fatalf("run = %+v, %v", run, err)
+			}
+			if !slices.Contains(recordedPaths(&mu, &paths), "/repos/"+tc.want) {
+				t.Fatalf("requests = %v, want /repos/%s", recordedPaths(&mu, &paths), tc.want)
+			}
+			owner, repo, _ := strings.Cut(tc.want, "/")
+			if _, err := os.Stat(filepath.Join(dataDir, "github", owner, repo+".md")); err != nil {
+				t.Fatalf("dump for %s: %v", tc.want, err)
+			}
+		})
+	}
+}
+
+func TestBuildConnectorIMAPUsesMailAccountFallback(t *testing.T) {
+	for _, key := range []string{"BRAIN_IMAP_ACCOUNT", "BRAIN_IMAP_ADDRESS", "BRAIN_IMAP_USERNAME", "BRAIN_IMAP_PASSWORD_KEY", "BRAIN_IMAP_FOLDERS", "BRAIN_IMAP_STATE"} {
+		t.Setenv(key, "")
+	}
+	cfg := config.Default()
+	cfg.Mode = config.ModeLocal
+	cfg.DataDir = filepath.Join(t.TempDir(), "brain")
+	connector, err := bootstrap.BuildConnector(cfg, bootstrap.ConnectorOptions{
+		Name: "imap",
+		IMAP: &connectorbuild.IMAPAccount{Account: "work", Address: "imap.example.test:993", Username: "me@example.test", Folders: []string{"INBOX"}},
+	}, bootstrap.Options{Secrets: &fakeSecretStore{}})
+	if err != nil {
+		t.Fatalf("BuildConnector: %v", err)
+	}
+	if connector.Name() != "imap" {
+		t.Fatalf("connector name = %q", connector.Name())
+	}
+}
+
+func recordedPaths(mu *sync.Mutex, paths *[]string) []string {
+	mu.Lock()
+	defer mu.Unlock()
+	return append([]string(nil), (*paths)...)
 }
 
 func writeTestJSON(w http.ResponseWriter, body string) {

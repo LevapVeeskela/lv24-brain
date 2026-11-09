@@ -154,10 +154,13 @@ type ConnectorRunFilter struct {
 
 // ConnectorRunRequest selects one connector run from the HTTP API.
 type ConnectorRunRequest struct {
-	Name     string     `json:"name"`
-	Projects []string   `json:"projects,omitempty"`
-	Since    *time.Time `json:"since,omitempty"`
-	Limit    int        `json:"limit,omitempty"`
+	Name string `json:"name"`
+	// ProjectID maps raw items to an existing brain project. Unmapped items
+	// remain stored but are excluded from project-scoped server search.
+	ProjectID string     `json:"projectId,omitempty"`
+	Projects  []string   `json:"projects,omitempty"`
+	Since     *time.Time `json:"since,omitempty"`
+	Limit     int        `json:"limit,omitempty"`
 }
 
 // ConnectorRunner executes one connector and persists its run record. The

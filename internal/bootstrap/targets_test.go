@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"testing"
+	"time"
 
 	"github.com/levapveeskela/lv24-brain/internal/domain"
 )
@@ -71,6 +72,35 @@ func TestLoadMailAccounts(t *testing.T) {
 	imap := accounts[0].IMAPAccount()
 	if imap.Account != "box" || imap.Address != "imap.example.test:993" || imap.Username != "u" || len(imap.Folders) != 1 {
 		t.Fatalf("imap account = %+v", imap)
+	}
+}
+
+func TestMailAccountImportSinceHonorsDays(t *testing.T) {
+	now := time.Date(2026, 11, 9, 12, 0, 0, 0, time.UTC)
+	dir := t.TempDir()
+	statePath := filepath.Join(dir, "mail-state.json")
+	account := MailAccount{ID: "box", Days: 7}
+
+	explicit := time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)
+	if got, err := account.ImportSince(&explicit, now, statePath); err != nil || got == nil || !got.Equal(explicit) {
+		t.Fatalf("explicit since = %v, %v", got, err)
+	}
+
+	got, err := account.ImportSince(nil, now, statePath)
+	if err != nil || got == nil || !got.Equal(now.AddDate(0, 0, -7)) {
+		t.Fatalf("initial since = %v, %v", got, err)
+	}
+
+	raw := `{"version":1,"accounts":{"box":{"folders":{"INBOX":{"uid_validity":1,"last_uid":5,"updated_at":"2026-11-01T00:00:00Z"}}}}}`
+	if err := os.WriteFile(statePath, []byte(raw), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := account.ImportSince(nil, now, statePath); err != nil || got != nil {
+		t.Fatalf("since after cursor = %v, %v; want nil so the cursor catches up", got, err)
+	}
+
+	if got, err := (MailAccount{ID: "box"}).ImportSince(nil, now, statePath); err != nil || got != nil {
+		t.Fatalf("unbounded account since = %v, %v", got, err)
 	}
 }
 

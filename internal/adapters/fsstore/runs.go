@@ -41,6 +41,8 @@ type connectorRunFrontmatter struct {
 	FinishedAt           *time.Time             `yaml:"finished_at,omitempty"`
 	Counts               map[string]int         `yaml:"counts,omitempty"`
 	Error                string                 `yaml:"error,omitempty"`
+	ConnectionID         string                 `yaml:"connection_id,omitempty"`
+	Stats                *domain.RunStats       `yaml:"stats,omitempty"`
 }
 
 // AppendConnectorRun writes one run record under connectors/runs. A run id is
@@ -85,13 +87,15 @@ func (s *Store) AppendConnectorRun(ctx context.Context, run domain.ConnectorRun)
 			UpdatedAt:     updatedAt,
 			SchemaVersion: SchemaVersion,
 		},
-		ID:         id,
-		Source:     run.Source,
-		Status:     run.Status,
-		StartedAt:  started,
-		FinishedAt: finished,
-		Counts:     run.Counts,
-		Error:      run.Error,
+		ID:           id,
+		Source:       run.Source,
+		Status:       run.Status,
+		StartedAt:    started,
+		FinishedAt:   finished,
+		Counts:       run.Counts,
+		Error:        run.Error,
+		ConnectionID: run.ConnectionID,
+		Stats:        run.Stats,
 	}
 	raw, err := markdown.Render(frontmatter, renderConnectorRunBody(frontmatter))
 	if err != nil {
@@ -256,13 +260,15 @@ func readConnectorRun(path string) (connectorRunFrontmatter, bool) {
 
 func (f connectorRunFrontmatter) run() domain.ConnectorRun {
 	return domain.ConnectorRun{
-		ID:         f.ID,
-		Source:     f.Source,
-		StartedAt:  f.StartedAt.UTC(),
-		FinishedAt: f.FinishedAt,
-		Status:     f.Status,
-		Counts:     f.Counts,
-		Error:      f.Error,
+		ID:           f.ID,
+		Source:       f.Source,
+		StartedAt:    f.StartedAt.UTC(),
+		FinishedAt:   f.FinishedAt,
+		Status:       f.Status,
+		Counts:       f.Counts,
+		Error:        f.Error,
+		ConnectionID: f.ConnectionID,
+		Stats:        f.Stats,
 	}
 }
 

@@ -366,11 +366,10 @@ func (a *API) search(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"items": hits})
 }
 
-// searchKinds lists the document kinds a search may filter on. "state" and
-// "dump" are accepted so local-mode clients can send the same filters; server
-// search simply finds no documents of those kinds.
+// searchKinds lists the document kinds a search may filter on. Raw-zone
+// external items use "item"; clients request them explicitly like dumps.
 var searchKinds = map[string]struct{}{
-	"note": {}, "decision": {}, "attempt": {}, "handoff": {}, "state": {}, "dump": {},
+	"note": {}, "decision": {}, "attempt": {}, "handoff": {}, "state": {}, "dump": {}, "item": {},
 }
 
 // searchSinceParam reads the optional since query parameter (RFC3339). An

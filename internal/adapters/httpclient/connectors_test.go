@@ -135,14 +135,14 @@ func TestClientRunConnector(t *testing.T) {
 		t.Fatalf("New: %v", err)
 	}
 	since := time.Date(2026, 11, 1, 0, 0, 0, 0, time.UTC)
-	run, err := client.RunConnector(context.Background(), "github", []string{"acme/widgets"}, &since, 10)
+	run, err := client.RunConnectorMapped(context.Background(), "github", []string{"acme/widgets"}, &since, 10, "widgets")
 	if err != nil {
 		t.Fatalf("RunConnector: %v", err)
 	}
 	if run.ID != "run-1" || run.Status != domain.ConnectorSuccess || run.Counts["repos"] != 1 {
 		t.Fatalf("run = %+v", run)
 	}
-	if got.Name != "github" || len(got.Projects) != 1 || got.Limit != 10 || got.Since == nil {
+	if got.Name != "github" || len(got.Projects) != 1 || got.Limit != 10 || got.Since == nil || got.ProjectID != "widgets" {
 		t.Fatalf("request = %+v", got)
 	}
 }

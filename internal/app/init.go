@@ -15,6 +15,7 @@ const gitignoreContent = `# LV24 Brain local data exclusions
 secrets/
 index/
 backups/
+connectors/.locks/
 *.db
 *.sqlite
 *.sqlite3

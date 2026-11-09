@@ -29,6 +29,7 @@ import (
 	"github.com/levapveeskela/lv24-brain/internal/app"
 	"github.com/levapveeskela/lv24-brain/internal/bootstrap"
 	"github.com/levapveeskela/lv24-brain/internal/config"
+	"github.com/levapveeskela/lv24-brain/internal/connectorbuild"
 	"github.com/levapveeskela/lv24-brain/internal/domain"
 	"github.com/levapveeskela/lv24-brain/internal/gitinfo"
 	"github.com/levapveeskela/lv24-brain/internal/migrate"
@@ -163,6 +164,8 @@ func runCommand(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return runMCP(rest, stdin, stdout, stderr)
 	case "connector":
 		return runConnector(rest, stdout, stderr)
+	case "connection":
+		return runConnection(rest, stdin, stdout, stderr)
 	case "migrate":
 		return runMigrate(rest, stdout, stderr)
 	case "secret":
@@ -233,7 +236,8 @@ Commands:
   links      [[id]] links and backlinks of a record; --broken lists dangling links
   session    start|end handlers for agent session hooks
   mcp        Serve the brain as an MCP server over stdio (for coding agents)
-  connector  Run a read-only GitHub, GitLab, or IMAP connector
+  connector  Run a read-only connector (see connector --help for providers)
+  connection Manage local/git connections, credentials and provider descriptors
   migrate    Import a legacy .brain data directory; --rollback reverts an import
   secret     Manage OS-backed secrets (set, list, remove)
   login      Authenticate against a server-mode brain
@@ -1350,6 +1354,7 @@ func runIndex(args []string, stdout, stderr io.Writer) int {
 	fmt.Fprintf(stdout, "attempts: %d\n", result.Attempts)
 	fmt.Fprintf(stdout, "handoffs: %d\n", result.Handoffs)
 	fmt.Fprintf(stdout, "dumps: %d\n", result.Dumps)
+	fmt.Fprintf(stdout, "items: %d\n", result.Items)
 	fmt.Fprintf(stdout, "documents: %d\n", result.Documents)
 	fmt.Fprintf(stdout, "pruned: %d\n", result.Pruned)
 	fmt.Fprintf(stdout, "rebuilt: %t\n", result.Rebuild)
@@ -1360,7 +1365,7 @@ func runSearch(args []string, stdout, stderr io.Writer) int {
 	fs := newFlagSet("search", stderr)
 	project := fs.String("project", "", "project id filter")
 	limit := fs.Int("limit", app.DefaultSearchLimit, "maximum results")
-	kinds := fs.String("kind", "", "comma-separated kinds to keep: note, decision, attempt, handoff, dump")
+	kinds := fs.String("kind", "", "comma-separated kinds to keep: note, decision, attempt, handoff, dump, item (raw-zone external items; excluded by default)")
 	dumps := fs.Bool("dumps", false, "include connector dumps (mail, GitHub/GitLab issues and PRs)")
 	since := fs.String("since", "", "only documents updated since: duration (24h, 7d), date (2026-11-01) or RFC3339 time")
 	asJSON := fs.Bool("json", false, "print JSON")
@@ -1442,10 +1447,12 @@ func runConnector(args []string, stdout, stderr io.Writer) int {
 
 func runConnectorRun(args []string, stdout, stderr io.Writer) int {
 	fs := newFlagSet("connector run", stderr)
-	name := fs.String("name", "", "github, gitlab, or imap")
+	providers := connectorbuild.Builtin().Providers()
+	name := fs.String("name", "", strings.Join(providers, ", "))
 	project := fs.String("project", "", "configured repository/project filter (ignored for imap)")
+	brainProject := fs.String("brain-project", "", "map server raw items to this existing brain project")
 	account := fs.String("account", "", "imap account id from connectors/mail.json")
-	all := fs.Bool("all", false, "run github, gitlab and every connectors/mail.json account (local/git)")
+	all := fs.Bool("all", false, "run configured connections; fall back to legacy targets when catalogue is empty (local/git)")
 	days := fs.Int("days", 0, "only items updated in the last N days (alternative to --since)")
 	sinceRaw := fs.String("since", "", "only items updated at or after this RFC3339 time")
 	limit := fs.Int("limit", 0, "per-collection item limit (0 uses the connector default)")
@@ -1463,12 +1470,12 @@ func runConnectorRun(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "brain connector run: pass either --all or --name")
 		return 2
 	case *all:
-	case connectorName == "github", connectorName == "gitlab", connectorName == "imap":
+	case containsString(providers, connectorName):
 	default:
 		if connectorName == "" {
 			fmt.Fprintln(stderr, "brain connector run: --name is required")
 		} else {
-			fmt.Fprintf(stderr, "brain connector run: --name must be github, gitlab, or imap (got %q)\n", *name)
+			fmt.Fprintf(stderr, "brain connector run: --name must be one of %s (got %q)\n", strings.Join(providers, ", "), *name)
 		}
 		return 2
 	}
@@ -1499,9 +1506,10 @@ func runConnectorRun(args []string, stdout, stderr io.Writer) int {
 		return reportError(stderr, "connector run", err)
 	}
 	opts := bootstrap.ConnectorOptions{
-		Name:    connectorName,
-		Project: strings.TrimSpace(*project),
-		Limit:   *limit,
+		Name:         connectorName,
+		Project:      strings.TrimSpace(*project),
+		BrainProject: strings.TrimSpace(*brainProject),
+		Limit:        *limit,
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -1522,6 +1530,29 @@ func runConnectorRun(args []string, stdout, stderr io.Writer) int {
 		return 0
 	}
 
+	if *all {
+		catalogue, err := buildConnections(cfg, bootstrap.Options{})
+		if err != nil {
+			return reportError(stderr, "connector run", err)
+		}
+		connections, err := catalogue.Connections.List(ctx)
+		if err != nil {
+			return reportError(stderr, "connector run", err)
+		}
+		if len(connections) > 0 {
+			code := 0
+			for _, connection := range connections {
+				if *project != "" && !containsString(connection.Projects, *project) {
+					continue
+				}
+				fmt.Fprintf(stdout, "== %s\n", connection.ID)
+				if runConfiguredConnection(ctx, cfg, connection.ID, since, *limit, false, stdout, stderr) != 0 {
+					code = 1
+				}
+			}
+			return code
+		}
+	}
 	plans, err := planLocalConnectors(ctx, cfg, connectorName, strings.TrimSpace(*project), strings.TrimSpace(*account), *all, *limit)
 	if err != nil {
 		return reportError(stderr, "connector run", err)
@@ -1553,14 +1584,15 @@ func printConnectorRun(w io.Writer, run domain.ConnectorRun) {
 }
 
 func printConnectorUsage(w io.Writer) {
-	fmt.Fprint(w, `Usage:
-  brain connector run --name github|gitlab|imap [flags]
+	providers := connectorbuild.Builtin().Providers()
+	fmt.Fprintf(w, `Usage:
+  brain connector run --name %s [flags]
   brain connector run --all [--days N]
 
 Flags:
   --project <value>   GitHub owner/repository or GitLab project filter; ignored for imap
   --account <id>      IMAP account from connectors/mail.json (password key imap/<id>/password)
-  --all               github + gitlab + every mail.json account, one after another
+  --all              %s targets + every mail.json account, one after another
   --days <n>          Only collect items updated in the last n days
   --since <RFC3339>   Only collect items updated at or after this time
   --limit <n>         Per-collection item limit (0 uses the connector default)
@@ -1593,7 +1625,7 @@ In local/git mode connector dumps are written below the brain data directory.
 In server mode the command calls POST /v1/connectors/run; the server stores the
 run record (PostgreSQL when configured) and discards bulk dumps. The run record
 is exported by GET /v1/connectors/runs/{id}/markdown. Values are never printed.
-`)
+`, strings.Join(providers, "|"), strings.Join(providers, " + "))
 }
 
 func runMigrate(args []string, stdout, stderr io.Writer) int {

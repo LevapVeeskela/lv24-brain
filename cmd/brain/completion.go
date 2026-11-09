@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"io"
 	"strings"
+
+	"github.com/levapveeskela/lv24-brain/internal/connectorbuild"
 )
 
 // completionFlag is a flag offered by shell completion. takes marks a flag that
@@ -31,7 +33,7 @@ type completionCmd struct {
 	pos   *completionPos
 }
 
-// completionLeaf is an executable command path (one or two words) and its flags.
+// completionLeaf is an executable command path and its flags.
 type completionLeaf struct {
 	path  []string
 	flags []completionFlag
@@ -92,7 +94,7 @@ var completionTable = []completionCmd{
 	cmdLeaf("review", valueFlag("project"), valueFlag("since"), boolFlag("fix"), valueFlag("fix-kind"), boolFlag("json"), valueFlag("config")),
 	cmdLeaf("sync", boolFlag("status"), boolFlag("push"), valueFlag("config")),
 	cmdLeaf("index", boolFlag("rebuild"), valueFlag("config")),
-	cmdLeaf("search", valueFlag("project"), valueFlag("limit"), choiceFlag("kind", "note", "decision", "attempt", "handoff", "dump"),
+	cmdLeaf("search", valueFlag("project"), valueFlag("limit"), choiceFlag("kind", "note", "decision", "attempt", "handoff", "dump", "item"),
 		boolFlag("dumps"), valueFlag("since"), boolFlag("json"), valueFlag("config")),
 	cmdLeaf("journal", valueFlag("project"), valueFlag("user"), valueFlag("event"), valueFlag("since"), valueFlag("limit"),
 		boolFlag("json"), boolFlag("repair"), boolFlag("dry-run"), valueFlag("days"), valueFlag("config")),
@@ -135,8 +137,18 @@ var completionTable = []completionCmd{
 	),
 	cmdLeaf("mcp", valueFlag("config")),
 	cmdGroup("connector",
-		cmdLeaf("run", choiceFlag("name", "github", "gitlab", "imap"), valueFlag("project"), valueFlag("account"),
+		cmdLeaf("run", choiceFlag("name", connectorbuild.Builtin().Providers()...), valueFlag("project"), valueFlag("brain-project"), valueFlag("account"),
 			boolFlag("all"), valueFlag("days"), valueFlag("since"), valueFlag("limit"), valueFlag("config")),
+	),
+	cmdGroup("connection",
+		cmdLeaf("run", valueFlag("since"), valueFlag("days"), valueFlag("limit"), boolFlag("json"), valueFlag("config")),
+		cmdLeaf("list", boolFlag("json"), valueFlag("config")),
+		cmdLeaf("add", valueFlag("id"), valueFlag("account"), valueFlag("base-url"), valueFlag("project"), valueFlag("schedule"),
+			choiceFlag("publish", "local-only", "shared"), choiceFlag("setting", connectionSettingChoices()...), boolFlag("json"), valueFlag("config")).withPos(1, "provider", connectorbuild.Builtin().Providers()...),
+		cmdGroup("secret", cmdLeaf("set", valueFlag("config")).withPos(2, "field", connectionSecretFields()...)),
+		cmdLeaf("remove", boolFlag("yes"), boolFlag("json"), valueFlag("config")),
+		cmdLeaf("migrate", boolFlag("copy-legacy-secrets"), boolFlag("json"), valueFlag("config")),
+		cmdLeaf("providers", boolFlag("json"), valueFlag("config")),
 	),
 	cmdLeaf("migrate", valueFlag("from"), valueFlag("data-dir"), boolFlag("dry-run"), valueFlag("rollback"), valueFlag("config")),
 	cmdGroup("secret", cmdLeaf("set"), cmdLeaf("list"), cmdLeaf("remove")),
@@ -160,16 +172,65 @@ var completionTable = []completionCmd{
 // completionLeaves flattens completionTable into executable command paths.
 func completionLeaves() []completionLeaf {
 	var leaves []completionLeaf
-	for _, c := range completionTable {
-		if len(c.subs) == 0 {
-			leaves = append(leaves, completionLeaf{path: []string{c.name}, flags: c.flags, pos: c.pos})
-			continue
-		}
-		for _, s := range c.subs {
-			leaves = append(leaves, completionLeaf{path: []string{c.name, s.name}, flags: s.flags, pos: s.pos})
+	var walk func([]string, []completionCmd)
+	walk = func(parent []string, commands []completionCmd) {
+		for _, c := range commands {
+			path := append(append([]string{}, parent...), c.name)
+			if len(c.subs) == 0 {
+				leaves = append(leaves, completionLeaf{path: path, flags: c.flags, pos: c.pos})
+				continue
+			}
+			walk(path, c.subs)
 		}
 	}
+	walk(nil, completionTable)
 	return leaves
+}
+
+type completionGroup struct {
+	path []string
+	subs []completionCmd
+}
+
+func completionGroups() []completionGroup {
+	var groups []completionGroup
+	var walk func([]string, []completionCmd)
+	walk = func(parent []string, commands []completionCmd) {
+		for _, command := range commands {
+			if len(command.subs) == 0 {
+				continue
+			}
+			path := append(append([]string{}, parent...), command.name)
+			groups = append(groups, completionGroup{path, command.subs})
+			walk(path, command.subs)
+		}
+	}
+	walk(nil, completionTable)
+	return groups
+}
+
+func connectionSettingChoices() []string {
+	var choices []string
+	for _, descriptor := range connectorbuild.Builtin().Descriptors() {
+		for _, field := range descriptor.ConfigFields {
+			if !field.Secret {
+				choices = append(choices, field.Key+"=")
+			}
+		}
+	}
+	return choices
+}
+
+func connectionSecretFields() []string {
+	var choices []string
+	for _, descriptor := range connectorbuild.Builtin().Descriptors() {
+		for _, field := range descriptor.ConfigFields {
+			if field.Secret && !containsString(choices, field.Key) {
+				choices = append(choices, field.Key)
+			}
+		}
+	}
+	return choices
 }
 
 func (l completionLeaf) key() string { return strings.Join(l.path, " ") }
@@ -239,7 +300,7 @@ func renderBash() string {
 	w.line(0, "# bash completion for brain. Generated by `brain completion bash`.")
 	w.line(0, "# Install: brain completion bash > ~/.local/share/bash-completion/completions/brain")
 	w.line(0, "_brain_complete() {")
-	w.line(1, "local cur prev cmd sub key n i word")
+	w.line(1, "local cur prev key n i word")
 	w.line(1, "COMPREPLY=()")
 	w.line(1, `cur="${COMP_WORDS[COMP_CWORD]}"`)
 	w.line(1, `prev="${COMP_WORDS[COMP_CWORD-1]}"`)
@@ -247,24 +308,16 @@ func renderBash() string {
 	w.line(2, `COMPREPLY=( $(compgen -W "`+strings.Join(topLevelNames(), " ")+`" -- "$cur") )`)
 	w.line(2, "return 0")
 	w.line(1, "fi")
-	w.line(1, `cmd="${COMP_WORDS[1]}"`)
-	w.line(1, `sub=""`)
-	w.line(1, `case "$cmd" in`)
-	for _, c := range completionTable {
-		if len(c.subs) == 0 {
-			continue
-		}
-		w.line(2, c.name+")")
-		w.line(3, `if [ "$COMP_CWORD" -eq 2 ]; then`)
-		w.line(4, `COMPREPLY=( $(compgen -W "`+strings.Join(subNames(c), " ")+`" -- "$cur") )`)
-		w.line(4, "return 0")
-		w.line(3, "fi")
-		w.line(3, `sub="${COMP_WORDS[2]}"`)
-		w.line(3, ";;")
+	w.line(1, `key="${COMP_WORDS[1]}"`)
+	for _, group := range completionGroups() {
+		w.line(1, `if [ "$key" = "`+strings.Join(group.path, " ")+`" ]; then`)
+		w.line(2, fmt.Sprintf(`if [ "$COMP_CWORD" -eq %d ]; then`, len(group.path)+1))
+		w.line(3, `COMPREPLY=( $(compgen -W "`+strings.Join(subNames(completionCmd{subs: group.subs}), " ")+`" -- "$cur") )`)
+		w.line(3, "return 0")
+		w.line(2, "fi")
+		w.line(2, fmt.Sprintf(`key="$key ${COMP_WORDS[%d]}"`, len(group.path)+1))
+		w.line(1, "fi")
 	}
-	w.line(1, "esac")
-	w.line(1, `key="$cmd"`)
-	w.line(1, `if [ -n "$sub" ]; then key="$cmd $sub"; fi`)
 	w.line(1, `case "$key" in`)
 	for _, l := range completionLeaves() {
 		if len(l.flags) == 0 && l.pos == nil {
@@ -319,27 +372,22 @@ func renderZsh() string {
 	w.line(0, "# zsh completion for brain. Generated by `brain completion zsh`.")
 	w.line(0, "# Save as _brain in a directory on $fpath (for example ~/.zfunc), then start a new shell.")
 	w.line(0, "_brain() {")
-	w.line(1, "local sub key")
+	w.line(1, "local key")
 	w.line(1, "if (( CURRENT == 2 )); then")
 	w.line(2, "_values 'brain command' "+strings.Join(topLevelNames(), " "))
 	w.line(2, "return")
 	w.line(1, "fi")
-	w.line(1, "case $words[2] in")
-	for _, c := range completionTable {
-		if len(c.subs) == 0 {
-			continue
-		}
-		w.line(2, c.name+")")
-		w.line(3, "if (( CURRENT == 3 )); then")
-		w.line(4, "_values '"+c.name+" subcommand' "+strings.Join(subNames(c), " "))
-		w.line(4, "return")
-		w.line(3, "fi")
-		w.line(3, "sub=$words[3]")
-		w.line(3, ";;")
-	}
-	w.line(1, "esac")
 	w.line(1, "key=$words[2]")
-	w.line(1, `if [[ -n $sub ]]; then key="$key $sub"; fi`)
+	for _, group := range completionGroups() {
+		path := strings.Join(group.path, " ")
+		w.line(1, "if [[ $key == '"+path+"' ]]; then")
+		w.line(2, fmt.Sprintf("if (( CURRENT == %d )); then", len(group.path)+2))
+		w.line(3, "_values '"+path+" subcommand' "+strings.Join(subNames(completionCmd{subs: group.subs}), " "))
+		w.line(3, "return")
+		w.line(2, "fi")
+		w.line(2, fmt.Sprintf(`key="$key $words[%d]"`, len(group.path)+2))
+		w.line(1, "fi")
+	}
 	w.line(1, "case $key in")
 	for _, l := range completionLeaves() {
 		if len(l.flags) == 0 && l.pos == nil {
@@ -357,10 +405,11 @@ func renderZsh() string {
 			}
 		}
 		if l.pos != nil {
-			for i := 1; i < l.pos.index; i++ {
+			// _arguments sees the full words array, including the command path.
+			for i := 1; i < len(l.path)+l.pos.index; i++ {
 				specs = append(specs, fmt.Sprintf("'%d:argument:'", i))
 			}
-			specs = append(specs, fmt.Sprintf("'%d:%s:(%s)'", l.pos.index, l.pos.label, strings.Join(l.pos.values, " ")))
+			specs = append(specs, fmt.Sprintf("'%d:%s:(%s)'", len(l.path)+l.pos.index, l.pos.label, strings.Join(l.pos.values, " ")))
 		}
 		w.line(2, "'"+l.key()+"')")
 		w.line(3, "_arguments \\")
@@ -396,17 +445,15 @@ func renderFish() string {
 	w.line(0, "end")
 	w.line(0, "function __brain_sub")
 	w.line(1, "set -l w (commandline -opc)")
-	w.line(1, `test (count $w) -eq 2; and test "$w[2]" = "$argv[1]"`)
+	w.line(1, `test (count $w) -eq (math (count $argv) + 1); and __brain_at $argv`)
 	w.line(0, "end")
 	w.line(0, "function __brain_nwords")
 	w.line(1, "set -l w (commandline -opc)")
 	w.line(1, "math (count $w) - 1")
 	w.line(0, "end")
 	w.line(0, "complete -c brain -n 'test (__brain_nwords) -eq 0' -a '"+strings.Join(topLevelNames(), " ")+"'")
-	for _, c := range completionTable {
-		if len(c.subs) > 0 {
-			w.line(0, "complete -c brain -n '__brain_sub "+c.name+"' -a '"+strings.Join(subNames(c), " ")+"'")
-		}
+	for _, group := range completionGroups() {
+		w.line(0, "complete -c brain -n '__brain_sub "+strings.Join(group.path, " ")+"' -a '"+strings.Join(subNames(completionCmd{subs: group.subs}), " ")+"'")
 	}
 	for _, l := range completionLeaves() {
 		if l.pos != nil {
@@ -464,10 +511,8 @@ func renderPowerShell() string {
 	w.line(1, "param($wordToComplete, $commandAst, $cursorPosition)")
 	w.line(1, "$top = @("+psQuoteList(topLevelNames())+")")
 	w.line(1, "$subs = @{")
-	for _, c := range completionTable {
-		if len(c.subs) > 0 {
-			w.line(2, "'"+c.name+"' = @("+psQuoteList(subNames(c))+")")
-		}
+	for _, group := range completionGroups() {
+		w.line(2, "'"+strings.Join(group.path, " ")+"' = @("+psQuoteList(subNames(completionCmd{subs: group.subs}))+")")
 	}
 	w.line(1, "}")
 	w.line(1, "$flags = @{")
@@ -505,14 +550,17 @@ func renderPowerShell() string {
 	w.line(1, "$words = @($commandAst.CommandElements | Select-Object -Skip 1 | ForEach-Object { $_.ToString() })")
 	w.line(1, "if ($wordToComplete -ne '' -and $words.Count -gt 0) { $words = @($words | Select-Object -SkipLast 1) }")
 	w.line(1, "$items = @()")
+	w.line(1, "$key = ''; $pathLen = 0")
+	w.line(1, "foreach ($word in $words) {")
+	w.line(2, "if ($pathLen -eq 0) { $key = $word; $pathLen = 1; continue }")
+	w.line(2, "if (-not $subs.ContainsKey($key)) { break }")
+	w.line(2, "$key += ' ' + $word; $pathLen++")
+	w.line(1, "}")
 	w.line(1, "if ($words.Count -eq 0) {")
 	w.line(2, "$items = $top")
-	w.line(1, "} elseif ($subs.ContainsKey($words[0]) -and $words.Count -eq 1) {")
-	w.line(2, "$items = $subs[$words[0]]")
+	w.line(1, "} elseif ($subs.ContainsKey($key) -and $words.Count -eq $pathLen) {")
+	w.line(2, "$items = $subs[$key]")
 	w.line(1, "} else {")
-	w.line(2, "$key = $words[0]")
-	w.line(2, "if ($subs.ContainsKey($words[0])) { $key = $words[0] + ' ' + $words[1] }")
-	w.line(2, "$pathLen = @($key.Split(' ')).Count")
 	w.line(2, "$prev = $words[-1]")
 	w.line(2, "if ($values.ContainsKey($key + ' ' + $prev)) {")
 	w.line(3, "$items = $values[$key + ' ' + $prev]")
