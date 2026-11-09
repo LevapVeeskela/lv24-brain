@@ -38,6 +38,15 @@ internal/adapters/
   secrets/                 environment + OS secret store
   github/, gitlab/         read-only repository connectors
   imap/                    read-only IMAP connector
+  folders/                 Markdown/Obsidian/Logseq folders
+  jira/, confluence/       Jira and Confluence Cloud/Data Center
+  linear/                  Linear issues
+  slack/, notion/          Slack channels and Notion pages/databases
+  sentry/                  Sentry issues with bounded events
+  dbschema/                PostgreSQL/SQLite catalog-only schema snapshots
+  feeds/                   RSS/Atom and sitemap-driven web pages
+  connectorbuild/          source registry and native factory wiring
+  localapi/                local control API (WP2.2, not wired yet)
 internal/connectors/       shared run records, retry/rate-limit helpers, redaction
 internal/migrate/          legacy .brain importer
 internal/server/           server config and process wiring
@@ -315,6 +324,18 @@ GitHub, GitLab, and IMAP adapters are read-only. IMAP selects mailboxes
 read-only, uses `BODY.PEEK`, keeps metadata and a bounded snippet, and exposes
 no send, delete, move, append, copy, or flag operations. Runs are idempotent and
 build `ConnectorRun` values with sanitized errors.
+
+The native Phase 1 sources follow the same `ports.Source` contract and are
+registered in `internal/connectorbuild`: `folders`, `jira`, `confluence`,
+`linear`, `slack`, `notion`, `sentry`, `postgres-schema`, `sqlite-schema`,
+`rss`, and `web`. Each one owns a per-stream checkpoint cursor, bounds every
+response, and reports no deletes unless the upstream has authoritative
+tombstones (none of the Phase 1 sources do). Slack reads only explicitly listed
+channels; Notion syncs shared pages/data sources and falls back to search;
+Sentry stores issues with at most three bounded events each; the database
+sources read catalogs only and never user rows; RSS/web revalidate with HTTP
+validators. The `web` source defaults to the sitemap's host and port, honors
+`robots.txt`, and never follows redirects.
 
 `brain connector run --name github|gitlab|imap` selects one adapter. In local or
 git mode it writes Markdown dumps under the data directory (`github/...`,

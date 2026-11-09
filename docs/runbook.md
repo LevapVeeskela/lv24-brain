@@ -288,10 +288,20 @@ brain discover --root <workspace> --apply   # register the new ones
   GitHub/GitLab/IMAP: `folders` (`paths`, optional `extensions`/`ignore`; no
   credentials; Obsidian/Logseq text is preserved), `jira` (`token` secret,
   optional `email`/`deployment`/`projects`/`jql`), `confluence` (`token`
-  secret, optional `email`/`deployment`/`spaces`/`cql`) and `linear` (`token`
-  secret, optional `teams`/`authscheme`). Add/run them with
+  secret, optional `email`/`deployment`/`spaces`/`cql`), `linear` (`token`
+  secret, optional `teams`/`authscheme`), `slack` (`token` secret,
+  `channels` required, optional `threads`/`limit`; DMs and private channels
+  are never discovered), `notion` (`token` secret, optional
+  `databases`/`pages`/`version`), `sentry` (`token` secret, `org` required,
+  optional `projects`/`environment`; at most three newest events per issue),
+  `postgres-schema` (`host`/`database`/`user` + `password` secret, optional
+  `port`/`sslmode`/`includesystem`), `sqlite-schema` (absolute `path`, optional
+  `includesystem`), `rss` (`urls`, optional `limit`) and `web` (`sitemaps`,
+  optional `maxpages`/`allowhosts`/`respectrobots`). Add/run them with
   `brain connection add|run`; `brain connector run --name` still accepts only
-  `github`, `gitlab`, `imap`.
+  `github`, `gitlab`, `imap`. The database sources read catalogs only and the
+  web source never follows redirects or leaves the sitemap's host/port unless
+  `allowhosts` permits it.
 - `brain graphs` runs `graphify` and `codegraph` only where their indexes
   already exist (`--init` creates missing ones), skips missing tools, and logs
   tool output to `<user cache dir>/lv24-brain/graphs.log`, outside the data

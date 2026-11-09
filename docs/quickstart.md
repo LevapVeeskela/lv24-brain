@@ -291,6 +291,51 @@ printf '%s\n' '<confluence-api-token>' | ./bin/brain connection secret set wiki 
 printf '%s\n' '<linear-token>' | ./bin/brain connection secret set linear-work token \
   --config ~/brain/brain.yaml
 ./bin/brain connection run linear-work --config ~/brain/brain.yaml
+
+# Slack (bot token; listing a channel is the explicit opt-in)
+./bin/brain connection add slack --id slack-team \
+  --setting channels=C0123456789,C9876543210 --config ~/brain/brain.yaml
+printf '%s\n' '<xoxb-token>' | ./bin/brain connection secret set slack-team token \
+  --config ~/brain/brain.yaml
+./bin/brain connection run slack-team --limit 20 --config ~/brain/brain.yaml
+
+# Notion (share pages/databases with the integration)
+./bin/brain connection add notion --id notion-work \
+  --setting databases=<data-source-id> --config ~/brain/brain.yaml
+printf '%s\n' '<notion-token>' | ./bin/brain connection secret set notion-work token \
+  --config ~/brain/brain.yaml
+./bin/brain connection run notion-work --config ~/brain/brain.yaml
+
+# Sentry (org slug required; optional projects/environment)
+./bin/brain connection add sentry --id sentry-prod \
+  --base-url https://sentry.io --setting org=acme \
+  --setting projects=api,web --setting environment=production \
+  --config ~/brain/brain.yaml
+printf '%s\n' '<sentry-token>' | ./bin/brain connection secret set sentry-prod token \
+  --config ~/brain/brain.yaml
+./bin/brain connection run sentry-prod --days 7 --config ~/brain/brain.yaml
+
+# Database schema snapshots (catalog-only; never reads user rows)
+./bin/brain connection add postgres-schema --id app-schema \
+  --setting host=db.example.test --setting database=app --setting user=brain_ro \
+  --setting sslmode=verify-full --config ~/brain/brain.yaml
+printf '%s\n' '<read-only-password>' | ./bin/brain connection secret set app-schema password \
+  --config ~/brain/brain.yaml
+./bin/brain connection run app-schema --config ~/brain/brain.yaml
+
+./bin/brain connection add sqlite-schema --id local-schema \
+  --setting 'path=/absolute/path/app.db' --config ~/brain/brain.yaml
+./bin/brain connection run local-schema --config ~/brain/brain.yaml
+
+# RSS/Atom feeds and sitemap-driven web pages (no credentials)
+./bin/brain connection add rss --id news \
+  --setting urls=https://example.test/feed.xml --config ~/brain/brain.yaml
+./bin/brain connection run news --limit 50 --config ~/brain/brain.yaml
+
+./bin/brain connection add web --id docs-site \
+  --setting sitemaps=https://example.test/sitemap.xml \
+  --setting maxpages=50 --config ~/brain/brain.yaml
+./bin/brain connection run docs-site --config ~/brain/brain.yaml
 ```
 
 These providers are available through `brain connection run`/`brain connector run --all`;
