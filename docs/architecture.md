@@ -265,7 +265,7 @@ Persistence:
   refuses to start until a backup is taken and
   `BRAIN_DATABASE_BACKUP_CONFIRMED=1` is set. A fresh database migrates
   immediately.
-- `postgres.SchemaVersion` is 8. Migration `0002_auth_tokens.sql` adds the
+- `postgres.SchemaVersion` is 9. Migration `0002_auth_tokens.sql` adds the
   `api_tokens` and `refresh_tokens` tables, so API tokens and refresh-token
   families survive restarts. Migration `0003_auth_revocations.sql` adds durable
   family/session revocation tombstones with no expiry, so pruning expired token
@@ -287,6 +287,9 @@ Persistence:
 - Migration `0008_project_access.sql` adds per-project access control (a
   restriction row per project and its members) and API token `scopes` and
   project allow-lists. Tokens minted before it keep their full role.
+- Migration `0009_connector_items.sql` adds the server raw store
+  (`connector_items`, `connector_checkpoints`, run `connection_id`/`stats`)
+  used by the native item-level ingestion.
 - The authenticated login is attached to the request context through
   `ports.WithActor`, which both the HTTP layer and the Postgres adapter use, so
   every revision and audit row records who made the change.
@@ -323,14 +326,16 @@ writes nothing, and the UID cursor advances only after the batch is stored
 (after a failed fetch, to the last stored message). GitHub and GitLab follow
 pagination (`Link` / `X-Next-Page`, at most 10 pages, `limit` up to 1000).
 
-In server mode the command calls `POST /v1/connectors/run`; the server builds the
-same adapter from environment/OS secrets, runs it with `BRAIN_CONNECTOR_TIMEOUT`,
-discards the bulk Markdown dumps, and stores the run record through
-`httpapi.Store` (PostgreSQL when configured). Viewers can list and fetch runs
+In server mode the command calls `POST /v1/connectors/run`; the server builds
+the native item-level connection from environment/OS secrets, runs it with
+`BRAIN_CONNECTOR_TIMEOUT`, stores raw items and checkpoints in PostgreSQL
+(schema 9) plus the run record through `httpapi.Store`, and maps items to an
+existing project when the request carries `projectId`. The in-memory
+development store has no raw zone and rejects the run as unsupported instead
+of discarding output. Viewers can list and fetch runs
 at `GET /v1/connectors/runs` and `GET /v1/connectors/runs/{id}`; `GET
 /v1/connectors/runs/{id}/markdown` exports the run record. The run record keeps
-status, counts and the sanitized error. IMAP server runs are stateless unless
-`BRAIN_IMAP_STATE` is set.
+status, counts and the sanitized error.
 
 `internal/adapters/secrets` resolves credentials from
 `BRAIN_SECRET_<NAME>` first and the platform store second: Windows Credential
@@ -338,7 +343,33 @@ Manager, macOS Keychain, or Linux Secret Service. A key such as `github/token`
 maps to `BRAIN_SECRET_GITHUB_TOKEN`. Environment-provided values shadow the OS
 store and cannot be overwritten through the store API.
 `brain secret set|list|remove` manages the OS store; `set` reads the value from
-stdin and prints only the secret name.
+stdin and prints only the secret name. Connection credentials use the
+`conn/<id>/<field>` namespace (`brain connection secret set <id> <field>`
+reads the value from stdin); the catalogue `connectors/connections.json`
+stores settings only, never secrets.
+
+Raw zone (v0.9.0): in local/git mode the ingestion host stores one
+Markdown file per item at `connectors/<id>/items/<40 hex>.md` (provenance
+frontmatter), one checkpoint per stream at
+`connectors/<id>/checkpoints/<stream>.json`, and tombstones (ref, deleted,
+observed_at only) for reported deletes. Items are written before checkpoints;
+a run then updates the per-item index (`item:<conn>/<id>`, kind `item`,
+excluded from default search) and persists the run record. Publish policy is
+applied before the first write: `local-only` writes a `connectors/<id>/.gitignore`
+that ignores everything, and on a shared-to-local-only switch the caller
+untracks `connectors/<id>` (`git rm --cached -r`) before private payload
+writes. That untrack does not erase prior git history. Mail connections
+default to `local-only`; mail addresses are hashed to `[email:<12 hex>]`
+(exposure reduction, not anonymization). Sources never infer deletes from
+absence.
+
+In server mode the same host writes raw items and checkpoints to PostgreSQL
+(`connector_items`, `connector_checkpoints`, migration `0009`) and run
+`connection_id`/`stats`; server search includes mapped items. The in-memory
+development store has no raw zone, so connector runs return `unsupported`
+instead of reporting a false success. A request may pass `projectId` to map
+items to an existing project; unmapped items stay stored but out of
+project-scoped search.
 
 ## Auto-update
 
@@ -406,7 +437,9 @@ left untouched and the command exits non-zero.
 | No CLI OIDC flow | `brain login` supports local accounts only; OIDC is browser-based |
 | `brain sync` not implemented in server mode | API is the only server sync path |
 | Multi-replica deployment unsupported | the SSE broker and login rate limiter are per-process even with durable tokens |
-| Server-side connector dumps are not persisted | run records and per-run Markdown export are available; bulk GitHub/GitLab/IMAP Markdown dumps are discarded in server mode |
+| Server raw items require PostgreSQL | connector runs persist raw items, checkpoints and run records with `BRAIN_DATABASE_URL`; the in-memory development store returns `unsupported` instead of discarding output |
+| Raw-zone deletes are not inferred | sources report tombstones only; `Deletes` is false without authoritative tombstones |
+| No curation or desktop in this phase | ingestion never writes curated records; no digest/promotion UI |
 | CLI index is local-only | `brain search` in server mode uses `GET /v1/search`; no local index is built |
 | No server-side Markdown import/export | migrate into Markdown first; server records go through the API |
 | Server auto-update not implemented | upgrade by pulling a new image; `BRAIN_SERVER_AUTO_UPDATE` is reserved |

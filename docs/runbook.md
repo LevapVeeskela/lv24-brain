@@ -153,12 +153,15 @@ brain journal --repair --dry-run   # records of the last 30 days without a journ
   renamed or quarantined on another machine) and reports them as `pruned`.
 - `brain search` queries the local FTS5 index in local and git mode and calls
   `GET /v1/search` in server mode. It searches curated records by default;
-  `--dumps` adds connector dumps (mail, GitHub/GitLab issues and PRs) and
+  `--dumps` adds legacy connector dumps (mail, GitHub/GitLab issues and PRs),
+  `--kind item` adds raw-zone items (excluded by default), and
   `--kind note,decision` (or `--kind dump`) filters by kind. GitHub/GitLab
   dumps are indexed under the registered project whose `repo_url` they
   mirror, so `brain search --project ims --kind dump "flaky"` finds that
-  repository's issues. Connector runs index their dumps. Server mode applies
-  `--kind` too (Postgres full-text search, ranked); it stores no dumps.
+  repository's issues. Connector runs index their dumps; item runs update the
+  per-item index (`brain index` prints `items`). Server mode applies
+  `--kind` too (Postgres full-text search, ranked); raw items join only when
+  asked for and only when mapped to an existing brain project.
 - Local search (FTS5) matches each query term of 4 or more characters by
   prefix, so `warm` finds `warmup`; shorter terms match exactly. It
   first requires all terms; when that finds nothing, it falls back to records
@@ -271,6 +274,16 @@ brain discover --root <workspace> --apply   # register the new ones
   it is never stored.
 - Each run is bounded to five minutes and a failing account does not stop the
   others; the command exits 1 if any run failed.
+- Named connections (v0.9.0, local/git only):
+  `brain connection add github --id <id> --setting repos=o/r`,
+  `brain connection add gitlab --id <id> --setting projects=g/p`,
+  `brain connection add imap --id <id> --account <mail-id> --base-url imaps://host[:port] --setting username=... [--setting folders=...]`;
+  secrets via stdin (`brain connection secret set <id> token|password`,
+  stored as `conn/<id>/<field>`); `brain connection run <id> [--since RFC3339]
+  [--days N] [--limit N] [--json]`; `brain connector run --all` prefers the catalogue
+  when non-empty and falls back to the legacy targets above when empty.
+  `--name` stays legacy snapshot (Markdown dumps); it is not native
+  item-level. Deletes are never inferred.
 - `brain graphs` runs `graphify` and `codegraph` only where their indexes
   already exist (`--init` creates missing ones), skips missing tools, and logs
   tool output to `<user cache dir>/lv24-brain/graphs.log`, outside the data

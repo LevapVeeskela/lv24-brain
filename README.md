@@ -121,16 +121,16 @@ The engine has moved past the initial scaffold. Implemented and tested today:
 | Storage | Markdown + YAML frontmatter (`fsstore`), SQLite FTS5 index, `registry.json` project index |
 | Local search | `brain index` refreshes FTS5 from Markdown; `brain index --rebuild` discards and rebuilds it; `brain search` queries it in local/`git` mode; English and Russian word forms match as a prefix ("decisions" finds "decision", "решений" finds "решение") and `--since` limits by update time. `brain index` is local-only; `brain search` also works in server mode through `GET /v1/search` |
 | Git sync | `fetch`, `pull --rebase`, commit, optional push; read-only `--status`; conflict reporting |
-| HTTP server | Health/readiness/version, OpenAPI JSON, JWT + rotating refresh tokens, API tokens with optional scopes (read/write/admin) and project allow-list, per-project ACL, durable auth tables (migrations `0002_auth_tokens.sql` and `0003_auth_revocations.sql`, server schema 8: `0004_security_audit.sql`, `0005_knowledge_owner.sql`, `0006_api_token_expiry.sql`, `0007_search_fulltext.sql`, `0008_project_access.sql`), security audit log (`GET /v1/audit`, admin), local admin bootstrap, OIDC (PKCE/state/nonce), roles `admin\|member\|viewer`, SSE revision stream; Postgres when `BRAIN_DATABASE_URL` is set, in-memory fallback otherwise |
+| HTTP server | Health/readiness/version, OpenAPI JSON, JWT + rotating refresh tokens, API tokens with optional scopes (read/write/admin) and project allow-list, per-project ACL, durable auth tables (migrations `0002_auth_tokens.sql` and `0003_auth_revocations.sql`, server schema 9: `0004_security_audit.sql`, `0005_knowledge_owner.sql`, `0006_api_token_expiry.sql`, `0007_search_fulltext.sql`, `0008_project_access.sql`, `0009_connector_items.sql`), security audit log (`GET /v1/audit`, admin), local admin bootstrap, OIDC (PKCE/state/nonce), roles `admin\|member\|viewer`, SSE revision stream; Postgres when `BRAIN_DATABASE_URL` is set, in-memory fallback otherwise |
 | Server-mode CLI | `brain login` / `brain logout`; one atomic OS secret-store bundle `server-session` (server URL, access token, refresh token) bound to the configured `server_url`; `server-token` remains an explicit static API-token fallback; the HTTP client refreshes once on `401` and retries; `BRAIN_TOKEN` overrides stored credentials; `brain token list\|create\|revoke` manages API tokens (list never shows secrets; `create --scope read\|write\|admin --project <id> --expires 30d\|720h` prints the secret once) |
-| Connectors | GitHub, GitLab, and IMAP adapters plus `brain connector run`; local/`git` writes Markdown dumps and run records under the data directory. Server mode runs through `POST /v1/connectors/run`, stores run records in PostgreSQL, and exports each run as Markdown at `GET /v1/connectors/runs/{id}/markdown` |
+| Connectors (v0.9.0) | `brain connection list\|add\|remove\|migrate\|providers\|secret set` manages the local/git catalogue `connectors/connections.json` (no secrets; credentials live as `conn/<id>/<field>` in the OS keychain, set from stdin); `brain connection run <id> [--since RFC3339] [--days N] [--limit N] [--json]` runs one connection through the ingestion host (per-connection lock, secret redaction, mail address hashing, body cap, index update, run record); `brain connector run --all` runs every configured connection when the catalogue is non-empty and falls back to the legacy `--name github\|gitlab\|imap` snapshot targets when it is empty. Server mode runs the same native item-level path through `POST /v1/connectors/run`: a PostgreSQL deployment persists raw items and checkpoints (schema 9), while the in-memory development store rejects connector runs as unsupported instead of silently discarding output; `--brain-project <id>` maps items to an existing brain project (`projectId` in the API; unmapped items stay stored but out of project-scoped search). The legacy snapshot path and `connectors/runs/` records keep working in local/git mode |
 | Auto-update | `brain update --check`, `--yes`, and `--rollback`; notify-only daily check; release check, Ed25519-signed manifest, SHA-256 verification, staged apply, previous binary kept; GoReleaser release workflow |
 | Installers | npm (`npm i -g lv24-brain`, platform packages `@lv24/brain-<os>-<cpu>`, `brain update` defers to npm), Windows PowerShell/BAT installer (with optional OpenCode handoff hook) and macOS/Linux bash installer |
 | Migration | `brain migrate` imports legacy `.brain` knowledge (idempotent, dry-run, path validation), registers projects, and sets `schema_version`; every import writes a backup manifest and `brain migrate --rollback <manifest.json \| latest>` reverts it (edited files are kept) |
 
 API tokens and refresh-token families are durable in Postgres (migrations
 `0002_auth_tokens.sql` and `0003_auth_revocations.sql`; the server schema is
-version 8 after `0008_project_access.sql`), so they survive restarts and refresh rotation still revokes the whole family on
+version 9 after `0009_connector_items.sql`), so they survive restarts and refresh rotation still revokes the whole family on
 reuse. Revocation tombstones have no expiry, so pruning expired token rows
 cannot resurrect a revoked family or session. Without
 `BRAIN_DATABASE_URL`, `brain-server` still falls back to an in-memory store that
@@ -143,10 +143,22 @@ Known gaps, stated plainly:
 
 - Server auto-update is not implemented; `BRAIN_SERVER_AUTO_UPDATE` is a
   reserved placeholder and deployments upgrade by replacing the image.
-- Server-side connector runs persist the run record, status, counts and
-  sanitized error in PostgreSQL, but discard the bulk connector Markdown dumps.
-  The per-run Markdown export contains the run record, not the dump content.
-  IMAP server runs are stateless unless `BRAIN_IMAP_STATE` is set.
+- Server-side connector runs use the native item-level path. With
+  `BRAIN_DATABASE_URL` they persist raw items and checkpoints in PostgreSQL
+  (`connector_items`, `connector_checkpoints`, run `connection_id`/`stats`,
+  migration `0009_connector_items.sql`, schema 9) plus the run record. The
+  per-run Markdown export contains the run record, not item content. The
+  in-memory development store has no raw zone and returns `unsupported` for
+  connector runs instead of discarding output. Pass `projectId` /
+  `--brain-project` to map server items to an existing project; unmapped
+  items are stored but excluded from project-scoped search.
+- Raw-zone items are excluded from default search; opt in with
+  `brain search <query> --kind item` (legacy dumps: `--dumps` / `--kind dump`).
+- Providers do not infer deletes: a missing item is not a tombstone unless
+  the source reports one (capability `Deletes` is false for providers without
+  authoritative tombstones).
+- No curation or desktop yet: ingestion never writes curated records, and
+  there is no digest/promotion UI in this phase.
 - `brain sync` is not implemented in server mode; the server API is the sync
   path.
 - `brain index` is local-only. `brain search` works in server mode through

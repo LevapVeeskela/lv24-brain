@@ -8,7 +8,7 @@ Public `lv24-brain` may contain code, docs, templates, tests, installers, and
 deployment files only. It must not contain:
 
 - notes, decisions, attempts, handoffs, journals, or project state;
-- mail, connector dumps, contact details, or other personal data;
+- Mail, connector dumps, raw-zone items, contact details, or other personal data;
 - tokens, passwords, private keys, `.env` values, keychain exports;
 - machine-specific paths or hostnames that identify a person;
 - database files, indexes, or backups of private data.
@@ -88,9 +88,18 @@ matching `.gitignore` into the data directory.
   for v1.
 - Connector runs are idempotent and produce status, counts, and a sanitized
   error. Local or `git` mode writes Markdown dumps under the data directory and
-  persists the run under `connectors/runs/`. Server mode runs through
-  `POST /v1/connectors/run` (admin only), persists the run record, and discards
-  the bulk GitHub/GitLab/IMAP Markdown dumps; the per-run Markdown export
+  persists the run under `connectors/runs/`. Connection runs (v0.9.0)
+  store raw items at `connectors/<id>/items/*.md`, checkpoints at
+  `connectors/<id>/checkpoints/*.json`, and tombstones for reported deletes;
+  ingest redacts secrets to `[redacted]` and hashes mail addresses to
+  `[email:<12 hex>]` (exposure reduction, not anonymization). Switching a
+  connection to `local-only` untracks `connectors/<id>` from git before
+  private payload writes (`git rm --cached -r`); it does not erase prior git
+  history, and mail defaults to `local-only`. Server mode runs the same
+  native item-level path through `POST /v1/connectors/run` (admin only): with
+  PostgreSQL it persists raw items, checkpoints and the run record (schema 9);
+  the in-memory development store has no raw zone and rejects connector runs
+  as unsupported instead of discarding output. The per-run Markdown export
   contains only status, counts and the sanitized error. Connector events are
   telemetry about the run, not message content.
 
@@ -106,7 +115,7 @@ Implemented in `internal/adapters/httpapi` and `internal/auth`:
   refresh-token reuse, deletion and role changes take effect immediately.
 - Rotating refresh tokens stored as SHA-256 hashes; reuse revokes the token
   family. In a Postgres deployment they are persisted by migrations
-  `0002_auth_tokens.sql` and `0003_auth_revocations.sql` (server schema 8), so
+  `0002_auth_tokens.sql` and `0003_auth_revocations.sql` (server schema 9), so
   restarts do not invalidate sessions. Revocation tombstones have no expiry, so
   pruning expired token rows cannot resurrect a revoked family or session.
 - Opaque API tokens with the `brain_` prefix, stored as SHA-256 hashes in the
@@ -211,7 +220,7 @@ Current limits, stated plainly:
   applies embedded migrations on startup; startup logs redact the database URL.
 - An existing Postgres schema with pending migrations refuses to start until a
   backup is taken and `BRAIN_DATABASE_BACKUP_CONFIRMED=1` is set. Migrations are
-  forward-only; every upgrade (currently to schema 8) is gated this way.
+  forward-only; every upgrade (currently to schema 9) is gated this way.
 - API tokens and refresh-token families are durable in Postgres (migrations
   `0002_auth_tokens.sql` and `0003_auth_revocations.sql`), so restart no longer
   forces re-authentication.

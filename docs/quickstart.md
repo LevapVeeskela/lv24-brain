@@ -182,12 +182,16 @@ note/demo/First note
 
 Server mode does not use the local index. `brain search` there calls
 `GET /v1/search?q=...` on the configured server; `brain index` returns an
-unsupported-mode error.
+unsupported-mode error. Raw items stay out of default search on both sides;
+`--kind item` opts in (`--dumps` keeps opting into legacy dumps; on the
+server an excluded `dump` also excludes items).
 
 ### Connectors
 
 The CLI runs read-only GitHub, GitLab, and IMAP connectors. Credentials come
-from the environment or the OS secret store, never from `brain.yaml`:
+from the environment or the OS secret store, never from `brain.yaml`.
+The legacy snapshot path below keeps working; the connection catalogue
+(v0.9.0) adds item-level runs on top of it:
 
 ```sh
 export BRAIN_GITHUB_REPOS="owner/repository"
@@ -201,20 +205,57 @@ store the password under `imap/<account-slug>/password` (or override the key
 with `BRAIN_IMAP_PASSWORD_KEY`). Dumps are written below the data directory:
 `github/<owner>/<repo>.md`, `gitlab/<group>/<project>.md`, and one file per
 batch of new mail, `mail/<account>/<folder>/<date>-uid<first>-<last>.md`.
-They are searchable with `brain search --dumps`.
+They are searchable with `brain search --dumps`. Raw-zone items (v0.9.0)
+are excluded by default; opt in with `brain search <query> --kind item`.
+
+`brain connection` (local/git mode only) manages named connections in
+`connectors/connections.json` (settings only, never secrets):
+
+```sh
+./bin/brain connection providers --config ~/brain/brain.yaml
+./bin/brain connection add github --id gh-main \
+  --setting repos=owner/repository --config ~/brain/brain.yaml
+printf '%s\n' '<github-token>' | ./bin/brain connection secret set gh-main token \
+  --config ~/brain/brain.yaml
+./bin/brain connection list --config ~/brain/brain.yaml
+./bin/brain connection run gh-main --limit 25 --config ~/brain/brain.yaml
+./bin/brain connection migrate --copy-legacy-secrets --config ~/brain/brain.yaml
+```
+
+GitLab uses `--setting projects=group/project`; IMAP uses
+`--setting username=... [--setting folders=INBOX]` with `--account <id>` and
+`--base-url imaps://host[:port]`, and the secret field is `password`
+(`brain connection secret set <id> password`, value from stdin). Credential
+keys are `conn/<id>/<field>` in the OS keychain. `connection remove <id> --yes`
+keeps items, checkpoints and credentials (purge hint printed on removal).
+`brain connector run --all` runs every configured connection when the
+catalogue is non-empty (optional `--project` filters by connection project);
+when the catalogue is empty it falls back to the legacy data-derived targets.
+`brain connection run <id> [--since RFC3339] [--days N] [--limit N] [--json]` runs one
+connection through the ingestion host: per-connection lock (busy returns
+`connection busy`), publish policy applied before the first write (a
+shared-to-local-only switch untracks `connectors/<id>` from git via
+`git rm --cached -r` but does not rewrite prior git history), secret
+redaction (`[redacted]`), mail address hashing (`[email:<12 hex>]`, exposure
+reduction, not anonymization), body cap (512 KiB with truncation marker),
+per-stream checkpoints (`connectors/<id>/checkpoints/*.json`), tombstones for
+reported deletes, index update, and a run record. Sources do not infer
+deletes from absence (`Deletes` is false without authoritative tombstones).
 
 `--since <RFC3339>` limits items by update time; `--limit <n>` caps each
 collection. The command prints source, status, counts, and a sanitized error.
 In local or `git` mode it also writes dumps below the data directory and
 persists each run as Markdown under `connectors/runs/`. In server mode the same
-command calls `POST /v1/connectors/run`; the server stores the run record in
-PostgreSQL (or the in-memory development store) and discards the bulk dumps.
+command calls `POST /v1/connectors/run`; with PostgreSQL the server persists
+raw items and checkpoints (schema 9) plus the run record, while the in-memory
+development store has no raw zone and rejects the run as unsupported. Pass
+`--brain-project <id>` to map items to a project; unmapped items stay stored but
+out of project-scoped search.
 `GET /v1/connectors/runs` lists records, `GET /v1/connectors/runs/{id}` returns
 one, and `GET /v1/connectors/runs/{id}/markdown` exports it as Markdown.
 `BRAIN_CONNECTOR_TIMEOUT` (default `5m`, clamped to `10s`–`1h`) bounds a server run.
 The CLI allows `1h10s` for this synchronous request, including persistence;
 ordinary API and authentication requests retain the `30s` default timeout.
-IMAP server runs are stateless unless `BRAIN_IMAP_STATE` is set.
 
 ## 2. Git mode
 
@@ -274,7 +315,7 @@ a token in the repository URL.
 The HTTP API and the token-authenticated CLI client are implemented. Postgres
 persistence is enabled by `BRAIN_DATABASE_URL` (or `DATABASE_URL`); without it
 the server falls back to an in-memory store and loses data on restart. Server
-schema 8 (migrations `0002_auth_tokens.sql` through `0008_project_access.sql`)
+schema 9 (migrations `0002_auth_tokens.sql` through `0009_connector_items.sql`)
 stores API tokens (with optional scopes and project allow-lists), refresh-token
 families, the security audit log, knowledge-record owners, and project access
 rules durably. See
@@ -425,7 +466,7 @@ also accepts `--config <path>`.
 | `brain handoff [summary]` | `--project`, `--summary`, `--next <text>` (next action), `--git-context <text>` (default: read from the project checkout), `--no-git` (record no git context) |
 | `brain journal` | `--project`, `--user`, `--event <name>` (for example `note`, `decision`, `attempt`, `handoff`, `commit`), `--since <duration>` (for example `24h`), `--limit <n>` (default 20). Local and git mode. |
 | `brain event commit` | `--project <id>`, `--repo <path>` (default `.`), `--quiet` (print nothing on success; used by the hook). Local and git mode. |
-| `brain search <query>` | `--project <id>`, `--limit <n>` (default 20), `--kind <kind>`, `--dumps`, `--since <24h\|7d\|2w\|2026-11-01\|RFC3339>`. English and Russian word forms match as a prefix. |
+| `brain search <query>` | `--project <id>`, `--limit <n>` (default 20), `--kind <kind>` (`note,decision,attempt,handoff,dump,item`; raw-zone `item` is excluded by default), `--dumps` (legacy dumps; also un-excludes server items), `--since <24h\|7d\|2w\|2026-11-01\|RFC3339>`. English and Russian word forms match as a prefix. |
 | `brain links <id>` | `--project <id>`, `--json`; `--broken` lists `[[id]]` references to missing records. Write `[[<id>]]`, `[[<id>\|text]]` or `[[<project>/<id>]]` in record text; `brain record show` lists Links and Backlinks. |
 | `brain context <task>` | `--project <id>`, `--budget <runes>` (default 4000), `--kind decision\|attempt\|note` (repeatable), `--since <24h\|7d\|2w\|date>`, `--json`. State, review findings, latest handoff, best-matching records and failed attempts for the task. MCP: `brain_context`. |
 | `brain sync` | `--status` (read-only divergence and conflict report), `--push` (push after committing) |
