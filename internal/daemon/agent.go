@@ -643,30 +643,30 @@ func writeJSONAtomic(path string, value any, mode os.FileMode) error {
 	}
 	tmp, err := os.CreateTemp(filepath.Dir(path), ".agent-*.tmp")
 	if err != nil {
-		return err
+		return fmt.Errorf("create temp: %w", err)
 	}
 	tmpName := tmp.Name()
 	defer os.Remove(tmpName)
 	if err := tmp.Chmod(mode); err != nil {
 		_ = tmp.Close()
-		return err
+		return fmt.Errorf("chmod temp: %w", err)
 	}
 	if _, err := tmp.Write(append(raw, '\n')); err != nil {
 		_ = tmp.Close()
-		return err
+		return fmt.Errorf("write temp: %w", err)
 	}
 	if err := tmp.Sync(); err != nil {
 		_ = tmp.Close()
-		return err
+		return fmt.Errorf("sync temp: %w", err)
 	}
 	if err := tmp.Close(); err != nil {
-		return err
+		return fmt.Errorf("close temp: %w", err)
 	}
 	if err := securePath(tmpName, mode, false); err != nil {
-		return err
+		return fmt.Errorf("secure temp: %w", err)
 	}
 	if err := replaceFile(tmpName, path); err != nil {
-		return err
+		return fmt.Errorf("replace %s: %w", filepath.Base(path), err)
 	}
 	return nil
 }
