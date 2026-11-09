@@ -18,6 +18,7 @@ import (
 	"github.com/levapveeskela/lv24-brain/internal/adapters/imap"
 	"github.com/levapveeskela/lv24-brain/internal/adapters/jira"
 	"github.com/levapveeskela/lv24-brain/internal/adapters/linear"
+	"github.com/levapveeskela/lv24-brain/internal/adapters/mcpsource"
 	"github.com/levapveeskela/lv24-brain/internal/adapters/notion"
 	"github.com/levapveeskela/lv24-brain/internal/adapters/sentry"
 	"github.com/levapveeskela/lv24-brain/internal/adapters/slack"
@@ -110,6 +111,7 @@ func Builtin() *Registry {
 		{Descriptor: dbschema.SQLiteDescriptor(), Factory: newNativeSQLiteSchema},
 		{Descriptor: feeds.RSSDescriptor(), Factory: newNativeRSS},
 		{Descriptor: feeds.WebDescriptor(), Factory: newNativeWeb},
+		{Descriptor: mcpsource.Descriptor(), Factory: newNativeMCP},
 	} {
 		if err := registry.Register(entry.Descriptor, entry.Factory); err != nil {
 			panic("connectorbuild: invalid built-in provider: " + err.Error())
@@ -181,6 +183,10 @@ func newNativeRSS(conn domain.Connection, deps Deps) (ports.Source, error) {
 
 func newNativeWeb(conn domain.Connection, deps Deps) (ports.Source, error) {
 	return feeds.NewWeb(conn, httpClient(deps))
+}
+
+func newNativeMCP(conn domain.Connection, deps Deps) (ports.Source, error) {
+	return mcpsource.NewSource(conn, deps.Credentials, deps.Now)
 }
 
 func imapAddress(baseURL string) (string, error) {

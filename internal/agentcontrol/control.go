@@ -79,6 +79,9 @@ func New(opts Options) (*Control, error) {
 	if err := os.MkdirAll(filepath.Join(opts.DataDir, "agent"), 0o700); err != nil {
 		return nil, fmt.Errorf("agentcontrol: create agent directory: %w", err)
 	}
+	if info, statErr := os.Lstat(filepath.Join(opts.DataDir, "agent")); statErr == nil && info.Mode()&os.ModeSymlink != 0 {
+		return nil, errors.New("agentcontrol: agent state directory must not be a symlink")
+	}
 	return &Control{
 		opts:     opts,
 		settings: &settingsStore{path: filepath.Join(opts.DataDir, "agent", "settings.json")},

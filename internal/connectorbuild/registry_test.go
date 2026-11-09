@@ -129,7 +129,7 @@ func TestBuiltinRegistersProviders(t *testing.T) {
 	providers := registry.Providers()
 
 	// Assert
-	want := []string{"confluence", "folders", "github", "gitlab", "imap", "jira", "linear", "notion", "postgres-schema", "rss", "sentry", "slack", "sqlite-schema", "web"}
+	want := []string{"confluence", "folders", "github", "gitlab", "imap", "jira", "linear", "mcp", "notion", "postgres-schema", "rss", "sentry", "slack", "sqlite-schema", "web"}
 	if !slices.Equal(providers, want) {
 		t.Fatalf("Providers() = %v, want %v", providers, want)
 	}
@@ -163,6 +163,7 @@ func TestBuiltinBuildsNativeSources(t *testing.T) {
 		"sqlite-schema":   {ID: "sq", Provider: "sqlite-schema", Settings: map[string]string{"path": sqlitePath}},
 		"rss":             {ID: "rss", Provider: "rss", Settings: map[string]string{"urls": "https://example.test/feed.xml"}},
 		"web":             {ID: "web", Provider: "web", Settings: map[string]string{"sitemaps": "https://example.test/sitemap.xml"}},
+		"mcp":             {ID: "mcp", Provider: "mcp", Settings: map[string]string{"transport": "http", "url": "https://example.test/mcp"}},
 	}
 	for name, conn := range cases {
 		t.Run(name, func(t *testing.T) {

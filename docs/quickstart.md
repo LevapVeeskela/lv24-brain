@@ -336,6 +336,14 @@ printf '%s\n' '<read-only-password>' | ./bin/brain connection secret set app-sch
   --setting sitemaps=https://example.test/sitemap.xml \
   --setting maxpages=50 --config ~/brain/brain.yaml
 ./bin/brain connection run docs-site --config ~/brain/brain.yaml
+
+# MCP server (Phase 3; stdio command or streamable HTTP URL)
+./bin/brain connection add mcp --id mcp-docs \
+  --setting transport=http --setting url=https://mcp.example.test/mcp \
+  --setting tools=search_pages,list_recent --config ~/brain/brain.yaml
+printf '%s\n' '<mcp-bearer-token>' | ./bin/brain connection secret set mcp-docs token \
+  --config ~/brain/brain.yaml
+./bin/brain connection run mcp-docs --limit 50 --config ~/brain/brain.yaml
 ```
 
 These providers are available through `brain connection run`/`brain connector run --all`;

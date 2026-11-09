@@ -45,6 +45,7 @@ internal/adapters/
   sentry/                  Sentry issues with bounded events
   dbschema/                PostgreSQL/SQLite catalog-only schema snapshots
   feeds/                   RSS/Atom and sitemap-driven web pages
+  mcpsource/               MCP servers over stdio/streamable HTTP
   connectorbuild/          source registry and native factory wiring
   localapi/                authenticated loopback control API
 internal/connectors/       shared run records, retry/rate-limit helpers, redaction
@@ -358,6 +359,13 @@ Sentry stores issues with at most three bounded events each; the database
 sources read catalogs only and never user rows; RSS/web revalidate with HTTP
 validators. The `web` source defaults to the sitemap's host and port, honors
 `robots.txt`, and never follows redirects.
+
+The Phase 3 `mcp` source (v0.12.0, in development) connects to Model Context
+Protocol servers over stdio or streamable HTTP and maps read-only
+search/list tools to items. It requires an explicit tool allow-list heuristic
+(destructive names are always denied), bounds calls/results, and marks output
+as recent-results-only; stdio commands inherit the agent environment and must
+be trusted.
 
 `brain connector run --name github|gitlab|imap` selects one adapter. In local or
 git mode it writes Markdown dumps under the data directory (`github/...`,
