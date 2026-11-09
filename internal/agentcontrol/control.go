@@ -112,7 +112,7 @@ func (c *Control) Start(ctx context.Context, runtime daemon.Runtime) (int, error
 		Now:         c.opts.Now,
 		Heartbeat:   15 * time.Second,
 		Status:      "running",
-		Connections: c.opts.Connections,
+		Connections: connectionService{store: c.opts.Connections, agent: agent},
 		Sources: sourceRegistry{
 			registry: c.opts.Registry,
 			deps:     c.opts.Deps,
@@ -180,6 +180,40 @@ func (c *Control) Port() int {
 		return 0
 	}
 	return c.server.Port()
+}
+
+// connectionService guards catalogue deletion against an active run, matching
+// the CLI's per-connection lock behavior.
+type connectionService struct {
+	store ports.ConnectionStore
+	agent *daemon.Agent
+}
+
+func (s connectionService) List(ctx context.Context) ([]domain.Connection, error) {
+	return s.store.List(ctx)
+}
+
+func (s connectionService) Get(ctx context.Context, id string) (domain.Connection, error) {
+	return s.store.Get(ctx, id)
+}
+
+func (s connectionService) Create(ctx context.Context, connection domain.Connection) error {
+	return s.store.Create(ctx, connection)
+}
+
+func (s connectionService) Update(ctx context.Context, connection domain.Connection) error {
+	return s.store.Update(ctx, connection)
+}
+
+func (s connectionService) Delete(ctx context.Context, id string) error {
+	if s.agent != nil {
+		for _, job := range s.agent.RecentJobs() {
+			if job.View.ConnectionID == id && (job.View.Status == "queued" || job.View.Status == "running") {
+				return fmt.Errorf("%w: connection has a queued or running job", domain.ErrConflict)
+			}
+		}
+	}
+	return s.store.Delete(ctx, id)
 }
 
 // sourceRegistry adapts connectorbuild to the local API's checker contract.
@@ -359,14 +393,22 @@ func runFromJob(detail daemon.JobDetail) (domain.ConnectorRun, bool) {
 	if detail.HasRun {
 		return detail.Run, true
 	}
-	if detail.View.Status != "queued" && detail.View.Status != "running" {
-		return domain.ConnectorRun{}, false
-	}
 	run := domain.ConnectorRun{
 		ID: detail.View.ID, ConnectionID: detail.View.ConnectionID,
 		StartedAt: detail.View.StartedAt, Status: domain.ConnectorRunning,
 	}
-	return run, true
+	if !detail.View.FinishedAt.IsZero() {
+		finished := detail.View.FinishedAt
+		run.FinishedAt = &finished
+		run.Status = domain.ConnectorFailed
+	}
+	switch detail.View.Status {
+	case "queued", "running":
+		return run, true
+	case "failed", "canceled", "busy", "rejected":
+		return run, true
+	}
+	return domain.ConnectorRun{}, false
 }
 
 func runSummary(run domain.ConnectorRun) []string {

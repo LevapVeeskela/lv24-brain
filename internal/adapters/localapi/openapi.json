@@ -4,7 +4,7 @@
   "servers": [{ "url": "http://127.0.0.1:{port}", "variables": { "port": { "default": "49152" } } }],
   "security": [{ "bearerAuth": [] }],
   "paths": {
-    "/v1/health": { "get": { "responses": { "200": { "description": "Agent health without credentials" }, "401": { "$ref": "#/components/responses/Error" }, "403": { "$ref": "#/components/responses/Error" } } } },
+    "/v1/health": { "get": { "responses": { "200": { "description": "Agent health (bearer token required)" }, "401": { "$ref": "#/components/responses/Error" }, "403": { "$ref": "#/components/responses/Error" } } } },
     "/v1/connections": {
       "get": { "responses": { "200": { "description": "Connection catalogue" }, "401": { "$ref": "#/components/responses/Error" } } },
       "post": { "requestBody": { "$ref": "#/components/requestBodies/JSON" }, "responses": { "201": { "description": "Created connection" }, "400": { "$ref": "#/components/responses/Error" }, "409": { "$ref": "#/components/responses/Error" }, "413": { "$ref": "#/components/responses/Error" }, "415": { "$ref": "#/components/responses/Error" } } }

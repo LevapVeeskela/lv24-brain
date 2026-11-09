@@ -391,7 +391,10 @@ func (a *Agent) QueueConnectionOptions(ctx context.Context, connectionID string,
 		return "", ErrJobActive
 	}
 	jobID := fmt.Sprintf("%s-%d", connectionID, a.clock.Now().UnixNano())
-	jobCtx, cancel := context.WithCancel(ctx)
+	// The job outlives the caller (an HTTP request or CLI command); only its
+	// values are inherited. Caller cancellation aborts enqueueing above, not
+	// an accepted run.
+	jobCtx, cancel := context.WithCancel(context.WithoutCancel(ctx))
 	j := &job{view: JobView{ID: jobID, ConnectionID: connectionID, Status: "queued"}, opts: opts, ctx: jobCtx, cancel: cancel}
 	a.jobs[jobID] = j
 	a.active[connectionID] = jobID

@@ -104,8 +104,12 @@ type recordingRunner struct {
 }
 
 func (r *recordingRunner) RunConnection(ctx context.Context, opts app.RunConnectionOptions) (app.RunConnectionResult, error) {
-	if err := ctx.Err(); err != nil {
-		return app.RunConnectionResult{}, err
+	// A real ingestion run outlives the HTTP request that queued it; fail if
+	// the job context is canceled when the request ends.
+	select {
+	case <-ctx.Done():
+		return app.RunConnectionResult{}, ctx.Err()
+	case <-time.After(20 * time.Millisecond):
 	}
 	r.mu.Lock()
 	r.runs++
@@ -306,13 +310,16 @@ func TestControlEndToEnd(t *testing.T) {
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
 		getResp, getBody = api.do(http.MethodGet, "/v1/runs/"+accepted.JobID, "", nil)
-		if getResp.StatusCode == http.StatusOK {
+		if getResp.StatusCode == http.StatusOK && bytes.Contains(getBody, []byte(`"status":"success"`)) {
 			break
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
 	if getResp.StatusCode != http.StatusOK || !bytes.Contains(getBody, []byte(accepted.JobID)) {
 		t.Fatalf("run %s = %d %s", accepted.JobID, getResp.StatusCode, getBody)
+	}
+	if !bytes.Contains(getBody, []byte(`"status":"success"`)) {
+		t.Fatalf("run did not finish successfully: %s", getBody)
 	}
 	resp, body = api.do(http.MethodGet, "/v1/runs", "", nil)
 	if resp.StatusCode != http.StatusOK || !bytes.Contains(body, []byte(accepted.JobID)) {
