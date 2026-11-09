@@ -159,8 +159,8 @@ func (s *Ingestion) RunConnection(ctx context.Context, opts RunConnectionOptions
 	defer func() { _ = release() }()
 	// Reload under the lock: an update between the first read and the lock
 	// (for example shared -> local-only) must not run with the stale snapshot.
-	// Catalog writers must coordinate with the same lock; until an update
-	// command exists, this reload closes the read/lock window.
+	// Catalog mutations that affect an existing connection (remove; no update
+	// command exists yet) take the same lock; add/migrate only create entries.
 	if connection, err = s.Connections.Get(ctx, connection.ID); err != nil {
 		return RunConnectionResult{}, fmt.Errorf("reload connection %s under lock: %w", opts.ConnectionID, err)
 	}

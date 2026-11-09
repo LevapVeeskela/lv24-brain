@@ -221,12 +221,14 @@ func (s *Source) Check(ctx context.Context) error {
 //     it never reports an item missing from a filtered read as deleted.
 //
 // Known limitation (documented, not fixed): GitLab offers numbered pages
-// only. An item updated *while an initial backfill is running* can be shifted
-// into an already-read page and be missed for that pass; the five-minute
-// overlap repairs the usual case and the next full backfill repairs the
-// rest. Incremental passes are bounded by the watermark, so they do not
-// shift. The source never drops items silently: it returns every item of
-// every page it requests, in provider order.
+// only. An item updated *while an initial backfill is running* can move across
+// a page boundary; the cursor stores the IDs already returned from the current
+// page and replays that page when its prefix changes, so a shift inside the
+// current page cannot skip a record (replayed items are idempotent upserts).
+// A shift that moves an item backwards into a fully consumed earlier page can
+// still be missed for that pass; the five-minute watermark overlap repairs the
+// usual recent case, but there is no forced full re-backfill. The source never
+// silently claims a full page is complete without pagination information.
 func (s *Source) Read(ctx context.Context, req ports.ReadRequest) (ports.ReadBatch, error) {
 	if err := ctx.Err(); err != nil {
 		return ports.ReadBatch{}, err
@@ -282,19 +284,30 @@ func (s *Source) Read(ctx context.Context, req ports.ReadRequest) (ports.ReadBat
 			if err != nil {
 				return ports.ReadBatch{}, fmt.Errorf("gitlab %s: %s", stream.name, connectors.SanitizeError(err, token))
 			}
+			pageIDs := make([]string, len(page.records))
+			for index := range page.records {
+				pageIDs[index] = sourceRecordID(stream.project, page.records[index])
+			}
+			// Numbered pages are mutable. Only trust the saved offset when the
+			// fetched page starts with exactly the records already returned;
+			// otherwise replay the page. Duplicates are idempotent, a skipped
+			// record would be lost.
+			if state.Offset > 0 && !samePagePrefix(pageIDs, state.Seen) {
+				state.Offset, state.Seen = 0, nil
+			}
 			if state.Offset > len(page.records) {
-				// The provider page shrank since the checkpoint was written
-				// (an item was removed or moved). Everything before the offset
-				// was returned by an earlier batch, so the page is consumed;
-				// never restart it, which would duplicate items.
 				state.Offset = len(page.records)
 			}
 			for state.Offset < len(page.records) && len(batch.Items) < limit {
-				item, err := s.buildItem(ctx, token, stream, page.records[state.Offset])
+				recordIndex := state.Offset
+				item, err := s.buildItem(ctx, token, stream, page.records[recordIndex])
 				if err != nil {
 					return ports.ReadBatch{}, fmt.Errorf("gitlab %s: %s", stream.name, connectors.SanitizeError(err, token))
 				}
 				state.Offset++
+				if state.Offset > len(state.Seen) {
+					state.Seen = append(state.Seen, pageIDs[recordIndex])
+				}
 				batch.Items = append(batch.Items, item)
 			}
 			if state.Offset < len(page.records) {
@@ -308,7 +321,7 @@ func (s *Source) Read(ctx context.Context, req ports.ReadRequest) (ports.ReadBat
 				return ports.ReadBatch{}, fmt.Errorf("gitlab %s: %s", stream.name, connectors.SanitizeError(err))
 			}
 			if ok {
-				state.Page, state.Offset = next, 0
+				state.Page, state.Offset, state.Seen = next, 0, nil
 				states[index] = state
 				continue
 			}
@@ -358,7 +371,13 @@ type sourceCursor struct {
 	PassMax time.Time `json:"passMax,omitempty"`
 	Page    int       `json:"page,omitempty"`
 	Offset  int       `json:"offset,omitempty"`
-	Done    bool      `json:"done,omitempty"`
+	// Seen lists the record IDs already returned from the current page in
+	// order. Numbered pages can shift when an item is updated or removed
+	// during a backfill; a resume compares this prefix with the fetched page
+	// and restarts the page (duplicates are idempotent) instead of trusting a
+	// stale offset and skipping a record.
+	Seen []string `json:"seen,omitempty"`
+	Done bool     `json:"done,omitempty"`
 }
 
 // readSourceCursor decodes the checkpoint of one stream. Any malformed or
@@ -377,7 +396,7 @@ func readSourceCursor(checkpoints map[string]domain.Checkpoint, stream sourceStr
 	if err := json.Unmarshal(checkpoint.Data, &state); err != nil {
 		return sourceCursor{}, domain.NewValidationError("gitlab.checkpoint", "is not valid JSON")
 	}
-	if state.Page < 1 || state.Page > sourceMaxPagesPerStream || state.Offset < 0 || state.Offset > sourcePageSize {
+	if state.Page < 1 || state.Page > sourceMaxPagesPerStream || state.Offset < 0 || state.Offset > sourcePageSize || len(state.Seen) > sourcePageSize {
 		return sourceCursor{}, domain.NewValidationError("gitlab.checkpoint", "position is invalid")
 	}
 	return state, nil
@@ -491,6 +510,38 @@ func (r sourceRecord) updatedAt() time.Time {
 	default:
 		return time.Time{}
 	}
+}
+
+// sourceRecordID is the stable external ID of a raw provider record. It does
+// not fetch notes, so the cursor can fingerprint a page cheaply.
+func sourceRecordID(project string, record sourceRecord) string {
+	switch {
+	case record.issue != nil:
+		return project + "#issue-" + strconv.Itoa(record.issue.IID)
+	case record.merge != nil:
+		return project + "!mr-" + strconv.Itoa(record.merge.IID)
+	case record.commit != nil:
+		return project + "#commit-" + record.commit.ID
+	default:
+		return ""
+	}
+}
+
+// samePagePrefix reports whether ids starts with the previously returned IDs.
+// A mismatch means the numbered page shifted and its offset is unsafe.
+func samePagePrefix(ids, seen []string) bool {
+	if len(seen) == 0 {
+		return true
+	}
+	if len(ids) < len(seen) {
+		return false
+	}
+	for index := range seen {
+		if ids[index] != seen[index] {
+			return false
+		}
+	}
+	return true
 }
 
 type sourcePage struct {

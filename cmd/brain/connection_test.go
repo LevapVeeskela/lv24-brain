@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/levapveeskela/lv24-brain/internal/adapters/connectionlock"
 	"github.com/levapveeskela/lv24-brain/internal/adapters/fsstore"
 	"github.com/levapveeskela/lv24-brain/internal/app"
 	"github.com/levapveeskela/lv24-brain/internal/bootstrap"
@@ -131,6 +132,33 @@ func TestConnectionAddListRemove(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+func TestConnectionRemoveRefusesWhileRunHoldsLock(t *testing.T) {
+	cfg, dataDir := connectionConfig(t, config.ModeLocal)
+	code, _, errOut := runForTest(t, "connection", "add", "github", "--id", "work", "--setting", "repos=acme/widgets", "--config", cfg)
+	if code != 0 {
+		t.Fatalf("add: %d %s", code, errOut)
+	}
+	locker, err := connectionlock.New(dataDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	release, err := locker.TryLock(context.Background(), "work")
+	if err != nil {
+		t.Fatal(err)
+	}
+	code, _, errOut = runForTest(t, "connection", "remove", "work", "--yes", "--config", cfg)
+	if code != 1 || !strings.Contains(errOut, "busy") {
+		t.Fatalf("remove while locked = %d %s", code, errOut)
+	}
+	if err := release(); err != nil {
+		t.Fatal(err)
+	}
+	code, _, errOut = runForTest(t, "connection", "remove", "work", "--yes", "--config", cfg)
+	if code != 0 {
+		t.Fatalf("remove after release = %d %s", code, errOut)
 	}
 }
 

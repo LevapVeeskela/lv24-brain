@@ -169,9 +169,6 @@ func (s *Source) Read(ctx context.Context, request ports.ReadRequest) (ports.Rea
 			cursor = sourceFolderCursor{Folder: folder, UIDValidity: mailbox.UIDValidity}
 		}
 		since := request.Since
-		if cursor.LastUID > 0 {
-			since = nil
-		}
 		uids, err := session.Search(ctx, imapv2.UID(cursor.LastUID), sinceOrZero(since))
 		if err != nil {
 			return ports.ReadBatch{}, fmt.Errorf("imap search %q: %s", folder, connectors.SanitizeError(err, password))

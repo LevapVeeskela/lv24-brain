@@ -347,7 +347,7 @@ func (s *sinceFilteringSession) Search(ctx context.Context, after imapv2.UID, si
 	return kept, nil
 }
 
-func TestSourceInitialWindowSinceNarrowsFirstReadOnly(t *testing.T) {
+func TestSourceSinceBoundsEveryRead(t *testing.T) {
 	connection := sourceConnection()
 	oldDate := time.Date(2026, time.January, 2, 10, 0, 0, 0, time.UTC)
 	newDate := time.Date(2026, time.November, 1, 10, 0, 0, 0, time.UTC)
@@ -375,8 +375,9 @@ func TestSourceInitialWindowSinceNarrowsFirstReadOnly(t *testing.T) {
 		t.Fatalf("first read = %+v, want only the in-window message", first.Items)
 	}
 
-	// Once a checkpoint exists the source resumes by UID and ignores Since,
-	// so a later window never hides already-seen mail or deletes anything.
+	// An explicit Since bounds every read, including one that resumes from a
+	// UID cursor: the caller asked for a time window, not only a first-run
+	// initial window (the host passes InitialWindow separately).
 	future := time.Date(2027, time.January, 1, 0, 0, 0, 0, time.UTC)
 	second, err := source.Read(context.Background(), ports.ReadRequest{
 		Connection:  connection,
@@ -386,11 +387,11 @@ func TestSourceInitialWindowSinceNarrowsFirstReadOnly(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(inner.searches) != 2 || !inner.searches[1].Since.IsZero() {
-		t.Fatalf("searches = %+v, want Since ignored once the UID cursor exists", inner.searches)
+	if len(inner.searches) != 2 || !inner.searches[1].Since.Equal(future) {
+		t.Fatalf("searches = %+v, want the explicit Since preserved with a UID cursor", inner.searches)
 	}
 	if len(second.Items) != 0 {
-		t.Fatalf("second read = %+v, want nothing new and no tombstones", second.Items)
+		t.Fatalf("second read = %+v, want nothing in the future window and no tombstones", second.Items)
 	}
 }
 

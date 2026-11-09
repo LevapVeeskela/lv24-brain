@@ -147,6 +147,7 @@ func (c serverCredentials) Get(ctx context.Context, connectionID, field string) 
 // stay unmapped and server search excludes them.
 func buildServerConnection(req httpapi.ConnectorRunRequest) (domain.Connection, error) {
 	provider := strings.ToLower(strings.TrimSpace(req.Name))
+	projectID := strings.TrimSpace(req.ProjectID)
 	switch provider {
 	case "github", "gitlab", "imap":
 	default:
@@ -167,7 +168,7 @@ func buildServerConnection(req httpapi.ConnectorRunRequest) (domain.Connection, 
 			BaseURL:  strings.TrimSpace(os.Getenv("BRAIN_GITHUB_BASE_URL")),
 			Settings: map[string]string{"repos": strings.Join(repos, ",")},
 		}
-		conn.ID = serverConnectionID("github", conn.BaseURL, "", repos)
+		conn.ID = serverConnectionID("github", conn.BaseURL, "", repos, projectID)
 	case "gitlab":
 		projects := serverEnvList("BRAIN_GITLAB_PROJECTS")
 		if len(projects) == 0 {
@@ -181,7 +182,7 @@ func buildServerConnection(req httpapi.ConnectorRunRequest) (domain.Connection, 
 			BaseURL:  strings.TrimSpace(os.Getenv("BRAIN_GITLAB_BASE_URL")),
 			Settings: map[string]string{"projects": strings.Join(projects, ",")},
 		}
-		conn.ID = serverConnectionID("gitlab", conn.BaseURL, "", projects)
+		conn.ID = serverConnectionID("gitlab", conn.BaseURL, "", projects, projectID)
 	case "imap":
 		account := strings.TrimSpace(os.Getenv("BRAIN_IMAP_ACCOUNT"))
 		address := strings.TrimSpace(os.Getenv("BRAIN_IMAP_ADDRESS"))
@@ -206,9 +207,9 @@ func buildServerConnection(req httpapi.ConnectorRunRequest) (domain.Connection, 
 			BaseURL:  serverIMAPBaseURL(address),
 			Settings: settings,
 		}
-		conn.ID = serverConnectionID("imap", conn.BaseURL, account, folders)
+		conn.ID = serverConnectionID("imap", conn.BaseURL, account, folders, projectID)
 	}
-	if projectID := strings.TrimSpace(req.ProjectID); projectID != "" {
+	if projectID != "" {
 		conn.Projects = []string{projectID}
 	}
 	if err := conn.Validate(); err != nil {
@@ -241,10 +242,11 @@ func (r *connectorRunner) newIngestion(raw rawStore, conn domain.Connection) *ap
 	}
 }
 
-// serverConnectionID hashes provider, host, account and the sorted target
-// set into a stable connection ID. Different target sets hash differently,
-// so checkpoints (cursors) are never shared across different selections.
-func serverConnectionID(provider, baseURL, account string, targets []string) string {
+// serverConnectionID hashes provider, host, account, brain project mapping and
+// the sorted target set into a stable connection ID. Different target sets or
+// project mappings hash differently, so checkpoints (cursors) and item
+// attribution are never shared across different selections.
+func serverConnectionID(provider, baseURL, account string, targets []string, projectID string) string {
 	sorted := append([]string(nil), targets...)
 	sort.Strings(sorted)
 	sum := sha256.New()
@@ -253,6 +255,10 @@ func serverConnectionID(provider, baseURL, account string, targets []string) str
 	sum.Write([]byte(strings.TrimSpace(baseURL)))
 	sum.Write([]byte{0})
 	sum.Write([]byte(strings.ToLower(strings.TrimSpace(account))))
+	if projectID = strings.TrimSpace(projectID); projectID != "" {
+		sum.Write([]byte{0})
+		sum.Write([]byte(projectID))
+	}
 	for _, target := range sorted {
 		sum.Write([]byte{0})
 		sum.Write([]byte(target))

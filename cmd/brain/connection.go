@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/levapveeskela/lv24-brain/internal/adapters/connectionlock"
 	"github.com/levapveeskela/lv24-brain/internal/app"
 	"github.com/levapveeskela/lv24-brain/internal/bootstrap"
 	"github.com/levapveeskela/lv24-brain/internal/config"
@@ -302,6 +303,19 @@ func connectionRemove(ctx context.Context, runtime *bootstrap.ConnectionRuntime,
 	if !yes {
 		return connectionValidationError(stderr, "remove", errors.New("pass --yes to remove connection configuration"))
 	}
+	locker, err := connectionlock.New(dataDir)
+	if err != nil {
+		return reportError(stderr, "connection remove", err)
+	}
+	release, err := locker.TryLock(ctx, connectionID)
+	if errors.Is(err, domain.ErrConflict) {
+		fmt.Fprintln(stderr, "connection remove: connection busy; wait for the active run to finish")
+		return 1
+	}
+	if err != nil {
+		return reportError(stderr, "connection remove", err)
+	}
+	defer func() { _ = release() }()
 	if err := runtime.Connections.Delete(ctx, connectionID); err != nil {
 		return reportError(stderr, "connection remove", err)
 	}

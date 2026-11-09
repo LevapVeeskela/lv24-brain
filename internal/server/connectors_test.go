@@ -530,6 +530,23 @@ func TestBuildServerConnectionStableIDs(t *testing.T) {
 		t.Fatalf("repos = %q, want env list", envConn.Settings["repos"])
 	}
 
+	// Project mapping is part of the identity: the same provider targets mapped
+	// to different brain projects must never share items or cursors.
+	mappedOne, err := buildServerConnection(httpapi.ConnectorRunRequest{Name: "github", ProjectID: "project-one"})
+	if err != nil {
+		t.Fatalf("build mapped one: %v", err)
+	}
+	mappedTwo, err := buildServerConnection(httpapi.ConnectorRunRequest{Name: "github", ProjectID: "project-two"})
+	if err != nil {
+		t.Fatalf("build mapped two: %v", err)
+	}
+	if mappedOne.ID == mappedTwo.ID || mappedOne.ID == envConn.ID {
+		t.Fatalf("project mappings share a connection id: one=%q two=%q unmapped=%q", mappedOne.ID, mappedTwo.ID, envConn.ID)
+	}
+	if len(mappedOne.Projects) != 1 || mappedOne.Projects[0] != "project-one" {
+		t.Fatalf("mapped projects = %v", mappedOne.Projects)
+	}
+
 	// Different hosts never share a cursor.
 	t.Setenv("BRAIN_GITHUB_BASE_URL", "https://other.example.com")
 	hostConn, err := buildServerConnection(httpapi.ConnectorRunRequest{Name: "github", Projects: []string{"acme/widgets"}})

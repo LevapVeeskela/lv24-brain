@@ -668,6 +668,47 @@ func TestSourcePageCheckpointAdvancesOnlyAfterReturningItems(t *testing.T) {
 // TestSourceCheckpointKeepsOffsetForUnreturnedItems proves that a page
 // position only advances once every item of the page was returned: a limit
 // that cuts inside a page stores the offset, not the next page.
+func TestSourcePageShiftDoesNotSkipRecords(t *testing.T) {
+	base := time.Date(2026, 11, 1, 12, 0, 0, 0, time.UTC)
+	fake := newFakeGitLab(t)
+	fake.perPage = 2
+	for iid := 1; iid <= 4; iid++ {
+		fake.issues = append(fake.issues, testIssue(iid, base.Add(time.Duration(iid)*time.Minute)))
+	}
+	conn := domain.Connection{ID: "gl-test"}
+	source, _ := fake.source(t, &conn, "acme/widgets")
+
+	checkpoints := make(map[string]domain.Checkpoint)
+	first := mustRead(t, source, conn, checkpoints, 1, nil)
+	if len(first.Items) != 1 || first.Items[0].Ref.ExternalID != "acme/widgets#issue-1" {
+		t.Fatalf("first batch = %+v", first.Items)
+	}
+	applyCheckpoints(checkpoints, first)
+
+	// Insert a new issue before the saved offset. The numbered page shifts;
+	// a stale offset would skip one of the later issues.
+	fake.mu.Lock()
+	fake.issues = append([]sourceIssue{testIssue(9, base.Add(9*time.Minute))}, fake.issues...)
+	fake.mu.Unlock()
+
+	seen := map[string]bool{"acme/widgets#issue-1": true}
+	for reads := 0; reads < 10; reads++ {
+		batch := mustRead(t, source, conn, checkpoints, 10, nil)
+		for _, item := range batch.Items {
+			seen[item.Ref.ExternalID] = true
+		}
+		applyCheckpoints(checkpoints, batch)
+		if !batch.More {
+			break
+		}
+	}
+	for _, id := range []string{"acme/widgets#issue-2", "acme/widgets#issue-3", "acme/widgets#issue-4", "acme/widgets#issue-9"} {
+		if !seen[id] {
+			t.Fatalf("record %s was skipped after a page shift; seen=%v", id, seen)
+		}
+	}
+}
+
 func TestSourceCheckpointKeepsOffsetForUnreturnedItems(t *testing.T) {
 	base := time.Date(2026, 11, 1, 12, 0, 0, 0, time.UTC)
 	fake := newFakeGitLab(t)

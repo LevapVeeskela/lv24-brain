@@ -156,7 +156,6 @@ func (r *connectorRunner) persistPanic(ctx context.Context, conn domain.Connecti
 	run := connectors.NewRun(conn.Provider, started)
 	run.ConnectionID = conn.ID
 	run = connectors.FinishRun(run, nil, panicErr, time.Now())
-	run.ConnectionID = conn.ID
 
 	persistCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), connectorRunPersistTime)
 	defer cancel()

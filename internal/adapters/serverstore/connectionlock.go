@@ -2,9 +2,12 @@ package serverstore
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"time"
+
+	"github.com/jackc/pgx/v5"
 
 	"github.com/levapveeskela/lv24-brain/internal/domain"
 	"github.com/levapveeskela/lv24-brain/internal/ports"
@@ -17,27 +20,35 @@ func (s *Store) ItemZone() ports.ItemStore { return s.Items() }
 func (s *Store) CheckpointZone() ports.CheckpointStore { return s.Checkpoints() }
 
 // TryLock holds a database-session advisory lock for one connection. PostgreSQL
-// releases it when a server process or its database session dies.
+// releases it when a server process or its database session dies. The key uses
+// 64-bit hashtextextended (not 32-bit hashtext) to make an unrelated connection
+// ID collision negligible.
+//
+// The lock uses a dedicated pgx connection, not a pgxpool lease: the ingestion
+// host lists checkpoints and writes items through the pool while the lock is
+// held, so a pooled lock connection could deadlock a small
+// BRAIN_DATABASE_MAX_CONNS pool (even MaxConns=1) until the run timeout.
 func (s *Store) TryLock(ctx context.Context, id string) (func() error, error) {
 	if err := domain.ValidateConnectionID("connection.id", id); err != nil {
 		return nil, err
 	}
-	conn, err := s.pg.Pool().Acquire(ctx)
+	config := s.pg.Pool().Config().ConnConfig.Copy()
+	conn, err := pgx.ConnectConfig(ctx, config)
 	if err != nil {
 		return nil, err
 	}
+	closeConn := func(closeCtx context.Context) error { return conn.Close(closeCtx) }
 	var acquired bool
-	if err = conn.QueryRow(ctx, `SELECT pg_try_advisory_lock(47615, hashtext($1))`, id).Scan(&acquired); err != nil {
-		// An interrupted reply could have acquired the lock: never return this
-		// session to the pool in an unknown state.
-		raw := conn.Hijack()
+	if err = conn.QueryRow(ctx, `SELECT pg_try_advisory_lock(hashtextextended($1, 47615))`, id).Scan(&acquired); err != nil {
 		closeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		_ = raw.Close(closeCtx)
+		_ = closeConn(closeCtx)
 		return nil, err
 	}
 	if !acquired {
-		conn.Release()
+		closeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = closeConn(closeCtx)
 		return nil, fmt.Errorf("%w: connection busy", domain.ErrConflict)
 	}
 	var once sync.Once
@@ -47,16 +58,17 @@ func (s *Store) TryLock(ctx context.Context, id string) (func() error, error) {
 			releaseCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
 			var unlocked bool
-			releaseErr = conn.QueryRow(releaseCtx, `SELECT pg_advisory_unlock(47615, hashtext($1))`, id).Scan(&unlocked)
+			releaseErr = conn.QueryRow(releaseCtx, `SELECT pg_advisory_unlock(hashtextextended($1, 47615))`, id).Scan(&unlocked)
 			if releaseErr != nil || !unlocked {
-				raw := conn.Hijack()
-				_ = raw.Close(releaseCtx)
+				_ = closeConn(releaseCtx)
 				if releaseErr == nil {
 					releaseErr = fmt.Errorf("connection lock was lost")
 				}
 				return
 			}
-			conn.Release()
+			if err := closeConn(releaseCtx); err != nil && !errors.Is(err, context.Canceled) {
+				releaseErr = err
+			}
 		})
 		return releaseErr
 	}, nil
