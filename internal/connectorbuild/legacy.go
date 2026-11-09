@@ -10,12 +10,17 @@ import (
 	"sync"
 
 	"github.com/levapveeskela/lv24-brain/internal/adapters/confluence"
+	"github.com/levapveeskela/lv24-brain/internal/adapters/dbschema"
+	"github.com/levapveeskela/lv24-brain/internal/adapters/feeds"
 	"github.com/levapveeskela/lv24-brain/internal/adapters/folders"
 	"github.com/levapveeskela/lv24-brain/internal/adapters/github"
 	"github.com/levapveeskela/lv24-brain/internal/adapters/gitlab"
 	"github.com/levapveeskela/lv24-brain/internal/adapters/imap"
 	"github.com/levapveeskela/lv24-brain/internal/adapters/jira"
 	"github.com/levapveeskela/lv24-brain/internal/adapters/linear"
+	"github.com/levapveeskela/lv24-brain/internal/adapters/notion"
+	"github.com/levapveeskela/lv24-brain/internal/adapters/sentry"
+	"github.com/levapveeskela/lv24-brain/internal/adapters/slack"
 	"github.com/levapveeskela/lv24-brain/internal/domain"
 	"github.com/levapveeskela/lv24-brain/internal/ports"
 )
@@ -98,6 +103,13 @@ func Builtin() *Registry {
 		{Descriptor: jira.Descriptor(), Factory: newNativeJira},
 		{Descriptor: confluence.Descriptor(), Factory: newNativeConfluence},
 		{Descriptor: linear.Descriptor(), Factory: newNativeLinear},
+		{Descriptor: slack.Descriptor(), Factory: newNativeSlack},
+		{Descriptor: notion.Descriptor(), Factory: newNativeNotion},
+		{Descriptor: sentry.Descriptor(), Factory: newNativeSentry},
+		{Descriptor: dbschema.PostgresDescriptor(), Factory: newNativePostgresSchema},
+		{Descriptor: dbschema.SQLiteDescriptor(), Factory: newNativeSQLiteSchema},
+		{Descriptor: feeds.RSSDescriptor(), Factory: newNativeRSS},
+		{Descriptor: feeds.WebDescriptor(), Factory: newNativeWeb},
 	} {
 		if err := registry.Register(entry.Descriptor, entry.Factory); err != nil {
 			panic("connectorbuild: invalid built-in provider: " + err.Error())
@@ -141,6 +153,34 @@ func newNativeConfluence(conn domain.Connection, deps Deps) (ports.Source, error
 
 func newNativeLinear(conn domain.Connection, deps Deps) (ports.Source, error) {
 	return linear.NewSource(conn, deps.Credentials, httpClient(deps), deps.Now)
+}
+
+func newNativeSlack(conn domain.Connection, deps Deps) (ports.Source, error) {
+	return slack.NewSource(conn, deps.Credentials, httpClient(deps), deps.Now)
+}
+
+func newNativeNotion(conn domain.Connection, deps Deps) (ports.Source, error) {
+	return notion.NewSource(conn, deps.Credentials, httpClient(deps), deps.Now)
+}
+
+func newNativeSentry(conn domain.Connection, deps Deps) (ports.Source, error) {
+	return sentry.NewSource(conn, deps.Credentials, httpClient(deps), deps.Now)
+}
+
+func newNativePostgresSchema(conn domain.Connection, deps Deps) (ports.Source, error) {
+	return dbschema.NewPostgresSource(conn, deps.Credentials, deps.Now)
+}
+
+func newNativeSQLiteSchema(conn domain.Connection, deps Deps) (ports.Source, error) {
+	return dbschema.NewSQLiteSource(conn, deps.Now)
+}
+
+func newNativeRSS(conn domain.Connection, deps Deps) (ports.Source, error) {
+	return feeds.NewRSS(conn, httpClient(deps))
+}
+
+func newNativeWeb(conn domain.Connection, deps Deps) (ports.Source, error) {
+	return feeds.NewWeb(conn, httpClient(deps))
 }
 
 func imapAddress(baseURL string) (string, error) {

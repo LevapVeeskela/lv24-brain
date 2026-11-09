@@ -1,0 +1,37 @@
+{
+  "openapi": "3.0.3",
+  "info": { "title": "LV24 Brain Local Control API", "version": "1.0.0" },
+  "servers": [{ "url": "http://127.0.0.1:{port}", "variables": { "port": { "default": "49152" } } }],
+  "security": [{ "bearerAuth": [] }],
+  "paths": {
+    "/v1/health": { "get": { "responses": { "200": { "description": "Agent health without credentials" }, "401": { "$ref": "#/components/responses/Error" }, "403": { "$ref": "#/components/responses/Error" } } } },
+    "/v1/connections": {
+      "get": { "responses": { "200": { "description": "Connection catalogue" }, "401": { "$ref": "#/components/responses/Error" } } },
+      "post": { "requestBody": { "$ref": "#/components/requestBodies/JSON" }, "responses": { "201": { "description": "Created connection" }, "400": { "$ref": "#/components/responses/Error" }, "409": { "$ref": "#/components/responses/Error" }, "413": { "$ref": "#/components/responses/Error" }, "415": { "$ref": "#/components/responses/Error" } } }
+    },
+    "/v1/connections/{id}": {
+      "parameters": [{ "$ref": "#/components/parameters/ID" }],
+      "get": { "responses": { "200": { "description": "Connection without secret values" }, "404": { "$ref": "#/components/responses/Error" } } },
+      "patch": { "requestBody": { "$ref": "#/components/requestBodies/JSON" }, "responses": { "200": { "description": "Updated connection" }, "400": { "$ref": "#/components/responses/Error" }, "409": { "$ref": "#/components/responses/Error" } } },
+      "delete": { "responses": { "204": { "description": "Removed connection configuration" }, "404": { "$ref": "#/components/responses/Error" } } }
+    },
+    "/v1/connections/{id}/credentials/{field}": { "parameters": [{ "$ref": "#/components/parameters/ID" }, { "name": "field", "in": "path", "required": true, "schema": { "type": "string" } }], "post": { "description": "Writes a secret through the credential store; the value is never returned.", "requestBody": { "$ref": "#/components/requestBodies/JSON" }, "responses": { "204": { "description": "Credential stored" }, "400": { "$ref": "#/components/responses/Error" }, "404": { "$ref": "#/components/responses/Error" } } } },
+    "/v1/connections/{id}/test": { "parameters": [{ "$ref": "#/components/parameters/ID" }], "post": { "responses": { "200": { "description": "Source check passed" }, "404": { "$ref": "#/components/responses/Error" }, "500": { "$ref": "#/components/responses/Error" } } } },
+    "/v1/connections/{id}/run": { "parameters": [{ "$ref": "#/components/parameters/ID" }], "post": { "requestBody": { "required": false, "content": { "application/json": { "schema": { "type": "object" } } } }, "responses": { "202": { "description": "Run queued" }, "400": { "$ref": "#/components/responses/Error" }, "404": { "$ref": "#/components/responses/Error" }, "409": { "$ref": "#/components/responses/Error" } } } },
+    "/v1/runs": { "get": { "parameters": [{ "name": "limit", "in": "query", "schema": { "type": "integer", "minimum": 1, "maximum": 500 } }], "responses": { "200": { "description": "Recent run summaries without error text" } } } },
+    "/v1/runs/{id}": { "parameters": [{ "$ref": "#/components/parameters/ID" }], "get": { "responses": { "200": { "description": "Run summary" }, "404": { "$ref": "#/components/responses/Error" } } } },
+    "/v1/runs/{id}/log": { "parameters": [{ "$ref": "#/components/parameters/ID" }], "get": { "responses": { "200": { "description": "Redacted Server-Sent Events log stream", "content": { "text/event-stream": { "schema": { "type": "string" } } } }, "404": { "$ref": "#/components/responses/Error" } } } },
+    "/v1/schedules": { "get": { "responses": { "200": { "description": "Persisted schedules" } } } },
+    "/v1/schedules/{connectionId}": { "parameters": [{ "name": "connectionId", "in": "path", "required": true, "schema": { "type": "string" } }], "put": { "requestBody": { "$ref": "#/components/requestBodies/JSON" }, "responses": { "200": { "description": "Schedule saved" }, "400": { "$ref": "#/components/responses/Error" }, "404": { "$ref": "#/components/responses/Error" } } } },
+    "/v1/projects": { "get": { "responses": { "200": { "description": "Registered project IDs and names" } } } },
+    "/v1/settings": { "get": { "responses": { "200": { "description": "Non-secret settings only" } } }, "put": { "requestBody": { "$ref": "#/components/requestBodies/JSON" }, "responses": { "200": { "description": "Settings saved" }, "400": { "$ref": "#/components/responses/Error" }, "413": { "$ref": "#/components/responses/Error" } } } },
+    "/v1/engine/update": { "post": { "description": "Checks/applies an engine update only after explicit confirmation.", "requestBody": { "$ref": "#/components/requestBodies/JSON" }, "responses": { "200": { "description": "Sanitized update result" }, "400": { "$ref": "#/components/responses/Error" }, "500": { "$ref": "#/components/responses/Error" } } } },
+    "/v1/shutdown": { "post": { "responses": { "202": { "description": "Graceful shutdown requested" }, "500": { "$ref": "#/components/responses/Error" } } } }
+  },
+  "components": {
+    "securitySchemes": { "bearerAuth": { "type": "http", "scheme": "bearer" } },
+    "parameters": { "ID": { "name": "id", "in": "path", "required": true, "schema": { "type": "string" } } },
+    "requestBodies": { "JSON": { "required": true, "content": { "application/json": { "schema": { "type": "object" } } } } },
+    "responses": { "Error": { "description": "Sanitized API error", "content": { "application/json": { "schema": { "type": "object", "required": ["error"], "properties": { "error": { "type": "object", "required": ["code", "message"], "properties": { "code": { "type": "string" }, "message": { "type": "string" } } } } } } } } }
+  }
+}

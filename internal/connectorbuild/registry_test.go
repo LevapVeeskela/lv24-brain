@@ -3,6 +3,8 @@ package connectorbuild
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"slices"
 	"testing"
 	"time"
@@ -127,7 +129,7 @@ func TestBuiltinRegistersProviders(t *testing.T) {
 	providers := registry.Providers()
 
 	// Assert
-	want := []string{"confluence", "folders", "github", "gitlab", "imap", "jira", "linear"}
+	want := []string{"confluence", "folders", "github", "gitlab", "imap", "jira", "linear", "notion", "postgres-schema", "rss", "sentry", "slack", "sqlite-schema", "web"}
 	if !slices.Equal(providers, want) {
 		t.Fatalf("Providers() = %v, want %v", providers, want)
 	}
@@ -142,14 +144,25 @@ func TestBuiltinRegistersProviders(t *testing.T) {
 
 func TestBuiltinBuildsNativeSources(t *testing.T) {
 	deps := Deps{Credentials: SecretCredentials{Store: fakeSecrets{}}, Now: func() time.Time { return time.Unix(0, 0) }}
+	sqlitePath := filepath.Join(t.TempDir(), "schema.db")
+	if err := os.WriteFile(sqlitePath, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
 	cases := map[string]domain.Connection{
-		"github":     {ID: "gh", Provider: "github", Settings: map[string]string{"repos": "acme/widgets"}},
-		"gitlab":     {ID: "gl", Provider: "gitlab", BaseURL: "https://gitlab.example.com/api/v4", Settings: map[string]string{"projects": "acme/api"}},
-		"imap":       {ID: "mail", Provider: "imap", Account: "work", BaseURL: "imaps://imap.example.com", Settings: map[string]string{"username": "me"}},
-		"folders":    {ID: "notes", Provider: "folders", Settings: map[string]string{"paths": t.TempDir()}},
-		"jira":       {ID: "jira", Provider: "jira", BaseURL: "https://example.atlassian.net", Settings: map[string]string{"email": "me@example.test"}},
-		"confluence": {ID: "conf", Provider: "confluence", BaseURL: "https://example.atlassian.net/wiki", Settings: map[string]string{"email": "me@example.test"}},
-		"linear":     {ID: "lin", Provider: "linear"},
+		"github":          {ID: "gh", Provider: "github", Settings: map[string]string{"repos": "acme/widgets"}},
+		"gitlab":          {ID: "gl", Provider: "gitlab", BaseURL: "https://gitlab.example.com/api/v4", Settings: map[string]string{"projects": "acme/api"}},
+		"imap":            {ID: "mail", Provider: "imap", Account: "work", BaseURL: "imaps://imap.example.com", Settings: map[string]string{"username": "me"}},
+		"folders":         {ID: "notes", Provider: "folders", Settings: map[string]string{"paths": t.TempDir()}},
+		"jira":            {ID: "jira", Provider: "jira", BaseURL: "https://example.atlassian.net", Settings: map[string]string{"email": "me@example.test"}},
+		"confluence":      {ID: "conf", Provider: "confluence", BaseURL: "https://example.atlassian.net/wiki", Settings: map[string]string{"email": "me@example.test"}},
+		"linear":          {ID: "lin", Provider: "linear"},
+		"slack":           {ID: "slack", Provider: "slack", Settings: map[string]string{"channels": "C0123456789"}},
+		"notion":          {ID: "notion", Provider: "notion"},
+		"sentry":          {ID: "sentry", Provider: "sentry", Settings: map[string]string{"org": "acme"}},
+		"postgres-schema": {ID: "pg", Provider: "postgres-schema", Settings: map[string]string{"host": "db.example.test", "database": "app", "user": "brain_ro"}},
+		"sqlite-schema":   {ID: "sq", Provider: "sqlite-schema", Settings: map[string]string{"path": sqlitePath}},
+		"rss":             {ID: "rss", Provider: "rss", Settings: map[string]string{"urls": "https://example.test/feed.xml"}},
+		"web":             {ID: "web", Provider: "web", Settings: map[string]string{"sitemaps": "https://example.test/sitemap.xml"}},
 	}
 	for name, conn := range cases {
 		t.Run(name, func(t *testing.T) {
