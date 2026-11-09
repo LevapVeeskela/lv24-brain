@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -57,9 +58,10 @@ type Control struct {
 	opts     Options
 	settings *settingsStore
 
-	mu     sync.Mutex
-	server *localapi.Server
-	done   chan struct{}
+	mu       sync.Mutex
+	updateMu sync.Mutex
+	server   *localapi.Server
+	done     chan struct{}
 }
 
 // New validates the control dependencies and prepares the private settings
@@ -124,7 +126,7 @@ func (c *Control) Start(ctx context.Context, runtime daemon.Runtime) (int, error
 		Schedules:   scheduleStore{connections: c.opts.Connections},
 		Projects:    projectLister{projects: c.opts.Projects},
 		Settings:    c.settings,
-		Updater:     updater{updater: c.opts.Updater},
+		Updater:     updater{updater: c.opts.Updater, mu: &c.updateMu},
 		Shutdown: localapi.ShutdownFunc(func(context.Context) error {
 			stopCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 			defer cancel()
@@ -581,21 +583,32 @@ func (s *settingsStore) load() (map[string]string, error) {
 }
 
 // updater applies a verified engine update after explicit confirmation.
-type updater struct{ updater Updater }
+type updater struct {
+	updater Updater
+	mu      *sync.Mutex
+}
 
 func (u updater) Update(ctx context.Context) (localapi.UpdateResult, error) {
 	if u.updater == nil {
 		return localapi.UpdateResult{}, errors.New("update is unavailable")
 	}
+	if u.mu != nil && !u.mu.TryLock() {
+		return localapi.UpdateResult{}, fmt.Errorf("%w: an update is already in progress", domain.ErrConflict)
+	}
+	if u.mu != nil {
+		defer u.mu.Unlock()
+	}
 	release, err := u.updater.Check(ctx, "")
 	if err != nil {
 		return localapi.UpdateResult{}, err
 	}
-	result := localapi.UpdateResult{Available: true, Version: release.Version}
-	if release.Version == u.updater.CurrentVersion() {
-		result.Available = false
+	result := localapi.UpdateResult{Version: release.Version}
+	if compareVersions(release.Version, u.updater.CurrentVersion()) <= 0 {
+		// Never reinstall the running build or downgrade implicitly; an
+		// operator can still use `brain update --rollback` deliberately.
 		return result, nil
 	}
+	result.Available = true
 	artifact, err := u.updater.Download(ctx, release)
 	if err != nil {
 		return localapi.UpdateResult{}, err
@@ -605,4 +618,59 @@ func (u updater) Update(ctx context.Context) (localapi.UpdateResult, error) {
 	}
 	result.Applied = true
 	return result, nil
+}
+
+// compareVersions compares dotted numeric versions, treating a prerelease as
+// lower than the same stable version. It is deliberately small: the updater
+// uses semver tags, and a malformed version sorts as older rather than newer.
+func compareVersions(a, b string) int {
+	parse := func(value string) ([]int, bool, bool) {
+		value = strings.TrimPrefix(strings.TrimSpace(value), "v")
+		prerelease := false
+		if i := strings.IndexByte(value, '-'); i >= 0 {
+			value = value[:i]
+			prerelease = true
+		}
+		parts := strings.Split(value, ".")
+		numbers := make([]int, 0, len(parts))
+		for _, part := range parts {
+			number, err := strconv.Atoi(part)
+			if err != nil {
+				return nil, false, false
+			}
+			numbers = append(numbers, number)
+		}
+		return numbers, prerelease, true
+	}
+	left, leftPre, leftOK := parse(a)
+	right, rightPre, rightOK := parse(b)
+	if !leftOK || !rightOK {
+		if a == b {
+			return 0
+		}
+		return -1
+	}
+	for i := 0; i < len(left) || i < len(right); i++ {
+		var x, y int
+		if i < len(left) {
+			x = left[i]
+		}
+		if i < len(right) {
+			y = right[i]
+		}
+		if x != y {
+			if x < y {
+				return -1
+			}
+			return 1
+		}
+	}
+	switch {
+	case leftPre == rightPre:
+		return 0
+	case leftPre:
+		return -1
+	default:
+		return 1
+	}
 }

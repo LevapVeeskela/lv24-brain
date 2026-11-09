@@ -53,6 +53,8 @@ matching `.gitignore` into the data directory.
 - The token values are never written to `brain.yaml` or printed.
 - `brain.yaml` stores names and non-secret settings only. Credentials never
   appear in Markdown, git history, indexes, logs, error text, or telemetry.
+  Connection `baseUrl` values reject userinfo, fragments and query strings so
+  the committed `connectors/connections.json` catalogue cannot carry tokens.
 - Server secrets come from the deployment environment. `deploy/.env.example`
   references variables and never contains values; `deploy/.env` is ignored.
 - Rotate any key that appears in a transcript, log, commit, or screenshot.

@@ -361,6 +361,25 @@ func TestSettingsStoreRejectsCorruptFile(t *testing.T) {
 	}
 }
 
+func TestCompareVersions(t *testing.T) {
+	cases := []struct {
+		a, b string
+		want int
+	}{
+		{"0.10.0", "0.9.0", 1},
+		{"v0.10.0", "0.10.0", 0},
+		{"0.10.0", "0.10.1", -1},
+		{"1.0.0-pre.1", "1.0.0", -1},
+		{"1.0.0", "1.0.0-pre.1", 1},
+		{"bad", "0.1.0", -1},
+	}
+	for _, tc := range cases {
+		if got := compareVersions(tc.a, tc.b); got != tc.want {
+			t.Fatalf("compareVersions(%q, %q) = %d, want %d", tc.a, tc.b, got, tc.want)
+		}
+	}
+}
+
 func TestRunSummaryExcludesSecrets(t *testing.T) {
 	// The run record is sanitized by the ingestion host; this checks the
 	// adapter never adds credential fields of its own.

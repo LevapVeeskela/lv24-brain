@@ -266,7 +266,7 @@ func TestAuthHostOriginAndNoCORS(t *testing.T) {
 	cases := []struct {
 		name, auth, host, origin string
 		want                     int
-	}{{"missing", "", host, "", 401}, {"wrong", "Bearer wrong", host, "", 401}, {"valid", "Bearer " + testToken, host, "", 200}, {"localhost host", "Bearer " + testToken, "localhost:" + strconvI(testPort), "", 200}, {"IPv6 loopback host", "Bearer " + testToken, "[::1]:" + strconvI(testPort), "", 200}, {"host suffix", "Bearer " + testToken, host + ".evil", "", 403}, {"dns rebinding", "Bearer " + testToken, "evil.test:" + strconvI(testPort), "", 403}, {"loopback alias mismatch", "Bearer " + testToken, "127.0.0.1:80", "", 403}, {"null origin", "Bearer " + testToken, host, "null", 403}, {"same-site origin", "Bearer " + testToken, host, "http://127.0.0.1:" + strconvI(testPort), 403}, {"localhost origin", "Bearer " + testToken, host, "http://localhost:" + strconvI(testPort), 403}}
+	}{{"missing", "", host, "", 401}, {"wrong", "Bearer wrong", host, "", 401}, {"valid", "Bearer " + testToken, host, "", 200}, {"localhost host", "Bearer " + testToken, "localhost:" + strconvI(testPort), "", 403}, {"IPv6 loopback host", "Bearer " + testToken, "[::1]:" + strconvI(testPort), "", 403}, {"host suffix", "Bearer " + testToken, host + ".evil", "", 403}, {"dns rebinding", "Bearer " + testToken, "evil.test:" + strconvI(testPort), "", 403}, {"loopback alias mismatch", "Bearer " + testToken, "127.0.0.1:80", "", 403}, {"null origin", "Bearer " + testToken, host, "null", 403}, {"same-site origin", "Bearer " + testToken, host, "http://127.0.0.1:" + strconvI(testPort), 403}, {"localhost origin", "Bearer " + testToken, host, "http://localhost:" + strconvI(testPort), 403}}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			r := httptest.NewRequest(http.MethodGet, "/v1/health", nil)
@@ -302,7 +302,12 @@ func TestConnectionCRUDValidationSecretsAndCredentialSetter(t *testing.T) {
 	f := newFixture(t)
 	body := `{"id":"demo-1","provider":"demo","baseUrl":"https://example.test?access_token=secret-in-query","settings":{"endpoint":"https://example.test"}}`
 	w := request(f, http.MethodPost, "/v1/connections", body, nil)
-	if w.Code != 201 || strings.Contains(w.Body.String(), "secret-in-query") {
+	if w.Code != 400 || strings.Contains(w.Body.String(), "secret-in-query") {
+		t.Fatalf("query-secret create=%d %s", w.Code, w.Body.String())
+	}
+	body = `{"id":"demo-1","provider":"demo","baseUrl":"https://example.test","settings":{"endpoint":"https://example.test"}}`
+	w = request(f, http.MethodPost, "/v1/connections", body, nil)
+	if w.Code != 201 || strings.Contains(w.Body.String(), "secret") {
 		t.Fatalf("create=%d %s", w.Code, w.Body.String())
 	}
 	if strings.Contains(w.Body.String(), "token") {
@@ -559,3 +564,16 @@ func TestNoInternalErrorTextOrSecretOnServiceFailure(t *testing.T) {
 type errorJobQueue struct{ err error }
 
 func (f *errorJobQueue) Queue(context.Context, string, RunOptions) (string, error) { return "", f.err }
+
+func TestSecretKeyClassification(t *testing.T) {
+	for _, key := range []string{"token", "api-token", "accessKey", "passwd", "pwd", "session", "cookie", "bearer", "auth", "authorization", "client_secret"} {
+		if !isSecretKey(key) {
+			t.Fatalf("%q should be classified as secret", key)
+		}
+	}
+	for _, key := range []string{"theme", "author", "startup", "update-channel", "log-level"} {
+		if isSecretKey(key) {
+			t.Fatalf("%q should not be classified as secret", key)
+		}
+	}
+}

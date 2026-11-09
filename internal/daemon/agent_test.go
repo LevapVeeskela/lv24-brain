@@ -453,3 +453,17 @@ func TestLogRotationRetentionAndRedaction(t *testing.T) {
 		t.Fatalf("log permissions=%o", info.Mode().Perm())
 	}
 }
+
+func TestOwnerTokenHashIsNotTheBearerToken(t *testing.T) {
+	raw := "bearer-secret-value"
+	hashed := hashToken(raw)
+	if hashed == raw || len(hashed) != 64 {
+		t.Fatalf("hashToken(%q) = %q", raw, hashed)
+	}
+	if !tokenMatches(hashed, raw) || !tokenMatches(raw, raw) {
+		t.Fatal("tokenMatches rejected a valid hash or legacy raw token")
+	}
+	if tokenMatches(hashToken("other"), raw) {
+		t.Fatal("tokenMatches accepted another token")
+	}
+}

@@ -13,7 +13,7 @@
       "parameters": [{ "$ref": "#/components/parameters/ID" }],
       "get": { "responses": { "200": { "description": "Connection without secret values" }, "404": { "$ref": "#/components/responses/Error" } } },
       "patch": { "requestBody": { "$ref": "#/components/requestBodies/JSON" }, "responses": { "200": { "description": "Updated connection" }, "400": { "$ref": "#/components/responses/Error" }, "409": { "$ref": "#/components/responses/Error" } } },
-      "delete": { "responses": { "204": { "description": "Removed connection configuration" }, "404": { "$ref": "#/components/responses/Error" } } }
+      "delete": { "description": "Removes the connection configuration; items, checkpoints and credentials are retained (as with `brain connection remove`).", "responses": { "204": { "description": "Removed connection configuration" }, "404": { "$ref": "#/components/responses/Error" }, "409": { "$ref": "#/components/responses/Error" } } }
     },
     "/v1/connections/{id}/credentials/{field}": { "parameters": [{ "$ref": "#/components/parameters/ID" }, { "name": "field", "in": "path", "required": true, "schema": { "type": "string" } }], "post": { "description": "Writes a secret through the credential store; the value is never returned.", "requestBody": { "$ref": "#/components/requestBodies/JSON" }, "responses": { "204": { "description": "Credential stored" }, "400": { "$ref": "#/components/responses/Error" }, "404": { "$ref": "#/components/responses/Error" } } } },
     "/v1/connections/{id}/test": { "parameters": [{ "$ref": "#/components/parameters/ID" }], "post": { "responses": { "200": { "description": "Source check passed" }, "404": { "$ref": "#/components/responses/Error" }, "500": { "$ref": "#/components/responses/Error" } } } },

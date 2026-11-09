@@ -4,6 +4,7 @@ package daemon
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -179,15 +180,27 @@ func New(opts Options) (*Agent, error) {
 		opts.PIDAlive = pidAlive
 	}
 	dir := filepath.Join(root, "agent")
+	if info, statErr := os.Lstat(dir); statErr == nil && info.Mode()&os.ModeSymlink != 0 {
+		return nil, errors.New("daemon: agent state directory must not be a symlink")
+	}
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, fmt.Errorf("daemon: create agent directory: %w", err)
 	}
 	ignorePath := filepath.Join(dir, ".gitignore")
-	if _, statErr := os.Stat(ignorePath); errors.Is(statErr, os.ErrNotExist) {
+	if info, statErr := os.Lstat(ignorePath); statErr == nil {
+		if !info.Mode().IsRegular() {
+			return nil, errors.New("daemon: agent ignore file must be a regular file")
+		}
+		// Re-write a tampered ignore file: anything in agent/ is private
+		// runtime state, including the bearer token.
+		if err := os.WriteFile(ignorePath, []byte(agentIgnoreContent), 0o600); err != nil {
+			return nil, fmt.Errorf("daemon: rewrite agent ignore file: %w", err)
+		}
+	} else if errors.Is(statErr, os.ErrNotExist) {
 		if err := os.WriteFile(ignorePath, []byte(agentIgnoreContent), 0o600); err != nil {
 			return nil, fmt.Errorf("daemon: write agent ignore file: %w", err)
 		}
-	} else if statErr != nil {
+	} else {
 		return nil, fmt.Errorf("daemon: inspect agent ignore file: %w", statErr)
 	}
 	if canonical, err := filepath.EvalSymlinks(root); err == nil {
@@ -265,7 +278,7 @@ func (a *Agent) Run(ctx context.Context) error {
 	a.runtime = runtime
 	a.mu.Unlock()
 	ownerPath := filepath.Join(a.dataDir, "agent", "owner.json")
-	if err := writeJSONAtomic(ownerPath, lockOwner{PID: runtime.PID, Token: runtime.Token}, 0o600); err != nil {
+	if err := writeJSONAtomic(ownerPath, lockOwner{PID: runtime.PID, Token: hashToken(runtime.Token)}, 0o600); err != nil {
 		return fmt.Errorf("daemon: write lock owner: %w", err)
 	}
 	if err := writeJSONAtomic(a.runtimePath, runtime, 0o600); err != nil {
@@ -395,7 +408,7 @@ func (a *Agent) QueueConnectionOptions(ctx context.Context, connectionID string,
 	// values are inherited. Caller cancellation aborts enqueueing above, not
 	// an accepted run.
 	jobCtx, cancel := context.WithCancel(context.WithoutCancel(ctx))
-	j := &job{view: JobView{ID: jobID, ConnectionID: connectionID, Status: "queued"}, opts: opts, ctx: jobCtx, cancel: cancel}
+	j := &job{view: JobView{ID: jobID, ConnectionID: connectionID, Status: "queued", StartedAt: a.clock.Now().UTC()}, opts: opts, ctx: jobCtx, cancel: cancel}
 	a.jobs[jobID] = j
 	a.active[connectionID] = jobID
 	queue := a.queue
@@ -708,7 +721,7 @@ func StopProcess(ctx context.Context, dataDir string) error {
 	if err := validateBrainProcess(runtime.PID); err != nil {
 		return fmt.Errorf("daemon: refusing to stop pid %d: %w", runtime.PID, err)
 	}
-	request := stopRequest{PID: runtime.PID, Token: runtime.Token}
+	request := stopRequest{PID: runtime.PID, Token: hashToken(runtime.Token)}
 	if err := writeJSONAtomic(filepath.Join(dataDir, "agent", "stop.json"), request, 0o600); err != nil {
 		return fmt.Errorf("daemon: request agent shutdown: %w", err)
 	}
@@ -760,7 +773,7 @@ func (a *Agent) watchStop(ctx context.Context) {
 			if err != nil {
 				continue
 			}
-			if request.PID != a.runtime.PID || request.Token != a.runtime.Token {
+			if request.PID != a.runtime.PID || !tokenMatches(request.Token, a.runtime.Token) {
 				continue
 			}
 			a.logger.Printf("graceful stop requested")
@@ -802,7 +815,19 @@ func runtimeOwnsLock(dataDir string, runtime Runtime) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	return owner.PID == runtime.PID && owner.Token != "" && owner.Token == runtime.Token, nil
+	return owner.PID == runtime.PID && owner.Token != "" && tokenMatches(owner.Token, runtime.Token), nil
+}
+
+// hashToken returns the value stored in owner.json and stop.json: those files
+// must not duplicate the bearer token from runtime.json. Raw-token comparisons
+// remain accepted so an agent from an older build can still be stopped.
+func hashToken(token string) string {
+	sum := sha256.Sum256([]byte(token))
+	return hex.EncodeToString(sum[:])
+}
+
+func tokenMatches(stored, raw string) bool {
+	return stored == raw || stored == hashToken(raw)
 }
 
 func readLockOwner(path string) (lockOwner, error) {

@@ -61,6 +61,7 @@ func TestConnectionValidateRejectsInvalid(t *testing.T) {
 		"relative base":     func(c *Connection) { c.BaseURL = "api.github.com" },
 		"userinfo base":     func(c *Connection) { c.BaseURL = "https://user:pw@host" },
 		"fragment base":     func(c *Connection) { c.BaseURL = "https://host/#x" },
+		"query base":        func(c *Connection) { c.BaseURL = "https://host/?access_token=x" },
 		"duplicate project": func(c *Connection) { c.Projects = []string{"a", "a"} },
 		"blank project":     func(c *Connection) { c.Projects = []string{" "} },
 		"bad schedule":      func(c *Connection) { c.Schedule = "*/5 * * * *" },

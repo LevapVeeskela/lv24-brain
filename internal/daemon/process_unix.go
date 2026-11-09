@@ -21,16 +21,28 @@ func pidAlive(pid int) bool {
 	return err == nil || errors.Is(err, syscall.EPERM)
 }
 
+// trimDeletedSuffix normalizes the Linux /proc/<pid>/exe target after a
+// self-update replaced the running binary: the kernel appends " (deleted)".
+func trimDeletedSuffix(path string) string {
+	return strings.TrimSuffix(path, " (deleted)")
+}
+
 func validateBrainProcess(pid int) error {
 	current, err := os.Executable()
 	if err != nil {
 		return err
 	}
-	current, _ = filepath.EvalSymlinks(current)
+	current = trimDeletedSuffix(current)
+	if resolved, err := filepath.EvalSymlinks(current); err == nil {
+		current = resolved
+	}
 	// Linux exposes the exact executable path. The agent lock owner file is
 	// the authoritative ownership check; this is an additional guard.
 	if exe, err := os.Readlink(filepath.Join("/proc", strconv.Itoa(pid), "exe")); err == nil {
-		exe, _ = filepath.EvalSymlinks(exe)
+		exe = trimDeletedSuffix(exe)
+		if resolved, err := filepath.EvalSymlinks(exe); err == nil {
+			exe = resolved
+		}
 		if exe == "" || filepath.Clean(exe) != filepath.Clean(current) {
 			return fmt.Errorf("process executable does not match this brain binary")
 		}

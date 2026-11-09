@@ -28,11 +28,12 @@ func NewServer(opts Options) (*Server, error) {
 		return nil, err
 	}
 	server := &http.Server{
-		Handler:           handler,
-		ReadHeaderTimeout: 5 * time.Second,
-		ReadTimeout:       30 * time.Second,
-		WriteTimeout:      0, // SSE streams are canceled by request/server shutdown.
-		IdleTimeout:       60 * time.Second,
+		Handler:                      handler,
+		ReadHeaderTimeout:            5 * time.Second,
+		ReadTimeout:                  30 * time.Second,
+		WriteTimeout:                 60 * time.Second,
+		IdleTimeout:                  60 * time.Second,
+		DisableGeneralOptionsHandler: true,
 	}
 	return &Server{Listener: listener, HTTP: server, Handler: handler}, nil
 }

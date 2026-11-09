@@ -88,6 +88,15 @@ func loadScheduleState(path string) (ScheduleState, error) {
 	if state.Version != scheduleStateVersion || state.Entries == nil {
 		return ScheduleState{}, errors.New("daemon: unsupported or invalid schedule state")
 	}
+	for id, entry := range state.Entries {
+		if strings.TrimSpace(entry.Schedule) == "" || entry.NextRun.IsZero() {
+			delete(state.Entries, id)
+			continue
+		}
+		if _, err := ParseSchedule(entry.Schedule); err != nil {
+			delete(state.Entries, id)
+		}
+	}
 	return state, nil
 }
 
@@ -139,12 +148,16 @@ func (a *Agent) scheduler(ctx context.Context) {
 		}
 		delay := time.Minute
 		for _, entry := range state.Entries {
+			if entry.NextRun.IsZero() {
+				continue
+			}
 			if d := entry.NextRun.Sub(a.clock.Now()); d < delay {
 				delay = d
 			}
 		}
-		if delay < 0 {
-			delay = 0
+		if delay < time.Second {
+			// A due or corrupt entry must not spin the scheduler at 100% CPU.
+			delay = time.Second
 		}
 		select {
 		case <-ctx.Done():

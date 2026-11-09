@@ -25,6 +25,9 @@ func newRotatingLog(path string, maxBytes int64, retention int) (*rotatingLog, e
 		return nil, err
 	}
 	_ = os.Chmod(filepath.Dir(path), 0o700)
+	if info, err := os.Lstat(path); err == nil && !info.Mode().IsRegular() {
+		return nil, fmt.Errorf("daemon: log path is not a regular file")
+	}
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
 	if err != nil {
 		return nil, fmt.Errorf("daemon: open log: %w", err)

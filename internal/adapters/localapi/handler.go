@@ -80,10 +80,10 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) validHost(host string) bool {
-	port := strconv.Itoa(h.opts.Port)
-	return host == net.JoinHostPort("127.0.0.1", port) ||
-		host == net.JoinHostPort("localhost", port) ||
-		host == net.JoinHostPort("::1", port)
+	// The listener is IPv4 loopback only. Accepting localhost/::1 would let a
+	// client that resolves localhost to IPv6 send the bearer token to a
+	// different process bound on [::1].
+	return host == net.JoinHostPort("127.0.0.1", strconv.Itoa(h.opts.Port))
 }
 
 func (h *Handler) authorized(header string) bool {
@@ -549,6 +549,9 @@ func (h *Handler) streamRunLog(w http.ResponseWriter, r *http.Request, id string
 	w.Header().Set("X-Accel-Buffering", "no")
 	w.WriteHeader(http.StatusOK)
 	flusher.Flush()
+	// Normal responses inherit the server's 60s write deadline; an SSE stream
+	// is long-lived and manages its own lifetime through the request context.
+	_ = http.NewResponseController(w).SetWriteDeadline(time.Time{})
 	ticker := time.NewTicker(h.opts.Heartbeat)
 	defer ticker.Stop()
 	lines := 0
@@ -565,7 +568,10 @@ func (h *Handler) streamRunLog(w http.ResponseWriter, r *http.Request, id string
 			if !open {
 				return
 			}
-			text := boundedText(h.redact(line.Text), MaxLogLineBytes)
+			// Normalize line breaks before redaction: a credential split
+			// across lines would otherwise escape the value pattern.
+			raw := strings.NewReplacer("\r", " ", "\n", " ").Replace(line.Text)
+			text := boundedText(h.redact(raw), MaxLogLineBytes)
 			text = strings.ReplaceAll(strings.ReplaceAll(text, "\r", ""), "\n", "\\n")
 			if _, err := fmt.Fprintf(w, "data: %s\n\n", text); err != nil {
 				return
@@ -839,9 +845,15 @@ func (h *Handler) safeSettings(settings map[string]string) map[string]string {
 }
 
 func isSecretKey(key string) bool {
-	key = strings.ToLower(strings.NewReplacer("-", "", "_", "", ".", "").Replace(key))
-	for _, marker := range []string{"secret", "token", "password", "credential", "apikey", "privatekey", "authorization", "auth"} {
-		if strings.Contains(key, marker) {
+	normalized := strings.ToLower(strings.NewReplacer("-", "", "_", "", ".", "").Replace(key))
+	if normalized == "auth" || normalized == "authorization" {
+		return true
+	}
+	for _, marker := range []string{
+		"secret", "token", "password", "passwd", "pwd", "credential", "apikey",
+		"privatekey", "accesskey", "session", "cookie", "bearer",
+	} {
+		if strings.Contains(normalized, marker) {
 			return true
 		}
 	}

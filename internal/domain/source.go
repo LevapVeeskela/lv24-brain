@@ -781,6 +781,11 @@ func canonicalBaseURL(raw string) (string, error) {
 	if parsed.Fragment != "" {
 		return "", NewValidationError("connection.baseUrl", "must not contain a fragment")
 	}
+	if parsed.RawQuery != "" {
+		// The catalogue is documented as secret-free and is committed to the
+		// data repository; query parameters commonly carry tokens.
+		return "", NewValidationError("connection.baseUrl", "must not contain a query string")
+	}
 	scheme := strings.ToLower(parsed.Scheme)
 	host := strings.ToLower(parsed.Hostname())
 	if strings.Contains(host, ":") {
@@ -790,9 +795,6 @@ func canonicalBaseURL(raw string) (string, error) {
 		host += ":" + port
 	}
 	canonical := scheme + "://" + host + strings.TrimRight(parsed.EscapedPath(), "/")
-	if parsed.RawQuery != "" {
-		canonical += "?" + parsed.RawQuery
-	}
 	return canonical, nil
 }
 
