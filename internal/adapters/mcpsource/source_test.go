@@ -564,3 +564,32 @@ func (c *countingCredentials) Get(context.Context, string, string) (string, erro
 	c.calls++
 	return "should-not-be-read", nil
 }
+
+func TestDenyListAndToolNameValidation(t *testing.T) {
+	for _, name := range []string{"search_and_remove", "LIST_and_purge", "find_and_archive", "query_delete", "search_and_archive", "recent_uploads"} {
+		if !deniedTool(name) {
+			t.Fatalf("deniedTool(%q) = false", name)
+		}
+	}
+	for _, name := range []string{"search_pages", "list_recent", "find_items"} {
+		if deniedTool(name) {
+			t.Fatalf("deniedTool(%q) = true", name)
+		}
+	}
+	for _, name := range []string{"search pages", "\uff53\uff45\uff41\uff52\uff43\uff48", "search/pages", "search\npages"} {
+		if validToolName(name) {
+			t.Fatalf("validToolName(%q) = true", name)
+		}
+	}
+	if !validToolName("search_pages.v2") || !validToolName("search-pages") {
+		t.Fatal("valid ASCII tool names were rejected")
+	}
+	destructive := true
+	tool := &mcp.Tool{Name: "search_pages", Annotations: &mcp.ToolAnnotations{DestructiveHint: &destructive}}
+	if !destructiveTool(tool) {
+		t.Fatal("destructive annotation was ignored")
+	}
+	if destructiveTool(&mcp.Tool{Name: "search_pages"}) {
+		t.Fatal("plain read tool was denied")
+	}
+}

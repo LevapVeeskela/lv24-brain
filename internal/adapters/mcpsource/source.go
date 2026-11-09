@@ -62,7 +62,7 @@ func Descriptor() domain.SourceDescriptor {
 			{Key: "args", Label: "Arguments", Help: "Optional newline-separated argv; each line is one literal argument, with no shell interpolation."},
 			{Key: "url", Label: "Streamable HTTP URL", Help: "Required for http. HTTPS, or HTTP to loopback only; URL credentials, query and fragment are forbidden."},
 			{Key: "token", Label: "Bearer token", Secret: true, Help: "Optional HTTP Bearer token. Never sent to stdio servers."},
-			{Key: "tools", Label: "Read tools", Help: "Optional exact comma/newline-separated names. Without this, names matching search/list/recent/query/find are selected, except names containing create/update/delete/write/send/execute/run/call/set."},
+			{Key: "tools", Label: "Read tools", Help: "Optional exact comma/newline-separated names (letters, digits, '_', '-', '.'). Without this, names matching search/list/recent/query/find are selected, except names containing destructive verbs (create/update/delete/remove/write/send/execute/run/call/set/add/insert/upsert/upload/post/put/patch/archive/purge/destroy/drop/truncate/approve/merge/assign/move/rename/edit/save/commit/push/reset/revoke/grant/publish/deploy/invite/share/cancel/close/reopen/disable/enable/lock/unlock/mark/mute/kick/ban/track/untrack) or a destructive annotation."},
 			{Key: "maxitems", Label: "Maximum items per tool", Help: "Optional, default 100, maximum 500."},
 			{Key: "query", Label: "Default query", Help: "Used only for required string inputs that have no JSON default. Defaults to *; never used to guess secrets."},
 			{Key: "timeout", Label: "Timeout", Help: "Optional per MCP operation, default 30s, maximum 5m."},
@@ -368,7 +368,7 @@ func (s *Source) listTools(ctx context.Context, session *mcp.ClientSession) ([]*
 			return nil, errors.New("mcp read: tool listing failed")
 		}
 		for _, tool := range result.Tools {
-			if tool != nil && tool.Name != "" && len(tool.Name) <= 128 && !strings.ContainsRune(tool.Name, 0) {
+			if tool != nil && validToolName(tool.Name) {
 				tools = append(tools, tool)
 				if len(tools) > maximumListedTools {
 					return nil, errors.New("mcp read: server exposes too many tools")
@@ -410,7 +410,7 @@ func (s *Source) selectTools(tools []*mcp.Tool) ([]*mcp.Tool, []string) {
 	var skipped []string
 	for _, tool := range tools {
 		name := tool.Name
-		if deniedTool(name) {
+		if destructiveTool(tool) {
 			if allow[name] {
 				skipped = append(skipped, name)
 			}
@@ -500,8 +500,8 @@ func parseSettings(conn domain.Connection) (settings, error) {
 	seen := make(map[string]bool)
 	for _, name := range strings.FieldsFunc(toolsRaw, func(r rune) bool { return r == ',' || r == '\n' || r == '\r' }) {
 		name = strings.TrimSpace(name)
-		if name == "" || len(name) > 128 || strings.ContainsRune(name, 0) {
-			return settings{}, domain.NewValidationError("mcp.tools", "tool names must be non-empty and at most 128 bytes")
+		if !validToolName(name) {
+			return settings{}, domain.NewValidationError("mcp.tools", "tool names must use letters, digits, '_', '-' or '.' (at most 128 bytes)")
 		}
 		if !seen[name] {
 			seen[name] = true
@@ -554,12 +554,44 @@ func streamName(identity string) string {
 
 func deniedTool(name string) bool {
 	lower := strings.ToLower(name)
-	for _, word := range []string{"create", "update", "delete", "write", "send", "execute", "run", "call", "set"} {
+	for _, word := range []string{
+		"create", "update", "delete", "remove", "write", "send", "execute",
+		"run", "call", "set", "add", "insert", "upsert", "upload", "post",
+		"put", "patch", "archive", "purge", "destroy", "drop", "truncate",
+		"approve", "merge", "assign", "move", "rename", "edit", "save",
+		"commit", "push", "reset", "revoke", "grant", "publish", "deploy",
+		"invite", "share", "cancel", "close", "reopen", "disable", "enable",
+		"lock", "unlock", "mark", "mute", "kick", "ban", "track", "untrack",
+	} {
 		if strings.Contains(lower, word) {
 			return true
 		}
 	}
 	return false
+}
+
+// destructiveTool is the unconditional deny gate: a name marker or an
+// explicit destructive annotation from the server both deny the call.
+func destructiveTool(tool *mcp.Tool) bool {
+	if deniedTool(tool.Name) {
+		return true
+	}
+	return tool.Annotations != nil && tool.Annotations.DestructiveHint != nil && *tool.Annotations.DestructiveHint
+}
+
+func validToolName(name string) bool {
+	if name == "" || len(name) > 128 {
+		return false
+	}
+	for _, r := range name {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
+		case r == '_' || r == '-' || r == '.':
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 func defaultReadTool(name string) bool {
