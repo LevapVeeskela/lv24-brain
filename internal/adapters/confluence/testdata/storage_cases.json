@@ -1,0 +1,52 @@
+[
+  {
+    "name": "heading_and_paragraph",
+    "storage": "<h1>Title</h1><p>Body</p>",
+    "markdown": "# Title\n\nBody"
+  },
+  {
+    "name": "bold_and_italic",
+    "storage": "<p>Hello <strong>bold</strong> and <em>italic</em>.</p>",
+    "markdown": "Hello **bold** and *italic*."
+  },
+  {
+    "name": "link",
+    "storage": "<p>See <a href=\"https://example.test/docs\">docs</a>.</p>",
+    "markdown": "See [docs](https://example.test/docs)."
+  },
+  {
+    "name": "unordered_list",
+    "storage": "<ul><li>One</li><li>Two</li></ul>",
+    "markdown": "- One\n- Two"
+  },
+  {
+    "name": "ordered_list",
+    "storage": "<ol><li>One</li><li>Two</li></ol>",
+    "markdown": "1. One\n2. Two"
+  },
+  {
+    "name": "pre_code",
+    "storage": "<pre><code>line1\nline2</code></pre>",
+    "markdown": "```\nline1\nline2\n```"
+  },
+  {
+    "name": "minimal_table",
+    "storage": "<table><tr><th>A</th><th>B</th></tr><tr><td>1</td><td>2</td></tr></table>",
+    "markdown": "| A | B |\n| --- | --- |\n| 1 | 2 |"
+  },
+  {
+    "name": "unknown_tags_and_script",
+    "storage": "<div><unknown data-x=\"1\">keep</unknown><script>drop</script></div>",
+    "markdown": "keep"
+  },
+  {
+    "name": "entities",
+    "storage": "<p>A &amp; B &lt; C</p>",
+    "markdown": "A & B < C"
+  },
+  {
+    "name": "image",
+    "storage": "<p><img src=\"https://example.test/y.png\" alt=\"Diagram\"/></p>",
+    "markdown": "![Diagram](https://example.test/y.png)"
+  }
+]

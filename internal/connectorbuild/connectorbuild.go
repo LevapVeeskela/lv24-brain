@@ -61,6 +61,20 @@ var snapshotBuilders = map[string]func(Options) (ports.Connector, error){
 	imap.Name:   buildIMAPSnapshot,
 }
 
+// snapshotProviders lists the providers that still have a legacy Markdown
+// snapshot connector. New native-only sources are not available through
+// `brain connector run --name`; use `brain connection run <id>`.
+func snapshotProviders() []string {
+	return []string{github.Name, gitlab.Name, imap.Name}
+}
+
+// SnapshotProviders returns the provider names accepted by the legacy
+// snapshot command (`brain connector run --name`). It is separate from
+// Registry.Providers(), which lists every native source.
+func SnapshotProviders() []string {
+	return snapshotProviders()
+}
+
 // Build selects a read-only Markdown-dump connector. Credentials are resolved
 // by the connector at run time through Secrets; env configuration is read here
 // so both the CLI and the server use the same names. Provider names come from
@@ -71,7 +85,7 @@ func Build(opts Options) (ports.Connector, error) {
 	name := strings.ToLower(strings.TrimSpace(opts.Name))
 	entry, err := registry.Lookup(name)
 	if err != nil {
-		return nil, domain.NewValidationError("connector.name", "must be "+providerChoices(registry.Providers()))
+		return nil, domain.NewValidationError("connector.name", "must be "+providerChoices(snapshotProviders()))
 	}
 	if opts.Secrets == nil {
 		return nil, domain.NewValidationError("connector.secrets", "is required")

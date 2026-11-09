@@ -162,6 +162,22 @@ func TestConnectionRemoveRefusesWhileRunHoldsLock(t *testing.T) {
 	}
 }
 
+func TestAgentStatusAndStopWithoutRunningAgent(t *testing.T) {
+	cfg, _ := connectionConfig(t, config.ModeLocal)
+	code, out, errOut := runForTest(t, "agent", "status", "--config", cfg)
+	if code != 0 || !strings.Contains(out, "not running") {
+		t.Fatalf("agent status = %d %q %q", code, out, errOut)
+	}
+	code, out, errOut = runForTest(t, "agent", "status", "--json", "--config", cfg)
+	if code != 0 || !strings.Contains(out, `"running": false`) {
+		t.Fatalf("agent status json = %d %q %q", code, out, errOut)
+	}
+	code, _, errOut = runForTest(t, "agent", "stop", "--config", cfg)
+	if code != 0 {
+		t.Fatalf("agent stop without runtime = %d %q", code, errOut)
+	}
+}
+
 func TestConnectionValidation(t *testing.T) {
 	cases := []struct {
 		name string

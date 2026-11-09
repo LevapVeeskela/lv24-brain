@@ -166,6 +166,8 @@ func runCommand(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return runConnector(rest, stdout, stderr)
 	case "connection":
 		return runConnection(rest, stdin, stdout, stderr)
+	case "agent":
+		return runAgent(rest, stdout, stderr)
 	case "migrate":
 		return runMigrate(rest, stdout, stderr)
 	case "secret":
@@ -238,6 +240,7 @@ Commands:
   mcp        Serve the brain as an MCP server over stdio (for coding agents)
   connector  Run a read-only connector (see connector --help for providers)
   connection Manage local/git connections, credentials and provider descriptors
+  agent      Run, inspect or stop the background connection agent
   migrate    Import a legacy .brain data directory; --rollback reverts an import
   secret     Manage OS-backed secrets (set, list, remove)
   login      Authenticate against a server-mode brain
@@ -1447,7 +1450,7 @@ func runConnector(args []string, stdout, stderr io.Writer) int {
 
 func runConnectorRun(args []string, stdout, stderr io.Writer) int {
 	fs := newFlagSet("connector run", stderr)
-	providers := connectorbuild.Builtin().Providers()
+	providers := connectorbuild.SnapshotProviders()
 	name := fs.String("name", "", strings.Join(providers, ", "))
 	project := fs.String("project", "", "configured repository/project filter (ignored for imap)")
 	brainProject := fs.String("brain-project", "", "map server raw items to this existing brain project")
@@ -1584,7 +1587,7 @@ func printConnectorRun(w io.Writer, run domain.ConnectorRun) {
 }
 
 func printConnectorUsage(w io.Writer) {
-	providers := connectorbuild.Builtin().Providers()
+	providers := connectorbuild.SnapshotProviders()
 	fmt.Fprintf(w, `Usage:
   brain connector run --name %s [flags]
   brain connector run --all [--days N]

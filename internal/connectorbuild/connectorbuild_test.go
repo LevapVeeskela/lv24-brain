@@ -86,8 +86,8 @@ func TestBuildRejectsUnknownName(t *testing.T) {
 	}
 }
 
-func TestBuildAcceptsEveryRegistryProvider(t *testing.T) {
-	for _, provider := range Builtin().Providers() {
+func TestBuildAcceptsEverySnapshotProvider(t *testing.T) {
+	for _, provider := range SnapshotProviders() {
 		t.Run(provider, func(t *testing.T) {
 			t.Setenv("BRAIN_GITHUB_REPOS", "acme/widgets")
 			t.Setenv("BRAIN_GITLAB_PROJECTS", "acme/api")
@@ -100,6 +100,17 @@ func TestBuildAcceptsEveryRegistryProvider(t *testing.T) {
 			}
 			if connector.Name() != provider {
 				t.Fatalf("Name() = %q, want %q", connector.Name(), provider)
+			}
+		})
+	}
+}
+
+func TestBuildRejectsNativeOnlyProviderForSnapshotCommand(t *testing.T) {
+	for _, provider := range []string{"folders", "jira", "confluence", "linear"} {
+		t.Run(provider, func(t *testing.T) {
+			_, err := Build(Options{Name: provider, Secrets: fakeSecrets{}, Sink: connectors.DiscardSink{}})
+			if !errors.Is(err, domain.ErrValidation) || !strings.Contains(err.Error(), "brain connection run") {
+				t.Fatalf("Build(%q) error = %v, want native-only guidance", provider, err)
 			}
 		})
 	}

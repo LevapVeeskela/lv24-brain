@@ -9,9 +9,13 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/levapveeskela/lv24-brain/internal/adapters/confluence"
+	"github.com/levapveeskela/lv24-brain/internal/adapters/folders"
 	"github.com/levapveeskela/lv24-brain/internal/adapters/github"
 	"github.com/levapveeskela/lv24-brain/internal/adapters/gitlab"
 	"github.com/levapveeskela/lv24-brain/internal/adapters/imap"
+	"github.com/levapveeskela/lv24-brain/internal/adapters/jira"
+	"github.com/levapveeskela/lv24-brain/internal/adapters/linear"
 	"github.com/levapveeskela/lv24-brain/internal/domain"
 	"github.com/levapveeskela/lv24-brain/internal/ports"
 )
@@ -90,6 +94,10 @@ func Builtin() *Registry {
 		{Descriptor: GitHubDescriptor(), Factory: newNativeGitHub},
 		{Descriptor: GitLabDescriptor(), Factory: newNativeGitLab},
 		{Descriptor: IMAPDescriptor(), Factory: newNativeIMAP},
+		{Descriptor: folders.Descriptor(), Factory: newNativeFolders},
+		{Descriptor: jira.Descriptor(), Factory: newNativeJira},
+		{Descriptor: confluence.Descriptor(), Factory: newNativeConfluence},
+		{Descriptor: linear.Descriptor(), Factory: newNativeLinear},
 	} {
 		if err := registry.Register(entry.Descriptor, entry.Factory); err != nil {
 			panic("connectorbuild: invalid built-in provider: " + err.Error())
@@ -117,6 +125,22 @@ func newNativeGitLab(conn domain.Connection, deps Deps) (ports.Source, error) {
 
 func newNativeIMAP(conn domain.Connection, deps Deps) (ports.Source, error) {
 	return imap.NewSource(conn, deps.Credentials, nil, deps.Now)
+}
+
+func newNativeFolders(conn domain.Connection, deps Deps) (ports.Source, error) {
+	return folders.NewSource(conn, deps.Now)
+}
+
+func newNativeJira(conn domain.Connection, deps Deps) (ports.Source, error) {
+	return jira.NewSource(conn, deps.Credentials, httpClient(deps), deps.Now)
+}
+
+func newNativeConfluence(conn domain.Connection, deps Deps) (ports.Source, error) {
+	return confluence.NewSource(conn, deps.Credentials, httpClient(deps), deps.Now)
+}
+
+func newNativeLinear(conn domain.Connection, deps Deps) (ports.Source, error) {
+	return linear.NewSource(conn, deps.Credentials, httpClient(deps), deps.Now)
 }
 
 func imapAddress(baseURL string) (string, error) {
