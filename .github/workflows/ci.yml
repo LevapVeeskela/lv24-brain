@@ -232,8 +232,9 @@ jobs:
           test -n "$ASSET_VERSION"
           node npm/build.mjs --version 0.0.0-ci --asset-version "$ASSET_VERSION" --dist release-assets --out npm-out
           node --test npm/build.test.mjs
-          for dir in npm-out/*/; do
-            (cd "$dir" && npm pack --dry-run)
+          for manifest in npm-out/*/package.json npm-out/@*/*/package.json; do
+            [ -f "$manifest" ] || continue
+            (cd "$(dirname "$manifest")" && npm pack --dry-run)
           done
 
   race:
