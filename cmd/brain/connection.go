@@ -31,6 +31,7 @@ func printConnectionUsage(w io.Writer) {
   brain connection migrate [--copy-legacy-secrets] [--json]
   brain connection providers [--json]
   brain connection run <id> [--since RFC3339] [--days N] [--limit N] [--json]
+  brain connection auth <id> [--client-id <id>] [--scopes a,b] [--remove]
 
 All commands accept --config <path> and require local or git mode.
 Use providers to inspect required settings. Secret fields must be set from
@@ -68,8 +69,9 @@ func runConnection(args []string, stdin io.Reader, stdout, stderr io.Writer) int
 	cfgPath := configFlag(fs)
 	var asJSON, yes, copySecrets bool
 	var id, account, baseURL, schedule, publish string
-	var sinceRaw string
+	var sinceRaw, clientID, scopesRaw string
 	var limit, days int
+	var remove bool
 	var projects, settings []string
 	switch command {
 	case "run":
@@ -77,6 +79,10 @@ func runConnection(args []string, stdin io.Reader, stdout, stderr io.Writer) int
 		fs.StringVar(&sinceRaw, "since", "", "read updates at or after RFC3339 time")
 		fs.IntVar(&days, "days", 0, "read updates from the last N days (alternative to --since)")
 		fs.IntVar(&limit, "limit", 0, "maximum items per run (0 uses default)")
+	case "auth":
+		fs.StringVar(&clientID, "client-id", "", "OAuth public client ID (or BRAIN_OAUTH_CLIENT_ID)")
+		fs.StringVar(&scopesRaw, "scopes", "", "comma-separated OAuth scopes (default: provider defaults)")
+		fs.BoolVar(&remove, "remove", false, "remove the stored OAuth session for this connection")
 	case "list", "providers":
 		fs.BoolVar(&asJSON, "json", false, "print JSON")
 	case "add":
@@ -106,7 +112,7 @@ func runConnection(args []string, stdin io.Reader, stdout, stderr io.Writer) int
 	}
 	wantArgs := 0
 	switch command {
-	case "add", "remove", "run":
+	case "add", "remove", "run", "auth":
 		wantArgs = 1
 	case "secret set":
 		wantArgs = 2
@@ -122,6 +128,13 @@ func runConnection(args []string, stdin io.Reader, stdout, stderr io.Writer) int
 	if cfg.Mode == config.ModeServer {
 		fmt.Fprintln(stderr, "brain connection: not available in server mode yet (use local or git mode)")
 		return 2
+	}
+	if command == "auth" {
+		runtime, err := buildConnections(cfg, bootstrap.Options{})
+		if err != nil {
+			return reportError(stderr, "connection auth", err)
+		}
+		return connectionAuth(context.Background(), runtime, positional[0], clientID, scopesRaw, remove, stdout, stderr)
 	}
 	if command == "run" {
 		if limit < 0 {

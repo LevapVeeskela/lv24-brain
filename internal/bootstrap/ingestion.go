@@ -8,6 +8,7 @@ import (
 	"github.com/levapveeskela/lv24-brain/internal/config"
 	"github.com/levapveeskela/lv24-brain/internal/connectorbuild"
 	"github.com/levapveeskela/lv24-brain/internal/connectors"
+	"github.com/levapveeskela/lv24-brain/internal/oauthlogin"
 )
 
 // IngestionRuntime owns the item ingestion host and its local search index.
@@ -54,7 +55,14 @@ func BuildIngestion(cfg config.BrainConfig, opts Options) (*IngestionRuntime, er
 	}
 	host := &app.Ingestion{
 		Connections: catalogue.Connections, Registry: catalogue.Registry,
-		Deps:  connectorbuild.Deps{Credentials: catalogue.Credentials, Secrets: withGHTokenFallback(runtime.Secrets), Sink: sink},
+		Deps: connectorbuild.Deps{
+			Credentials: &oauthlogin.Credentials{
+				Base:     catalogue.Credentials,
+				Sessions: &oauthlogin.SessionStore{Secrets: runtime.Secrets},
+			},
+			Secrets: withGHTokenFallback(runtime.Secrets),
+			Sink:    sink,
+		},
 		Items: store.Items(), Checkpoints: store.Checkpoints(), Locker: locker, Index: runtime.App, Runs: store,
 	}
 	if cfg.Mode == config.ModeGit {

@@ -284,6 +284,13 @@ brain discover --root <workspace> --apply   # register the new ones
   when non-empty and falls back to the legacy targets above when empty.
   `--name` stays legacy snapshot (Markdown dumps); it is not native
   item-level. Deletes are never inferred.
+- OAuth (v0.12.0, in development): `brain connection auth <id>` runs GitHub's
+  device flow or GitLab's PKCE loopback flow (port 47615) using a public client
+  ID from `--client-id` or `BRAIN_OAUTH_CLIENT_ID`. The bundle is stored only
+  in the OS secret store (`conn/<id>/oauth` plus token-free metadata), never in
+  `connections.json`. An OAuth session takes precedence over a PAT for `token`
+  lookups; `--remove` deletes it and falls back to the PAT/token path. Refresh
+  rotation is persisted before the new access token is used.
 - Phase 1 native providers (v0.10.0, local/git only) are registered next to
   GitHub/GitLab/IMAP: `folders` (`paths`, optional `extensions`/`ignore`; no
   credentials; Obsidian/Logseq text is preserved), `jira` (`token` secret,

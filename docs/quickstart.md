@@ -259,6 +259,26 @@ one, and `GET /v1/connectors/runs/{id}/markdown` exports it as Markdown.
 The CLI allows `1h10s` for this synchronous request, including persistence;
 ordinary API and authentication requests retain the `30s` default timeout.
 
+### OAuth for GitHub and GitLab (v0.12.0, in development)
+
+Public-client OAuth uses the system browser and never ships a client secret.
+Pass `--client-id` or set `BRAIN_OAUTH_CLIENT_ID`; GitHub uses the device flow,
+GitLab uses PKCE on loopback port 47615. The resulting bundle is stored only in
+the OS secret store (`conn/<id>/oauth` plus token-free metadata); an OAuth
+session takes precedence over a PAT for `token` lookups, and `--remove` falls
+back to the PAT/token path.
+
+```sh
+export BRAIN_OAUTH_CLIENT_ID='<public-client-id>'
+./bin/brain connection auth gh-main --scopes repo,read:user --config ~/brain/brain.yaml
+./bin/brain connection auth gl-main --scopes read_api,read_user --config ~/brain/brain.yaml
+./bin/brain connection run gh-main --config ~/brain/brain.yaml
+./bin/brain connection auth gh-main --remove --config ~/brain/brain.yaml
+```
+
+`brain connection add` still accepts PATs via `connection secret set`; the
+OAuth session is optional.
+
 Native Phase 1 sources (local/git) are added through the same catalogue:
 
 ```sh

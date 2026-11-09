@@ -406,10 +406,11 @@ stores settings only, never secrets.
 OAuth foundation (Phase 3.1): `internal/adapters/sourceoauth` implements the
 RFC 8252 loopback PKCE flow, GitHub device flow, a validated token bundle in
 the secret store, and serialized refresh with rotation persisted before the new
-access token is returned. It is not wired into provider adapters or the CLI yet;
-PATs and provider tokens remain the supported path until the desktop OAuth flow
-is added. GitHub device flow is the preferred public-client path; GitLab uses
-PKCE; Atlassian/Notion stay token-based for MVP.
+access token is returned. `internal/oauthlogin` stores the bundle under
+`conn/<id>/oauth` plus token-free metadata and makes an OAuth session override
+the PAT for `token` lookups; `brain connection auth <id>` drives the flow
+(GitHub device, GitLab PKCE) and `--remove` falls back to the PAT path.
+Atlassian/Notion stay token-based for MVP.
 
 Raw zone (v0.9.0): in local/git mode the ingestion host stores one
 Markdown file per item at `connectors/<id>/items/<40 hex>.md` (provenance

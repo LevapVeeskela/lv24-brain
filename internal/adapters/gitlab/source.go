@@ -91,7 +91,7 @@ func Descriptor() domain.SourceDescriptor {
 	return domain.SourceDescriptor{
 		Provider:       Name,
 		DisplayName:    "GitLab",
-		Capabilities:   domain.Capabilities{Backfill: true, Incremental: true, AuthModes: []domain.AuthMode{domain.AuthToken}},
+		Capabilities:   domain.Capabilities{Backfill: true, Incremental: true, AuthModes: []domain.AuthMode{domain.AuthToken, domain.AuthOAuthPKCE}},
 		DefaultPublish: domain.PublishShared,
 		ConfigFields: []domain.ConfigField{
 			{Key: "projects", Label: "Projects", Required: true, Help: "Comma-separated GitLab project paths or numeric IDs."},

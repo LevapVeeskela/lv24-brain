@@ -16,12 +16,14 @@ import (
 
 	"github.com/levapveeskela/lv24-brain/internal/adapters/connectionlock"
 	"github.com/levapveeskela/lv24-brain/internal/adapters/fsstore"
+	"github.com/levapveeskela/lv24-brain/internal/adapters/sourceoauth"
 	"github.com/levapveeskela/lv24-brain/internal/app"
 	"github.com/levapveeskela/lv24-brain/internal/bootstrap"
 	"github.com/levapveeskela/lv24-brain/internal/config"
 	"github.com/levapveeskela/lv24-brain/internal/connectorbuild"
 	"github.com/levapveeskela/lv24-brain/internal/domain"
 	"github.com/levapveeskela/lv24-brain/internal/mcpserver"
+	"github.com/levapveeskela/lv24-brain/internal/oauthlogin"
 	"github.com/levapveeskela/lv24-brain/internal/ports"
 	"gopkg.in/yaml.v3"
 )
@@ -597,5 +599,38 @@ func TestConnectionMigrate(t *testing.T) {
 				t.Fatalf("legacy changed: %q %v", got, err)
 			}
 		})
+	}
+}
+
+func TestConnectionAuthRemoveAndUnsupportedProvider(t *testing.T) {
+	cfg, _ := connectionConfig(t, config.ModeLocal)
+	secrets := newCLISecretStore()
+	connectionSecrets(t, secrets)
+	if code, _, stderr := runForTest(t, "connection", "add", "github", "--id", "work", "--setting", "repos=a/b", "--config", cfg); code != 0 {
+		t.Fatalf("add github: %s", stderr)
+	}
+	if code, _, stderr := runForTest(t, "connection", "add", "folders", "--id", "notes", "--setting", "paths="+t.TempDir(), "--config", cfg); code != 0 {
+		t.Fatalf("add folders: %s", stderr)
+	}
+	store := &oauthlogin.SessionStore{Secrets: secrets}
+	ctx := context.Background()
+	if err := store.Save(ctx, "work", oauthlogin.Session{
+		Provider: "github", ClientID: "client-id",
+		Bundle: sourceoauth.Bundle{AccessToken: "access-token"},
+	}); err != nil {
+		t.Fatalf("seed session: %v", err)
+	}
+	code, out, stderr := runForTest(t, "connection", "auth", "work", "--remove", "--config", cfg)
+	if code != 0 || !strings.Contains(out, "OAuth session removed") {
+		t.Fatalf("auth remove = %d %q %s", code, out, stderr)
+	}
+	for _, key := range []string{"conn/work/oauth", "conn/work/oauthmeta"} {
+		if _, err := secrets.Get(ctx, key); !errors.Is(err, domain.ErrNotFound) {
+			t.Fatalf("key %s was not removed: %v", key, err)
+		}
+	}
+	code, _, stderr = runForTest(t, "connection", "auth", "notes", "--client-id", "client", "--config", cfg)
+	if code == 0 || !strings.Contains(stderr, "OAuth") {
+		t.Fatalf("unsupported provider auth = %d %s", code, stderr)
 	}
 }

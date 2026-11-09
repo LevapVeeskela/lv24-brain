@@ -149,6 +149,7 @@ var completionTable = []completionCmd{
 		cmdLeaf("remove", boolFlag("yes"), boolFlag("json"), valueFlag("config")),
 		cmdLeaf("migrate", boolFlag("copy-legacy-secrets"), boolFlag("json"), valueFlag("config")),
 		cmdLeaf("providers", boolFlag("json"), valueFlag("config")),
+		cmdLeaf("auth", valueFlag("client-id"), valueFlag("scopes"), boolFlag("remove"), valueFlag("config")),
 	),
 	cmdLeaf("migrate", valueFlag("from"), valueFlag("data-dir"), boolFlag("dry-run"), valueFlag("rollback"), valueFlag("config")),
 	cmdGroup("agent",

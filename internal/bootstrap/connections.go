@@ -17,8 +17,10 @@ import (
 type ConnectionRuntime struct {
 	Connections ports.ConnectionStore
 	Credentials ports.CredentialStore
-	Registry    *connectorbuild.Registry
-	Migrator    app.ConnectionMigrator
+	// Secrets is the raw local secret store, used for OAuth session bundles.
+	Secrets  ports.SecretStore
+	Registry *connectorbuild.Registry
+	Migrator app.ConnectionMigrator
 }
 
 // BuildConnections wires local/git connection management. Discovery is lazy:
@@ -39,6 +41,7 @@ func BuildConnections(cfg config.BrainConfig, opts Options) (*ConnectionRuntime,
 	return &ConnectionRuntime{
 		Connections: connections,
 		Credentials: credentials,
+		Secrets:     secrets,
 		Registry:    connectorbuild.Builtin(),
 		Migrator: app.ConnectionMigrator{
 			Connections:   connections,

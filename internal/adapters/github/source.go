@@ -35,7 +35,7 @@ const (
 func Descriptor() domain.SourceDescriptor {
 	return domain.SourceDescriptor{
 		Provider: Name, DisplayName: "GitHub",
-		Capabilities:   domain.Capabilities{Backfill: true, Incremental: true, AuthModes: []domain.AuthMode{domain.AuthToken}},
+		Capabilities:   domain.Capabilities{Backfill: true, Incremental: true, AuthModes: []domain.AuthMode{domain.AuthToken, domain.AuthOAuthDevice}},
 		DefaultPublish: domain.PublishShared,
 		ConfigFields: []domain.ConfigField{
 			{Key: "repos", Label: "Repositories", Required: true, Help: "Comma or newline separated owner/repository names."},

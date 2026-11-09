@@ -1146,7 +1146,9 @@ func TestSourceStreamsMatchDescriptorAndKinds(t *testing.T) {
 	if !descriptor.Capabilities.Backfill || !descriptor.Capabilities.Incremental || descriptor.Capabilities.Deletes {
 		t.Fatalf("capabilities = %+v", descriptor.Capabilities)
 	}
-	if len(descriptor.Capabilities.AuthModes) != 1 || descriptor.Capabilities.AuthModes[0] != domain.AuthToken {
+	if len(descriptor.Capabilities.AuthModes) != 2 ||
+		descriptor.Capabilities.AuthModes[0] != domain.AuthToken ||
+		descriptor.Capabilities.AuthModes[1] != domain.AuthOAuthPKCE {
 		t.Fatalf("auth modes = %v", descriptor.Capabilities.AuthModes)
 	}
 	if descriptor.DefaultPublish != domain.PublishShared {
