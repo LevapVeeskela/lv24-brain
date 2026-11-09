@@ -259,6 +259,58 @@ one, and `GET /v1/connectors/runs/{id}/markdown` exports it as Markdown.
 The CLI allows `1h10s` for this synchronous request, including persistence;
 ordinary API and authentication requests retain the `30s` default timeout.
 
+Native Phase 1 sources (local/git) are added through the same catalogue:
+
+```sh
+# Local folders, Obsidian vaults and Logseq graphs (no credentials)
+./bin/brain connection add folders --id notes \
+  --setting paths='C:\notes,C:\vault' --config ~/brain/brain.yaml
+./bin/brain connection run notes --limit 100 --config ~/brain/brain.yaml
+
+# Jira Cloud or Data Center (token is secret; email is Cloud-only)
+./bin/brain connection add jira --id jira-work \
+  --base-url https://site.atlassian.net \
+  --setting email=me@example.test --setting deployment=cloud \
+  --setting projects=ENG,OPS --config ~/brain/brain.yaml
+printf '%s\n' '<jira-api-token>' | ./bin/brain connection secret set jira-work token \
+  --config ~/brain/brain.yaml
+./bin/brain connection run jira-work --days 30 --config ~/brain/brain.yaml
+
+# Confluence Cloud (base URL includes /wiki) or Data Center
+./bin/brain connection add confluence --id wiki \
+  --base-url https://site.atlassian.net/wiki \
+  --setting email=me@example.test --setting spaces=ENG \
+  --config ~/brain/brain.yaml
+printf '%s\n' '<confluence-api-token>' | ./bin/brain connection secret set wiki token \
+  --config ~/brain/brain.yaml
+./bin/brain connection run wiki --config ~/brain/brain.yaml
+
+# Linear (PAT by default; authscheme=oauth for Bearer)
+./bin/brain connection add linear --id linear-work --setting teams=ENG \
+  --config ~/brain/brain.yaml
+printf '%s\n' '<linear-token>' | ./bin/brain connection secret set linear-work token \
+  --config ~/brain/brain.yaml
+./bin/brain connection run linear-work --config ~/brain/brain.yaml
+```
+
+These providers are available through `brain connection run`/`brain connector run --all`;
+the legacy snapshot `brain connector run --name` still accepts only
+`github`, `gitlab` and `imap`.
+
+`brain agent` (WP2.1, in development) runs configured connections in the
+background with persisted `Schedule` values:
+
+```sh
+./bin/brain agent --config ~/brain/brain.yaml          # foreground; one instance per data dir
+./bin/brain agent status --config ~/brain/brain.yaml
+./bin/brain agent stop --config ~/brain/brain.yaml
+```
+
+The agent writes only private `agent/` state (runtime/schedule/stop/log files,
+0600 and excluded from git), keeps a parent-PID watchdog, serializes runs of the
+same connection and never logs credentials. The local control API (`brain agent`
+port) is a later work package; `port` is reserved in the runtime file.
+
 ## 2. Git mode
 
 Team mode: a private data repository is the shared brain.

@@ -11,7 +11,8 @@ actually does today and where the remaining gaps are.
   mail, or machine paths.
 - `lv24-brain-data` (private): `brain.yaml`, `projects/`, `mail/`, `connectors/`,
   `journal/`, `registry.json`, and `global/`. Never contains secrets, indexes,
-  or backups.
+  or backups. The background agent keeps private runtime/schedule/log state in
+  `agent/` (0600, self-ignored, never published).
 
 ## Module layout
 
@@ -148,6 +149,8 @@ brain graphs     refresh graphify/codegraph indexes of registered projects
 brain agents     sync the shared agent instructions (agents sync [--check])
 brain mcp        serve the brain as an MCP server over stdio (for coding agents)
 brain connector  run a read-only GitHub, GitLab, or IMAP connector
+brain connection  manage named local/git connections
+brain agent      run, inspect or stop the background connection agent
 brain migrate    import a legacy .brain data directory (--rollback reverts an import)
 brain secret     set, list, or remove OS-backed secrets
 brain login      authenticate against a server-mode brain (local account)

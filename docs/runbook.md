@@ -284,6 +284,14 @@ brain discover --root <workspace> --apply   # register the new ones
   when non-empty and falls back to the legacy targets above when empty.
   `--name` stays legacy snapshot (Markdown dumps); it is not native
   item-level. Deletes are never inferred.
+- Phase 1 native providers (v0.10.0, local/git only) are registered next to
+  GitHub/GitLab/IMAP: `folders` (`paths`, optional `extensions`/`ignore`; no
+  credentials; Obsidian/Logseq text is preserved), `jira` (`token` secret,
+  optional `email`/`deployment`/`projects`/`jql`), `confluence` (`token`
+  secret, optional `email`/`deployment`/`spaces`/`cql`) and `linear` (`token`
+  secret, optional `teams`/`authscheme`). Add/run them with
+  `brain connection add|run`; `brain connector run --name` still accepts only
+  `github`, `gitlab`, `imap`.
 - `brain graphs` runs `graphify` and `codegraph` only where their indexes
   already exist (`--init` creates missing ones), skips missing tools, and logs
   tool output to `<user cache dir>/lv24-brain/graphs.log`, outside the data
