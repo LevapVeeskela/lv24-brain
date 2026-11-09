@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -18,6 +20,7 @@ import (
 type connectorPlan struct {
 	label string
 	opts  bootstrap.ConnectorOptions
+	mail  *bootstrap.MailAccount
 }
 
 // planLocalConnectors expands a request into runs with data-derived targets:
@@ -63,7 +66,11 @@ func planLocalConnectors(ctx context.Context, cfg config.BrainConfig, name, proj
 			opts.Name = "imap"
 			opts.Project = ""
 			opts.IMAP = mail.IMAPAccount()
-			plans = append(plans, connectorPlan{label: "imap/" + mail.ID, opts: opts})
+			plan := connectorPlan{label: "imap/" + mail.ID, opts: opts}
+			if strings.TrimSpace(os.Getenv("BRAIN_IMAP_ACCOUNT")) == "" {
+				plan.mail = &mail
+			}
+			plans = append(plans, plan)
 		}
 		if !matched {
 			return domain.NewValidationError("imap.account", fmt.Sprintf("no matching account in %s", bootstrap.MailConfigPath))
@@ -125,6 +132,18 @@ func runLocalConnectors(ctx context.Context, cfg config.BrainConfig, plans []con
 			connector = connectors.Recording{Inner: connector, Runs: runStore}
 		}
 		runOptions := ports.ConnectorOptions{Since: since, Limit: plan.opts.Limit}
+		if plan.mail != nil {
+			statePath := strings.TrimSpace(os.Getenv("BRAIN_IMAP_STATE"))
+			if statePath == "" {
+				statePath = filepath.Join(cfg.DataDir, "connectors", "mail-state.json")
+			}
+			runOptions.Since, err = plan.mail.ImportSince(since, time.Now(), statePath)
+			if err != nil {
+				reportError(stderr, "connector run "+plan.label, err)
+				ok = false
+				continue
+			}
+		}
 		if plan.opts.Name != "imap" && strings.TrimSpace(plan.opts.Project) != "" {
 			runOptions.Projects = []string{strings.TrimSpace(plan.opts.Project)}
 		}
