@@ -155,7 +155,10 @@ func (r *connectorRunner) persistPanic(ctx context.Context, conn domain.Connecti
 	panicErr := fmt.Errorf("%w: %s", errConnectorPanicked, connectors.SanitizeText(redacted, 500))
 	run := connectors.NewRun(conn.Provider, started)
 	run.ConnectionID = conn.ID
-	run = connectors.FinishRun(run, nil, panicErr, time.Now())
+	// Persist no panic payload at all: pattern redaction cannot know an
+	// arbitrary credential embedded in a panic value. The returned error keeps
+	// the redacted detail for the admin caller.
+	run = connectors.FinishRun(run, nil, errors.New("connector panicked"), time.Now())
 
 	persistCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), connectorRunPersistTime)
 	defer cancel()
