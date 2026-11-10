@@ -429,21 +429,13 @@ type ItemRef struct {
 	ExternalID   string `json:"externalId"`
 }
 
-// Validate checks both parts. ExternalID is any valid UTF-8 without NUL.
+// Validate checks both parts. ExternalID uses the same rule as every other
+// provider identifier: valid UTF-8 without control characters.
 func (r ItemRef) Validate() error {
 	if err := ValidateConnectionID("item.connectionId", r.ConnectionID); err != nil {
 		return err
 	}
-	if r.ExternalID == "" {
-		return NewValidationError("item.externalId", "is required")
-	}
-	if len(r.ExternalID) > maxExternalIDLength {
-		return NewValidationError("item.externalId", fmt.Sprintf("must be at most %d bytes", maxExternalIDLength))
-	}
-	if !utf8.ValidString(r.ExternalID) || strings.ContainsRune(r.ExternalID, 0) {
-		return NewValidationError("item.externalId", "must be valid UTF-8 without NUL")
-	}
-	return nil
+	return ValidateExternalID("item.externalId", r.ExternalID)
 }
 
 // Key is the stable storage key "<connectionID>/<40 hex>". The hash covers

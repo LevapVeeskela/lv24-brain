@@ -23,7 +23,8 @@ type SourceRef struct {
 }
 
 // Validate checks the source fields that are present. A source must identify
-// at least one item, proposal or URL.
+// at least one item, proposal or URL; a connection id alone does not name
+// provenance.
 func (s SourceRef) Validate() error {
 	if s.ProjectID != "" {
 		if s.ProjectID != strings.TrimSpace(s.ProjectID) {
@@ -42,11 +43,8 @@ func (s SourceRef) Validate() error {
 		if err := ValidateItemKey("source.itemKey", s.ItemKey); err != nil {
 			return err
 		}
-		if s.ConnectionID != "" {
-			connectionID, _, _ := strings.Cut(s.ItemKey, "/")
-			if connectionID != s.ConnectionID {
-				return NewValidationError("source.itemKey", "belongs to another connection")
-			}
+		if err := validateItemKeyConnection("source.itemKey", s.ConnectionID, s.ItemKey); err != nil {
+			return err
 		}
 	}
 	if s.ExternalID != "" {
@@ -67,8 +65,8 @@ func (s SourceRef) Validate() error {
 	if math.IsNaN(s.Confidence) || math.IsInf(s.Confidence, 0) || s.Confidence < 0 || s.Confidence > 1 {
 		return NewValidationError("source.confidence", "must be between 0 and 1")
 	}
-	if s.ProposalID == "" && s.ConnectionID == "" && s.ExternalID == "" && s.ItemKey == "" && s.URL == "" {
-		return NewValidationError("source", "needs a proposal, connection, item key, external id or URL")
+	if s.ProposalID == "" && s.ExternalID == "" && s.ItemKey == "" && s.URL == "" {
+		return NewValidationError("source", "needs a proposal, item key, external id or URL")
 	}
 	return nil
 }

@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/levapveeskela/lv24-brain/internal/domain"
+	"github.com/levapveeskela/lv24-brain/internal/markdown"
 )
 
 func testRecordSource(projectID string) *domain.SourceRef {
@@ -183,5 +184,183 @@ func TestRecordsWithoutSourceStayNil(t *testing.T) {
 		if strings.Contains(string(raw), "source:") {
 			t.Fatalf("legacy record encoded an empty source:\n%s", raw)
 		}
+	}
+}
+
+func writeDecisionWithSource(t *testing.T, store *Store, projectID string, source *sourceRefFrontmatter) {
+	t.Helper()
+	frontmatter := decisionFrontmatter{
+		Frontmatter: markdown.Frontmatter{
+			ProjectID:     projectID,
+			Kind:          "decision",
+			UpdatedAt:     testClock,
+			SchemaVersion: SchemaVersion,
+		},
+		ID:        "decision-source-test",
+		Title:     "Source test",
+		Status:    domain.DecisionAccepted,
+		Source:    source,
+		CreatedAt: testClock,
+	}
+	raw, err := markdown.Render(frontmatter, "# Source test\n\nStatus: accepted\n\n## Context\n\ntext\n")
+	if err != nil {
+		t.Fatalf("render decision: %v", err)
+	}
+	dir := filepath.Join(store.Root(), "projects", projectID, "decisions")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "2026-11-01-source-test.md"), raw, 0o644); err != nil {
+		t.Fatalf("write decision: %v", err)
+	}
+}
+
+// TestInvalidRecordSourceIsSkipped rejects provenance that is malformed,
+// points outside http(s) or names another project. A record with such a source
+// must not be listed as curated; Problems reports the file.
+func TestInvalidRecordSourceIsSkipped(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+	project := seedProject(t, store)
+
+	otherProjectSource := &sourceRefFrontmatter{
+		ProjectID:    "other",
+		ConnectionID: "gh-acme",
+		ExternalID:   "acme/widgets#issue-7",
+	}
+	writeDecisionWithSource(t, store, project.ID, otherProjectSource)
+
+	if decisions, err := store.ListDecisions(ctx, project.ID); err != nil || len(decisions) != 0 {
+		t.Fatalf("ListDecisions = %+v, %v; want empty", decisions, err)
+	}
+	problems, err := store.Problems(ctx, project.ID)
+	if err != nil {
+		t.Fatalf("Problems: %v", err)
+	}
+	if len(problems) != 1 || problems[0].Kind != "decision" || !strings.Contains(problems[0].Reason, "source.projectId") {
+		t.Fatalf("problems = %+v, want one decision source problem", problems)
+	}
+
+	// A decision whose source URL is javascript: must not be curated either.
+	writeDecisionWithSource(t, store, project.ID, &sourceRefFrontmatter{
+		ConnectionID: "gh-acme",
+		URL:          "javascript:alert(1)",
+	})
+	if decisions, err := store.ListDecisions(ctx, project.ID); err != nil || len(decisions) != 0 {
+		t.Fatalf("ListDecisions with javascript source = %+v, %v; want empty", decisions, err)
+	}
+
+	// The same rule applies to attempts.
+	attemptFrontmatter := attemptFrontmatter{
+		Frontmatter: markdown.Frontmatter{
+			ProjectID:     project.ID,
+			Kind:          "attempt",
+			UpdatedAt:     testClock,
+			SchemaVersion: SchemaVersion,
+		},
+		ID:        "attempt-source-test",
+		Title:     "Source test",
+		Source:    &sourceRefFrontmatter{ConnectionID: "gh-acme", URL: "javascript:alert(1)"},
+		CreatedAt: testClock,
+	}
+	attemptRaw, err := markdown.Render(attemptFrontmatter, "# Source test\n\n## Hypothesis\n\nh\n")
+	if err != nil {
+		t.Fatalf("render attempt: %v", err)
+	}
+	attemptsDir := filepath.Join(store.Root(), "projects", project.ID, "attempts")
+	if err := os.MkdirAll(attemptsDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(attemptsDir, "2026-11-01-source-test.md"), attemptRaw, 0o644); err != nil {
+		t.Fatalf("write attempt: %v", err)
+	}
+	if attempts, err := store.ListAttempts(ctx, project.ID); err != nil || len(attempts) != 0 {
+		t.Fatalf("ListAttempts = %+v, %v; want empty", attempts, err)
+	}
+
+	// An empty source object is not provenance: the note file is reported, not
+	// returned as a valid note.
+	noteFrontmatter := noteFileFrontmatter{
+		Frontmatter: markdown.Frontmatter{
+			ProjectID:     project.ID,
+			Kind:          "note",
+			UpdatedAt:     testClock,
+			SchemaVersion: SchemaVersion,
+		},
+		Date: "2026-11-02",
+	}
+	emptySource := &domain.SourceRef{}
+	body := renderNoteEntry(noteMetadata{
+		ID:        "note-empty-source",
+		Title:     "Empty source",
+		Source:    emptySource,
+		CreatedAt: testClock,
+	}, "Body of the note.")
+	raw, err := markdown.Render(noteFrontmatter, body)
+	if err != nil {
+		t.Fatalf("render notes: %v", err)
+	}
+	notesDir := filepath.Join(store.Root(), "projects", project.ID, "notes")
+	if err := os.MkdirAll(notesDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(notesDir, "2026-11-02.md"), raw, 0o644); err != nil {
+		t.Fatalf("write notes: %v", err)
+	}
+	if notes, err := store.ListNotes(ctx, project.ID); err != nil || len(notes) != 0 {
+		t.Fatalf("ListNotes = %+v, %v; want empty", notes, err)
+	}
+
+	problems, err = store.Problems(ctx, project.ID)
+	if err != nil {
+		t.Fatalf("Problems: %v", err)
+	}
+	counts := make(map[string]int, len(problems))
+	for _, problem := range problems {
+		counts[problem.Kind]++
+	}
+	if counts["decision"] != 1 || counts["attempt"] != 1 || counts["note"] != 1 {
+		t.Fatalf("problem kinds = %v, want one decision, attempt and note", counts)
+	}
+}
+
+// TestOptionalObservedAtIsTolerated: a space-separated observation time is
+// informational and must not hide the decision that carries it.
+func TestOptionalObservedAtIsTolerated(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+	project := seedProject(t, store)
+	writeDecisionWithSource(t, store, project.ID, &sourceRefFrontmatter{
+		ProjectID:    project.ID,
+		ConnectionID: "gh-acme",
+		ExternalID:   "acme/widgets#issue-7",
+		ObservedAt:   "2026-11-05 09:30:00",
+	})
+	decisions, err := store.ListDecisions(ctx, project.ID)
+	if err != nil {
+		t.Fatalf("ListDecisions: %v", err)
+	}
+	if len(decisions) != 1 || decisions[0].Source == nil {
+		t.Fatalf("decisions = %+v, want one with a source", decisions)
+	}
+	want := time.Date(2026, 11, 5, 9, 30, 0, 0, time.UTC)
+	if !decisions[0].Source.ObservedAt.Equal(want) {
+		t.Fatalf("observed_at = %v, want %v", decisions[0].Source.ObservedAt, want)
+	}
+
+	writeDecisionWithSource(t, store, project.ID, &sourceRefFrontmatter{
+		ProjectID:    project.ID,
+		ConnectionID: "gh-acme",
+		ExternalID:   "acme/widgets#issue-8",
+		ObservedAt:   "not a timestamp",
+	})
+	// The helper overwrites the same file with an unparseable observation
+	// time; the decision still reads and the optional time becomes zero.
+	decisions, err = store.ListDecisions(ctx, project.ID)
+	if err != nil {
+		t.Fatalf("ListDecisions with bad timestamp: %v", err)
+	}
+	if len(decisions) != 1 || decisions[0].Source == nil || !decisions[0].Source.ObservedAt.IsZero() {
+		t.Fatalf("decisions = %+v, want one with a zero observed_at", decisions)
 	}
 }

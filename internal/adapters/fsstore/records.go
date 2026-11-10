@@ -83,10 +83,9 @@ func sourceRefFromFrontmatter(source *sourceRefFrontmatter) (*domain.SourceRef, 
 	if source == nil {
 		return nil, nil
 	}
-	observedAt, err := parseItemTime(source.ObservedAt)
-	if err != nil {
-		return nil, fmt.Errorf("source observed_at: %w", err)
-	}
+	// observed_at is informational: a hand-edited or legacy timestamp must
+	// never hide the record it belongs to.
+	observedAt := parseOptionalTime(source.ObservedAt)
 	return &domain.SourceRef{
 		ProjectID:    source.ProjectID,
 		ConnectionID: source.ConnectionID,
@@ -97,6 +96,22 @@ func sourceRefFromFrontmatter(source *sourceRefFrontmatter) (*domain.SourceRef, 
 		ProposalID:   source.ProposalID,
 		Confidence:   source.Confidence,
 	}, nil
+}
+
+// validateRecordSourceRef rejects provenance that is malformed or that names
+// another project, so a hand-edited or hostile source field cannot make a
+// record look curated.
+func validateRecordSourceRef(source *domain.SourceRef, projectID string) error {
+	if source == nil {
+		return nil
+	}
+	if err := source.Validate(); err != nil {
+		return err
+	}
+	if source.ProjectID != "" && projectID != "" && source.ProjectID != projectID {
+		return domain.NewValidationError("source.projectId", "does not match the record project")
+	}
+	return nil
 }
 
 type handoffFrontmatter struct {

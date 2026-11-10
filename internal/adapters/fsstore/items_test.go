@@ -355,7 +355,7 @@ func TestItemFrontmatterSurvivesHostileValues(t *testing.T) {
 	// Arrange
 	ctx := context.Background()
 	items := newTestStore(t).Items()
-	item := testItem("gh-acme", "id: x\n---\n", "Title\n---\nnot frontmatter")
+	item := testItem("gh-acme", "id: x --- y", "Title\n---\nnot frontmatter")
 	item.Author = "---"
 	item.Body = "---\nbody: also not frontmatter\n---\n"
 	item = item.WithHash()

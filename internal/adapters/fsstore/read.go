@@ -302,6 +302,11 @@ func readNotesFile(path string) (noteFileFrontmatter, []domain.Note, error) {
 	for i := range notes {
 		notes[i].ProjectID = frontmatter.ProjectID
 		notes[i].UpdatedAt = frontmatter.UpdatedAt.UTC()
+		if err := validateRecordSourceRef(notes[i].Source, frontmatter.ProjectID); err != nil {
+			// Invalid provenance must not yield a valid curated record; the
+			// whole daily file is reported as a problem so it can be fixed.
+			return noteFileFrontmatter{}, nil, fmt.Errorf("parse %s: %w", path, err)
+		}
 	}
 	return frontmatter, notes, nil
 }
@@ -331,6 +336,9 @@ func readDecisionFile(path string) (domain.Decision, error) {
 	}
 	source, err := sourceRefFromFrontmatter(frontmatter.Source)
 	if err != nil {
+		return domain.Decision{}, fmt.Errorf("parse %s: %w", path, err)
+	}
+	if err := validateRecordSourceRef(source, frontmatter.ProjectID); err != nil {
 		return domain.Decision{}, fmt.Errorf("parse %s: %w", path, err)
 	}
 	return domain.Decision{
@@ -369,6 +377,9 @@ func readAttemptFile(path string) (domain.Attempt, error) {
 	}
 	source, err := sourceRefFromFrontmatter(frontmatter.Source)
 	if err != nil {
+		return domain.Attempt{}, fmt.Errorf("parse %s: %w", path, err)
+	}
+	if err := validateRecordSourceRef(source, frontmatter.ProjectID); err != nil {
 		return domain.Attempt{}, fmt.Errorf("parse %s: %w", path, err)
 	}
 	return domain.Attempt{

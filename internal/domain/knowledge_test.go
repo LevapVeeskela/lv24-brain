@@ -61,6 +61,7 @@ func TestSourceRefValidate(t *testing.T) {
 	}
 	for name, mutate := range map[string]func(*SourceRef){
 		"empty":              func(s *SourceRef) { *s = SourceRef{} },
+		"connection only":    func(s *SourceRef) { *s = SourceRef{ConnectionID: "gh-acme"} },
 		"bad connection":     func(s *SourceRef) { s.ConnectionID = "GH" },
 		"item key mismatch":  func(s *SourceRef) { s.ItemKey = "gh-other/" + strings.Repeat("a", itemKeyHashLength) },
 		"bad item key":       func(s *SourceRef) { s.ItemKey = "gh-acme/not-a-hash" },

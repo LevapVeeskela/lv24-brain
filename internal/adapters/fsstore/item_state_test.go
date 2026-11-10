@@ -2,7 +2,9 @@ package fsstore
 
 import (
 	"context"
+	"errors"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -56,5 +58,24 @@ func TestItemStatePersistsAndChangesTheHash(t *testing.T) {
 	got, err = store.Items().Get(ctx, item.Ref)
 	if err != nil || got.State != domain.ItemStateMerged {
 		t.Fatalf("updated item = %+v, %v", got, err)
+	}
+}
+
+// TestReadItemRejectsUnknownState: a hand-edited state must be skipped like
+// any other damaged item instead of being returned as valid metadata.
+func TestReadItemRejectsUnknownState(t *testing.T) {
+	item := testItem("gh-acme", "issue/7", "Closed issue")
+	item.State = "bogus"
+	item = item.WithHash()
+	raw, err := encodeItem(item)
+	if err != nil {
+		t.Fatalf("encode item: %v", err)
+	}
+	path := filepath.Join(t.TempDir(), "item.md")
+	if err := os.WriteFile(path, raw, 0o644); err != nil {
+		t.Fatalf("write item: %v", err)
+	}
+	if _, err := readItemFile(path, item.Key()); !errors.Is(err, domain.ErrValidation) {
+		t.Fatalf("readItemFile error = %v, want validation error", err)
 	}
 }

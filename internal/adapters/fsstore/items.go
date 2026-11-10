@@ -703,6 +703,9 @@ func readItemFile(path, key string) (domain.Item, error) {
 	if item.Key() != key {
 		return domain.Item{}, domain.NewValidationError("item.ref", fmt.Sprintf("file for %s holds another item", key))
 	}
+	if !item.State.Valid() {
+		return domain.Item{}, domain.NewValidationError("item.state", "stored item has an unknown state")
+	}
 	for _, field := range []struct {
 		raw    string
 		target *time.Time
@@ -725,6 +728,35 @@ func formatItemTime(at time.Time) string {
 		return ""
 	}
 	return at.UTC().Format(time.RFC3339Nano)
+}
+
+// optionalTimeLayouts accept the canonical RFC 3339 form plus the
+// space-separated timestamps the legacy Company Brain tool and hand edits
+// produce. Optional provenance times are informational, so a value that
+// matches none of them is ignored rather than treated as a parse failure.
+var optionalTimeLayouts = []string{
+	time.RFC3339Nano,
+	"2006-01-02 15:04:05.999999999Z07:00",
+	"2006-01-02 15:04:05Z07:00",
+	"2006-01-02 15:04:05.999999999",
+	"2006-01-02 15:04:05",
+	"2006-01-02",
+}
+
+// parseOptionalTime parses an informational timestamp leniently. It returns
+// the zero time for an empty or unparseable value: a bad optional time must
+// never hide the record that carries it.
+func parseOptionalTime(raw string) time.Time {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return time.Time{}
+	}
+	for _, layout := range optionalTimeLayouts {
+		if parsed, err := time.Parse(layout, raw); err == nil {
+			return parsed.UTC()
+		}
+	}
+	return time.Time{}
 }
 
 func parseItemTime(raw string) (time.Time, error) {

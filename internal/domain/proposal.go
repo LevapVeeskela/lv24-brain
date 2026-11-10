@@ -115,6 +115,9 @@ func (c ProposalCitation) Validate() error {
 		if err := ValidateItemKey("citation.itemKey", c.ItemKey); err != nil {
 			return err
 		}
+		if err := validateItemKeyConnection("citation.itemKey", c.ConnectionID, c.ItemKey); err != nil {
+			return err
+		}
 	}
 	if c.ExternalID != "" {
 		if err := ValidateExternalID("citation.externalId", c.ExternalID); err != nil {
@@ -139,7 +142,9 @@ func (c ProposalCitation) Validate() error {
 type Proposal struct {
 	// SchemaVersion is the proposal layout version (0 means "current").
 	SchemaVersion int `json:"schemaVersion"`
-	// ProjectID is the brain project the proposal belongs to.
+	// ProjectID is the brain project the proposal belongs to. This type only
+	// requires a trimmed non-empty value; the fsstore adapter additionally
+	// enforces its path-safe project alphabet before using it as a directory.
 	ProjectID string `json:"projectId"`
 	// ID is deterministic: proposal-<connection>-<sha256(project NUL
 	// connection NUL externalID)[:12]>.
@@ -234,7 +239,9 @@ func (p Proposal) IsTerminal() bool { return p.Status.Terminal() }
 
 // Validate checks identity, bounds and payload hash consistency. SchemaVersion
 // 0 and Status "" are accepted for values that have not been stored yet; the
-// store normalizes them before writing.
+// store normalizes them before writing. The project-id alphabet is only
+// enforced by stores that map the id to a directory (fsstore); server-backed
+// stores may keep their own project ids.
 func (p Proposal) Validate() error {
 	if p.SchemaVersion != 0 && p.SchemaVersion != ProposalSchemaVersion {
 		return NewValidationError("proposal.schemaVersion", fmt.Sprintf("unsupported version %d", p.SchemaVersion))
@@ -357,7 +364,14 @@ func (p Proposal) ComputePayloadHash() string {
 	writeField(p.ID)
 	writeField(string(p.Kind))
 	writeField(strings.TrimSpace(p.Rule))
-	writeField(strconv.FormatFloat(p.Confidence, 'g', -1, 64))
+	// Normalize negative zero: encoding omits a zero confidence, so a stored
+	// -0.0 would read back as +0.0 and no longer match a hash computed from
+	// the caller's value.
+	confidence := p.Confidence
+	if confidence == 0 {
+		confidence = 0
+	}
+	writeField(strconv.FormatFloat(confidence, 'g', -1, 64))
 	writeField(p.ConnectionID)
 	writeField(p.ExternalID)
 	writeField(collapseSpace(p.Title))
@@ -381,6 +395,20 @@ func (p Proposal) ComputePayloadHash() string {
 func (p Proposal) WithPayloadHash() Proposal {
 	p.PayloadHash = p.ComputePayloadHash()
 	return p
+}
+
+// validateItemKeyConnection checks that an item key belongs to connectionID
+// when both are present, so a citation or source can never name one connection
+// while pointing at another connection's item.
+func validateItemKeyConnection(field, connectionID, itemKey string) error {
+	if connectionID == "" || itemKey == "" {
+		return nil
+	}
+	keyConnection, _, _ := strings.Cut(itemKey, "/")
+	if keyConnection != connectionID {
+		return NewValidationError(field, "belongs to another connection")
+	}
+	return nil
 }
 
 // ValidateItemKey checks "<connectionID>/<40 lowercase hex>" as used by ItemRef.Key.

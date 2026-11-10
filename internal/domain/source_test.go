@@ -193,11 +193,12 @@ func TestCredentialKey(t *testing.T) {
 
 func TestItemRefValidate(t *testing.T) {
 	cases := map[string]ItemRef{
-		"empty external": {ConnectionID: "c", ExternalID: ""},
-		"nul external":   {ConnectionID: "c", ExternalID: "a\x00b"},
-		"bad utf8":       {ConnectionID: "c", ExternalID: "\xff"},
-		"long external":  {ConnectionID: "c", ExternalID: strings.Repeat("x", 1025)},
-		"bad connection": {ConnectionID: "C", ExternalID: "1"},
+		"empty external":   {ConnectionID: "c", ExternalID: ""},
+		"nul external":     {ConnectionID: "c", ExternalID: "a\x00b"},
+		"control external": {ConnectionID: "c", ExternalID: "a\nb"},
+		"bad utf8":         {ConnectionID: "c", ExternalID: "\xff"},
+		"long external":    {ConnectionID: "c", ExternalID: strings.Repeat("x", 1025)},
+		"bad connection":   {ConnectionID: "C", ExternalID: "1"},
 	}
 	for name, ref := range cases {
 		t.Run(name, func(t *testing.T) {

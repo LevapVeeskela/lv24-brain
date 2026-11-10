@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -386,8 +388,12 @@ func TestProposalProblemsReportsMalformedFiles(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ProposalProblems: %v", err)
 	}
-	if len(problems) != 1 || problems[0].Kind != "proposal" || problems[0].Path != badPath {
-		t.Fatalf("problems = %+v", problems)
+	wantPath := "proposals/" + project.ID + "/" + filepath.Base(badPath)
+	if len(problems) != 1 || problems[0].Kind != "proposal" || problems[0].Path != wantPath {
+		t.Fatalf("problems = %+v, want one relative path %q", problems, wantPath)
+	}
+	if problems[0].Reason != proposalReasonMalformed {
+		t.Fatalf("reason = %q, want stable malformed code", problems[0].Reason)
 	}
 }
 
@@ -440,5 +446,458 @@ func TestCurrentRevisionIgnoresProposals(t *testing.T) {
 	}
 	if before.Value != after.Value {
 		t.Fatalf("proposals changed the curated revision: %s -> %s", before.Value, after.Value)
+	}
+}
+
+func proposalTestPath(store *Store, projectID, id string) string {
+	return filepath.Join(store.Root(), proposalsDir, projectID, id+proposalFileExt)
+}
+
+// editProposalFile rewrites the proposal file with edit applied to its lines.
+func editProposalFile(t *testing.T, path string, edit func([]string) []string) {
+	t.Helper()
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read proposal: %v", err)
+	}
+	lines := edit(strings.Split(string(raw), "\n"))
+	if err := os.WriteFile(path, []byte(strings.Join(lines, "\n")), 0o644); err != nil {
+		t.Fatalf("write proposal: %v", err)
+	}
+}
+
+func removeProposalField(t *testing.T, path, field string) {
+	t.Helper()
+	editProposalFile(t, path, func(lines []string) []string {
+		kept := make([]string, 0, len(lines))
+		for _, line := range lines {
+			if strings.HasPrefix(line, field+":") {
+				continue
+			}
+			kept = append(kept, line)
+		}
+		return kept
+	})
+}
+
+func replaceProposalField(t *testing.T, path, field, value string) {
+	t.Helper()
+	editProposalFile(t, path, func(lines []string) []string {
+		for index, line := range lines {
+			trimmed := strings.TrimLeft(line, " \t")
+			if !strings.HasPrefix(trimmed, field+":") {
+				continue
+			}
+			indent := line[:len(line)-len(trimmed)]
+			lines[index] = indent + field + ": " + value
+		}
+		return lines
+	})
+}
+
+// TestProposalNegativeZeroConfidenceRoundTrip: Validate accepts -0.0, the
+// encoder omits a zero confidence, and the read-back hash must still match.
+func TestProposalNegativeZeroConfidenceRoundTrip(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+	project := seedProject(t, store)
+	proposal := testProposal(project.ID)
+	proposal.Confidence = math.Copysign(0, -1)
+	proposal.PayloadHash = proposal.ComputePayloadHash()
+
+	stored, err := store.Put(ctx, proposal)
+	if err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	if math.Signbit(stored.Confidence) {
+		t.Fatalf("Put kept negative zero in memory: %v", stored.Confidence)
+	}
+	got, err := store.Get(ctx, project.ID, proposal.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.Confidence != 0 || got.PayloadHash != proposal.PayloadHash {
+		t.Fatalf("read back confidence %v hash %s, want 0 and %s", got.Confidence, got.PayloadHash, proposal.PayloadHash)
+	}
+	if err := got.Validate(); err != nil {
+		t.Fatalf("read back Validate: %v", err)
+	}
+}
+
+// TestProposalPutPreservesDamagedTerminalFile: deleting the status line makes
+// the file unreadable as a proposal. Put must not silently rewrite it as a
+// fresh pending proposal in place.
+func TestProposalPutPreservesDamagedTerminalFile(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+	project := seedProject(t, store)
+	proposal := testProposal(project.ID)
+	if _, err := store.Put(ctx, proposal); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	if _, err := store.SetStatus(ctx, project.ID, proposal.ID, domain.ProposalPromoted, "decision-keep"); err != nil {
+		t.Fatalf("SetStatus: %v", err)
+	}
+	path := proposalTestPath(store, project.ID, proposal.ID)
+	removeProposalField(t, path, "status")
+
+	changed := proposal
+	changed.Title = "A digest must not reset this"
+	changed.PayloadHash = changed.ComputePayloadHash()
+	_, err := store.Put(ctx, changed)
+	if err == nil {
+		t.Fatal("Put rewrote a proposal file that no longer parses")
+	}
+	var invalid *proposalInvalidError
+	if !errors.As(err, &invalid) {
+		t.Fatalf("Put error = %v, want proposalInvalidError", err)
+	}
+
+	preserved, globErr := filepath.Glob(path + proposalBadInfix + "*")
+	if globErr != nil {
+		t.Fatalf("glob preserved: %v", globErr)
+	}
+	if len(preserved) != 1 {
+		t.Fatalf("preserved files = %v, want exactly one", preserved)
+	}
+	raw, readErr := os.ReadFile(preserved[0])
+	if readErr != nil {
+		t.Fatalf("read preserved: %v", readErr)
+	}
+	if !strings.Contains(string(raw), "decision-keep") || !strings.Contains(string(raw), "promoted") {
+		t.Fatalf("preserved file lost its terminal state:\n%s", raw)
+	}
+	if _, err := store.Get(ctx, project.ID, proposal.ID); !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("Get after quarantine error = %v, want ErrNotFound", err)
+	}
+
+	// The next run is not permanently blocked: the path is free again and a
+	// fresh pending proposal is written. The original is still preserved.
+	recreated, err := store.Put(ctx, changed)
+	if err != nil {
+		t.Fatalf("Put after quarantine: %v", err)
+	}
+	if recreated.Status != domain.ProposalPending {
+		t.Fatalf("recreated status = %q, want pending", recreated.Status)
+	}
+}
+
+// TestProposalPutPropagatesIOErrors: a directory at the proposal path is an
+// I/O failure, not parse damage, so Put must neither quarantine nor overwrite.
+func TestProposalPutPropagatesIOErrors(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+	project := seedProject(t, store)
+	proposal := testProposal(project.ID)
+	path := proposalTestPath(store, project.ID, proposal.ID)
+	if err := os.MkdirAll(path, 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+
+	_, err := store.Put(ctx, proposal)
+	if err == nil {
+		t.Fatal("Put ignored an I/O error")
+	}
+	var invalid *proposalInvalidError
+	if errors.As(err, &invalid) {
+		t.Fatalf("Put treated an I/O error as parse damage: %v", err)
+	}
+	info, statErr := os.Stat(path)
+	if statErr != nil || !info.IsDir() {
+		t.Fatalf("Put disturbed the I/O failure at the path: %v %v", info, statErr)
+	}
+	preserved, globErr := filepath.Glob(path + proposalBadInfix + "*")
+	if globErr != nil || len(preserved) != 0 {
+		t.Fatalf("preserved files = %v, %v; want none", preserved, globErr)
+	}
+}
+
+// TestProposalReadRequiresCanonicalFields: a hand edit that drops any canonical
+// field must hide the proposal and be reported, not produce a zero-valued one.
+func TestProposalReadRequiresCanonicalFields(t *testing.T) {
+	for _, field := range []string{"status", "payload_hash", "created_at", "updated_at"} {
+		t.Run(field, func(t *testing.T) {
+			store := newTestStore(t)
+			ctx := context.Background()
+			project := seedProject(t, store)
+			proposal := testProposal(project.ID)
+			if _, err := store.Put(ctx, proposal); err != nil {
+				t.Fatalf("Put: %v", err)
+			}
+			path := proposalTestPath(store, project.ID, proposal.ID)
+			removeProposalField(t, path, field)
+
+			if _, err := store.Get(ctx, project.ID, proposal.ID); err == nil {
+				t.Fatalf("Get accepted a proposal without %s", field)
+			}
+			list, err := store.List(ctx, project.ID, ports.ProposalListOptions{})
+			if err != nil || len(list) != 0 {
+				t.Fatalf("List = %d, %v; want empty", len(list), err)
+			}
+			problems, err := store.ProposalProblems(ctx, project.ID)
+			if err != nil {
+				t.Fatalf("ProposalProblems: %v", err)
+			}
+			if len(problems) != 1 || problems[0].Reason != proposalReasonMissing {
+				t.Fatalf("problems = %+v, want one missing-field problem", problems)
+			}
+		})
+	}
+}
+
+// TestProposalOptionalTimestampsAreTolerant: space-separated or unparseable
+// informational timestamps must not hide a proposal.
+func TestProposalOptionalTimestampsAreTolerant(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+	project := seedProject(t, store)
+	proposal := testProposal(project.ID)
+	if _, err := store.Put(ctx, proposal); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	path := proposalTestPath(store, project.ID, proposal.ID)
+
+	replaceProposalField(t, path, "observed_at", `"2026-11-04 08:15:30"`)
+	got, err := store.Get(ctx, project.ID, proposal.ID)
+	if err != nil {
+		t.Fatalf("Get with space-separated observed_at: %v", err)
+	}
+	wantObserved := time.Date(2026, 11, 4, 8, 15, 30, 0, time.UTC)
+	if len(got.Citations) != 1 || !got.Citations[0].ObservedAt.Equal(wantObserved) {
+		t.Fatalf("citations = %+v, want observed_at %v", got.Citations, wantObserved)
+	}
+
+	replaceProposalField(t, path, "observed_at", `"not a timestamp"`)
+	got, err = store.Get(ctx, project.ID, proposal.ID)
+	if err != nil {
+		t.Fatalf("Get with unparseable observed_at: %v", err)
+	}
+	if len(got.Citations) != 1 || !got.Citations[0].ObservedAt.IsZero() {
+		t.Fatalf("citations = %+v, want a zero observed_at", got.Citations)
+	}
+
+	if _, err := store.SetStatus(ctx, project.ID, proposal.ID, domain.ProposalPromoted, "decision-1"); err != nil {
+		t.Fatalf("SetStatus: %v", err)
+	}
+	replaceProposalField(t, path, "promoted_at", "2026-11-05T10:30:00Z")
+	promoted, err := store.Get(ctx, project.ID, proposal.ID)
+	if err != nil {
+		t.Fatalf("Get with unquoted promoted_at: %v", err)
+	}
+	if !promoted.PromotedAt.Equal(testClock) {
+		t.Fatalf("promoted_at = %v, want %v", promoted.PromotedAt, testClock)
+	}
+	replaceProposalField(t, path, "promoted_at", `"2026-11-05 10:30:00"`)
+	promoted, err = store.Get(ctx, project.ID, proposal.ID)
+	if err != nil {
+		t.Fatalf("Get with space-separated promoted_at: %v", err)
+	}
+	if !promoted.PromotedAt.Equal(testClock) {
+		t.Fatalf("promoted_at = %v, want %v", promoted.PromotedAt, testClock)
+	}
+	replaceProposalField(t, path, "promoted_at", `"not a timestamp"`)
+	promoted, err = store.Get(ctx, project.ID, proposal.ID)
+	if err != nil {
+		t.Fatalf("Get with unparseable promoted_at: %v", err)
+	}
+	if !promoted.PromotedAt.IsZero() {
+		t.Fatalf("promoted_at = %v, want zero", promoted.PromotedAt)
+	}
+}
+
+// TestProposalSetStatusIgnoresRecordIDForNonPromoted: the port documents
+// recordID as ignored outside promotion, so a stale caller must not fail and
+// must not store a promoted record id.
+func TestProposalSetStatusIgnoresRecordIDForNonPromoted(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+	project := seedProject(t, store)
+	proposal := testProposal(project.ID)
+	if _, err := store.Put(ctx, proposal); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	stale, err := store.SetStatus(ctx, project.ID, proposal.ID, domain.ProposalStale, "decision-ignored")
+	if err != nil {
+		t.Fatalf("SetStatus stale with recordID: %v", err)
+	}
+	if stale.Status != domain.ProposalStale || stale.PromotedRecordID != "" || !stale.PromotedAt.IsZero() {
+		t.Fatalf("stale = %+v, want no promoted fields", stale)
+	}
+	again, err := store.SetStatus(ctx, project.ID, proposal.ID, domain.ProposalStale, "decision-other")
+	if err != nil {
+		t.Fatalf("repeated SetStatus stale: %v", err)
+	}
+	if !again.UpdatedAt.Equal(stale.UpdatedAt) {
+		t.Fatalf("ignored recordID caused a rewrite: %v -> %v", stale.UpdatedAt, again.UpdatedAt)
+	}
+}
+
+// TestProposalPutRecomputesHashAfterDerivingID: a caller may hash a proposal
+// before Put derives its deterministic id; the hash covers the id, so Put must
+// recompute it instead of rejecting the value.
+func TestProposalPutRecomputesHashAfterDerivingID(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+	project := seedProject(t, store)
+	proposal := testProposal(project.ID)
+	proposal.ID = ""
+	proposal.PayloadHash = proposal.ComputePayloadHash()
+
+	stored, err := store.Put(ctx, proposal)
+	if err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	if stored.ID != domain.ProposalID(project.ID, proposal.ConnectionID, proposal.ExternalID) {
+		t.Fatalf("id = %q", stored.ID)
+	}
+	if stored.PayloadHash != stored.ComputePayloadHash() {
+		t.Fatalf("payload hash = %q, want %q", stored.PayloadHash, stored.ComputePayloadHash())
+	}
+}
+
+// TestProposalProblemsDoNotLeakPathsOrContent: diagnostics must use relative
+// paths and stable codes, never the data root or hand-edited field text.
+func TestProposalProblemsDoNotLeakPathsOrContent(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+	project := seedProject(t, store)
+	id := testProposal(project.ID).ID
+	dir := filepath.Join(store.Root(), proposalsDir, project.ID)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	const marker = "secret-marker-do-not-leak"
+	path := filepath.Join(dir, id+proposalFileExt)
+	raw := fmt.Sprintf(`---
+project_id: %q
+kind: %q
+updated_at: 2026-11-05T10:30:00Z
+schema_version: 1
+id: %q
+proposal_kind: %q
+rule: "closed-issue"
+confidence: 0.5
+connection_id: "gh-acme"
+external_id: %q
+title: %q
+payload_hash: "sha256:%s"
+status: "pending"
+created_at: 2026-11-05T10:30:00Z
+---
+# Title
+`, project.ID, proposalKindStorage, id, marker, marker, marker, strings.Repeat("0", 64))
+	if err := os.WriteFile(path, []byte(raw), 0o644); err != nil {
+		t.Fatalf("write leak proposal: %v", err)
+	}
+
+	_, err := store.Get(ctx, project.ID, id)
+	if err == nil {
+		t.Fatal("Get accepted a proposal with an unknown kind")
+	}
+	problems, problemsErr := store.ProposalProblems(ctx, project.ID)
+	if problemsErr != nil {
+		t.Fatalf("ProposalProblems: %v", problemsErr)
+	}
+	if len(problems) != 1 {
+		t.Fatalf("problems = %+v, want one", problems)
+	}
+	wantPath := proposalsDir + "/" + project.ID + "/" + id + proposalFileExt
+	if problems[0].Path != wantPath {
+		t.Fatalf("problem path = %q, want %q", problems[0].Path, wantPath)
+	}
+	for _, text := range []string{err.Error(), problems[0].Path, problems[0].Reason} {
+		for _, leak := range []string{store.Root(), marker} {
+			if strings.Contains(text, leak) {
+				t.Fatalf("proposal diagnostics leaked %q in %q", leak, text)
+			}
+		}
+	}
+}
+
+// TestProposalIgnoreFileSelfHeals: every proposal write verifies the catch-all
+// rule, so a stale or missing .gitignore is repaired even by SetStatus.
+func TestProposalIgnoreFileSelfHeals(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+	project := seedProject(t, store)
+	proposal := testProposal(project.ID)
+	if _, err := store.Put(ctx, proposal); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	ignorePath := filepath.Join(store.Root(), proposalsDir, proposalIgnoreFile)
+
+	if err := os.WriteFile(ignorePath, []byte("# stale\n!*.md\n"), 0o644); err != nil {
+		t.Fatalf("write stale ignore: %v", err)
+	}
+	changed := proposal
+	changed.Title = "Repair the ignore file"
+	changed.PayloadHash = changed.ComputePayloadHash()
+	if _, err := store.Put(ctx, changed); err != nil {
+		t.Fatalf("Put after stale ignore: %v", err)
+	}
+	raw, err := os.ReadFile(ignorePath)
+	if err != nil || !proposalsIgnoreCoversAll(raw) {
+		t.Fatalf("ignore after Put = %q, %v; want a catch-all rule", raw, err)
+	}
+
+	if err := os.Remove(ignorePath); err != nil {
+		t.Fatalf("remove ignore: %v", err)
+	}
+	if _, err := store.SetStatus(ctx, project.ID, proposal.ID, domain.ProposalStale, ""); err != nil {
+		t.Fatalf("SetStatus after missing ignore: %v", err)
+	}
+	raw, err = os.ReadFile(ignorePath)
+	if err != nil || !proposalsIgnoreCoversAll(raw) {
+		t.Fatalf("ignore after SetStatus = %q, %v; want a catch-all rule", raw, err)
+	}
+}
+
+// TestProposalIgnoreFileKeepsProposalsOutOfGit proves the repaired ignore file
+// is effective for a real repository, not just present on disk.
+func TestProposalIgnoreFileKeepsProposalsOutOfGit(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git is not installed")
+	}
+	store := newTestStore(t)
+	ctx := context.Background()
+	project := seedProject(t, store)
+	dir := filepath.Join(store.Root(), proposalsDir)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	ignorePath := filepath.Join(dir, proposalIgnoreFile)
+	if err := os.WriteFile(ignorePath, []byte("!*.md\n"), 0o644); err != nil {
+		t.Fatalf("write stale ignore: %v", err)
+	}
+	runGit := func(args ...string) string {
+		t.Helper()
+		command := exec.Command("git", append([]string{"-C", store.Root()}, args...)...)
+		out, err := command.CombinedOutput()
+		if err != nil {
+			t.Fatalf("git %v: %v %s", args, err, out)
+		}
+		return string(out)
+	}
+	runGit("init", "-q")
+	status := func() string {
+		return runGit("status", "--porcelain", "--untracked-files=all", "--", proposalsDir)
+	}
+
+	if _, err := store.Put(ctx, testProposal(project.ID)); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	if out := status(); strings.TrimSpace(out) != "" {
+		t.Fatalf("proposals are visible to git after Put:\n%s", out)
+	}
+
+	if err := os.Remove(ignorePath); err != nil {
+		t.Fatalf("remove ignore: %v", err)
+	}
+	proposal := testProposal(project.ID)
+	if _, err := store.SetStatus(ctx, project.ID, proposal.ID, domain.ProposalStale, ""); err != nil {
+		t.Fatalf("SetStatus after missing ignore: %v", err)
+	}
+	if out := status(); strings.TrimSpace(out) != "" {
+		t.Fatalf("proposals are visible to git after SetStatus:\n%s", out)
 	}
 }

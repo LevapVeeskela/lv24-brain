@@ -134,6 +134,23 @@ func TestProposalHashTreatsUnsetSchemaAsCurrent(t *testing.T) {
 	}
 }
 
+// TestProposalHashTreatsNegativeZeroAsZero closes the roundtrip hole where
+// Validate accepted -0.0, encoding dropped the sign, and the read-back hash
+// mismatch rejected the stored proposal.
+func TestProposalHashTreatsNegativeZeroAsZero(t *testing.T) {
+	proposal := validProposal()
+	proposal.Confidence = 0
+	positive := proposal.ComputePayloadHash()
+	proposal.Confidence = math.Copysign(0, -1)
+	if negative := proposal.ComputePayloadHash(); negative != positive {
+		t.Fatalf("negative zero hashed differently: %s vs %s", negative, positive)
+	}
+	proposal.PayloadHash = proposal.ComputePayloadHash()
+	if err := proposal.Validate(); err != nil {
+		t.Fatalf("negative zero proposal validation: %v", err)
+	}
+}
+
 func TestProposalValidateAcceptsAndRejects(t *testing.T) {
 	good := validProposal()
 	if err := good.Validate(); err != nil {
@@ -170,6 +187,12 @@ func TestProposalValidateAcceptsAndRejects(t *testing.T) {
 		},
 		"citation bad url": func(p *Proposal) {
 			p.Citations = []ProposalCitation{{URL: "ftp://example.test/file"}}
+		},
+		"citation connection mismatch": func(p *Proposal) {
+			p.Citations = []ProposalCitation{{
+				ConnectionID: "gh-acme",
+				ItemKey:      "gh-other/" + strings.Repeat("a", itemKeyHashLength),
+			}}
 		},
 		"citation credentials": func(p *Proposal) {
 			p.Citations = []ProposalCitation{{URL: "https://user:pass@example.test/file"}}

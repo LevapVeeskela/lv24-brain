@@ -16,6 +16,7 @@ secrets/
 index/
 backups/
 connectors/.locks/
+proposals/
 agent/
 *.db
 *.sqlite
