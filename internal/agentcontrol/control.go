@@ -125,6 +125,7 @@ func (c *Control) Start(ctx context.Context, runtime daemon.Runtime) (int, error
 		},
 		Credentials: credentialSetter{secrets: c.opts.Secrets},
 		Jobs:        jobQueue{agent: agent, now: c.opts.Now},
+		Cancels:     jobCanceler{jobs: agent},
 		Runs:        runLister{agent: agent, store: c.opts.Runs},
 		Schedules:   scheduleStore{connections: c.opts.Connections},
 		Projects:    projectLister{projects: c.opts.Projects},
@@ -314,6 +315,36 @@ func (q jobQueue) Queue(ctx context.Context, connectionID string, opts localapi.
 	return jobID, nil
 }
 
+// jobCanceler adapts the daemon's in-memory job table to the local API.
+// Cancellation is only accepted for jobs that have not finished; a finished
+// job must not be reported as accepted.
+type jobCanceler struct{ jobs jobTable }
+
+// jobTable is the small slice of daemon.Agent cancellation needs.
+type jobTable interface {
+	JobDetails(string) (daemon.JobDetail, bool)
+	CancelJob(string) bool
+}
+
+func (c jobCanceler) CancelJob(ctx context.Context, jobID string) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	detail, ok := c.jobs.JobDetails(jobID)
+	if !ok {
+		return "", domain.ErrNotFound
+	}
+	switch detail.View.Status {
+	case "queued", "running":
+	default:
+		return "", fmt.Errorf("%w: job has already finished", domain.ErrConflict)
+	}
+	if !c.jobs.CancelJob(jobID) {
+		return "", domain.ErrNotFound
+	}
+	return detail.View.Status, nil
+}
+
 // runLister merges in-memory jobs with the persisted run history. Job IDs are
 // valid run IDs while the process lives, so the desktop can tail a run it
 // just queued.
@@ -428,7 +459,14 @@ func runFromJob(detail daemon.JobDetail) (domain.ConnectorRun, bool) {
 	switch detail.View.Status {
 	case "queued", "running":
 		return run, true
-	case "failed", "canceled", "busy", "rejected":
+	case "canceled":
+		// A job canceled before it produced a run record still stopped for an
+		// explicit reason. Keep the established wire convention that a canceled
+		// run is partial + stats.truncated="canceled", never a silent failure.
+		run.Status = domain.ConnectorPartial
+		run.Stats = &domain.RunStats{Truncated: domain.TruncatedCanceled}
+		return run, true
+	case "failed", "busy", "rejected":
 		return run, true
 	}
 	return domain.ConnectorRun{}, false

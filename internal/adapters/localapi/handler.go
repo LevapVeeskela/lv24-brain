@@ -493,11 +493,18 @@ func (h *Handler) runRoute(w http.ResponseWriter, r *http.Request, rest string) 
 		writeError(w, http.StatusNotFound, "not_found", "run not found")
 		return
 	}
+	id := parts[0]
+	if len(parts) == 2 && parts[1] == "cancel" {
+		if !method(w, r, http.MethodPost) {
+			return
+		}
+		h.cancelRun(w, r, id)
+		return
+	}
 	if h.opts.Runs == nil {
 		unavailable(w)
 		return
 	}
-	id := parts[0]
 	if len(parts) == 2 && parts[1] == "log" {
 		if !method(w, r, http.MethodGet) {
 			return
@@ -518,6 +525,18 @@ func (h *Handler) runRoute(w http.ResponseWriter, r *http.Request, rest string) 
 		return
 	}
 	writeJSON(w, http.StatusOK, h.safeRun(item))
+}
+
+func (h *Handler) cancelRun(w http.ResponseWriter, r *http.Request, id string) {
+	if h.opts.Cancels == nil {
+		unavailable(w)
+		return
+	}
+	if _, err := h.opts.Cancels.CancelJob(r.Context(), id); err != nil {
+		h.writeServiceError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusAccepted, map[string]string{"status": "canceling"})
 }
 
 func (h *Handler) safeRun(run domain.ConnectorRun) RunView {

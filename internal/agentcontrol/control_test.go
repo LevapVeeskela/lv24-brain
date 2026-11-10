@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -453,6 +454,77 @@ func TestCompareVersions(t *testing.T) {
 		if got := compareVersions(tc.a, tc.b); got != tc.want {
 			t.Fatalf("compareVersions(%q, %q) = %d, want %d", tc.a, tc.b, got, tc.want)
 		}
+	}
+}
+
+type fakeJobTable struct {
+	jobs     map[string]daemon.JobDetail
+	canceled []string
+}
+
+func (f *fakeJobTable) JobDetails(id string) (daemon.JobDetail, bool) {
+	detail, ok := f.jobs[id]
+	return detail, ok
+}
+
+func (f *fakeJobTable) CancelJob(id string) bool {
+	f.canceled = append(f.canceled, id)
+	_, ok := f.jobs[id]
+	return ok
+}
+
+func TestJobCancelerAcceptsOnlyActiveJobs(t *testing.T) {
+	table := &fakeJobTable{jobs: map[string]daemon.JobDetail{
+		"queued":  {View: daemon.JobView{ID: "queued", Status: "queued"}},
+		"running": {View: daemon.JobView{ID: "running", Status: "running"}},
+		"done":    {View: daemon.JobView{ID: "done", Status: "success"}},
+		"failed":  {View: daemon.JobView{ID: "failed", Status: "failed"}},
+	}}
+	canceler := jobCanceler{jobs: table}
+	for _, tc := range []struct{ id, want string }{
+		{"queued", "queued"},
+		{"running", "running"},
+	} {
+		got, err := canceler.CancelJob(context.Background(), tc.id)
+		if err != nil || got != tc.want {
+			t.Fatalf("CancelJob(%q) = %q, %v; want %q", tc.id, got, err, tc.want)
+		}
+	}
+	if _, err := canceler.CancelJob(context.Background(), "missing"); !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("unknown job error = %v, want ErrNotFound", err)
+	}
+	for _, id := range []string{"done", "failed"} {
+		if _, err := canceler.CancelJob(context.Background(), id); !errors.Is(err, domain.ErrConflict) {
+			t.Fatalf("finished job %q error = %v, want ErrConflict", id, err)
+		}
+	}
+	if strings.Join(table.canceled, ",") != "queued,running" {
+		t.Fatalf("cancelled jobs = %v, want only active jobs", table.canceled)
+	}
+	cancelledContext, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := canceler.CancelJob(cancelledContext, "queued"); !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled context error = %v", err)
+	}
+}
+
+func TestRunFromJobReportsCanceledBeforeStartAsPartialCanceled(t *testing.T) {
+	finished := time.Date(2026, 11, 10, 12, 0, 0, 0, time.UTC)
+	run, ok := runFromJob(daemon.JobDetail{View: daemon.JobView{
+		ID: "job-1", ConnectionID: "work", Status: "canceled",
+		StartedAt: finished.Add(-time.Second), FinishedAt: finished,
+	}})
+	if !ok {
+		t.Fatal("canceled job was hidden from the run list")
+	}
+	if run.Status != domain.ConnectorPartial {
+		t.Fatalf("status = %q, want %q", run.Status, domain.ConnectorPartial)
+	}
+	if run.Stats == nil || run.Stats.Truncated != domain.TruncatedCanceled {
+		t.Fatalf("stats = %+v, want truncated=canceled", run.Stats)
+	}
+	if run.FinishedAt == nil || !run.FinishedAt.Equal(finished) {
+		t.Fatalf("finishedAt = %v, want %v", run.FinishedAt, finished)
 	}
 }
 

@@ -62,6 +62,22 @@ Method mismatches are always `405` with an `Allow` header (for example
 - Run views and logs exclude error text and credential-bearing fields; logs are
   redacted by both the ingestion host and the handler.
 
+## Canceling jobs
+
+`POST /v1/runs/{id}/cancel` requests cancellation of a queued or running job.
+A `202` with `{"status":"canceling"}` means the request was accepted, not that
+the job has already stopped: a running job stops at its next cancellation
+checkpoint (for example between source reads), so clients should keep watching
+`GET /v1/runs/{id}` until the run is no longer `running`.
+
+- Unknown, expired and persisted-only run IDs return `404`; the endpoint only
+  cancels jobs in the current agent process.
+- A job that already finished returns `409` with the `conflict` code.
+- Canceling a queued job skips it before it starts.
+- A canceled run is reported as `partial` with `stats.truncated: "canceled"`.
+  The same representation is used for a canceled queued job that never produced
+  a connector run record. Clients must not infer cancellation from item counts.
+
 ## SSE log snapshot
 
 `GET /v1/runs/{id}/log` returns `200` with `Content-Type: text/event-stream`,

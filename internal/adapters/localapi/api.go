@@ -67,6 +67,14 @@ type JobQueue interface {
 	Queue(context.Context, string, RunOptions) (string, error)
 }
 
+// JobCanceler cancels a queued or running job. It returns the status observed
+// before cancellation ("queued" or "running"). An unknown or expired job
+// returns domain.ErrNotFound; a job that already finished returns
+// domain.ErrConflict.
+type JobCanceler interface {
+	CancelJob(context.Context, string) (string, error)
+}
+
 // RunView deliberately excludes error text and any credential-bearing fields.
 type RunView struct {
 	ID           string                 `json:"id"`
@@ -157,6 +165,7 @@ type Options struct {
 	Sources     SourceRegistry
 	Credentials CredentialSetter
 	Jobs        JobQueue
+	Cancels     JobCanceler
 	Runs        RunLister
 	Schedules   ScheduleStore
 	Projects    ProjectLister

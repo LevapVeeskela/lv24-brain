@@ -153,6 +153,27 @@ func (f *fakeJobs) Queue(_ context.Context, id string, opts RunOptions) (string,
 	return "job-1", nil
 }
 
+type fakeCancels struct {
+	statuses map[string]string
+	ids      []string
+	err      error
+}
+
+func (f *fakeCancels) CancelJob(_ context.Context, id string) (string, error) {
+	f.ids = append(f.ids, id)
+	if f.err != nil {
+		return "", f.err
+	}
+	status, ok := f.statuses[id]
+	if !ok {
+		return "", domain.ErrNotFound
+	}
+	if status != "queued" && status != "running" {
+		return "", domain.ErrConflict
+	}
+	return status, nil
+}
+
 type fakeRunLog struct {
 	lines  chan LogLine
 	closed chan struct{}
@@ -243,6 +264,7 @@ type testFixture struct {
 	connections *fakeConnections
 	credentials *fakeCredentials
 	jobs        *fakeJobs
+	cancels     *fakeCancels
 	runs        *fakeRuns
 	schedules   *fakeSchedules
 	settings    *fakeSettings
@@ -285,10 +307,10 @@ func (w *synchronizedWriter) String() string {
 
 func newFixture(t *testing.T) *testFixture {
 	t.Helper()
-	f := &testFixture{connections: newFakeConnections(), credentials: &fakeCredentials{}, jobs: &fakeJobs{}, runs: &fakeRuns{log: newFakeRunLog()}, schedules: &fakeSchedules{}, settings: &fakeSettings{values: map[string]string{"theme": "dark", "api_token": "should-not-escape"}}, updater: &fakeUpdater{}, shutdown: make(chan struct{})}
+	f := &testFixture{connections: newFakeConnections(), credentials: &fakeCredentials{}, jobs: &fakeJobs{}, cancels: &fakeCancels{statuses: map[string]string{"run-1": "queued"}}, runs: &fakeRuns{log: newFakeRunLog()}, schedules: &fakeSchedules{}, settings: &fakeSettings{values: map[string]string{"theme": "dark", "api_token": "should-not-escape"}}, updater: &fakeUpdater{}, shutdown: make(chan struct{})}
 	f.schedules.connections = f.connections
 	var err error
-	f.handler, err = NewHandler(Options{Token: TokenFunc(func() string { return testToken }), Port: testPort, Version: "test", PID: 99, StartedAt: time.Now().Add(-time.Minute), Now: time.Now, MaxBody: 256, Heartbeat: 10 * time.Millisecond, Connections: f.connections, Sources: fakeRegistry{}, Credentials: f.credentials, Jobs: f.jobs, Runs: f.runs, Schedules: f.schedules, Projects: fakeProjects{items: []Project{{ID: "brain", Name: "Brain"}}}, Settings: f.settings, Updater: f.updater, Shutdown: ShutdownFunc(func(context.Context) error { close(f.shutdown); return nil })})
+	f.handler, err = NewHandler(Options{Token: TokenFunc(func() string { return testToken }), Port: testPort, Version: "test", PID: 99, StartedAt: time.Now().Add(-time.Minute), Now: time.Now, MaxBody: 256, Heartbeat: 10 * time.Millisecond, Connections: f.connections, Sources: fakeRegistry{}, Credentials: f.credentials, Jobs: f.jobs, Cancels: f.cancels, Runs: f.runs, Schedules: f.schedules, Projects: fakeProjects{items: []Project{{ID: "brain", Name: "Brain"}}}, Settings: f.settings, Updater: f.updater, Shutdown: ShutdownFunc(func(context.Context) error { close(f.shutdown); return nil })})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -438,6 +460,38 @@ func TestRunQueueBusyTestAndRunViews(t *testing.T) {
 }
 
 func (f *testFixture) sourcesErrForTest() {}
+
+func TestRunCancelAcceptsActiveJobsAndRejectsUnknownOrFinished(t *testing.T) {
+	f := newFixture(t)
+	f.cancels.statuses = map[string]string{"queued-job": "queued", "running-job": "running", "done-job": "success"}
+	for _, jobID := range []string{"queued-job", "running-job"} {
+		w := request(f, http.MethodPost, "/v1/runs/"+jobID+"/cancel", "", nil)
+		if w.Code != http.StatusAccepted || !strings.Contains(w.Body.String(), `"status":"canceling"`) {
+			t.Fatalf("cancel %s = %d %s", jobID, w.Code, w.Body.String())
+		}
+	}
+	if got := request(f, http.MethodPost, "/v1/runs/missing/cancel", "", nil); got.Code != http.StatusNotFound {
+		t.Fatalf("unknown cancel = %d %s", got.Code, got.Body.String())
+	}
+	if got := request(f, http.MethodPost, "/v1/runs/done-job/cancel", "", nil); got.Code != http.StatusConflict {
+		t.Fatalf("finished cancel = %d %s", got.Code, got.Body.String())
+	}
+	if got := request(f, http.MethodGet, "/v1/runs/queued-job/cancel", "", nil); got.Code != http.StatusMethodNotAllowed || got.Header().Get("Allow") != "POST" {
+		t.Fatalf("cancel method = %d Allow=%q", got.Code, got.Header().Get("Allow"))
+	}
+	if got := strings.Join(f.cancels.ids, ","); got != "queued-job,running-job,missing,done-job" {
+		t.Fatalf("cancel calls = %s", got)
+	}
+}
+
+func TestRunCancelServiceErrorIsSanitized(t *testing.T) {
+	f := newFixture(t)
+	f.cancels.err = errors.New("cancel failed with " + testToken)
+	w := request(f, http.MethodPost, "/v1/runs/run-1/cancel", "", nil)
+	if w.Code != http.StatusInternalServerError || strings.Contains(w.Body.String(), testToken) {
+		t.Fatalf("unsafe cancel error: %d %s", w.Code, w.Body.String())
+	}
+}
 
 func TestTestEndpointSanitizesProviderFailure(t *testing.T) {
 	f := newFixture(t)
@@ -673,6 +727,7 @@ func TestMethodMismatchReturns405WithAllow(t *testing.T) {
 		{"runs collection", http.MethodPost, "/v1/runs", "GET"},
 		{"run item", http.MethodDelete, "/v1/runs/run-1", "GET"},
 		{"run log", http.MethodPost, "/v1/runs/run-1/log", "GET"},
+		{"run cancel", http.MethodGet, "/v1/runs/run-1/cancel", "POST"},
 		{"schedules collection", http.MethodPost, "/v1/schedules", "GET"},
 		{"schedule item", http.MethodGet, "/v1/schedules/demo-1", "PUT"},
 		{"projects", http.MethodPost, "/v1/projects", "GET"},
@@ -756,7 +811,7 @@ func TestOpenAPIParsesAndListsRoutes(t *testing.T) {
 	if document.OpenAPI != "3.0.3" {
 		t.Fatalf("version=%q", document.OpenAPI)
 	}
-	methods := map[string][]string{"/v1/health": {"get"}, "/v1/connections": {"get", "post"}, "/v1/connections/{id}": {"get", "patch", "delete"}, "/v1/connections/{id}/test": {"post"}, "/v1/connections/{id}/run": {"post"}, "/v1/connections/{id}/credentials/{field}": {"post"}, "/v1/runs": {"get"}, "/v1/runs/{id}": {"get"}, "/v1/runs/{id}/log": {"get"}, "/v1/schedules": {"get"}, "/v1/schedules/{connectionId}": {"put"}, "/v1/projects": {"get"}, "/v1/settings": {"get", "put"}, "/v1/engine/update": {"post"}, "/v1/shutdown": {"post"}}
+	methods := map[string][]string{"/v1/health": {"get"}, "/v1/connections": {"get", "post"}, "/v1/connections/{id}": {"get", "patch", "delete"}, "/v1/connections/{id}/test": {"post"}, "/v1/connections/{id}/run": {"post"}, "/v1/connections/{id}/credentials/{field}": {"post"}, "/v1/runs": {"get"}, "/v1/runs/{id}": {"get"}, "/v1/runs/{id}/cancel": {"post"}, "/v1/runs/{id}/log": {"get"}, "/v1/schedules": {"get"}, "/v1/schedules/{connectionId}": {"put"}, "/v1/projects": {"get"}, "/v1/settings": {"get", "put"}, "/v1/engine/update": {"post"}, "/v1/shutdown": {"post"}}
 	for path, expected := range methods {
 		operations, ok := document.Paths[path]
 		if !ok {

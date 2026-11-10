@@ -194,6 +194,8 @@ func contractPath(path string) string {
 		return "/v1/connections/demo-1/run"
 	case "/v1/runs/{id}":
 		return "/v1/runs/run-1"
+	case "/v1/runs/{id}/cancel":
+		return "/v1/runs/run-1/cancel"
 	case "/v1/runs/{id}/log":
 		return "/v1/runs/run-1/log"
 	case "/v1/schedules/{connectionId}":

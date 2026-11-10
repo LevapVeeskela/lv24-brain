@@ -14,6 +14,7 @@ POST /v1/connections/{id}/credentials/{field}
 POST /v1/connections/{id}/run
 POST /v1/connections/{id}/test
 POST /v1/engine/update
+POST /v1/runs/{id}/cancel
 POST /v1/shutdown
 PUT /v1/schedules/{connectionId}
 PUT /v1/settings
