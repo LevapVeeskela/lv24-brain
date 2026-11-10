@@ -38,7 +38,7 @@ The CLI itself does not need a Go toolchain or a checkout of the repository.
 
 The launcher is available on PyPI as
 [`lv24-brain`](https://pypi.org/project/lv24-brain/); the current version is
-`0.13.0`:
+`0.13.1`:
 
 ```bash
 pip install lv24-brain
@@ -69,12 +69,12 @@ installation hint. An interrupted run exits with code `130`.
 ## Version pinning
 
 By default the launcher runs the npm package version matching its own version
-(currently `0.13.0`). Override it with `BRAIN_NPM_VERSION` to use any npm
+(currently `0.13.1`). Override it with `BRAIN_NPM_VERSION` to use any npm
 version or tag:
 
 ```bash
 BRAIN_NPM_VERSION=latest lv24-brain --help
-BRAIN_NPM_VERSION=0.13.0 lv24-brain --help
+BRAIN_NPM_VERSION=0.13.1 lv24-brain --help
 ```
 
 PowerShell:

@@ -13,10 +13,10 @@ binary is still built and signed once, by `release.yml`.
 through Trusted Publishing (workflow `pypi-publish.yml`, run `42777147197`).
 `0.12.1` was published the same day (run `42754828216`); `0.12.0` was the first
 launcher upload (run `42738309137`). `pip install lv24-brain` works. The
-launcher version in this tree is `0.13.0`, matching the `v0.13.0` engine tag.
-The trusted publisher is configured for this repository, so later releases
-need no PyPI API token or secret. The one-time setup below is kept as a runbook
-and is already completed for this project.
+launcher version in this tree is `0.13.1`, prepared for the `v0.13.1` engine
+tag and not yet uploaded to PyPI. The trusted publisher is configured for this
+repository, so later releases need no PyPI API token or secret. The one-time
+setup below is kept as a runbook and is already completed for this project.
 
 ## What the package is
 
@@ -77,7 +77,7 @@ dependencies of the installed launcher.
 3. After the GitHub release exists, run **pypi-publish** with that version:
 
    ```bash
-   gh workflow run pypi-publish.yml --ref main -f version=0.13.0
+   gh workflow run pypi-publish.yml --ref main -f version=0.13.1
    ```
 
    The manual dispatch is the normal path here: `release.yml` creates the
