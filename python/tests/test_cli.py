@@ -80,7 +80,7 @@ class MainTests(unittest.TestCase):
                 handle.write(content)
         else:
             launcher = self.bin_dir / "npx"
-            content = '#!/bin/sh\nexec "{0}" "$(dirname "$0")/fake_npx.py" "$@"\n'.format(
+            content = '#!/bin/sh\nexec "{0}" "${{0%/*}}/fake_npx.py" "$@"\n'.format(
                 sys.executable
             )
             launcher.write_text(content, encoding="utf-8")
