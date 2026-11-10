@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "lv24-brain"
+version = "0.12.0"
+description = "Python launcher for the lv24-brain CLI"
+readme = "README.md"
+requires-python = ">=3.9"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+authors = [
+    { name = "LevapVeeskela" },
+]
+keywords = ["brain", "cli", "memory", "knowledge", "agents"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Environment :: Console",
+    "Operating System :: OS Independent",
+]
+
+[project.urls]
+Homepage = "https://brain.lv24.by"
+Repository = "https://github.com/LevapVeeskela/lv24-brain"
+Issues = "https://github.com/LevapVeeskela/lv24-brain/issues"
+Documentation = "https://github.com/LevapVeeskela/lv24-brain/blob/main/docs/pypi.md"
+
+[project.scripts]
+# No `brain` script on purpose: the native Go binary and the npm package
+# already own that name, and pip would silently shadow one of them on PATH.
+lv24-brain = "lv24_brain.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]

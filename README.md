@@ -95,6 +95,19 @@ brain agents sync --hooks                         # Claude Code, Codex and OpenC
 cd ~/src/myapp && brain open
 ```
 
+The same CLI has a thin Python launcher on PyPI:
+
+```sh
+pip install lv24-brain
+lv24-brain open .
+```
+
+It runs `npx --yes lv24-brain@<version>` and needs Node.js 18 or newer. It
+does not bundle Node.js or the binary, and it deliberately installs only
+`lv24-brain`, never `brain`, so it cannot shadow the native Go binary. npm and
+the signed installers remain the canonical distribution; see
+[docs/pypi.md](docs/pypi.md).
+
 That is the whole loop: agents read `brain open` (or `brain context "<task>"`)
 at session start and leave a handoff at the end. Next steps:
 [quickstart](docs/quickstart.md) · [install options](docs/install.md) ·

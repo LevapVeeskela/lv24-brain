@@ -41,3 +41,10 @@ registry.json
 .DS_Store
 Thumbs.db
 *.swp
+
+# Python launcher (python/)
+__pycache__/
+*.py[cod]
+/python/build/
+/python/dist/
+*.egg-info/
