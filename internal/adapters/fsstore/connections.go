@@ -113,6 +113,44 @@ func (s *ConnectionStore) Update(ctx context.Context, connection domain.Connecti
 	})
 }
 
+// Patch applies mutate while holding the store's write lock. Reading and
+// writing under the same lock prevents concurrent PATCH-style updates from
+// overwriting each other with stale snapshots.
+func (s *ConnectionStore) Patch(ctx context.Context, id string, mutate func(*domain.Connection) error) (domain.Connection, error) {
+	if err := domain.ValidateConnectionID("connection.id", id); err != nil {
+		return domain.Connection{}, err
+	}
+	if mutate == nil {
+		return domain.Connection{}, domain.NewValidationError("connection.patch", "mutate is required")
+	}
+	var patched domain.Connection
+	err := s.change(ctx, func(connections []domain.Connection) ([]domain.Connection, error) {
+		for i, existing := range connections {
+			if existing.ID != id {
+				continue
+			}
+			candidate := existing
+			if err := mutate(&candidate); err != nil {
+				return nil, err
+			}
+			if candidate.ID != id {
+				return nil, fmt.Errorf("%w: connection %q id is immutable", domain.ErrConflict, id)
+			}
+			if existing.Identity() != candidate.Identity() {
+				return nil, fmt.Errorf("%w: connection %q identity is immutable", domain.ErrConflict, id)
+			}
+			connections[i] = candidate
+			patched = candidate
+			return connections, nil
+		}
+		return nil, fmt.Errorf("%w: connection %q", domain.ErrNotFound, id)
+	})
+	if err != nil {
+		return domain.Connection{}, err
+	}
+	return patched, nil
+}
+
 // Delete removes only configuration; payloads and credentials are caller-owned.
 func (s *ConnectionStore) Delete(ctx context.Context, id string) error {
 	if err := domain.ValidateConnectionID("connection.id", id); err != nil {

@@ -64,6 +64,112 @@ func TestConnectionsCRUD(t *testing.T) {
 	}
 }
 
+func TestConnectionPatchMutatesUnderLockAndValidates(t *testing.T) {
+	ctx := context.Background()
+	store, err := NewConnectionStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	original := testConnection("one", "alice")
+	original.Schedule = "@daily"
+	if err := store.Create(ctx, original); err != nil {
+		t.Fatal(err)
+	}
+	patched, err := store.Patch(ctx, "one", func(connection *domain.Connection) error {
+		connection.Schedule = "@hourly"
+		return nil
+	})
+	if err != nil || patched.Schedule != "@hourly" {
+		t.Fatalf("patch = %+v, %v", patched, err)
+	}
+	stop := errors.New("stop")
+	if _, err := store.Patch(ctx, "one", func(connection *domain.Connection) error {
+		connection.Schedule = "@every 5m"
+		return stop
+	}); !errors.Is(err, stop) {
+		t.Fatalf("callback error = %v", err)
+	}
+	stored, err := store.Get(ctx, "one")
+	if err != nil || stored.Schedule != "@hourly" {
+		t.Fatalf("aborted patch changed the file: %+v, %v", stored, err)
+	}
+	if _, err := store.Patch(ctx, "missing", func(*domain.Connection) error { return nil }); !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("missing patch = %v", err)
+	}
+	if _, err := store.Patch(ctx, "one", func(connection *domain.Connection) error {
+		connection.ID = "two"
+		return nil
+	}); !errors.Is(err, domain.ErrConflict) {
+		t.Fatalf("id change = %v", err)
+	}
+	if _, err := store.Patch(ctx, "one", func(connection *domain.Connection) error {
+		connection.Provider = "gitlab"
+		return nil
+	}); !errors.Is(err, domain.ErrConflict) {
+		t.Fatalf("identity change = %v", err)
+	}
+	if _, err := store.Patch(ctx, "one", nil); !errors.Is(err, domain.ErrValidation) {
+		t.Fatalf("nil mutate = %v", err)
+	}
+}
+
+func TestConnectionsConcurrentPatchesPreserveDisjointFields(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	seed, err := NewConnectionStore(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := seed.Create(ctx, testConnection("one", "alice")); err != nil {
+		t.Fatal(err)
+	}
+	first, err := NewConnectionStore(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := NewConnectionStore(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	start := make(chan struct{})
+	errs := make(chan error, 2)
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		<-start
+		_, err := first.Patch(ctx, "one", func(connection *domain.Connection) error {
+			connection.Settings = map[string]string{"repos": "owner/other"}
+			return nil
+		})
+		errs <- err
+	}()
+	go func() {
+		defer wg.Done()
+		<-start
+		_, err := second.Patch(ctx, "one", func(connection *domain.Connection) error {
+			connection.Schedule = "@hourly"
+			return nil
+		})
+		errs <- err
+	}()
+	close(start)
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	stored, err := seed.Get(ctx, "one")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.Settings["repos"] != "owner/other" || stored.Schedule != "@hourly" {
+		t.Fatalf("lost update: %+v", stored)
+	}
+}
+
 func TestConnectionsConflictsAndImmutableIdentity(t *testing.T) {
 	ctx := context.Background()
 	store, err := NewConnectionStore(t.TempDir())

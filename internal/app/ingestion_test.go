@@ -342,7 +342,10 @@ func (s *mutableConnectionStore) Get(_ context.Context, id string) (domain.Conne
 }
 func (*mutableConnectionStore) Create(context.Context, domain.Connection) error { panic("unused") }
 func (*mutableConnectionStore) Update(context.Context, domain.Connection) error { panic("unused") }
-func (*mutableConnectionStore) Delete(context.Context, string) error            { panic("unused") }
+func (*mutableConnectionStore) Patch(context.Context, string, func(*domain.Connection) error) (domain.Connection, error) {
+	panic("unused")
+}
+func (*mutableConnectionStore) Delete(context.Context, string) error { panic("unused") }
 
 type oneConnectionStore struct{ connection domain.Connection }
 
@@ -357,7 +360,10 @@ func (s oneConnectionStore) Get(_ context.Context, id string) (domain.Connection
 }
 func (oneConnectionStore) Create(context.Context, domain.Connection) error { panic("unused") }
 func (oneConnectionStore) Update(context.Context, domain.Connection) error { panic("unused") }
-func (oneConnectionStore) Delete(context.Context, string) error            { panic("unused") }
+func (oneConnectionStore) Patch(context.Context, string, func(*domain.Connection) error) (domain.Connection, error) {
+	panic("unused")
+}
+func (oneConnectionStore) Delete(context.Context, string) error { panic("unused") }
 
 func ingestionDescriptor(personal bool) domain.SourceDescriptor {
 	return domain.SourceDescriptor{Provider: "sample", DisplayName: "Sample", Capabilities: domain.Capabilities{AuthModes: []domain.AuthMode{domain.AuthNone}}, DefaultPublish: domain.PublishLocalOnly, Streams: []string{"inbox"}, PersonalData: personal}

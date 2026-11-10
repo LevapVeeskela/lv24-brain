@@ -185,6 +185,82 @@ func (c apiClient) do(method, path string, body string, headers map[string]strin
 	return resp, raw
 }
 
+// blockingConnectionStore forces the old Get -> Update interleaving by
+// pausing the next Get after it has taken its snapshot.
+type blockingConnectionStore struct {
+	ports.ConnectionStore
+	mu           sync.Mutex
+	blockNextGet bool
+	getStarted   chan struct{}
+	getRelease   chan struct{}
+	patchStarted chan struct{}
+	patchOnce    sync.Once
+}
+
+func (s *blockingConnectionStore) Get(ctx context.Context, id string) (domain.Connection, error) {
+	connection, err := s.ConnectionStore.Get(ctx, id)
+	s.mu.Lock()
+	block := s.blockNextGet
+	if block {
+		s.blockNextGet = false
+	}
+	s.mu.Unlock()
+	if block {
+		close(s.getStarted)
+		<-s.getRelease
+	}
+	return connection, err
+}
+
+func (s *blockingConnectionStore) Patch(ctx context.Context, id string, mutate func(*domain.Connection) error) (domain.Connection, error) {
+	s.patchOnce.Do(func() { close(s.patchStarted) })
+	return s.ConnectionStore.Patch(ctx, id, mutate)
+}
+
+func TestConcurrentPatchAndScheduleSetPreserveFields(t *testing.T) {
+	ctx := context.Background()
+	store, err := fsstore.NewConnectionStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Create(ctx, domain.Connection{ID: "work", Provider: "fixture", Account: "old"}); err != nil {
+		t.Fatal(err)
+	}
+	blocking := &blockingConnectionStore{
+		ConnectionStore: store,
+		blockNextGet:    true,
+		getStarted:      make(chan struct{}),
+		getRelease:      make(chan struct{}),
+		patchStarted:    make(chan struct{}),
+	}
+	schedules := scheduleStore{connections: blocking}
+	done := make(chan error, 1)
+	go func() { done <- schedules.SetSchedule(ctx, "work", "@hourly") }()
+	select {
+	case <-blocking.getStarted:
+	case <-blocking.patchStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("SetSchedule did not reach the connection store")
+	}
+	if _, err := store.Patch(ctx, "work", func(connection *domain.Connection) error {
+		connection.Settings = map[string]string{"repos": "owner/other"}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	close(blocking.getRelease)
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	stored, err := store.Get(ctx, "work")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.Settings["repos"] != "owner/other" || stored.Schedule != "@hourly" {
+		t.Fatalf("lost update: %+v", stored)
+	}
+}
+
 func TestControlEndToEnd(t *testing.T) {
 	dir := t.TempDir()
 	connections, err := fsstore.NewConnectionStore(dir)

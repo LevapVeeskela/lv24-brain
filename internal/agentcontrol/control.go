@@ -212,6 +212,10 @@ func (s connectionService) Update(ctx context.Context, connection domain.Connect
 	return s.store.Update(ctx, connection)
 }
 
+func (s connectionService) Patch(ctx context.Context, id string, mutate func(*domain.Connection) error) (domain.Connection, error) {
+	return s.store.Patch(ctx, id, mutate)
+}
+
 func (s connectionService) Delete(ctx context.Context, id string) error {
 	if s.agent != nil {
 		for _, job := range s.agent.RecentJobs() {
@@ -485,12 +489,11 @@ func (s scheduleStore) ListSchedules(ctx context.Context) ([]localapi.Schedule, 
 }
 
 func (s scheduleStore) SetSchedule(ctx context.Context, connectionID, expression string) error {
-	connection, err := s.connections.Get(ctx, connectionID)
-	if err != nil {
-		return err
-	}
-	connection.Schedule = expression
-	return s.connections.Update(ctx, connection)
+	_, err := s.connections.Patch(ctx, connectionID, func(connection *domain.Connection) error {
+		connection.Schedule = expression
+		return nil
+	})
+	return err
 }
 
 // projectLister exposes id/name only.

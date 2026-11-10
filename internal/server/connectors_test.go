@@ -665,6 +665,9 @@ func TestServerConnectionStoreIsReadOnly(t *testing.T) {
 	if err := store.Update(ctx, conn); !errors.Is(err, domain.ErrUnsupported) {
 		t.Fatalf("update error = %v", err)
 	}
+	if _, err := store.Patch(ctx, conn.ID, func(*domain.Connection) error { return nil }); !errors.Is(err, domain.ErrUnsupported) {
+		t.Fatalf("patch error = %v", err)
+	}
 	if err := store.Delete(ctx, conn.ID); !errors.Is(err, domain.ErrUnsupported) {
 		t.Fatalf("delete error = %v", err)
 	}

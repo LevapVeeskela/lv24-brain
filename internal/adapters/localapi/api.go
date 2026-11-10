@@ -33,6 +33,9 @@ type ConnectionService interface {
 	Get(context.Context, string) (domain.Connection, error)
 	Create(context.Context, domain.Connection) error
 	Update(context.Context, domain.Connection) error
+	// Patch atomically applies mutate to the stored connection. The callback
+	// runs under the store's write lock; returning an error aborts the change.
+	Patch(context.Context, string, func(*domain.Connection) error) (domain.Connection, error)
 	Delete(context.Context, string) error
 }
 

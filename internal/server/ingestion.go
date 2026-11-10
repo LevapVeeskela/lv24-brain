@@ -67,6 +67,11 @@ func (s *serverConnectionStore) Update(context.Context, domain.Connection) error
 	return domain.ErrUnsupported
 }
 
+// Patch refuses: the ephemeral connection is immutable.
+func (s *serverConnectionStore) Patch(context.Context, string, func(*domain.Connection) error) (domain.Connection, error) {
+	return domain.Connection{}, domain.ErrUnsupported
+}
+
 // Delete refuses: the ephemeral connection is never persisted.
 func (s *serverConnectionStore) Delete(context.Context, string) error {
 	return domain.ErrUnsupported

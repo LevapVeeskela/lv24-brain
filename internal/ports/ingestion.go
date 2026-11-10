@@ -147,6 +147,14 @@ type ConnectionStore interface {
 	// is immutable: changing it returns domain.ErrConflict; create a new
 	// connection instead. Unknown IDs return domain.ErrNotFound.
 	Update(ctx context.Context, connection domain.Connection) error
+	// Patch atomically mutates the connection with the given ID. The store
+	// holds its write lock while mutate runs, so concurrent readers cannot
+	// observe and later overwrite a stale value. mutate receives the stored
+	// connection and may change mutable fields in place; returning an error
+	// aborts the write. ID and Identity are immutable (domain.ErrConflict).
+	// Unknown IDs return domain.ErrNotFound; read-only catalogues return
+	// domain.ErrUnsupported.
+	Patch(ctx context.Context, id string, mutate func(*domain.Connection) error) (domain.Connection, error)
 	// Delete removes a connection; callers purge its items, checkpoints and
 	// credentials separately. Unknown IDs return domain.ErrNotFound.
 	Delete(ctx context.Context, id string) error

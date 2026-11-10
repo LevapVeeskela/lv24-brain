@@ -25,6 +25,14 @@ const testPort = 43123
 type fakeConnections struct {
 	mu     sync.Mutex
 	values map[string]domain.Connection
+
+	// Optional hooks let tests force the old Get -> Update interleaving: the
+	// next Get returns its snapshot and blocks until getRelease is closed.
+	blockNextGet bool
+	getStarted   chan struct{}
+	getRelease   chan struct{}
+	patchStarted chan struct{}
+	patchOnce    sync.Once
 }
 
 func newFakeConnections() *fakeConnections {
@@ -41,10 +49,22 @@ func (f *fakeConnections) List(context.Context) ([]domain.Connection, error) {
 }
 func (f *fakeConnections) Get(_ context.Context, id string) (domain.Connection, error) {
 	f.mu.Lock()
-	defer f.mu.Unlock()
 	v, ok := f.values[id]
+	block := f.blockNextGet
+	if block {
+		f.blockNextGet = false
+	}
+	f.mu.Unlock()
 	if !ok {
 		return domain.Connection{}, domain.ErrNotFound
+	}
+	if block {
+		if f.getStarted != nil {
+			close(f.getStarted)
+		}
+		if f.getRelease != nil {
+			<-f.getRelease
+		}
 	}
 	return v, nil
 }
@@ -65,6 +85,22 @@ func (f *fakeConnections) Update(_ context.Context, c domain.Connection) error {
 	}
 	f.values[c.ID] = c
 	return nil
+}
+func (f *fakeConnections) Patch(_ context.Context, id string, mutate func(*domain.Connection) error) (domain.Connection, error) {
+	if f.patchStarted != nil {
+		f.patchOnce.Do(func() { close(f.patchStarted) })
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	v, ok := f.values[id]
+	if !ok {
+		return domain.Connection{}, domain.ErrNotFound
+	}
+	if err := mutate(&v); err != nil {
+		return domain.Connection{}, err
+	}
+	f.values[id] = v
+	return v, nil
 }
 func (f *fakeConnections) Delete(_ context.Context, id string) error {
 	f.mu.Lock()
@@ -151,14 +187,36 @@ func (f *fakeRuns) OpenRunLog(context.Context, string) (RunLog, error) {
 }
 
 type fakeSchedules struct {
-	items     []Schedule
-	id, value string
+	items       []Schedule
+	connections *fakeConnections
+	id, value   string
 }
 
 func (f *fakeSchedules) ListSchedules(context.Context) ([]Schedule, error) { return f.items, nil }
-func (f *fakeSchedules) SetSchedule(_ context.Context, id, value string) error {
+func (f *fakeSchedules) SetSchedule(ctx context.Context, id, value string) error {
+	if f.connections != nil {
+		if _, err := f.connections.Patch(ctx, id, func(connection *domain.Connection) error {
+			connection.Schedule = value
+			return nil
+		}); err != nil {
+			return err
+		}
+	}
 	f.id, f.value = id, value
 	return nil
+}
+
+// patchingSchedules mirrors the production schedule store: SetSchedule writes
+// the connection through its atomic Patch primitive.
+type patchingSchedules struct{ connections *fakeConnections }
+
+func (patchingSchedules) ListSchedules(context.Context) ([]Schedule, error) { return nil, nil }
+func (s patchingSchedules) SetSchedule(ctx context.Context, id, value string) error {
+	_, err := s.connections.Patch(ctx, id, func(connection *domain.Connection) error {
+		connection.Schedule = value
+		return nil
+	})
+	return err
 }
 
 type fakeProjects struct{ items []Project }
@@ -228,6 +286,7 @@ func (w *synchronizedWriter) String() string {
 func newFixture(t *testing.T) *testFixture {
 	t.Helper()
 	f := &testFixture{connections: newFakeConnections(), credentials: &fakeCredentials{}, jobs: &fakeJobs{}, runs: &fakeRuns{log: newFakeRunLog()}, schedules: &fakeSchedules{}, settings: &fakeSettings{values: map[string]string{"theme": "dark", "api_token": "should-not-escape"}}, updater: &fakeUpdater{}, shutdown: make(chan struct{})}
+	f.schedules.connections = f.connections
 	var err error
 	f.handler, err = NewHandler(Options{Token: TokenFunc(func() string { return testToken }), Port: testPort, Version: "test", PID: 99, StartedAt: time.Now().Add(-time.Minute), Now: time.Now, MaxBody: 256, Heartbeat: 10 * time.Millisecond, Connections: f.connections, Sources: fakeRegistry{}, Credentials: f.credentials, Jobs: f.jobs, Runs: f.runs, Schedules: f.schedules, Projects: fakeProjects{items: []Project{{ID: "brain", Name: "Brain"}}}, Settings: f.settings, Updater: f.updater, Shutdown: ShutdownFunc(func(context.Context) error { close(f.shutdown); return nil })})
 	if err != nil {
@@ -440,6 +499,10 @@ func TestScheduleProjectsSettingsUpdateShutdown(t *testing.T) {
 	if w.Code != 200 || f.schedules.value != "@every 1m" {
 		t.Fatalf("schedule=%d %s", w.Code, w.Body.String())
 	}
+	w = request(f, http.MethodPut, "/v1/schedules/missing", `{"schedule":"@hourly"}`, nil)
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("unknown schedule=%d %s", w.Code, w.Body.String())
+	}
 	w = request(f, http.MethodGet, "/v1/projects", "", nil)
 	if w.Code != 200 || strings.Contains(w.Body.String(), "paths") {
 		t.Fatalf("projects=%d %s", w.Code, w.Body.String())
@@ -472,6 +535,107 @@ func TestScheduleProjectsSettingsUpdateShutdown(t *testing.T) {
 	case <-f.shutdown:
 	case <-time.After(time.Second):
 		t.Fatal("shutdown callback not invoked")
+	}
+}
+
+// waitForConnectionMutation returns once a request has either taken the old
+// Get snapshot (and is blocked) or entered the atomic Patch path.
+func waitForConnectionMutation(t *testing.T, connections *fakeConnections) {
+	t.Helper()
+	select {
+	case <-connections.getStarted:
+	case <-connections.patchStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("request did not reach the connection store")
+	}
+}
+
+func TestConcurrentPatchesPreserveDisjointFields(t *testing.T) {
+	f := newFixture(t)
+	if err := f.connections.Create(context.Background(), domain.Connection{ID: "demo-1", Provider: "demo", Account: "old"}); err != nil {
+		t.Fatal(err)
+	}
+	f.connections.blockNextGet = true
+	f.connections.getStarted = make(chan struct{})
+	f.connections.getRelease = make(chan struct{})
+	f.connections.patchStarted = make(chan struct{})
+
+	first := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		first <- request(f, http.MethodPatch, "/v1/connections/demo-1", `{"settings":{"endpoint":"new"}}`, nil)
+	}()
+	waitForConnectionMutation(t, f.connections)
+	second := request(f, http.MethodPatch, "/v1/connections/demo-1", `{"schedule":"@hourly"}`, nil)
+	if second.Code != http.StatusOK {
+		t.Fatalf("second patch=%d %s", second.Code, second.Body.String())
+	}
+	close(f.connections.getRelease)
+	if got := <-first; got.Code != http.StatusOK {
+		t.Fatalf("first patch=%d %s", got.Code, got.Body.String())
+	}
+	stored, err := f.connections.Get(context.Background(), "demo-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.Settings["endpoint"] != "new" || stored.Schedule != "@hourly" {
+		t.Fatalf("lost update: %+v", stored)
+	}
+}
+
+func TestConcurrentPatchAndSchedulePutPreserveDisjointFields(t *testing.T) {
+	f := newFixture(t)
+	if err := f.connections.Create(context.Background(), domain.Connection{ID: "demo-1", Provider: "demo", Account: "old"}); err != nil {
+		t.Fatal(err)
+	}
+	f.handler.opts.Schedules = patchingSchedules{connections: f.connections}
+	f.connections.blockNextGet = true
+	f.connections.getStarted = make(chan struct{})
+	f.connections.getRelease = make(chan struct{})
+	f.connections.patchStarted = make(chan struct{})
+
+	first := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		first <- request(f, http.MethodPatch, "/v1/connections/demo-1", `{"settings":{"endpoint":"new"}}`, nil)
+	}()
+	waitForConnectionMutation(t, f.connections)
+	w := request(f, http.MethodPut, "/v1/schedules/demo-1", `{"schedule":"@daily"}`, nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("schedule put=%d %s", w.Code, w.Body.String())
+	}
+	close(f.connections.getRelease)
+	if got := <-first; got.Code != http.StatusOK {
+		t.Fatalf("patch=%d %s", got.Code, got.Body.String())
+	}
+	stored, err := f.connections.Get(context.Background(), "demo-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.Settings["endpoint"] != "new" || stored.Schedule != "@daily" {
+		t.Fatalf("lost update: %+v", stored)
+	}
+}
+
+func TestConnectionPatchReplacesSettingsAndProjects(t *testing.T) {
+	f := newFixture(t)
+	if err := f.connections.Create(context.Background(), domain.Connection{
+		ID: "demo-1", Provider: "demo",
+		Projects: []string{"old"}, Settings: map[string]string{"endpoint": "old", "extra": "drop"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	w := request(f, http.MethodPatch, "/v1/connections/demo-1", `{"projects":["new"],"settings":{"endpoint":"new"}}`, nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("patch=%d %s", w.Code, w.Body.String())
+	}
+	stored, err := f.connections.Get(context.Background(), "demo-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(stored.Projects) != 1 || stored.Projects[0] != "new" {
+		t.Fatalf("projects = %v, want replace", stored.Projects)
+	}
+	if len(stored.Settings) != 1 || stored.Settings["endpoint"] != "new" {
+		t.Fatalf("settings = %v, want replace", stored.Settings)
 	}
 }
 

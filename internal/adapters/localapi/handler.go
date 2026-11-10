@@ -159,6 +159,9 @@ type connectionView struct {
 	Settings map[string]string    `json:"settings,omitempty"`
 }
 
+// connectionPatch applies only the fields present in the request. Projects
+// and Settings replace the stored value as a whole when present; they are not
+// merged with the previous list or map.
 type connectionPatch struct {
 	ID       *string               `json:"id,omitempty"`
 	Provider *string               `json:"provider,omitempty"`
@@ -169,6 +172,33 @@ type connectionPatch struct {
 	Schedule *string               `json:"schedule,omitempty"`
 	Publish  *domain.PublishPolicy `json:"publish,omitempty"`
 	Settings *map[string]string    `json:"settings,omitempty"`
+}
+
+func applyConnectionPatch(connection *domain.Connection, patch connectionPatch) {
+	if patch.Provider != nil {
+		connection.Provider = *patch.Provider
+	}
+	if patch.Backend != nil {
+		connection.Backend = *patch.Backend
+	}
+	if patch.Account != nil {
+		connection.Account = *patch.Account
+	}
+	if patch.BaseURL != nil {
+		connection.BaseURL = *patch.BaseURL
+	}
+	if patch.Projects != nil {
+		connection.Projects = append([]string(nil), (*patch.Projects)...)
+	}
+	if patch.Schedule != nil {
+		connection.Schedule = *patch.Schedule
+	}
+	if patch.Publish != nil {
+		connection.Publish = *patch.Publish
+	}
+	if patch.Settings != nil {
+		connection.Settings = *patch.Settings
+	}
 }
 
 func (h *Handler) connections(w http.ResponseWriter, r *http.Request) {
@@ -271,40 +301,17 @@ func (h *Handler) connectionRoute(w http.ResponseWriter, r *http.Request, rest s
 			writeError(w, http.StatusBadRequest, "validation", "connection id cannot be changed")
 			return
 		}
-		item, err := h.opts.Connections.Get(r.Context(), id)
+		var validationErr error
+		item, err := h.opts.Connections.Patch(r.Context(), id, func(connection *domain.Connection) error {
+			applyConnectionPatch(connection, patch)
+			validationErr = h.validateConnection(*connection)
+			return validationErr
+		})
 		if err != nil {
-			h.writeServiceError(w, err)
-			return
-		}
-		if patch.Provider != nil {
-			item.Provider = *patch.Provider
-		}
-		if patch.Backend != nil {
-			item.Backend = *patch.Backend
-		}
-		if patch.Account != nil {
-			item.Account = *patch.Account
-		}
-		if patch.BaseURL != nil {
-			item.BaseURL = *patch.BaseURL
-		}
-		if patch.Projects != nil {
-			item.Projects = append([]string(nil), (*patch.Projects)...)
-		}
-		if patch.Schedule != nil {
-			item.Schedule = *patch.Schedule
-		}
-		if patch.Publish != nil {
-			item.Publish = *patch.Publish
-		}
-		if patch.Settings != nil {
-			item.Settings = *patch.Settings
-		}
-		if err := h.validateConnection(item); err != nil {
-			writeError(w, http.StatusBadRequest, "validation", "connection is invalid or contains a secret field")
-			return
-		}
-		if err := h.opts.Connections.Update(r.Context(), item); err != nil {
+			if validationErr != nil {
+				writeError(w, http.StatusBadRequest, "validation", "connection is invalid or contains a secret field")
+				return
+			}
 			h.writeServiceError(w, err)
 			return
 		}
@@ -641,10 +648,8 @@ func (h *Handler) scheduleRoute(w http.ResponseWriter, r *http.Request, rest str
 		writeError(w, http.StatusBadRequest, "validation", "schedule is invalid; use manual, @hourly, @daily, or @every with an interval of at least 1m")
 		return
 	}
-	if _, err := h.opts.Connections.Get(r.Context(), parts[0]); err != nil {
-		h.writeServiceError(w, err)
-		return
-	}
+	// SetSchedule patches the connection atomically and returns ErrNotFound
+	// for an unknown ID, so a separate (racy) existence check is unnecessary.
 	if err := h.opts.Schedules.SetSchedule(r.Context(), parts[0], body.Schedule); err != nil {
 		h.writeServiceError(w, err)
 		return

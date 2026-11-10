@@ -32,7 +32,10 @@ func (s *testConnections) Get(context.Context, string) (domain.Connection, error
 }
 func (s *testConnections) Create(context.Context, domain.Connection) error { return nil }
 func (s *testConnections) Update(context.Context, domain.Connection) error { return nil }
-func (s *testConnections) Delete(context.Context, string) error            { return nil }
+func (s *testConnections) Patch(context.Context, string, func(*domain.Connection) error) (domain.Connection, error) {
+	return domain.Connection{}, domain.ErrUnsupported
+}
+func (s *testConnections) Delete(context.Context, string) error { return nil }
 
 type runnerFunc func(context.Context, app.RunConnectionOptions) (app.RunConnectionResult, error)
 
