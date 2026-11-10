@@ -123,6 +123,29 @@ func (k ItemKind) Valid() bool {
 	}
 }
 
+// ItemState is the normalized lifecycle state of an item known by its source.
+// It is optional: sources that cannot determine state leave it empty, and an
+// empty state is excluded from the item hash so old items keep their hashes.
+type ItemState string
+
+const (
+	ItemStateOpen     ItemState = "open"
+	ItemStateClosed   ItemState = "closed"
+	ItemStateMerged   ItemState = "merged"
+	ItemStateResolved ItemState = "resolved"
+	ItemStateIgnored  ItemState = "ignored"
+)
+
+// Valid reports whether s is empty or a known state.
+func (s ItemState) Valid() bool {
+	switch s {
+	case "", ItemStateOpen, ItemStateClosed, ItemStateMerged, ItemStateResolved, ItemStateIgnored:
+		return true
+	default:
+		return false
+	}
+}
+
 // Capabilities declares what a source can do. The host uses them to choose a
 // run strategy; it never assumes a capability that is not declared.
 type Capabilities struct {
@@ -442,7 +465,9 @@ type Item struct {
 	Body   string   `json:"body,omitempty"` // Markdown
 	URL    string   `json:"url,omitempty"`
 	Author string   `json:"author,omitempty"`
-	Labels []string `json:"labels,omitempty"`
+	// State is the normalized lifecycle state; empty when unknown.
+	State  ItemState `json:"state,omitempty"`
+	Labels []string  `json:"labels,omitempty"`
 	// CreatedAt and UpdatedAt are provider times; zero when unknown.
 	CreatedAt time.Time `json:"createdAt,omitzero"`
 	UpdatedAt time.Time `json:"updatedAt,omitzero"`
@@ -478,6 +503,9 @@ func (i Item) Validate() error {
 		if len(i.Body) > MaxItemBodyBytes {
 			return NewValidationError("item.body", fmt.Sprintf("must be at most %d bytes; the host truncates longer bodies", MaxItemBodyBytes))
 		}
+		if !i.State.Valid() {
+			return NewValidationError("item.state", fmt.Sprintf("unknown state %q", i.State))
+		}
 		if err := validateTags("item.labels", i.Labels); err != nil {
 			return err
 		}
@@ -492,11 +520,13 @@ func (i Item) Validate() error {
 }
 
 // ComputeHash returns "sha256:<hex>" over normalized content: kind, title,
-// body, URL, author, sorted labels and ACL, provider times, project and the
-// deleted flag. ObservedAt, Ref and Hash are excluded, so re-reading an
-// unchanged item yields the same hash. Body line endings are normalized to
-// LF, trailing spaces per line and leading/trailing blank lines are dropped;
-// title, author and tags are whitespace-collapsed.
+// body, URL, author, sorted labels and ACL, provider times, project, the
+// deleted flag and, only when non-empty, the normalized state. ObservedAt,
+// Ref and Hash are excluded, so re-reading an unchanged item yields the same
+// hash. Body line endings are normalized to LF, trailing spaces per line and
+// leading/trailing blank lines are dropped; title, author and tags are
+// whitespace-collapsed. An empty State appends nothing, so hashes computed
+// before State existed are unchanged.
 func (i Item) ComputeHash() string {
 	var buf bytes.Buffer
 	writeField := func(value string) {
@@ -518,6 +548,10 @@ func (i Item) ComputeHash() string {
 		writeField(timeString(i.CreatedAt))
 		writeField(timeString(i.UpdatedAt))
 		writeField(strings.TrimSpace(i.ProjectID))
+		if i.State != "" {
+			writeField("state")
+			writeField(string(i.State))
+		}
 	}
 	sum := sha256.Sum256(buf.Bytes())
 	return ItemHashPrefix + hex.EncodeToString(sum[:])

@@ -361,6 +361,7 @@ func (s *Source) toItem(ctx context.Context, token, connectionID string, collect
 		item.Ref.ExternalID = fmt.Sprintf("%s#issue-%d", collection.repo, x.Number)
 		item.Kind, item.Title, item.URL, item.Author = domain.ItemIssue, x.Title, x.HTMLURL, x.User.Login
 		item.CreatedAt, item.UpdatedAt = x.CreatedAt, x.UpdatedAt
+		item.State = normalizeGitHubState(x.State)
 		item.Labels = labelNames(x.Labels)
 		item.Body = x.Body
 		commentPaths = []string{repoAPIPath(collection.repo) + "/issues/" + strconv.Itoa(x.Number) + "/comments"}
@@ -369,6 +370,7 @@ func (s *Source) toItem(ctx context.Context, token, connectionID string, collect
 		item.Ref.ExternalID = fmt.Sprintf("%s#pull-%d", collection.repo, x.Number)
 		item.Kind, item.Title, item.URL, item.Author = domain.ItemPullRequest, x.Title, x.HTMLURL, x.User.Login
 		item.CreatedAt, item.UpdatedAt = x.CreatedAt, x.UpdatedAt
+		item.State = normalizeGitHubPullState(x)
 		item.Labels = labelNames(x.Labels)
 		item.Body = x.Body
 		commentPaths = []string{
@@ -452,6 +454,28 @@ func capUTF8(value string, limit int) string {
 		limit--
 	}
 	return value[:limit]
+}
+
+// normalizeGitHubState maps a provider issue/PR state to the normalized item
+// state. Unknown values stay empty so the source degrades gracefully.
+func normalizeGitHubState(raw string) domain.ItemState {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "open":
+		return domain.ItemStateOpen
+	case "closed":
+		return domain.ItemStateClosed
+	default:
+		return ""
+	}
+}
+
+// normalizeGitHubPullState prefers merged_at: GitHub reports a merged pull
+// request's state as "closed", so the merge time is the only reliable signal.
+func normalizeGitHubPullState(pull *pullRequest) domain.ItemState {
+	if pull.MergedAt != nil {
+		return domain.ItemStateMerged
+	}
+	return normalizeGitHubState(pull.State)
 }
 
 func labelNames(labels []label) []string {

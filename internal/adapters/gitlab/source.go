@@ -690,6 +690,7 @@ func sourceIssueItem(connectionID, projectID, project string, record sourceIssue
 		Body:      sourceBody(record.Description, notes),
 		URL:       record.WebURL,
 		Author:    sourceAuthor(record.Author),
+		State:     normalizeGitLabState(record.State),
 		Labels:    sortedLabels(record.Labels),
 		CreatedAt: record.CreatedAt,
 		UpdatedAt: record.UpdatedAt,
@@ -705,10 +706,27 @@ func sourceMergeRequestItem(connectionID, projectID, project string, record sour
 		Body:      sourceBody(record.Description, notes),
 		URL:       record.WebURL,
 		Author:    sourceAuthor(record.Author),
+		State:     normalizeGitLabState(record.State),
 		Labels:    sortedLabels(record.Labels),
 		CreatedAt: record.CreatedAt,
 		UpdatedAt: record.UpdatedAt,
 		ProjectID: projectID,
+	}
+}
+
+// normalizeGitLabState maps GitLab's issue and merge request states. GitLab
+// reports merged merge requests as "merged" and closed ones as "closed";
+// "opened" is its name for open. Unknown values stay empty.
+func normalizeGitLabState(raw string) domain.ItemState {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "opened", "open", "reopened":
+		return domain.ItemStateOpen
+	case "closed":
+		return domain.ItemStateClosed
+	case "merged":
+		return domain.ItemStateMerged
+	default:
+		return ""
 	}
 }
 

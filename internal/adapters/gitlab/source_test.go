@@ -91,6 +91,52 @@ func TestSourceReadsIssueDescriptionAndBoundedNotesWithCheckpoint(t *testing.T) 
 	}
 }
 
+func TestSourceNormalizesIssueAndMergeRequestState(t *testing.T) {
+	at := time.Date(2026, 11, 1, 0, 0, 0, 0, time.UTC)
+	cases := []struct {
+		name  string
+		issue domain.Item
+		want  domain.ItemState
+	}{
+		{
+			name:  "opened issue",
+			issue: sourceIssueItem("gl-test", "lv24", "acme/widgets", sourceIssue{IID: 1, Title: "Open", State: "opened", CreatedAt: at, UpdatedAt: at}, nil),
+			want:  domain.ItemStateOpen,
+		},
+		{
+			name:  "closed issue",
+			issue: sourceIssueItem("gl-test", "lv24", "acme/widgets", sourceIssue{IID: 2, Title: "Closed", State: "closed", CreatedAt: at, UpdatedAt: at}, nil),
+			want:  domain.ItemStateClosed,
+		},
+		{
+			name:  "opened merge request",
+			issue: sourceMergeRequestItem("gl-test", "lv24", "acme/widgets", sourceMergeRequest{IID: 3, Title: "Open MR", State: "opened", CreatedAt: at, UpdatedAt: at}, nil),
+			want:  domain.ItemStateOpen,
+		},
+		{
+			name:  "merged merge request",
+			issue: sourceMergeRequestItem("gl-test", "lv24", "acme/widgets", sourceMergeRequest{IID: 4, Title: "Merged MR", State: "merged", CreatedAt: at, UpdatedAt: at}, nil),
+			want:  domain.ItemStateMerged,
+		},
+		{
+			name:  "unknown state",
+			issue: sourceIssueItem("gl-test", "lv24", "acme/widgets", sourceIssue{IID: 5, Title: "Unknown", State: "locked", CreatedAt: at, UpdatedAt: at}, nil),
+			want:  "",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.issue.State != tc.want {
+				t.Fatalf("state = %q, want %q", tc.issue.State, tc.want)
+			}
+		})
+	}
+	commit := sourceCommitItem("gl-test", "lv24", "acme/widgets", sourceCommit{ID: "abc", Title: "Commit", CommittedDate: at}, nil)
+	if commit.State != "" {
+		t.Fatalf("commit state = %q, want empty", commit.State)
+	}
+}
+
 var _ ports.CredentialProvider = sourceTestCredentials{}
 
 type sourceFixture struct {

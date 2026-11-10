@@ -432,7 +432,7 @@ const issuesQuery = `query LinearIssues($first: Int, $after: String, $filter: Is
   issues(first: $first, after: $after, filter: $filter, orderBy: $orderBy) {
     nodes {
       id identifier title description url createdAt updatedAt
-      state { name }
+      state { name type }
       team { key }
       labels(first: 50) { nodes { name } }
       assignee { name }
@@ -486,6 +486,9 @@ type gqlPageInfo struct {
 
 type gqlName struct {
 	Name string `json:"name"`
+	// Type is Linear's state category (backlog, unstarted, started,
+	// completed, canceled); empty for names that are not workflow states.
+	Type string `json:"type,omitempty"`
 }
 
 type gqlTeam struct {
@@ -624,10 +627,34 @@ func toItem(connectionID, projectID string, issue gqlIssue) domain.Item {
 		Body:      issueBody(issue.Description, issueComments(issue.Comments)),
 		URL:       strings.TrimSpace(issue.URL),
 		Author:    author,
+		State:     normalizeLinearState(issue.State),
 		Labels:    issueLabels(issue.Labels),
 		CreatedAt: issue.CreatedAt,
 		UpdatedAt: issue.UpdatedAt,
 		ProjectID: projectID,
+	}
+}
+
+// normalizeLinearState maps Linear workflow state types to normalized item
+// states. completed and canceled are closed; started, unstarted and backlog
+// are open. The state name is the fallback when an older API omits type.
+func normalizeLinearState(state *gqlName) domain.ItemState {
+	if state == nil {
+		return ""
+	}
+	switch strings.ToLower(strings.TrimSpace(state.Type)) {
+	case "completed", "canceled", "cancelled":
+		return domain.ItemStateClosed
+	case "started", "unstarted", "backlog", "planned", "triage":
+		return domain.ItemStateOpen
+	}
+	switch strings.ToLower(strings.TrimSpace(state.Name)) {
+	case "done", "completed", "canceled", "cancelled":
+		return domain.ItemStateClosed
+	case "":
+		return ""
+	default:
+		return domain.ItemStateOpen
 	}
 }
 

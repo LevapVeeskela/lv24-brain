@@ -28,9 +28,9 @@ type testCredentials struct{ token string }
 func (c testCredentials) Get(context.Context, string, string) (string, error) { return c.token, nil }
 
 type testIssue struct {
-	Key, Project, Summary, Description, Status, Type, Reporter, Assignee string
-	Labels                                                               []string
-	Created, Updated                                                     time.Time
+	Key, Project, Summary, Description, Status, Category, Type, Reporter, Assignee string
+	Labels                                                                         []string
+	Created, Updated                                                               time.Time
 }
 
 type testJira struct {
@@ -144,7 +144,7 @@ func issueJSON(value testIssue, cloud bool) map[string]any {
 			"summary": value.Summary, "description": description, "labels": value.Labels,
 			"created": value.Created.Format(time.RFC3339), "updated": value.Updated.Format(time.RFC3339),
 			"reporter": map[string]any{"displayName": value.Reporter}, "assignee": map[string]any{"displayName": value.Assignee},
-			"status": map[string]any{"name": value.Status}, "issuetype": map[string]any{"name": value.Type},
+			"status": map[string]any{"name": value.Status, "statusCategory": map[string]any{"key": value.Category}}, "issuetype": map[string]any{"name": value.Type},
 			"project": map[string]any{"key": value.Project, "name": "Project " + value.Project},
 		},
 	}
@@ -191,6 +191,34 @@ func buildSource(t *testing.T, conn domain.Connection, client *http.Client) *Sou
 func issueAt(key string, at time.Time) testIssue {
 	return testIssue{Key: key, Project: "ENG", Summary: "Summary " + key, Description: "description " + key,
 		Status: "Open", Type: "Task", Reporter: "Reporter", Assignee: "Assignee", Labels: []string{"backend"}, Created: at.Add(-time.Hour), Updated: at}
+}
+
+func TestSourceNormalizesStatusCategory(t *testing.T) {
+	at := time.Date(2026, 11, 9, 10, 0, 0, 0, time.UTC)
+	done := issueAt("ENG-1", at)
+	done.Status, done.Category = "Done", "done"
+	inProgress := issueAt("ENG-2", at.Add(time.Minute))
+	inProgress.Status, inProgress.Category = "In Progress", "indeterminate"
+	legacy := issueAt("ENG-3", at.Add(2*time.Minute))
+	legacy.Status, legacy.Category = "Closed", ""
+
+	fake := newTestJira("cloud", []testIssue{done, inProgress, legacy})
+	server := httptest.NewServer(http.HandlerFunc(fake.handler))
+	defer server.Close()
+	source := buildSource(t, testConnection(server.URL, "cloud"), server.Client())
+	batch, err := source.Read(context.Background(), ports.ReadRequest{Connection: source.connection, Limit: 10})
+	if err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	if len(batch.Items) != 3 {
+		t.Fatalf("items = %+v", batch.Items)
+	}
+	want := []domain.ItemState{domain.ItemStateClosed, domain.ItemStateOpen, domain.ItemStateClosed}
+	for index, state := range want {
+		if batch.Items[index].State != state {
+			t.Fatalf("item %d state = %q, want %q", index, batch.Items[index].State, state)
+		}
+	}
 }
 
 func TestDescriptorAndBaseURL(t *testing.T) {

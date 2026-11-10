@@ -79,6 +79,55 @@ func TestSourceReadsBoundedIssueBodyAndCommentsWithResumableCheckpoint(t *testin
 	}
 }
 
+func TestSourceNormalizesIssueAndPullRequestState(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/comments"):
+			_, _ = w.Write([]byte(`[]`))
+		case r.URL.Path == "/repos/acme/widgets/issues":
+			_, _ = w.Write([]byte(`[
+				{"number":1,"title":"Open issue","state":"open","html_url":"https://github.test/acme/widgets/issues/1","user":{"login":"alice"},"created_at":"2026-11-01T00:00:00Z","updated_at":"2026-11-02T00:00:00Z"},
+				{"number":2,"title":"Closed issue","state":"closed","html_url":"https://github.test/acme/widgets/issues/2","user":{"login":"alice"},"created_at":"2026-11-01T00:00:00Z","updated_at":"2026-11-02T00:00:00Z","closed_at":"2026-11-02T00:00:00Z"}
+			]`))
+		case r.URL.Path == "/repos/acme/widgets/pulls":
+			_, _ = w.Write([]byte(`[
+				{"number":3,"title":"Open pull","state":"open","html_url":"https://github.test/acme/widgets/pull/3","user":{"login":"alice"},"created_at":"2026-11-01T00:00:00Z","updated_at":"2026-11-02T00:00:00Z"},
+				{"number":4,"title":"Merged pull","state":"closed","merged_at":"2026-11-02T00:00:00Z","html_url":"https://github.test/acme/widgets/pull/4","user":{"login":"alice"},"created_at":"2026-11-01T00:00:00Z","updated_at":"2026-11-02T00:00:00Z"}
+			]`))
+		case r.URL.Path == "/repos/acme/widgets/commits":
+			_, _ = w.Write([]byte(`[]`))
+		default:
+			t.Errorf("unexpected request path: %s", r.URL.Path)
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	conn := domain.Connection{ID: "gh-test", Provider: Name, BaseURL: server.URL, Settings: map[string]string{"repos": "acme/widgets"}}
+	source, err := NewSource(conn, sourceCredentials{token: sourceToken}, server.Client(), func() time.Time { return time.Unix(0, 0) })
+	if err != nil {
+		t.Fatalf("NewSource: %v", err)
+	}
+	batch, err := source.Read(context.Background(), ports.ReadRequest{Connection: conn, Limit: 10})
+	if err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	if len(batch.Items) != 4 {
+		t.Fatalf("items = %#v, want four", batch.Items)
+	}
+	want := []domain.ItemState{
+		domain.ItemStateOpen,
+		domain.ItemStateClosed,
+		domain.ItemStateOpen,
+		domain.ItemStateMerged,
+	}
+	for index, state := range want {
+		if batch.Items[index].State != state {
+			t.Fatalf("item %d state = %q, want %q", index, batch.Items[index].State, state)
+		}
+	}
+}
+
 func TestSourceReadsPullRequestReviewCommentsAndCommitComments(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if got := r.Header.Get("Authorization"); got != "Bearer "+sourceToken {

@@ -160,6 +160,39 @@ func fakeStart(issues []gqlIssue, variables map[string]any) int {
 	return len(issues)
 }
 
+func TestToItemNormalizesStateType(t *testing.T) {
+	if !strings.Contains(issuesQuery, "state { name type }") {
+		t.Fatalf("issues query does not request the state type: %s", issuesQuery)
+	}
+	cases := []struct {
+		name  string
+		state *gqlName
+		want  domain.ItemState
+	}{
+		{"completed", &gqlName{Name: "Done", Type: "completed"}, domain.ItemStateClosed},
+		{"canceled", &gqlName{Name: "Canceled", Type: "canceled"}, domain.ItemStateClosed},
+		{"started", &gqlName{Name: "In Progress", Type: "started"}, domain.ItemStateOpen},
+		{"unstarted", &gqlName{Name: "Todo", Type: "unstarted"}, domain.ItemStateOpen},
+		{"backlog", &gqlName{Name: "Backlog", Type: "backlog"}, domain.ItemStateOpen},
+		{"legacy name fallback", &gqlName{Name: "Done"}, domain.ItemStateClosed},
+		{"unknown", &gqlName{Name: "Custom", Type: "something-new"}, domain.ItemStateOpen},
+		{"missing", nil, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			item := toItem("ln-test", "lv24", gqlIssue{
+				ID:         "issue-1",
+				Identifier: "ENG-1",
+				Title:      "Issue",
+				State:      tc.state,
+			})
+			if item.State != tc.want {
+				t.Fatalf("state = %q, want %q", item.State, tc.want)
+			}
+		})
+	}
+}
+
 func (f *linearFake) addIssue() {
 	f.mu.Lock()
 	defer f.mu.Unlock()

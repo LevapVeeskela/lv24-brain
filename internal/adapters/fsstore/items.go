@@ -97,6 +97,7 @@ type itemFrontmatter struct {
 	Title         string             `yaml:"title,omitempty"`
 	URL           string             `yaml:"url,omitempty"`
 	Author        string             `yaml:"author,omitempty"`
+	State         string             `yaml:"state,omitempty"`
 	Labels        []string           `yaml:"labels,omitempty"`
 	ACL           []string           `yaml:"acl,omitempty"`
 	Project       string             `yaml:"project,omitempty"`
@@ -631,6 +632,7 @@ func encodeItem(item domain.Item) ([]byte, error) {
 		front.Title = item.Title
 		front.URL = item.URL
 		front.Author = item.Author
+		front.State = string(item.State)
 		front.Labels = item.Labels
 		front.ACL = item.ACL
 		front.Project = item.ProjectID
@@ -688,6 +690,7 @@ func readItemFile(path, key string) (domain.Item, error) {
 		Body:      strings.TrimSuffix(body, "\n"),
 		URL:       front.URL,
 		Author:    front.Author,
+		State:     domain.ItemState(front.State),
 		Labels:    front.Labels,
 		ACL:       front.ACL,
 		Hash:      front.Hash,

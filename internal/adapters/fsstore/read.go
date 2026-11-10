@@ -241,6 +241,7 @@ func parseNotesBody(body string, defaultDate time.Time) ([]domain.Note, error) {
 				Body:      strings.TrimRight(strings.Join(lines[start:i], "\n"), "\n"),
 				Tags:      nonNilStrings(metadata.Tags),
 				Permalink: metadata.Permalink,
+				Source:    metadata.Source,
 				CreatedAt: metadata.CreatedAt.UTC(),
 			})
 			continue
@@ -328,6 +329,10 @@ func readDecisionFile(path string) (domain.Decision, error) {
 	if status == "" {
 		status = domain.DecisionProposed
 	}
+	source, err := sourceRefFromFrontmatter(frontmatter.Source)
+	if err != nil {
+		return domain.Decision{}, fmt.Errorf("parse %s: %w", path, err)
+	}
 	return domain.Decision{
 		ID:           frontmatter.ID,
 		ProjectID:    frontmatter.ProjectID,
@@ -339,6 +344,7 @@ func readDecisionFile(path string) (domain.Decision, error) {
 		Evidence:     evidence,
 		Paths:        paths,
 		Permalink:    frontmatter.Permalink,
+		Source:       source,
 		CreatedAt:    frontmatter.CreatedAt.UTC(),
 		UpdatedAt:    frontmatter.UpdatedAt.UTC(),
 	}, nil
@@ -361,6 +367,10 @@ func readAttemptFile(path string) (domain.Attempt, error) {
 	if title == "" {
 		title = frontmatter.Title
 	}
+	source, err := sourceRefFromFrontmatter(frontmatter.Source)
+	if err != nil {
+		return domain.Attempt{}, fmt.Errorf("parse %s: %w", path, err)
+	}
 	return domain.Attempt{
 		ID:         frontmatter.ID,
 		ProjectID:  frontmatter.ProjectID,
@@ -369,6 +379,7 @@ func readAttemptFile(path string) (domain.Attempt, error) {
 		Result:     result,
 		Reason:     reason,
 		Permalink:  frontmatter.Permalink,
+		Source:     source,
 		CreatedAt:  frontmatter.CreatedAt.UTC(),
 		UpdatedAt:  frontmatter.UpdatedAt.UTC(),
 	}, nil

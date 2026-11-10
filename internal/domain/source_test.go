@@ -301,6 +301,7 @@ func TestItemHashChangesWithContent(t *testing.T) {
 		"acl":      func(i *Item) { i.ACL = []string{"group:eng"} },
 		"deleted":  func(i *Item) { i.Deleted = true },
 		"project":  func(i *Item) { i.ProjectID = "lv24" },
+		"state":    func(i *Item) { i.State = ItemStateMerged },
 		"boundary": func(i *Item) { i.Title, i.Body = "Fix   loginline one", "\nline two" },
 	}
 	for name, mutate := range mutations {
@@ -324,6 +325,8 @@ func TestItemValidate(t *testing.T) {
 	untitled.Title = " "
 	badKind := validItem()
 	badKind.Kind = "ticket"
+	badState := validItem()
+	badState.State = "reopened"
 
 	// Act / Assert
 	if err := good.Validate(); err != nil {
@@ -332,10 +335,28 @@ func TestItemValidate(t *testing.T) {
 	if err := tombstone.Validate(); err != nil {
 		t.Fatalf("tombstone: %v", err)
 	}
-	for name, item := range map[string]Item{"stale hash": stale, "untitled": untitled, "bad kind": badKind} {
+	for name, item := range map[string]Item{"stale hash": stale, "untitled": untitled, "bad kind": badKind, "bad state": badState} {
 		if err := item.Validate(); !errors.Is(err, ErrValidation) {
 			t.Errorf("%s: Validate() = %v", name, err)
 		}
+	}
+}
+
+func TestItemHashIsUnchangedWithoutState(t *testing.T) {
+	// The literal is the hash of validItem before Item.State existed. Empty
+	// state must append nothing so stored items do not re-upsert on upgrade.
+	const legacyHash = "sha256:8596fbc6cf8fc5fe7fc25e0e0ef8a16f1bda4d3ae70cc1266c36ec04067c8f46"
+	item := validItem()
+	if got := item.ComputeHash(); got != legacyHash {
+		t.Fatalf("legacy item hash = %s, want %s", got, legacyHash)
+	}
+	item.State = ItemStateClosed
+	if item.ComputeHash() == legacyHash {
+		t.Fatal("state did not change the hash")
+	}
+	item.State = ""
+	if got := item.ComputeHash(); got != legacyHash {
+		t.Fatalf("clearing state did not restore the hash: %s", got)
 	}
 }
 

@@ -24,11 +24,12 @@ type noteFileFrontmatter struct {
 }
 
 type noteMetadata struct {
-	ID        string    `json:"id"`
-	Title     string    `json:"title"`
-	Tags      []string  `json:"tags,omitempty"`
-	Permalink string    `json:"permalink,omitempty"`
-	CreatedAt time.Time `json:"created_at"`
+	ID        string            `json:"id"`
+	Title     string            `json:"title"`
+	Tags      []string          `json:"tags,omitempty"`
+	Permalink string            `json:"permalink,omitempty"`
+	Source    *domain.SourceRef `json:"source,omitempty"`
+	CreatedAt time.Time         `json:"created_at"`
 }
 
 type decisionFrontmatter struct {
@@ -36,14 +37,66 @@ type decisionFrontmatter struct {
 	ID                   string                `yaml:"id,omitempty"`
 	Title                string                `yaml:"title,omitempty"`
 	Status               domain.DecisionStatus `yaml:"status,omitempty"`
+	Source               *sourceRefFrontmatter `yaml:"source,omitempty"`
 	CreatedAt            time.Time             `yaml:"created_at,omitempty"`
 }
 
 type attemptFrontmatter struct {
 	markdown.Frontmatter `yaml:",inline"`
-	ID                   string    `yaml:"id,omitempty"`
-	Title                string    `yaml:"title,omitempty"`
-	CreatedAt            time.Time `yaml:"created_at,omitempty"`
+	ID                   string                `yaml:"id,omitempty"`
+	Title                string                `yaml:"title,omitempty"`
+	Source               *sourceRefFrontmatter `yaml:"source,omitempty"`
+	CreatedAt            time.Time             `yaml:"created_at,omitempty"`
+}
+
+// sourceRefFrontmatter is the on-disk form of domain.SourceRef. Times are
+// RFC 3339 strings so a zero observation time is omitted rather than encoded
+// as year 1.
+type sourceRefFrontmatter struct {
+	ProjectID    string  `yaml:"project_id,omitempty"`
+	ConnectionID string  `yaml:"connection_id,omitempty"`
+	ItemKey      string  `yaml:"item_key,omitempty"`
+	ExternalID   string  `yaml:"external_id,omitempty"`
+	URL          string  `yaml:"url,omitempty"`
+	ObservedAt   string  `yaml:"observed_at,omitempty"`
+	ProposalID   string  `yaml:"proposal_id,omitempty"`
+	Confidence   float64 `yaml:"confidence,omitempty"`
+}
+
+func sourceRefToFrontmatter(source *domain.SourceRef) *sourceRefFrontmatter {
+	if source == nil {
+		return nil
+	}
+	return &sourceRefFrontmatter{
+		ProjectID:    source.ProjectID,
+		ConnectionID: source.ConnectionID,
+		ItemKey:      source.ItemKey,
+		ExternalID:   source.ExternalID,
+		URL:          source.URL,
+		ObservedAt:   formatItemTime(source.ObservedAt),
+		ProposalID:   source.ProposalID,
+		Confidence:   source.Confidence,
+	}
+}
+
+func sourceRefFromFrontmatter(source *sourceRefFrontmatter) (*domain.SourceRef, error) {
+	if source == nil {
+		return nil, nil
+	}
+	observedAt, err := parseItemTime(source.ObservedAt)
+	if err != nil {
+		return nil, fmt.Errorf("source observed_at: %w", err)
+	}
+	return &domain.SourceRef{
+		ProjectID:    source.ProjectID,
+		ConnectionID: source.ConnectionID,
+		ItemKey:      source.ItemKey,
+		ExternalID:   source.ExternalID,
+		URL:          source.URL,
+		ObservedAt:   observedAt,
+		ProposalID:   source.ProposalID,
+		Confidence:   source.Confidence,
+	}, nil
 }
 
 type handoffFrontmatter struct {
@@ -179,6 +232,7 @@ func appendNoteLocked(path string, note domain.Note, date string, createdAt, upd
 		Title:     note.Title,
 		Tags:      nonNilStrings(note.Tags),
 		Permalink: note.Permalink,
+		Source:    note.Source,
 		CreatedAt: createdAt,
 	}, note.Body)
 	if body != "" && !strings.HasSuffix(body, "\n\n") {
@@ -241,6 +295,7 @@ func (s *Store) AppendDecision(ctx context.Context, decision domain.Decision) (d
 				ID:        id,
 				Title:     decision.Title,
 				Status:    decision.Status,
+				Source:    sourceRefToFrontmatter(decision.Source),
 				CreatedAt: createdAt,
 			}
 			raw, err := markdown.Render(frontmatter, renderDecisionBody(decision))
@@ -292,6 +347,7 @@ func (s *Store) AppendAttempt(ctx context.Context, attempt domain.Attempt) (doma
 				},
 				ID:        id,
 				Title:     attempt.Title,
+				Source:    sourceRefToFrontmatter(attempt.Source),
 				CreatedAt: createdAt,
 			}
 			raw, err := markdown.Render(frontmatter, renderAttemptBody(attempt))

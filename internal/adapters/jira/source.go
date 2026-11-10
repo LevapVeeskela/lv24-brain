@@ -536,9 +536,32 @@ func (s *Source) issueItem(ctx context.Context, token, connectionID string, valu
 	return domain.Item{
 		Ref:  domain.ItemRef{ConnectionID: connectionID, ExternalID: value.Fields.Project.Key + "/" + value.Key},
 		Kind: domain.ItemIssue, Title: title, Body: body, URL: itemURL, Author: author,
+		State:  normalizeJiraState(value.Fields.Status.Name, value.Fields.Status.StatusCategory.Key),
 		Labels: labels, CreatedAt: value.Fields.Created, UpdatedAt: value.Fields.Updated,
 		ProjectID: singleConnectionProject(s.connection.Projects),
 	}, nil
+}
+
+// normalizeJiraState maps Jira's done category to closed and every other known
+// category to open. Older servers omit statusCategory; the status name is then
+// the fallback. An empty status yields an empty state.
+func normalizeJiraState(name, categoryKey string) domain.ItemState {
+	switch category := strings.ToLower(strings.TrimSpace(categoryKey)); category {
+	case "done":
+		return domain.ItemStateClosed
+	case "":
+		// Fall through to the name fallback for older servers.
+	default:
+		return domain.ItemStateOpen
+	}
+	switch strings.ToLower(strings.TrimSpace(name)) {
+	case "done", "closed", "resolved", "fixed", "complete", "completed":
+		return domain.ItemStateClosed
+	case "":
+		return ""
+	default:
+		return domain.ItemStateOpen
+	}
 }
 
 func (s *Source) comments(ctx context.Context, token, key string) ([]jiraComment, error) {
@@ -668,7 +691,10 @@ type issue struct {
 		Reporter    jiraUser  `json:"reporter"`
 		Assignee    jiraUser  `json:"assignee"`
 		Status      struct {
-			Name string `json:"name"`
+			Name           string `json:"name"`
+			StatusCategory struct {
+				Key string `json:"key"`
+			} `json:"statusCategory"`
 		} `json:"status"`
 		IssueType struct {
 			Name string `json:"name"`
