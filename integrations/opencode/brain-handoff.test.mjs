@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 
-import plugin, { createServer } from "./brain-handoff.js";
+import plugin, { createServer, setupV2 } from "./brain-handoff.js";
 
 const DIRECTORY = "/work/proj";
 const CONFIG = "/brain/brain.yaml";
@@ -29,9 +29,56 @@ function fakeCtx({ withHook = true } = {}) {
 }
 
 /**
- * Fake spawn. `script(child, args)` decides how the child behaves; every
- * call is recorded in `calls` with its args and options.
+ * Fake V2 ctx: `push(event)` feeds the subscription, which stays open until
+ * the cleanup aborts it (mirrors ctx.event.subscribe on a live server).
  */
+function fakeV2Ctx({ withHook = true } = {}) {
+  const base = fakeCtx({ withHook });
+  const queue = [];
+  const waiters = [];
+  const stats = { subscriptions: 0 };
+  let closed = false;
+
+  base.ctx.event = {
+    subscribe: ({ signal } = {}) => ({
+      [Symbol.asyncIterator]() {
+        stats.subscriptions += 1;
+        return {
+          async next() {
+            if (closed || signal?.aborted) return { done: true, value: undefined };
+            if (queue.length > 0) return { done: false, value: queue.shift() };
+            await new Promise((resolve) => {
+              waiters.push(resolve);
+              signal?.addEventListener("abort", resolve, { once: true });
+            });
+            if (closed || signal?.aborted) return { done: true, value: undefined };
+            return { done: false, value: queue.shift() };
+          },
+          async return() {
+            closed = true;
+            return { done: true, value: undefined };
+          },
+        };
+      },
+    }),
+  };
+
+  return {
+    ...base,
+    stats,
+    push(event) {
+      queue.push(event);
+      waiters.splice(0).forEach((resolve) => resolve());
+    },
+  };
+}
+
+/** Lets the background subscription loop process queued events. */
+async function flush(times = 4) {
+  for (let i = 0; i < times; i += 1) {
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+}
 function fakeSpawn(script) {
   const calls = [];
   const spawn = (bin, args, options) => {
@@ -230,7 +277,79 @@ test("dispose disposes the context hook registration", async () => {
   assert.equal(state.registrationDisposed, true);
 });
 
-test("default export keeps the { id, server } shape", () => {
+test("default export keeps the V1 server and the V2 setup entrypoints", () => {
   assert.equal(plugin.id, "brain-handoff");
   assert.equal(typeof plugin.server, "function");
+  assert.equal(typeof plugin.setup, "function");
+});
+
+test("V2 setup appends the start context to system parts", async () => {
+  const { spawn, calls } = fakeSpawn(exitsWith("Brain: project context"));
+  const f = fakeV2Ctx();
+  const cleanup = await setupV2(f.ctx, { ...BASE_DEPS, spawn });
+
+  const system = baseSystem();
+  await f.handlers.context(contextInput("s1", system));
+
+  assert.equal(startCalls(calls).length, 1);
+  assert.equal(system[0].text, "base\n\nBrain: project context");
+  await cleanup();
+});
+
+test("V2 setup runs the end handoff from the event stream", async () => {
+  const { spawn, calls } = fakeSpawn(exitsWith(""));
+  const f = fakeV2Ctx();
+  const cleanup = await setupV2(f.ctx, { ...BASE_DEPS, spawn });
+
+  f.push({ type: "session.idle", data: { sessionID: "s1" } });
+  await flush();
+
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].args[1], "end");
+  assert.equal(calls[0].args[5], DIRECTORY);
+  assert.equal(calls[0].options.stdio, "ignore");
+  await cleanup();
+});
+
+test("V2 setup drops the cached start context on session.deleted", async () => {
+  const { spawn, calls } = fakeSpawn(exitsWith("ctx"));
+  const f = fakeV2Ctx();
+  const cleanup = await setupV2(f.ctx, { ...BASE_DEPS, spawn });
+
+  await f.handlers.context(contextInput("s1", baseSystem()));
+  f.push({ type: "session.deleted", data: { sessionID: "s1" } });
+  await flush();
+  await f.handlers.context(contextInput("s1", baseSystem()));
+
+  assert.equal(startCalls(calls).length, 2);
+  await cleanup();
+});
+
+test("V2 cleanup aborts the event stream and disposes the context hook", async () => {
+  const { spawn, calls } = fakeSpawn(exitsWith(""));
+  const f = fakeV2Ctx();
+  const cleanup = await setupV2(f.ctx, { ...BASE_DEPS, spawn });
+
+  await cleanup();
+
+  assert.equal(f.state.registrationDisposed, true);
+  assert.equal(f.stats.subscriptions, 1);
+
+  f.push({ type: "session.idle", data: { sessionID: "s1" } });
+  await flush();
+  assert.equal(calls.length, 0);
+});
+
+test("V2 without ctx.event.subscribe keeps the start hook and does no handoff", async () => {
+  const { spawn, calls } = fakeSpawn(exitsWith("ctx"));
+  const { ctx, handlers, state } = fakeCtx();
+  const cleanup = await setupV2(ctx, { ...BASE_DEPS, spawn });
+
+  const system = baseSystem();
+  await handlers.context(contextInput("s1", system));
+
+  assert.equal(system[0].text, "base\n\nctx");
+  await cleanup();
+  assert.equal(state.registrationDisposed, true);
+  assert.equal(calls.length, 1);
 });

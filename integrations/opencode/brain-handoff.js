@@ -1,7 +1,9 @@
 /**
  * LV24 Brain OpenCode hook template.
  *
- * OpenCode loads the default export and calls `server(ctx)`. Two hooks:
+ * One file for both OpenCode runtimes. V1 loads the default export and calls
+ * `server(ctx)`; V2 requires `setup(ctx)` and ignores `server` (V1 does the
+ * opposite). Two hooks in both runtimes:
  *
  *   - Session start: the first `context` call of a session runs
  *     `brain session start --hook opencode` once and appends its plain-text
@@ -9,15 +11,15 @@
  *     cached text again (the system prompt is rebuilt every turn), but the
  *     command never runs twice for one session. Empty output, errors and a
  *     10 s timeout inject nothing.
- *   - Session end: the returned `event` hook runs `brain session end --hook
- *     opencode` when a session goes idle or closes. The engine writes a handoff
- *     only when something was recorded since the latest one and no handoff was
- *     written in the last 30 minutes, so idle checkpoints no longer pile up
- *     placeholder handoffs.
+ *   - Session end: the event stream runs `brain session end --hook opencode`
+ *     when a session goes idle or closes. The engine writes a handoff only when
+ *     something was recorded since the latest one and no handoff was written
+ *     in the last 30 minutes, so idle checkpoints no longer pile up placeholder
+ *     handoffs.
  *
  * Every failure is swallowed so the brain CLI can never break an OpenCode
- * session. Older OpenCode builds without `ctx.session.hook` skip injection and
- * keep the end handoff.
+ * session. Builds without `ctx.session.hook` skip injection and keep the end
+ * handoff; V2 builds without `ctx.event.subscribe` keep the start injection.
  *
  * Placeholders (replaced by installers/windows/install.ps1):
  *   __BRAIN_BIN__       absolute path to brain.exe (or `brain` on PATH)
@@ -25,12 +27,17 @@
  *
  * Environment overrides are supported: BRAIN_BIN, BRAIN_CONFIG.
  *
- * Hook evidence (OpenCode 2.1.4):
- *   - default export shape: { id, server(ctx) }
- *   - server(ctx) returns { event: async ({ event }) => ..., dispose }
- *   - event.type values include session.idle, session.deleted, global.disposed.
- *   - There is no session.end / session.ended event in this build.
- *   - ctx.session.hook("context", fn) receives { sessionID, system }.
+ * Hook evidence:
+ *   - OpenCode 2.1.4 (V1): default export { id, server(ctx) }; server returns
+ *     { event: async ({ event }) => ..., dispose }; event types include
+ *     session.idle, session.deleted, global.disposed; ctx.session.hook
+ *     ("context", fn) receives { sessionID, system }.
+ *   - OpenCode 2.2.x (V2): default export { id, setup(ctx) }; setup registers
+ *     hooks on the context and returns a cleanup function; events come from
+ *     ctx.event.subscribe({ signal }) as raw { type, data, location } values
+ *     (session.idle / session.deleted stay, global.disposed is V1-only);
+ *     ctx.session.hook("context", fn) receives { sessionID, system } and
+ *     system is an array of { type: "text", text } parts.
  */
 
 import { spawn } from "node:child_process";
@@ -52,6 +59,11 @@ const FINAL_DEBOUNCE_MS = 60 * 1000;
 const HANDOFF_TIMEOUT_MS = 30 * 1000;
 const START_TIMEOUT_MS = 10 * 1000;
 const MAX_TRACKED_SESSIONS = 200;
+
+// V2 event streams end or throw when the shared server restarts; reconnect
+// with a bounded doubling delay that resets once a real event arrives.
+const V2_EVENT_RETRY_MIN_MS = 50;
+const V2_EVENT_RETRY_MAX_MS = 5000;
 
 const DEFAULT_DEPS = {
   spawn,
@@ -293,7 +305,64 @@ export function createServer(ctx, deps = {}) {
   };
 }
 
+function delayUnlessAborted(ms, signal) {
+  return new Promise((resolvePromise) => {
+    if (signal.aborted) {
+      resolvePromise();
+      return;
+    }
+    const done = () => {
+      clearTimeout(timer);
+      signal.removeEventListener("abort", done);
+      resolvePromise();
+    };
+    const timer = setTimeout(done, ms);
+    signal.addEventListener("abort", done, { once: true });
+  });
+}
+
+/**
+ * OpenCode V2 entrypoint. V2 calls `setup(ctx)` and registers hooks on the
+ * context instead of accepting a `{ event }` object, so the same core runs
+ * behind an event subscription. Returns the cleanup V2 expects.
+ */
+export async function setupV2(ctx, deps = {}) {
+  const server = createServer(ctx, deps);
+  const controller = new AbortController();
+
+  if (typeof ctx?.event?.subscribe !== "function") {
+    return () => server.dispose();
+  }
+
+  const listening = (async () => {
+    let retryMs = V2_EVENT_RETRY_MIN_MS;
+    while (!controller.signal.aborted) {
+      try {
+        for await (const event of ctx.event.subscribe({ signal: controller.signal })) {
+          if (controller.signal.aborted) break;
+          // Every subscription opens with a handshake; only a real event
+          // proves the stream is healthy enough to reset the backoff.
+          if (event?.type !== "server.connected") retryMs = V2_EVENT_RETRY_MIN_MS;
+          await server.event({ event });
+        }
+      } catch {
+        // The shared server went away; reconnect below.
+      }
+      if (controller.signal.aborted) break;
+      await delayUnlessAborted(retryMs, controller.signal);
+      retryMs = Math.min(retryMs * 2, V2_EVENT_RETRY_MAX_MS);
+    }
+  })();
+
+  return async () => {
+    controller.abort();
+    await listening;
+    server.dispose();
+  };
+}
+
 export default {
   id: "brain-handoff",
   server: (ctx) => createServer(ctx),
+  setup: (ctx) => setupV2(ctx),
 };

@@ -270,7 +270,9 @@ replaces two placeholders:
 On session idle (10-minute debounce) and session close (1-minute debounce) it
 runs `brain session end --hook opencode`, which writes an `[auto]` handoff only
 when something was recorded since the latest handoff and no handoff is younger
-than 30 minutes. It never blocks or breaks an OpenCode session. See
+than 30 minutes. It never blocks or breaks an OpenCode session. The same file
+serves OpenCode V1 (1.18.29+, `server(ctx)`) and V2 (2.2.x, `setup(ctx)` +
+`ctx.event.subscribe`). See
 `integrations/opencode/README.md` for manual installation and environment
 overrides (`BRAIN_BIN`, `BRAIN_CONFIG`).
 
