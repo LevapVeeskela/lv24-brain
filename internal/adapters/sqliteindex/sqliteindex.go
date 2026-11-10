@@ -10,6 +10,7 @@ package sqliteindex
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -33,6 +34,16 @@ const (
 	snippetEnd       = "]"
 	snippetEllipsis  = "…"
 	snippetTokenSpan = 16
+
+	// retryInitialDelay and retryMaxDelay pace the retries of the connection
+	// pragmas and the schema bootstrap while another process holds a lock.
+	retryInitialDelay = 10 * time.Millisecond
+	retryMaxDelay     = 250 * time.Millisecond
+
+	// SQLite primary result codes for a temporarily locked database. Extended
+	// codes keep the primary code in the low byte.
+	sqliteBusy   = 5
+	sqliteLocked = 6
 )
 
 // Index stores documents in SQLite with an FTS5 mirror for search.
@@ -63,28 +74,121 @@ func Open(path string) (*Index, error) {
 	db := sql.OpenDB(connector)
 	db.SetMaxOpenConns(1)
 	index := &Index{db: db}
-	if err := index.prepareSchema(context.Background()); err != nil {
+	ctx := context.Background()
+	// WAL and synchronous are per-connection settings, but the journal-mode
+	// switch takes an exclusive lock that busy_timeout does not cover. Setting
+	// them after opening lets the switch be retried on SQLITE_BUSY.
+	if err := index.configure(ctx); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+	if err := index.prepareSchema(ctx); err != nil {
 		_ = db.Close()
 		return nil, err
 	}
 	return index, nil
 }
 
-// dataSourceName builds the modernc.org/sqlite DSN with per-connection pragmas.
+// dataSourceName builds the modernc.org/sqlite DSN. Only the busy timeout is a
+// connection pragma here: journal_mode and synchronous are applied by
+// configure, because the WAL switch on a brand-new database can fail with
+// SQLITE_BUSY before the busy handler is consulted.
 func dataSourceName(path string) string {
-	pragmas := "?_pragma=busy_timeout(" + strconv.FormatInt(busyTimeout.Milliseconds(), 10) + ")" +
-		"&_pragma=journal_mode(WAL)" +
-		"&_pragma=synchronous(NORMAL)"
+	pragmas := "?_pragma=busy_timeout(" + strconv.FormatInt(busyTimeout.Milliseconds(), 10) + ")"
 	if path == ":memory:" {
 		return "file::memory:" + pragmas
 	}
 	return "file:" + filepath.ToSlash(path) + pragmas
 }
 
-// prepareSchema creates the schema or, when the stored schemaVersion differs,
-// drops the derived tables and recreates them. The version is stored last, so
-// an interrupted rebuild is retried on the next open.
+// configure enables WAL and NORMAL synchronous mode, retrying the journal-mode
+// switch while another process holds the lock. An in-memory database reports
+// "memory" and is accepted as already configured.
+func (i *Index) configure(ctx context.Context) error {
+	err := retryOnBusy(ctx, busyTimeout, func() error {
+		var mode string
+		if err := i.db.QueryRowContext(ctx, "PRAGMA journal_mode=WAL").Scan(&mode); err != nil {
+			return err
+		}
+		switch strings.ToLower(mode) {
+		case "wal", "memory":
+			return nil
+		default:
+			return fmt.Errorf("sqliteindex: journal mode = %q, want wal", mode)
+		}
+	})
+	if err != nil {
+		return fmt.Errorf("sqliteindex: set journal mode: %w", err)
+	}
+	if err := retryOnBusy(ctx, busyTimeout, func() error {
+		_, err := i.db.ExecContext(ctx, "PRAGMA synchronous=NORMAL")
+		return err
+	}); err != nil {
+		return fmt.Errorf("sqliteindex: set synchronous mode: %w", err)
+	}
+	return nil
+}
+
+// retryOnBusy runs operation until it succeeds, fails with something other than
+// SQLITE_BUSY/SQLITE_LOCKED, exhausts the time budget, or ctx ends. The delay
+// starts at retryInitialDelay and doubles up to retryMaxDelay.
+func retryOnBusy(ctx context.Context, timeout time.Duration, operation func() error) error {
+	deadline := time.Now().Add(timeout)
+	delay := retryInitialDelay
+	for {
+		err := operation()
+		if err == nil || !isBusyError(err) {
+			return err
+		}
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			return err
+		}
+		wait := delay
+		if wait > remaining {
+			wait = remaining
+		}
+		timer := time.NewTimer(wait)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return ctx.Err()
+		case <-timer.C:
+		}
+		delay *= 2
+		if delay > retryMaxDelay {
+			delay = retryMaxDelay
+		}
+	}
+}
+
+// isBusyError reports whether err is SQLITE_BUSY or SQLITE_LOCKED, including
+// their extended codes.
+func isBusyError(err error) bool {
+	var sqliteErr *sqlite.Error
+	if !errors.As(err, &sqliteErr) {
+		return false
+	}
+	switch sqliteErr.Code() & 0xff {
+	case sqliteBusy, sqliteLocked:
+		return true
+	default:
+		return false
+	}
+}
+
+// prepareSchema creates the schema, retrying while another process is still
+// bootstrapping the same new database.
 func (i *Index) prepareSchema(ctx context.Context) error {
+	return retryOnBusy(ctx, busyTimeout, func() error {
+		return i.prepareSchemaOnce(ctx)
+	})
+}
+
+// prepareSchemaOnce creates the schema or, when the stored schemaVersion
+// differs, drops the derived tables and recreates them. The version is stored
+// last, so an interrupted rebuild is retried on the next open.
+func (i *Index) prepareSchemaOnce(ctx context.Context) error {
 	var version int
 	if err := i.db.QueryRowContext(ctx, "PRAGMA user_version").Scan(&version); err != nil {
 		return fmt.Errorf("sqliteindex: read schema version: %w", err)
