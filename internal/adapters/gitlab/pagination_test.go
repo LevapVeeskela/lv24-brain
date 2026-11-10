@@ -38,8 +38,8 @@ func (f *fakeCollection) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	f.requests = append(f.requests, r.URL)
 	f.mu.Unlock()
 
-	if got := r.Header.Get("PRIVATE-TOKEN"); got != testToken {
-		f.t.Errorf("PRIVATE-TOKEN = %q", got)
+	if got := r.Header.Get("Authorization"); got != "Bearer "+testToken {
+		f.t.Errorf("Authorization = %q", got)
 	}
 	page := 1
 	if raw := r.URL.Query().Get("page"); raw != "" {

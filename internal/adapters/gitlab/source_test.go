@@ -32,8 +32,8 @@ func (c sourceTestCredentials) Get(_ context.Context, connectionID, field string
 func TestSourceReadsIssueDescriptionAndBoundedNotesWithCheckpoint(t *testing.T) {
 	var requests []string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if got := r.Header.Get("PRIVATE-TOKEN"); got != sourceTestToken {
-			t.Errorf("PRIVATE-TOKEN = %q", got)
+		if got := r.Header.Get("Authorization"); got != "Bearer "+sourceTestToken {
+			t.Errorf("Authorization = %q", got)
 		}
 		requests = append(requests, r.URL.RequestURI())
 		w.Header().Set("Content-Type", "application/json")
@@ -184,7 +184,7 @@ func (f *sourceFixture) addIssueLocked() {
 }
 
 func (f *sourceFixture) handler(w http.ResponseWriter, r *http.Request) {
-	if r.Header.Get("PRIVATE-TOKEN") != sourceTestToken {
+	if r.Header.Get("Authorization") != "Bearer "+sourceTestToken {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}

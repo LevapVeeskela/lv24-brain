@@ -404,7 +404,7 @@ func (c *Connector) get(ctx context.Context, token, path string, query url.Value
 // or a next-page URL derived from it by nextPage.
 func (c *Connector) getURL(ctx context.Context, token, requestURL string, out any) (http.Header, error) {
 	header := http.Header{}
-	header.Set("PRIVATE-TOKEN", token)
+	header.Set("Authorization", "Bearer "+token)
 	header.Set("Accept", "application/json")
 	header.Set("User-Agent", c.userAgent)
 	return c.http.GetJSONWithHeaders(ctx, requestURL, header, out)

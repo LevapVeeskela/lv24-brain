@@ -58,8 +58,8 @@ func TestGitLabRunWritesDeterministicMarkdown(t *testing.T) {
 	var methods []string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		methods = append(methods, r.Method)
-		if got := r.Header.Get("PRIVATE-TOKEN"); got != testToken {
-			t.Errorf("PRIVATE-TOKEN = %q", got)
+		if got := r.Header.Get("Authorization"); got != "Bearer "+testToken {
+			t.Errorf("Authorization = %q", got)
 		}
 		if got := r.Header.Get("User-Agent"); got != DefaultUserAgent {
 			t.Errorf("User-Agent = %q", got)

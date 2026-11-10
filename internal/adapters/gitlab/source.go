@@ -893,7 +893,9 @@ func (s *Source) getURL(ctx context.Context, token string, requestURL string, ou
 
 func sourceHeaders(token string) http.Header {
 	header := make(http.Header)
-	header.Set("PRIVATE-TOKEN", token)
+	// GitLab accepts PATs and OAuth access tokens through the Bearer header.
+	// PRIVATE-TOKEN only works for PATs, so OAuth sessions would get a 401.
+	header.Set("Authorization", "Bearer "+token)
 	header.Set("Accept", "application/json")
 	header.Set("User-Agent", DefaultUserAgent)
 	return header

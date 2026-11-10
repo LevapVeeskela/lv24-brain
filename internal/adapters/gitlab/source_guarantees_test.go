@@ -87,7 +87,7 @@ func newFakeGitLab(t *testing.T) *fakeGitLab {
 func (f *fakeGitLab) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.requests = append(f.requests, fakeRequest{Path: r.URL.Path, Query: r.URL.RawQuery, Token: r.Header.Get("PRIVATE-TOKEN")})
+	f.requests = append(f.requests, fakeRequest{Path: r.URL.Path, Query: r.URL.RawQuery, Token: r.Header.Get("Authorization")})
 	w.Header().Set("Content-Type", "application/json")
 	for suffix, status := range f.failSuffix {
 		if strings.HasSuffix(r.URL.Path, suffix) {
@@ -1334,8 +1334,8 @@ func TestSourceTokenNeverAppearsInRequestsOrErrors(t *testing.T) {
 		if strings.Contains(request.Path, sourceTestToken) || strings.Contains(request.Query, sourceTestToken) {
 			t.Fatalf("token leaked into the request URL: %s?%s", request.Path, request.Query)
 		}
-		if request.Token != sourceTestToken {
-			t.Fatalf("PRIVATE-TOKEN header = %q", request.Token)
+		if request.Token != "Bearer "+sourceTestToken {
+			t.Fatalf("Authorization header = %q", request.Token)
 		}
 	}
 
