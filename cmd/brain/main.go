@@ -128,6 +128,8 @@ func runCommand(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return runStatus(rest, stdout, stderr)
 	case "review":
 		return runReview(rest, stdout, stderr)
+	case "promote":
+		return runPromote(rest, stdout, stderr)
 	case "sync":
 		return runSync(rest, stdout, stderr)
 	case "index":
@@ -221,6 +223,7 @@ Commands:
   handoff    Append a session handoff
   status     Show the configured instance
   review     Build a review report; --fix applies the safe fixes
+  promote    Promote or dismiss a proposal candidate
   sync       Pull, commit, and push brain data
   index      Rebuild or refresh the local search index
   search     Search notes, decisions, attempts and handoffs (--dumps adds connector dumps)
@@ -1215,6 +1218,11 @@ func runReview(args []string, stdout, stderr io.Writer) int {
 	if err != nil {
 		return reportError(stderr, "review", err)
 	}
+	proposalFindings, err := runtime.App.ProposalFindings(ctx, projectID)
+	if err != nil {
+		return reportError(stderr, "review", err)
+	}
+	findings = append(findings, proposalFindings...)
 	result, err := runtime.App.Review(ctx, app.ReviewOptions{
 		ProjectID: projectID,
 		Since:     *since,
@@ -1228,10 +1236,11 @@ func runReview(args []string, stdout, stderr io.Writer) int {
 			items = []string{}
 		}
 		return writeJSONReport(stdout, stderr, "review", jsonReview{
-			Summary:  result.Summary,
-			Items:    items,
-			Findings: toJSONFindings(findings),
-			Applied:  toJSONFindings(applied),
+			Summary:   result.Summary,
+			Items:     items,
+			Findings:  toJSONFindings(findings),
+			Applied:   toJSONFindings(applied),
+			Proposals: toJSONReviewProposals(result.Proposals),
 		})
 	}
 	printSummary(stdout, result.Summary)

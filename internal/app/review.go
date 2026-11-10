@@ -36,6 +36,10 @@ func (a *App) Review(ctx context.Context, opts ReviewOptions) (ReviewResult, err
 	}
 
 	items := make([]string, 0, 16)
+	proposals, pendingProposals, err := a.reviewProposals(ctx, project.ID)
+	if err != nil {
+		return ReviewResult{}, err
+	}
 	var out strings.Builder
 	fmt.Fprintf(&out, "# Review — %s\n", project.Name)
 	fmt.Fprintf(&out, "state_age: %s\n", stateAge(now, state))
@@ -127,7 +131,48 @@ func (a *App) Review(ctx context.Context, opts ReviewOptions) (ReviewResult, err
 		out.WriteString("- none\n")
 	}
 
-	return ReviewResult{Summary: out.String(), Items: items}, nil
+	if a.deps.Proposals != nil {
+		writeReviewProposals(&out, proposals, pendingProposals)
+	}
+
+	return ReviewResult{
+		Summary:              out.String(),
+		Items:                items,
+		Proposals:            proposals,
+		PendingProposalCount: pendingProposals,
+	}, nil
+}
+
+// reviewProposals lists pending candidates for the review report. It is only
+// called by Review: context and other callers never pay these store reads.
+func (a *App) reviewProposals(ctx context.Context, projectID string) ([]ProposalListItem, int, error) {
+	if a.deps.Proposals == nil {
+		return nil, 0, nil
+	}
+	proposals, err := a.listPendingProposals(ctx, projectID)
+	if err != nil {
+		return nil, 0, fmt.Errorf("list proposals: %w", err)
+	}
+	items, total := proposalListItems(proposals, proposalReviewLimit)
+	return items, total, nil
+}
+
+// writeReviewProposals renders the pending candidates before findings. Only
+// identity and confidence are shown; proposal bodies stay out of review.
+func writeReviewProposals(out *strings.Builder, proposals []ProposalListItem, total int) {
+	fmt.Fprintf(out, "\n## Proposals (%d pending)\n", total)
+	if len(proposals) == 0 {
+		out.WriteString("- none\n")
+		return
+	}
+	for _, proposal := range proposals {
+		fmt.Fprintf(out, "- [%s] %s (confidence %.2f, %s, %s)\n",
+			proposal.Kind, SummarizeLine(proposal.Title, promptLineRunes),
+			proposal.Confidence, formatDate(proposal.CreatedAt), proposal.ID)
+	}
+	if total > len(proposals) {
+		fmt.Fprintf(out, "- … %d more (brain review lists at most %d)\n", total-len(proposals), proposalReviewLimit)
+	}
 }
 
 func withinWindow(created, updated time.Time, cutoff time.Time) bool {

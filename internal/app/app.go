@@ -133,6 +133,11 @@ type NoteInput struct {
 	Title     string
 	Body      string
 	Tags      []string
+	// ID optionally pins the record id; empty selects the dated default.
+	// Promotion uses a deterministic id derived from the proposal.
+	ID string
+	// Source records the external item a promoted note came from.
+	Source *domain.SourceRef
 	// CreateProject registers ProjectID when no project, alias or path
 	// matches; without it an unknown project is an error.
 	CreateProject bool
@@ -155,6 +160,10 @@ type DecisionInput struct {
 	Evidence     []string
 	// Paths are repo-relative files or directories the decision governs.
 	Paths []string
+	// ID optionally pins the record id; empty selects the dated default.
+	ID string
+	// Source records the external item a promoted decision came from.
+	Source *domain.SourceRef
 	// CreateProject registers ProjectID when no project, alias or path
 	// matches; without it an unknown project is an error.
 	CreateProject bool
@@ -173,6 +182,10 @@ type AttemptInput struct {
 	Hypothesis string
 	Result     string
 	Reason     string
+	// ID optionally pins the record id; empty selects the dated default.
+	ID string
+	// Source records the external item a promoted attempt came from.
+	Source *domain.SourceRef
 	// CreateProject registers ProjectID when no project, alias or path
 	// matches; without it an unknown project is an error.
 	CreateProject bool
@@ -222,6 +235,12 @@ type ReviewOptions struct {
 type ReviewResult struct {
 	Summary string
 	Items   []string
+	// Proposals lists the newest pending (or stale) proposal candidates,
+	// capped at 20. It is empty when the store has no proposal zone.
+	Proposals []ProposalListItem
+	// PendingProposalCount is the total number of pending proposals, even
+	// when Proposals is capped.
+	PendingProposalCount int
 }
 
 // SyncOptions controls a sync run.

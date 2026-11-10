@@ -415,10 +415,42 @@ type jsonStatus struct {
 // jsonReview is `brain review --json`: the review text, its items, the
 // findings that remain and the ones --fix applied.
 type jsonReview struct {
-	Summary  string        `json:"summary"`
-	Items    []string      `json:"items"`
-	Findings []jsonFinding `json:"findings"`
-	Applied  []jsonFinding `json:"applied"`
+	Summary   string               `json:"summary"`
+	Items     []string             `json:"items"`
+	Findings  []jsonFinding        `json:"findings"`
+	Applied   []jsonFinding        `json:"applied"`
+	Proposals []jsonReviewProposal `json:"proposals"`
+}
+
+// jsonReviewProposal is one pending candidate in `brain review --json`.
+type jsonReviewProposal struct {
+	ID           string  `json:"id"`
+	Kind         string  `json:"kind"`
+	Title        string  `json:"title"`
+	Rule         string  `json:"rule"`
+	Confidence   float64 `json:"confidence"`
+	Status       string  `json:"status"`
+	ConnectionID string  `json:"connection_id"`
+	CreatedAt    *string `json:"created_at"`
+	UpdatedAt    *string `json:"updated_at"`
+}
+
+func toJSONReviewProposals(proposals []app.ProposalListItem) []jsonReviewProposal {
+	out := make([]jsonReviewProposal, 0, len(proposals))
+	for _, proposal := range proposals {
+		out = append(out, jsonReviewProposal{
+			ID:           proposal.ID,
+			Kind:         string(proposal.Kind),
+			Title:        proposal.Title,
+			Rule:         proposal.Rule,
+			Confidence:   proposal.Confidence,
+			Status:       string(proposal.Status),
+			ConnectionID: proposal.ConnectionID,
+			CreatedAt:    jsonTime(proposal.CreatedAt),
+			UpdatedAt:    jsonTime(proposal.UpdatedAt),
+		})
+	}
+	return out
 }
 
 // jsonFinding is one stale or contradictory finding in `brain review --json`.

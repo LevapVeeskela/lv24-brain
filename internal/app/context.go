@@ -91,6 +91,9 @@ type ContextResult struct {
 	// FailedAttempts are further attempts matching the task, newest first.
 	FailedAttempts []ContextRecord
 	Findings       []Finding
+	// PendingProposals counts pending candidates; nil when the proposal store
+	// is unavailable. Context never includes proposal bodies.
+	PendingProposals *int
 	// Skipped names the parts that are unavailable in this mode, with why.
 	Skipped []string
 	Summary string
@@ -171,6 +174,17 @@ func (a *App) Context(ctx context.Context, opts ContextOptions) (ContextResult, 
 		result.Skipped = append(result.Skipped, "review findings: "+err.Error())
 	} else {
 		result.Findings = findings
+	}
+	if a.deps.Proposals != nil {
+		count, countErr := a.pendingProposalCount(ctx, project.ID)
+		if countErr != nil {
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return ContextResult{}, ctxErr
+			}
+			result.Skipped = append(result.Skipped, "pending proposals: "+countErr.Error())
+		} else {
+			result.PendingProposals = &count
+		}
 	}
 
 	result.Summary = truncateSummary(renderContext(result, a.revision(ctx), now), result.Budget)
@@ -403,6 +417,9 @@ func renderContext(result ContextResult, revision string, now time.Time) string 
 	fmt.Fprintf(&out, "task: %s\n", SummarizeLine(result.Query, promptLineRunes))
 	if !result.Since.IsZero() {
 		fmt.Fprintf(&out, "since: %s\n", formatTime(result.Since))
+	}
+	if result.PendingProposals != nil {
+		fmt.Fprintf(&out, "pending_proposals: %d\n", *result.PendingProposals)
 	}
 	for _, skipped := range result.Skipped {
 		fmt.Fprintf(&out, "skipped: %s\n", SummarizeLine(skipped, promptLineRunes))

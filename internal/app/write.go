@@ -26,6 +26,7 @@ func (a *App) Note(ctx context.Context, input NoteInput) (NoteResult, error) {
 		Title:     fallbackTitle(input.Title, input.Body),
 		Body:      input.Body,
 		Tags:      input.Tags,
+		Source:    input.Source,
 		CreatedAt: now,
 		UpdatedAt: now,
 	}
@@ -37,12 +38,15 @@ func (a *App) Note(ctx context.Context, input NoteInput) (NoteResult, error) {
 		return NoteResult{}, err
 	}
 	for _, prior := range existing {
-		if prior.Title == note.Title && prior.Body == note.Body && a.isRetry(prior.CreatedAt) {
+		if prior.Title == note.Title && prior.Body == note.Body && sameRecordSource(prior.Source, note.Source) && a.isRetry(prior.CreatedAt) {
 			return NoteResult{Note: prior}, a.afterWrite(ctx, JournalNote, prior.ProjectID, prior.ID, prior.Title, noteDocument(prior))
 		}
 	}
 	used := stringSet(noteIDs(existing))
-	base := recordID("note", project.ID, now)
+	base := input.ID
+	if base == "" {
+		base = recordID("note", project.ID, now)
+	}
 	for attempt := 1; attempt <= maxRecordIDAttempts; attempt++ {
 		note.ID = availableID(base, used)
 		revision, appendErr := a.deps.Store.AppendNote(ctx, note)
@@ -90,6 +94,7 @@ func (a *App) Decision(ctx context.Context, input DecisionInput) (DecisionResult
 		Consequences: input.Consequences,
 		Evidence:     input.Evidence,
 		Paths:        paths,
+		Source:       input.Source,
 		CreatedAt:    now,
 		UpdatedAt:    now,
 	}
@@ -101,11 +106,11 @@ func (a *App) Decision(ctx context.Context, input DecisionInput) (DecisionResult
 		return DecisionResult{}, err
 	}
 	for _, prior := range existing {
-		if prior.Title == decision.Title && prior.Context == decision.Context && a.isRetry(prior.CreatedAt) {
+		if prior.Title == decision.Title && prior.Context == decision.Context && sameRecordSource(prior.Source, decision.Source) && a.isRetry(prior.CreatedAt) {
 			return DecisionResult{Decision: prior}, a.afterWrite(ctx, JournalDecision, prior.ProjectID, prior.ID, prior.Title, decisionDocument(prior))
 		}
 	}
-	decision.ID = availableID(recordID("decision", project.ID, now), stringSet(decisionIDs(existing)))
+	decision.ID = availableID(baseRecordID(input.ID, "decision", project.ID, now), stringSet(decisionIDs(existing)))
 	revision, err := a.deps.Store.AppendDecision(ctx, decision)
 	if err != nil {
 		return DecisionResult{}, err
@@ -131,6 +136,7 @@ func (a *App) Attempt(ctx context.Context, input AttemptInput) (AttemptResult, e
 		Hypothesis: input.Hypothesis,
 		Result:     input.Result,
 		Reason:     input.Reason,
+		Source:     input.Source,
 		CreatedAt:  now,
 		UpdatedAt:  now,
 	}
@@ -143,11 +149,11 @@ func (a *App) Attempt(ctx context.Context, input AttemptInput) (AttemptResult, e
 	}
 	for _, prior := range existing {
 		if prior.Title == attempt.Title && prior.Hypothesis == attempt.Hypothesis && prior.Result == attempt.Result &&
-			prior.Reason == attempt.Reason && a.isRetry(prior.CreatedAt) {
+			prior.Reason == attempt.Reason && sameRecordSource(prior.Source, attempt.Source) && a.isRetry(prior.CreatedAt) {
 			return AttemptResult{Attempt: prior}, a.afterWrite(ctx, JournalAttempt, prior.ProjectID, prior.ID, prior.Title, attemptDocument(prior))
 		}
 	}
-	attempt.ID = availableID(recordID("attempt", project.ID, now), stringSet(attemptIDs(existing)))
+	attempt.ID = availableID(baseRecordID(input.ID, "attempt", project.ID, now), stringSet(attemptIDs(existing)))
 	revision, err := a.deps.Store.AppendAttempt(ctx, attempt)
 	if err != nil {
 		return AttemptResult{}, err
@@ -193,6 +199,26 @@ func (a *App) Handoff(ctx context.Context, input HandoffInput) (HandoffResult, e
 	}
 	result := HandoffResult{Handoff: handoff, Revision: revision}
 	return result, a.afterWrite(ctx, JournalHandoff, handoff.ProjectID, handoff.ID, handoff.Summary, handoffDocument(handoff))
+}
+
+// baseRecordID uses an explicit id when the caller pinned one (promotion uses
+// a deterministic id) and otherwise the dated default.
+func baseRecordID(id, prefix, projectID string, now time.Time) string {
+	if id != "" {
+		return id
+	}
+	return recordID(prefix, projectID, now)
+}
+
+// sameRecordSource scopes the retry heuristic. A plain user write has no
+// source and keeps the old title/body behavior; a promoted write only matches
+// a prior record from the same proposal, so two proposals with identical
+// titles never collapse into one record.
+func sameRecordSource(previous, next *domain.SourceRef) bool {
+	if next == nil {
+		return true
+	}
+	return previous != nil && previous.ProposalID == next.ProposalID
 }
 
 // retryWindow is how long an identical record counts as a retry of the same
