@@ -9,10 +9,11 @@ PowerShell/bash installers, and GitHub Releases stay authoritative. Every
 launcher release delegates to the npm package at the same version, so the Go
 binary is still built and signed once, by `release.yml`.
 
-**Status:** the launcher and workflow live in this repository, but no PyPI
-project has been created yet. The owner must add the trusted publisher below
-before the first upload. Until then, `pip install lv24-brain` will not find the
-package.
+**Status:** live. `lv24-brain 0.12.0` was published to PyPI on 2026-11-10
+through Trusted Publishing (workflow `pypi-publish.yml`, run 42738309137), and
+`pip install lv24-brain` works. The trusted publisher is configured for this
+repository, so later releases need no PyPI API token or secret. The one-time
+setup below is kept as a runbook and is already completed for this project.
 
 ## What the package is
 
@@ -70,26 +71,30 @@ dependencies of the installed launcher.
    tag, so no additional manifest needs editing.
 2. Merge that change, then push the `vX.Y.Z` tag. `release.yml` builds the
    binaries and creates the GitHub release.
-3. Run **pypi-publish** manually with the version. `release.yml` creates the
+3. After the GitHub release exists, run **pypi-publish** with that version:
+
+   ```bash
+   gh workflow run pypi-publish.yml --ref main -f version=0.12.0
+   ```
+
+   The manual dispatch is the normal path here: `release.yml` creates the
    release with the repository `GITHUB_TOKEN`, and GitHub does not start
    workflows from events caused by that token, so the `release: published`
-   trigger does not fire for these releases. Publishing the release from the
-   GitHub UI also triggers the workflow.
-4. The workflow refuses a version that does not match the tag, the pyproject
-   file, and `__init__.py`. If that version already exists on PyPI, the upload
-   is skipped: PyPI releases are immutable.
+   trigger does not fire for those releases. Publishing a release from the
+   GitHub UI does trigger the workflow.
+4. The workflow refuses a version that does not match the release tag (when
+   triggered by a release), `python/pyproject.toml`, and `__init__.py`. If that
+   version already exists on PyPI, the upload is skipped: PyPI releases are
+   immutable. Use a new version instead of re-running a published one.
 
-Example:
+## One-time PyPI setup (already completed)
 
-```bash
-gh workflow run pypi-publish.yml --ref main -f version=0.12.0
-```
+This section is the runbook for the original setup; it is done for
+`lv24-brain` and does not need to be repeated for normal releases. A new
+project, a rename, or a recreated PyPI project would need it again.
 
-## One-time PyPI setup (owner)
-
-No PyPI project or token is created by this repository. To enable publishing,
-the owner adds a Trusted Publisher on PyPI (or a pending publisher for the
-first release):
+The owner adds a Trusted Publisher on PyPI (or a pending publisher before the
+first upload):
 
 - PyPI project name: `lv24-brain`
 - Owner: `LevapVeeskela`
@@ -101,9 +106,10 @@ The workflow needs `id-token: write` (already set). It uses
 `pypa/gh-action-pypi-publish` with a pinned commit and passes no credentials.
 PyPI issues a short-lived upload token for the job.
 
-Until that setup exists, the workflow fails at the publish step with an OIDC
-error; build and tests still run. Do not add a PyPI API token as a fallback
-unless the owner explicitly asks for one.
+The first upload used this configuration as a pending publisher; PyPI now
+shows it as the project's trusted publisher. Without it, the workflow fails at
+the publish step with an OIDC error while build and tests still run. Do not add
+a PyPI API token as a fallback unless the owner explicitly asks for one.
 
 ## Cost
 

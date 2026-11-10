@@ -36,14 +36,17 @@ The CLI itself does not need a Go toolchain or a checkout of the repository.
 
 ## Installation
 
-Once the first PyPI release is published:
+The launcher is available on PyPI as
+[`lv24-brain`](https://pypi.org/project/lv24-brain/); the current version is
+`0.12.0`:
 
 ```bash
 pip install lv24-brain
 ```
 
-This installs one console script, `lv24-brain`. The launcher also runs as a
-module:
+This installs one console script, `lv24-brain`. It does not install `brain`:
+the native Go binary and the npm package keep that command. The launcher also
+runs as a module:
 
 ```bash
 python -m lv24_brain --help

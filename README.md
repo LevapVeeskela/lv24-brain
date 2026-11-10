@@ -3,6 +3,7 @@
 # LV24 Brain
 
 [![npm](https://img.shields.io/npm/v/lv24-brain?label=npm&color=cb3837&logo=npm)](https://www.npmjs.com/package/lv24-brain)
+[![PyPI](https://img.shields.io/pypi/v/lv24-brain?label=PyPI&color=3775A9&logo=pypi&logoColor=white)](https://pypi.org/project/lv24-brain/)
 [![downloads](https://img.shields.io/npm/dm/lv24-brain?color=cb3837)](https://www.npmjs.com/package/lv24-brain)
 [![release](https://img.shields.io/github/v/release/LevapVeeskela/lv24-brain?color=0b6b5f&logo=github)](https://github.com/LevapVeeskela/lv24-brain/releases)
 [![GHCR](https://img.shields.io/badge/GHCR-ghcr.io%2Flevapveeskela%2Flv24--brain--server-2496ED?logo=docker&logoColor=white)](https://github.com/LevapVeeskela/lv24-brain/pkgs/container/lv24-brain-server)
@@ -95,7 +96,7 @@ brain agents sync --hooks                         # Claude Code, Codex and OpenC
 cd ~/src/myapp && brain open
 ```
 
-The same CLI has a thin Python launcher on PyPI:
+The same CLI is also available on PyPI as a thin Python launcher:
 
 ```sh
 pip install lv24-brain
