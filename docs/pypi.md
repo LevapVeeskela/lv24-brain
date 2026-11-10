@@ -9,14 +9,14 @@ PowerShell/bash installers, and GitHub Releases stay authoritative. Every
 launcher release delegates to the npm package at the same version, so the Go
 binary is still built and signed once, by `release.yml`.
 
-**Status:** live. `lv24-brain 0.12.1` was published to PyPI on 2026-11-10
-through Trusted Publishing (workflow `pypi-publish.yml`, run `42754828216`).
-The first launcher release, `0.12.0`, was published the same day (run
-`42738309137`). `pip install lv24-brain` works. The launcher version in this
-tree is `0.13.0`, prepared for the `v0.13.0` engine tag and not yet uploaded to
-PyPI. The trusted publisher is configured for this repository, so later
-releases need no PyPI API token or secret. The one-time setup below is kept as
-a runbook and is already completed for this project.
+**Status:** live. `lv24-brain 0.13.0` was published to PyPI on 2026-11-10
+through Trusted Publishing (workflow `pypi-publish.yml`, run `42777147197`).
+`0.12.1` was published the same day (run `42754828216`); `0.12.0` was the first
+launcher upload (run `42738309137`). `pip install lv24-brain` works. The
+launcher version in this tree is `0.13.0`, matching the `v0.13.0` engine tag.
+The trusted publisher is configured for this repository, so later releases
+need no PyPI API token or secret. The one-time setup below is kept as a runbook
+and is already completed for this project.
 
 ## What the package is
 
