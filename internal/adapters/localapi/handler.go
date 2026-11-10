@@ -237,7 +237,7 @@ func (h *Handler) connections(w http.ResponseWriter, r *http.Request) {
 		}
 		writeJSON(w, http.StatusCreated, h.viewConnection(item))
 	default:
-		method(w, r, http.MethodGet+", "+http.MethodPost)
+		method(w, r, http.MethodGet, http.MethodPost)
 	}
 }
 
@@ -327,7 +327,7 @@ func (h *Handler) connectionRoute(w http.ResponseWriter, r *http.Request, rest s
 		}
 		w.WriteHeader(http.StatusNoContent)
 	default:
-		method(w, r, http.MethodGet+", "+http.MethodPatch+", "+http.MethodDelete)
+		method(w, r, http.MethodGet, http.MethodPatch, http.MethodDelete)
 	}
 }
 
@@ -587,6 +587,12 @@ func (h *Handler) streamRunLog(w http.ResponseWriter, r *http.Request, id string
 			lines++
 		}
 	}
+	// Reaching the cap closes a stream that may still have lines. Name the
+	// truncation explicitly so a client cannot mistake it for the end of the log.
+	if _, err := io.WriteString(w, "event: truncated\ndata: log line limit reached\n\n"); err != nil {
+		return
+	}
+	flusher.Flush()
 }
 
 func (h *Handler) redact(value string) string {
@@ -710,7 +716,7 @@ func (h *Handler) settings(w http.ResponseWriter, r *http.Request) {
 		}
 		writeJSON(w, http.StatusOK, h.safeSettings(body))
 	default:
-		method(w, r, http.MethodGet+", "+http.MethodPut)
+		method(w, r, http.MethodGet, http.MethodPut)
 	}
 }
 
@@ -814,11 +820,17 @@ func pathParts(rest string) ([]string, bool) {
 	return parts, true
 }
 
-func method(w http.ResponseWriter, r *http.Request, expected string) bool {
-	if r.Method == expected {
-		return true
+// method accepts the request only when its method is in allowed. A mismatch is
+// an HTTP 405 with the RFC 9110 Allow header; the sanitized error envelope and
+// its stable method_not_allowed code stay unchanged.
+func method(w http.ResponseWriter, r *http.Request, allowed ...string) bool {
+	for _, candidate := range allowed {
+		if r.Method == candidate {
+			return true
+		}
 	}
-	writeError(w, http.StatusBadRequest, "method_not_allowed", "method is not allowed for this endpoint")
+	w.Header().Set("Allow", strings.Join(allowed, ", "))
+	writeError(w, http.StatusMethodNotAllowed, "method_not_allowed", "method is not allowed for this endpoint")
 	return false
 }
 

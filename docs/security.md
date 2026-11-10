@@ -130,6 +130,10 @@ reverse-proxy or browser mode.
   requests the graceful stop of the local agent. Settings persist non-secret UI
   values only.
 
+The frozen [localapi-v1 contract](localapi-v1.md) records these rules, the
+sanitized error envelope and 405 `Allow` header, job/run ID semantics, the
+500-run list cap and the bounded SSE snapshot/truncation signal.
+
 ## Server hardening
 
 Implemented in `internal/adapters/httpapi` and `internal/auth`:

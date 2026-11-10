@@ -1,6 +1,7 @@
 {
   "openapi": "3.0.3",
-  "info": { "title": "LV24 Brain Local Control API", "version": "1.0.0" },
+  "info": { "title": "LV24 Brain Local Control API", "version": "1.0.0", "description": "Frozen localapi-v1 contract. Every error uses the sanitized {error:{code,message}} envelope; a method mismatch returns 405 with an Allow header. See docs/localapi-v1.md." },
+  "x-contract": "localapi-v1",
   "servers": [{ "url": "http://127.0.0.1:{port}", "variables": { "port": { "default": "49152" } } }],
   "security": [{ "bearerAuth": [] }],
   "paths": {

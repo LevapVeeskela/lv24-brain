@@ -8,7 +8,6 @@ import (
 	"net/http/httptest"
 	"os"
 	"reflect"
-	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -372,9 +371,6 @@ func TestHTTPTransportBearerAndRedirectRefusal(t *testing.T) {
 }
 
 func TestStdioCommandTransport(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("stdio test helper process is skipped on Windows")
-	}
 	t.Setenv("LV24_MCP_STDIO_HELPER", "1")
 	conn := stdioConnection(map[string]string{"tools": "stdio_search"})
 	credentials := stdioCredentials{command: os.Args[0], args: "-test.run=^TestMCPStdioHelper$"}

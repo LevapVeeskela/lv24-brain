@@ -414,7 +414,9 @@ Endpoints: `GET /v1/health`; `GET|POST /v1/connections`;
 `POST /v1/shutdown`. Requests require exactly one `Authorization: Bearer`
 header, `Host` must be the loopback listener, and any `Origin`/`Referer` is
 rejected (no CORS, no browser access). The API is local-only; server mode has
-its own authenticated HTTP API.
+its own authenticated HTTP API. The frozen `localapi-v1` contract
+([localapi-v1.md](localapi-v1.md)) covers the error envelope, 405 `Allow`
+behavior, job/run IDs, the 500-run list cap and SSE snapshot limits.
 
 ## 2. Git mode
 

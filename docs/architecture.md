@@ -340,7 +340,10 @@ CRUD/test/run/credentials, run history with SSE logs, schedules, projects,
 non-secret settings, an explicitly confirmed engine update and graceful
 shutdown. Run and log identifiers are job IDs for the current process and
 persisted run IDs afterwards; job details and logs are sanitized by the
-ingestion host and the handler.
+ingestion host and the handler. The wire contract is frozen as `localapi-v1`;
+[localapi-v1.md](localapi-v1.md) defines auth/Host/Origin rules, the error
+envelope and 405 `Allow` behavior, ID and 500-run cap semantics, and SSE
+snapshot/truncation rules.
 
 ## Connectors and secrets
 

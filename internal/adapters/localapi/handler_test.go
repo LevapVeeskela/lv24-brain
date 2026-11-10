@@ -655,8 +655,73 @@ func TestBodyLimitContentTypeAndMethod(t *testing.T) {
 		t.Fatal(w.Code)
 	}
 	w = request(f, http.MethodDelete, "/v1/health", "", nil)
-	if w.Code != 400 {
-		t.Fatal(w.Code)
+	if w.Code != http.StatusMethodNotAllowed || w.Header().Get("Allow") != "GET" {
+		t.Fatalf("method mismatch=%d Allow=%q", w.Code, w.Header().Get("Allow"))
+	}
+}
+
+func TestMethodMismatchReturns405WithAllow(t *testing.T) {
+	cases := []struct {
+		name, method, path, allow string
+	}{
+		{"health", http.MethodPost, "/v1/health", "GET"},
+		{"connections collection", http.MethodDelete, "/v1/connections", "GET, POST"},
+		{"connection item", http.MethodPost, "/v1/connections/demo-1", "GET, PATCH, DELETE"},
+		{"credentials", http.MethodGet, "/v1/connections/demo-1/credentials/token", "POST"},
+		{"connection test", http.MethodGet, "/v1/connections/demo-1/test", "POST"},
+		{"connection run", http.MethodGet, "/v1/connections/demo-1/run", "POST"},
+		{"runs collection", http.MethodPost, "/v1/runs", "GET"},
+		{"run item", http.MethodDelete, "/v1/runs/run-1", "GET"},
+		{"run log", http.MethodPost, "/v1/runs/run-1/log", "GET"},
+		{"schedules collection", http.MethodPost, "/v1/schedules", "GET"},
+		{"schedule item", http.MethodGet, "/v1/schedules/demo-1", "PUT"},
+		{"projects", http.MethodPost, "/v1/projects", "GET"},
+		{"settings", http.MethodDelete, "/v1/settings", "GET, PUT"},
+		{"engine update", http.MethodGet, "/v1/engine/update", "POST"},
+		{"shutdown", http.MethodGet, "/v1/shutdown", "POST"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newFixture(t)
+			w := request(f, tc.method, tc.path, "", nil)
+			if w.Code != http.StatusMethodNotAllowed {
+				t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+			}
+			if got := w.Header().Get("Allow"); got != tc.allow {
+				t.Fatalf("Allow=%q, want %q", got, tc.allow)
+			}
+			envelope := decodeMap(t, w.Body.String())
+			errorBody, ok := envelope["error"].(map[string]any)
+			if !ok || errorBody["code"] != "method_not_allowed" {
+				t.Fatalf("envelope=%s", w.Body.String())
+			}
+			if !strings.HasPrefix(w.Header().Get("Content-Type"), "application/json") {
+				t.Fatalf("content type=%q", w.Header().Get("Content-Type"))
+			}
+		})
+	}
+}
+
+func TestRunLogTruncationIsSignalled(t *testing.T) {
+	f := newFixture(t)
+	// Fill the producer exactly to the cap; the handler must stop there and
+	// append a named truncation event instead of ending the stream silently.
+	// The producer runs concurrently because the fixture buffer holds only two
+	// lines and nothing consumes it before ServeHTTP starts.
+	go func() {
+		for i := 0; i < MaxLogLines; i++ {
+			f.runs.log.lines <- LogLine{Text: "line"}
+		}
+	}()
+	w := request(f, http.MethodGet, "/v1/runs/run-1/log", "", nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d", w.Code)
+	}
+	if !strings.Contains(w.Body.String(), "event: truncated\n") {
+		t.Fatalf("missing truncation event: %q", w.Body.String())
+	}
+	if strings.Count(w.Body.String(), "data: line\n") != MaxLogLines {
+		t.Fatalf("unexpected data events: %d", strings.Count(w.Body.String(), "data: line\n"))
 	}
 }
 
