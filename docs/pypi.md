@@ -11,9 +11,11 @@ binary is still built and signed once, by `release.yml`.
 
 **Status:** live. `lv24-brain 0.12.0` was published to PyPI on 2026-11-10
 through Trusted Publishing (workflow `pypi-publish.yml`, run 42738309137), and
-`pip install lv24-brain` works. The trusted publisher is configured for this
-repository, so later releases need no PyPI API token or secret. The one-time
-setup below is kept as a runbook and is already completed for this project.
+`pip install lv24-brain` works. The launcher version in this tree is `0.12.1`,
+matching the `v0.12.1` engine tag. The trusted publisher is configured for
+this repository, so later releases need no PyPI API token or secret. The
+one-time setup below is kept as a runbook and is already completed for this
+project.
 
 ## What the package is
 
@@ -74,7 +76,7 @@ dependencies of the installed launcher.
 3. After the GitHub release exists, run **pypi-publish** with that version:
 
    ```bash
-   gh workflow run pypi-publish.yml --ref main -f version=0.12.0
+   gh workflow run pypi-publish.yml --ref main -f version=0.12.1
    ```
 
    The manual dispatch is the normal path here: `release.yml` creates the
