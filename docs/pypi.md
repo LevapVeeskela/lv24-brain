@@ -9,12 +9,12 @@ PowerShell/bash installers, and GitHub Releases stay authoritative. Every
 launcher release delegates to the npm package at the same version, so the Go
 binary is still built and signed once, by `release.yml`.
 
-**Status:** live. `lv24-brain 0.14.0` was published to PyPI on 2026-11-10
-through Trusted Publishing (workflow `pypi-publish.yml`, run `42808652323`).
-`0.13.1` (run `42780702835`), `0.13.0` (run `42777147197`), `0.12.1` (run
-`42754828216`) and `0.12.0` (run `42738309137`) are earlier releases.
-`pip install lv24-brain` works. The launcher version in this tree is `0.14.0`,
-matching the `v0.14.0` engine tag. The trusted publisher is configured for this
+**Status:** live. `lv24-brain 0.14.1` was published to PyPI on 2026-11-10
+through Trusted Publishing (workflow `pypi-publish.yml`, run `42835268302`).
+`0.14.0` (run `42808652323`), `0.13.1` (run `42780702835`), `0.13.0` (run
+`42777147197`) and `0.12.1` (run `42754828216`) are earlier releases.
+`pip install lv24-brain` works. The launcher version in this tree is `0.14.1`,
+matching the `v0.14.1` engine tag. The trusted publisher is configured for this
 repository, so later releases need no PyPI API token or secret. The one-time
 setup below is kept as a runbook and is already completed for this project.
 
@@ -77,7 +77,7 @@ dependencies of the installed launcher.
 3. After the GitHub release exists, run **pypi-publish** with that version:
 
    ```bash
-   gh workflow run pypi-publish.yml --ref main -f version=0.14.0
+   gh workflow run pypi-publish.yml --ref main -f version=0.14.1
    ```
 
    The manual dispatch is the normal path here: `release.yml` creates the
