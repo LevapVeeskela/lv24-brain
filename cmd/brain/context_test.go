@@ -1,10 +1,16 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/levapveeskela/lv24-brain/internal/adapters/fsstore"
+	"github.com/levapveeskela/lv24-brain/internal/domain"
 )
 
 // setupContextBrain creates a local brain with project "demo" holding a
@@ -27,6 +33,132 @@ func setupContextBrain(t *testing.T) string {
 		}
 	}
 	return cfgPath
+}
+
+// addRawContextItem stores one raw item for project demo and optionally writes
+// a context-allow.json grant, then rebuilds the index.
+func addRawContextItem(t *testing.T, cfgPath, grants string) {
+	t.Helper()
+	dataDir := filepath.Dir(cfgPath)
+	store, err := fsstore.New(dataDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	item := domain.Item{
+		Ref:       domain.ItemRef{ConnectionID: "tracker", ExternalID: "ISSUE-1"},
+		Kind:      domain.ItemIssue,
+		Title:     "Parser retry budget",
+		Body:      "parser retry budget token ghp_" + strings.Repeat("a", 36),
+		URL:       "https://tracker.test/ISSUE-1",
+		Author:    "tester",
+		UpdatedAt: now, ObservedAt: now, ProjectID: "demo",
+	}.WithHash()
+	if _, err := store.Items().Upsert(context.Background(), item); err != nil {
+		t.Fatal(err)
+	}
+	if grants != "" {
+		if err := os.WriteFile(filepath.Join(dataDir, "context-allow.json"), []byte(grants), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if code, _, stderr := runForTest(t, "index", "--rebuild", "--config", cfgPath); code != 0 {
+		t.Fatalf("index: exit %d: %s", code, stderr)
+	}
+}
+
+func TestContextCommandRawExcerpts(t *testing.T) {
+	// Arrange
+	cfgPath := setupContextBrain(t)
+	addRawContextItem(t, cfgPath, `{"schemaVersion":1,"grants":[{"project":"demo","connection":"tracker","kinds":["issue"],"maxAgeDays":30,"maxExcerpts":3}]}`)
+
+	// Act
+	code, stdout, stderr := runForTest(t, "context", "parser", "--config", cfgPath, "--project", "demo", "--raw", "--json")
+
+	// Assert
+	if code != 0 {
+		t.Fatalf("context --raw: exit %d: %s", code, stderr)
+	}
+	var envelope struct {
+		Data struct {
+			RawExcerpts []struct {
+				ConnectionID string `json:"connection_id"`
+				ProjectID    string `json:"project_id"`
+				ExternalID   string `json:"external_id"`
+				Kind         string `json:"kind"`
+				Citation     string `json:"citation"`
+				Body         string `json:"body"`
+				Untrusted    bool   `json:"untrusted"`
+			} `json:"raw_excerpts"`
+			Skipped []string `json:"skipped"`
+			Summary string   `json:"summary"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal([]byte(stdout), &envelope); err != nil {
+		t.Fatalf("decode %q: %v", stdout, err)
+	}
+	excerpts := envelope.Data.RawExcerpts
+	if len(excerpts) != 1 {
+		t.Fatalf("raw_excerpts = %+v", excerpts)
+	}
+	excerpt := excerpts[0]
+	if excerpt.ConnectionID != "tracker" || excerpt.ProjectID != "demo" || excerpt.ExternalID != "ISSUE-1" ||
+		excerpt.Kind != "issue" || !excerpt.Untrusted {
+		t.Fatalf("excerpt = %+v", excerpt)
+	}
+	if !strings.Contains(excerpt.Citation, "tracker") || !strings.Contains(excerpt.Citation, "https://tracker.test/ISSUE-1") {
+		t.Fatalf("citation = %q", excerpt.Citation)
+	}
+	if strings.Contains(excerpt.Body, "ghp_") || !strings.Contains(excerpt.Body, "[redacted]") {
+		t.Fatalf("body = %q", excerpt.Body)
+	}
+	if !strings.Contains(envelope.Data.Summary, "## Raw excerpts (untrusted external text") {
+		t.Fatalf("summary = %q", envelope.Data.Summary)
+	}
+}
+
+func TestContextCommandRawRequiresGrant(t *testing.T) {
+	// Arrange
+	cfgPath := setupContextBrain(t)
+	addRawContextItem(t, cfgPath, "")
+
+	// Act
+	code, stdout, stderr := runForTest(t, "context", "parser", "--config", cfgPath, "--project", "demo", "--raw", "--json")
+
+	// Assert
+	if code != 0 {
+		t.Fatalf("context --raw: exit %d: %s", code, stderr)
+	}
+	var envelope struct {
+		Data struct {
+			RawExcerpts []any    `json:"raw_excerpts"`
+			Skipped     []string `json:"skipped"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal([]byte(stdout), &envelope); err != nil {
+		t.Fatal(err)
+	}
+	if len(envelope.Data.RawExcerpts) != 0 || !strings.Contains(strings.Join(envelope.Data.Skipped, "\n"), "no grant for project") {
+		t.Fatalf("data = %+v", envelope.Data)
+	}
+}
+
+func TestContextCommandRawRejectsBadGrantFile(t *testing.T) {
+	// Arrange
+	cfgPath := setupContextBrain(t)
+	addRawContextItem(t, cfgPath, `{"schemaVersion":1,"grants":[{"project":"demo","connection":"tracker","bogus":true}]}`)
+
+	// Act
+	code, _, stderr := runForTest(t, "context", "parser", "--config", cfgPath, "--project", "demo", "--raw")
+
+	// Assert
+	if code != 1 || !strings.Contains(stderr, "context-allow.json") || !strings.Contains(stderr, "unknown field") {
+		t.Fatalf("exit %d stderr %q", code, stderr)
+	}
+	// Without --raw the damaged file is never read.
+	if code, _, stderr := runForTest(t, "context", "parser", "--config", cfgPath, "--project", "demo"); code != 0 {
+		t.Fatalf("context without --raw: exit %d: %s", code, stderr)
+	}
 }
 
 func TestContextCommandPrintsMarkdown(t *testing.T) {

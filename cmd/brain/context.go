@@ -22,6 +22,7 @@ func runContext(args []string, stdout, stderr io.Writer) int {
 	var kinds repeatedFlag
 	fs.Var(&kinds, "kind", "keep only this record kind: decision, attempt or note (repeatable)")
 	since := fs.String("since", "", "drop records older than a window (24h, 7d, 2w) or a date (2026-11-01)")
+	raw := fs.Bool("raw", false, "include granted raw-zone excerpts when curated context is thin")
 	asJSON := fs.Bool("json", false, "print JSON")
 	cfgPath := configFlag(fs)
 	positional, err := parseInterspersed(fs, args)
@@ -62,6 +63,7 @@ func runContext(args []string, stdout, stderr io.Writer) int {
 		Budget:    *budget,
 		Kinds:     kinds,
 		Since:     *since,
+		Raw:       *raw,
 	})
 	if err != nil {
 		return reportError(stderr, "context", err)
@@ -81,6 +83,7 @@ func (b mcpBackend) Context(ctx context.Context, in mcpserver.ContextInput) (mcp
 		Budget:    in.Budget,
 		Kinds:     in.Kinds,
 		Since:     in.Since,
+		Raw:       in.Raw,
 	})
 	if err != nil {
 		return mcpserver.TaskContext{}, err
@@ -107,8 +110,9 @@ func toMCPContext(result app.ContextResult) mcpserver.TaskContext {
 				Fixable: finding.Fixable, Fix: finding.Fix,
 			}
 		}),
-		Skipped: result.Skipped,
-		Summary: result.Summary,
+		RawExcerpts: mapAll(result.RawExcerpts, toMCPContextExcerpt),
+		Skipped:     result.Skipped,
+		Summary:     result.Summary,
 	}
 	if result.Handoff != nil {
 		out.Handoff = toMCPContextHandoff(*result.Handoff)
@@ -126,5 +130,22 @@ func toMCPContextRecord(record app.ContextRecord) mcpserver.ContextRecord {
 	return mcpserver.ContextRecord{
 		ID: record.ID, Kind: record.Kind, Title: record.Title, Status: record.Status,
 		Detail: record.Detail, CreatedAt: record.CreatedAt, Score: record.Score,
+	}
+}
+
+func toMCPContextExcerpt(excerpt app.ContextExcerpt) mcpserver.ContextExcerpt {
+	return mcpserver.ContextExcerpt{
+		ConnectionID: excerpt.ConnectionID,
+		ProjectID:    excerpt.ProjectID,
+		ItemKey:      excerpt.ItemKey,
+		ExternalID:   excerpt.ExternalID,
+		Kind:         excerpt.Kind,
+		Title:        excerpt.Title,
+		URL:          excerpt.URL,
+		UpdatedAt:    excerpt.UpdatedAt,
+		Citation:     excerpt.Citation,
+		Body:         excerpt.Body,
+		Truncated:    excerpt.Truncated,
+		Untrusted:    true,
 	}
 }

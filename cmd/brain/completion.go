@@ -84,7 +84,7 @@ var completionTable = []completionCmd{
 	),
 	cmdLeaf("bootstrap", valueFlag("project"), valueFlag("budget"), boolFlag("json"), valueFlag("config")),
 	cmdLeaf("context", valueFlag("project"), valueFlag("budget"), choiceFlag("kind", "decision", "attempt", "note"),
-		valueFlag("since"), boolFlag("json"), valueFlag("config")),
+		valueFlag("since"), boolFlag("raw"), boolFlag("json"), valueFlag("config")),
 	cmdLeaf("note", valueFlag("project"), valueFlag("title"), valueFlag("body"), valueFlag("tags"), boolFlag("create"), valueFlag("config")),
 	cmdLeaf("decision", valueFlag("project"), valueFlag("title"), choiceFlag("status", completionStatuses...),
 		valueFlag("context"), valueFlag("alternatives"), valueFlag("consequences"), valueFlag("evidence"), valueFlag("paths"), boolFlag("create"), valueFlag("config")),

@@ -49,10 +49,11 @@ type Dependencies struct {
 	// proposal zone. All three are optional: adapters without them keep their
 	// current behavior, and proposal use cases report that the feature is not
 	// available instead of panicking.
-	Connections ports.ConnectionStore
-	Items       ports.ItemStore
-	Proposals   ports.ProposalStore
-	Now         func() time.Time
+	Connections   ports.ConnectionStore
+	Items         ports.ItemStore
+	Proposals     ports.ProposalStore
+	ContextGrants ports.ContextGrantStore
+	Now           func() time.Time
 }
 
 // App executes brain use cases.

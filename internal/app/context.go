@@ -62,6 +62,9 @@ type ContextOptions struct {
 	// Since drops records and handoffs older than a window (30m, 24h, 7d, 2w)
 	// or a date (2026-11-01, RFC 3339). Empty keeps everything.
 	Since string
+	// Raw requests raw-zone excerpts from explicitly granted connections when
+	// the curated context is thin. Grants are default-deny (context-allow.json).
+	Raw bool
 }
 
 // ContextRecord is one record relevant to the task.
@@ -73,6 +76,23 @@ type ContextRecord struct {
 	Detail    string // first line of the context, reason or body
 	CreatedAt time.Time
 	Score     float64
+}
+
+// ContextExcerpt is one raw-zone item body allowed by context-allow.json.
+// Bodies are re-redacted at read time and marked untrusted: they are external
+// text, not curated knowledge.
+type ContextExcerpt struct {
+	ConnectionID string
+	ProjectID    string
+	ItemKey      string
+	ExternalID   string
+	Kind         string
+	Title        string
+	URL          string
+	UpdatedAt    time.Time
+	Citation     string
+	Body         string
+	Truncated    bool
 }
 
 // ContextResult is the task context of a project. Summary is the Markdown
@@ -94,6 +114,9 @@ type ContextResult struct {
 	// PendingProposals counts pending candidates; nil when the proposal store
 	// is unavailable. Context never includes proposal bodies.
 	PendingProposals *int
+	// RawExcerpts are granted raw-zone excerpts, ordered by search relevance.
+	// Empty unless Raw was requested, grants match and curated context is thin.
+	RawExcerpts []ContextExcerpt
 	// Skipped names the parts that are unavailable in this mode, with why.
 	Skipped []string
 	Summary string
@@ -185,6 +208,15 @@ func (a *App) Context(ctx context.Context, opts ContextOptions) (ContextResult, 
 		} else {
 			result.PendingProposals = &count
 		}
+	}
+	if opts.Raw {
+		curated := len(result.Records) + len(result.FailedAttempts) + len(result.Findings)
+		excerpts, skipped, excerptErr := a.contextExcerpts(ctx, project, query, since, now, curated)
+		if excerptErr != nil {
+			return ContextResult{}, excerptErr
+		}
+		result.RawExcerpts = excerpts
+		result.Skipped = append(result.Skipped, skipped...)
 	}
 
 	result.Summary = truncateSummary(renderContext(result, a.revision(ctx), now), result.Budget)
@@ -440,6 +472,7 @@ func renderContext(result ContextResult, revision string, now time.Time) string 
 	writeContextRecords(&out, result.Records, "- none matched the task\n")
 	out.WriteString("\n## Failed attempts matching the task\n")
 	writeContextRecords(&out, result.FailedAttempts, "- none beyond the relevant records\n")
+	writeContextExcerpts(&out, result.RawExcerpts)
 	return out.String()
 }
 

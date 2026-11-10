@@ -80,10 +80,18 @@ func BuildWithOptions(cfg config.BrainConfig, opts Options) (*Runtime, error) {
 				}
 				return nil, connErr
 			}
+			contextGrants, grantsErr := fsstore.NewContextAllowStore(cfg.DataDir)
+			if grantsErr != nil {
+				if openedIndex != nil {
+					_ = openedIndex.Close()
+				}
+				return nil, grantsErr
+			}
 			deps.Store = store
 			deps.Connections = connections
 			deps.Items = store.ItemZone()
 			deps.Proposals = store
+			deps.ContextGrants = contextGrants
 			runStore = store
 			index = openedIndex
 			deps.Index = index

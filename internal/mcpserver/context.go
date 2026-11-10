@@ -18,24 +18,27 @@ type ContextInput struct {
 	Kinds []string
 	// Since is a window (7d, 24h) or a date (2026-11-01); empty keeps all.
 	Since string
+	// Raw requests granted raw-zone excerpts when curated context is thin.
+	Raw bool
 }
 
 // TaskContext is the context of a project for one task. The CLI prints the
 // same shape for `brain context --json`.
 type TaskContext struct {
-	ProjectID      string          `json:"project_id"`
-	ProjectName    string          `json:"project_name"`
-	Mode           string          `json:"mode"`
-	Query          string          `json:"query"`
-	Since          time.Time       `json:"since,omitzero"`
-	Budget         int             `json:"budget"`
-	State          State           `json:"state"`
-	Handoff        *ContextHandoff `json:"handoff"`
-	Records        []ContextRecord `json:"records"`
-	FailedAttempts []ContextRecord `json:"failed_attempts"`
-	Findings       []ReviewFinding `json:"findings"`
-	Skipped        []string        `json:"skipped"`
-	Summary        string          `json:"summary"`
+	ProjectID      string           `json:"project_id"`
+	ProjectName    string           `json:"project_name"`
+	Mode           string           `json:"mode"`
+	Query          string           `json:"query"`
+	Since          time.Time        `json:"since,omitzero"`
+	Budget         int              `json:"budget"`
+	State          State            `json:"state"`
+	Handoff        *ContextHandoff  `json:"handoff"`
+	Records        []ContextRecord  `json:"records"`
+	FailedAttempts []ContextRecord  `json:"failed_attempts"`
+	Findings       []ReviewFinding  `json:"findings"`
+	RawExcerpts    []ContextExcerpt `json:"raw_excerpts"`
+	Skipped        []string         `json:"skipped"`
+	Summary        string           `json:"summary"`
 }
 
 // ContextHandoff is the newest handoff of the project.
@@ -55,6 +58,23 @@ type ContextRecord struct {
 	Detail    string    `json:"detail"`
 	CreatedAt time.Time `json:"created_at,omitzero"`
 	Score     float64   `json:"score"`
+}
+
+// ContextExcerpt is one granted raw-zone excerpt. Untrusted is always true:
+// the body is external text, never curated knowledge.
+type ContextExcerpt struct {
+	ConnectionID string    `json:"connection_id"`
+	ProjectID    string    `json:"project_id"`
+	ItemKey      string    `json:"item_key"`
+	ExternalID   string    `json:"external_id,omitempty"`
+	Kind         string    `json:"kind"`
+	Title        string    `json:"title"`
+	URL          string    `json:"url,omitempty"`
+	UpdatedAt    time.Time `json:"updated_at,omitzero"`
+	Citation     string    `json:"citation"`
+	Body         string    `json:"body"`
+	Truncated    bool      `json:"truncated,omitempty"`
+	Untrusted    bool      `json:"untrusted"`
 }
 
 // ContextBackend is implemented by backends that can build task context.
@@ -78,6 +98,7 @@ func (s *Server) contextTools() []tool {
 			"budget":  intProp("Summary size budget in runes; 0 selects the default.", 0),
 			"kinds":   stringArrayProp("Keep only these record kinds: decision, attempt, note. Omit for all three."),
 			"since":   stringProp("Drop records and handoffs older than a window (24h, 7d, 2w) or a date (2026-11-01)."),
+			"raw":     boolProp("Include granted raw-zone excerpts when curated context is thin (default false)."),
 		}),
 		run: s.taskContext,
 	}}
@@ -90,6 +111,7 @@ func (s *Server) taskContext(ctx context.Context, raw json.RawMessage) (toolResu
 		Budget  int      `json:"budget"`
 		Kinds   []string `json:"kinds"`
 		Since   string   `json:"since"`
+		Raw     bool     `json:"raw"`
 	}
 	if err := decodeArgs(raw, &args); err != nil {
 		return toolResult{}, err
@@ -111,6 +133,7 @@ func (s *Server) taskContext(ctx context.Context, raw json.RawMessage) (toolResu
 		Budget:    args.Budget,
 		Kinds:     args.Kinds,
 		Since:     strings.TrimSpace(args.Since),
+		Raw:       args.Raw,
 	})
 	if err != nil {
 		return toolResult{}, err
@@ -128,6 +151,9 @@ func (c TaskContext) WithEmptyLists() TaskContext {
 	}
 	if c.Findings == nil {
 		c.Findings = []ReviewFinding{}
+	}
+	if c.RawExcerpts == nil {
+		c.RawExcerpts = []ContextExcerpt{}
 	}
 	if c.Skipped == nil {
 		c.Skipped = []string{}

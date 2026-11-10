@@ -11,7 +11,7 @@ func TestMCPServerContextToolPassesArguments(t *testing.T) {
 
 	// Act
 	result := toolCall(t, backend, "brain_context",
-		`{"query":" cache layer ","project":"beta","budget":900,"kinds":["decision","note"],"since":"7d"}`)
+		`{"query":" cache layer ","project":"beta","budget":900,"kinds":["decision","note"],"since":"7d","raw":true}`)
 
 	// Assert
 	if result["isError"] != false {
@@ -19,7 +19,7 @@ func TestMCPServerContextToolPassesArguments(t *testing.T) {
 	}
 	in := backend.contextIn
 	if in.ProjectID != "beta" || in.Query != "cache layer" || in.Budget != 900 || in.Since != "7d" ||
-		len(in.Kinds) != 2 || in.Kinds[0] != "decision" || in.Kinds[1] != "note" {
+		len(in.Kinds) != 2 || in.Kinds[0] != "decision" || in.Kinds[1] != "note" || !in.Raw {
 		t.Fatalf("context input = %+v", in)
 	}
 	content := result["content"].([]any)[0].(map[string]any)
@@ -31,7 +31,7 @@ func TestMCPServerContextToolPassesArguments(t *testing.T) {
 	if obj["project_id"] != "beta" || len(records) != 1 || records[0].(map[string]any)["id"] != "decision-alpha-1" {
 		t.Fatalf("structured = %v", obj)
 	}
-	for _, list := range []string{"failed_attempts", "findings", "skipped"} {
+	for _, list := range []string{"failed_attempts", "findings", "raw_excerpts", "skipped"} {
 		if got, ok := obj[list].([]any); !ok || len(got) != 0 {
 			t.Fatalf("%s = %v, want []", list, obj[list])
 		}
