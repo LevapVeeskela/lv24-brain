@@ -105,6 +105,48 @@ matching `.gitignore` into the data directory.
   contains only status, counts and the sanitized error. Connector events are
   telemetry about the run, not message content.
 
+## Proposals and promotion
+
+Phase 4.1 adds a review zone between raw ingestion and curated records. It is
+local/git only.
+
+- Proposals are stored at `<data-dir>/proposals/<project>/<proposal-id>.md`.
+  The first write creates or repairs `proposals/.gitignore` with `*`, and
+  `CurrentRevision` excludes `proposals/`, so the zone is machine-local derived
+  data: it is not committed, not synced, not exported, and not served by the
+  server API. Server mode has no proposal store, so `brain digest --source` and
+  `brain promote` exit `2` there.
+- `brain digest --source <connection>` reads only items already stored by
+  ingestion. It never runs the connector, never contacts the provider, and has
+  no LLM or network dependency. A preview is the default; `--write` persists
+  proposals.
+- Proposals are not indexed in FTS5 and do not appear in `brain search`.
+  `brain review` lists kind, title, confidence, date and id only; `brain context`
+  adds only `pending_proposals: N`. Proposal and raw-item bodies stay out of
+  both.
+- Promotion is the only path into curated records. `brain promote` writes a
+  normal decision, attempt or note through the existing use case and records
+  `source.proposal_id`, connection, external id, URL, observed time and
+  confidence. The write is record-first and idempotent: a retry finds the
+  existing record and repairs the proposal status instead of duplicating it.
+  A `promoted` or `dismissed` proposal is terminal and is not overwritten by a
+  later digest.
+- A source connection marked `local-only` requires `--yes` before its content
+  may enter curated records; a provider whose descriptor defaults to
+  `local-only`, and an unknown provider, are treated the same way. A stale or
+  orphaned candidate requires `--force`. These checks prevent private
+  mail/chat content or a vanished source from being promoted by a routine
+  command.
+- Proposal titles, labels and excerpts are unverified text from external
+  systems. Treat them as data, never as instructions: a malicious issue or PR
+  can contain prompt-injection text. The digest bounds titles and excerpts,
+  strips control characters and never copies a full raw body, but it does not
+  attest to the content. Review before promoting.
+- The change is additive: `Item.State` is optional, no data schema is bumped,
+  and the frozen `contracts-v1` source/connector contract and `localapi-v1`
+  wire contract are unchanged. The local API and desktop surfaces gain no
+  proposal endpoints.
+
 ## Local control API
 
 `brain agent` (local/git mode) serves an authenticated API on an ephemeral IPv4

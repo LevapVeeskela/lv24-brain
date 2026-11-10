@@ -62,6 +62,28 @@ and the approaches that already failed — so the next session does not repeat
 them. At the end of the session the hook writes a handoff, and the `Decision:`
 lines of the agent's final message land in a review inbox.
 
+## Curate sources without trusting them
+
+`brain digest --source` reads the raw items a connection already stored — it
+never contacts the provider — and previews deterministic candidates: a closed
+issue becomes a decision candidate, a merged pull request or commit a note, an
+incident an attempt. Nothing is accepted automatically:
+
+```sh
+brain digest --source gh-main                       # preview; writes nothing
+brain digest --source gh-main --project myapp --since 7d --write
+brain review --project myapp                        # pending proposals and stale/orphan findings
+brain promote proposal-gh-main-1a2b3c4d5e6f --as decision --status accepted
+brain promote proposal-gh-main-1a2b3c4d5e6f --dismiss       # or reject the candidate
+```
+
+Proposals live in `<data-dir>/proposals/<project>/<id>.md`, are git-ignored and
+machine-local, never sync, do not change the data revision, and are never
+indexed by `brain search`. Promotion is the only path from a proposal into
+curated records; the new record keeps `source.proposal_id`, and a rerun never
+creates a second record. Sources marked `local-only` need `--yes`; a stale or
+orphaned candidate needs `--force`.
+
 ## Why LV24 Brain
 
 - **Memory that survives the session.** State, decisions, attempts and handoffs
@@ -78,7 +100,11 @@ lines of the agent's final message land in a review inbox.
   `[[id]]` links with backlinks between records.
 - **Keeps itself honest.** `brain review` flags stale next steps, answered
   questions, decisions contradicted by later attempts or by changed code,
-  broken links and near-duplicates.
+  broken links, near-duplicates and pending proposals.
+- **Curates only with review.** `brain digest --source` turns stored raw items
+  into candidate decisions, attempts and notes; `brain promote` writes one
+  curated record with provenance. Proposals are machine-local and never
+  accepted automatically.
 - **Safe to keep updated.** Ed25519-signed releases, SHA-256-checked installs,
   `brain update` with rollback, npm packages with provenance.
 - **Grows into a team server.** Optional `brain-server` with Postgres,
@@ -131,7 +157,7 @@ The engine has moved past the initial scaffold. Implemented and tested today:
 
 | Area | State |
 |---|---|
-| CLI | `init`, `doctor`, `open`, `project list\|show\|set`, `bootstrap`, `note`, `decision`, `attempt`, `handoff`, `status`, `review`, `sync`, `index [--rebuild]`, `search <query> [--since 7d]`, `context "<task>"` (task-focused context; MCP `brain_context`), `journal`, `event commit`, `hooks`, `config`, `discover`, `graphs`, `agents sync [--check]`, `state get|set`, `record list|show|status|supersede|trash|restore`, `links <id>` / `links --broken` (`[[id]]` links and backlinks between records), `catchup`, `review [--fix]` (findings include `broken-link` and `near-duplicate`), `session start|end` (agent hooks), `mcp` (stdio MCP server for agents), `connector run`, `migrate [--rollback]`, `secret`, `update`, `serve`, `version`, `help`; `login` and `logout` in server mode |
+| CLI | `init`, `doctor`, `open`, `project list\|show\|set`, `bootstrap`, `note`, `decision`, `attempt`, `handoff`, `status`, `sync`, `index [--rebuild]`, `search <query> [--since 7d]`, `context "<task>"` (task-focused context; adds only `pending_proposals: N`; MCP `brain_context`), `journal`, `event commit`, `hooks`, `config`, `discover`, `graphs`, `agents sync [--check]`, `state get|set`, `record list|show|status|supersede|trash|restore`, `links <id>` / `links --broken` (`[[id]]` links and backlinks between records), `catchup`, `digest` (cross-project morning summary; `--source <conn>` previews proposals from stored items, `--write` persists), `review [--fix]` (findings include `broken-link`, `near-duplicate`, `proposal-stale`, `proposal-orphan` and `proposal-contradicted`), `promote <id>` (promote or dismiss one proposal), `session start|end` (agent hooks), `mcp` (stdio MCP server for agents), `connector run`, `migrate [--rollback]`, `secret`, `update`, `serve`, `version`, `help`; `login` and `logout` in server mode |
 | Storage | Markdown + YAML frontmatter (`fsstore`), SQLite FTS5 index, `registry.json` project index |
 | Local search | `brain index` refreshes FTS5 from Markdown; `brain index --rebuild` discards and rebuilds it; `brain search` queries it in local/`git` mode; English and Russian word forms match as a prefix ("decisions" finds "decision", "решений" finds "решение") and `--since` limits by update time. `brain index` is local-only; `brain search` also works in server mode through `GET /v1/search` |
 | Git sync | `fetch`, `pull --rebase`, commit, optional push; read-only `--status`; conflict reporting |
@@ -197,8 +223,13 @@ Known gaps, stated plainly:
 - Providers do not infer deletes: a missing item is not a tombstone unless
   the source reports one (capability `Deletes` is false for providers without
   authoritative tombstones).
-- No curation or desktop yet: ingestion never writes curated records, and
-  there is no digest/promotion UI in this phase.
+- Curation is local and rule-based: `brain digest --source` reads raw items
+  already stored by ingestion (it never runs the connector) and writes
+  machine-local proposals under `<data-dir>/proposals/`; promotion through
+  `brain promote` is the only path into curated records and is never automatic.
+  There is no scheduled digest, no proposal merge/trash, no raw context
+  excerpts or allow-list (Phase 4.2), and no proposal surface in server mode,
+  the local API or a desktop app. Candidates can be noisy; review each one.
 - `brain sync` is not implemented in server mode; the server API is the sync
   path.
 - `brain index` is local-only. `brain search` works in server mode through

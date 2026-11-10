@@ -104,6 +104,8 @@ projects/<id>/notes/YYYY-MM-DD.md      dated note sections
 projects/<id>/decisions/YYYY-MM-DD-<slug>.md
 projects/<id>/attempts/YYYY-MM-DD-<slug>.md
 projects/<id>/handoffs/YYYY-MM-DD-HHMMSS.md
+proposals/<project>/<proposal-id>.md    machine-local candidate records (ignored)
+proposals/.gitignore                   "*" so nothing here is committed
 connectors/runs/<UTC timestamp>-<source>-<run-id>.md
 ```
 
@@ -116,12 +118,13 @@ files before rebuilding. When a write cannot update the index, or `brain sync`
 pulls commits from another machine, the engine sets `index/dirty`; sync then
 reindexes at once, and the next search repairs the index if that failed.
 `brain doctor` warns while the marker is set. A reindex removes entries whose
-source files are gone. The data revision (`CurrentRevision`) covers curated
-the top-level data directory except `secrets/`, `index/`, `backups/`, `mail/`,
-`github/`, `gitlab/`, `connectors/` and `journal/`. So curated records and
-`brain.yaml`, `registry.json`, `global/` and `projects/` are covered, while
-secrets, the index, backups, connector dumps and runs, and journal lines are
-excluded, so mail syncs and journal lines do not change it.
+source files are gone. The data revision (`CurrentRevision`) covers the
+top-level data directory except `secrets/`, `index/`, `backups/`, `mail/`,
+`github/`, `gitlab/`, `connectors/`, `journal/` and `proposals/`. So curated
+records and `brain.yaml`, `registry.json`, `global/` and `projects/` are
+covered, while secrets, the index, backups, connector dumps and runs, journal
+lines, and machine-local proposals are excluded, so mail sync, journal lines
+and a proposal digest do not change it.
 
 Listing never stops at one damaged file: unreadable, malformed or empty record
 files are skipped and reported by `brain doctor` (check `records`). A daily
@@ -130,8 +133,10 @@ notes file that no longer parses is moved aside to
 damaged content is kept for repair.
 
 Domain records: `Project`, `Note`, `Decision`, `Attempt`, `Handoff`, `State`,
-`User`, `Role` (`admin|member|viewer`), `AuthSource`, `SyncRevision`, and
-`ConnectorRun`.
+`Proposal`, `User`, `Role` (`admin|member|viewer`), `AuthSource`,
+`SyncRevision`, and `ConnectorRun`. `Item.State` (`open`, `closed`, `merged`,
+`resolved`, `ignored`) is an optional additive field; it enters the item hash
+only when non-empty, so existing raw items do not re-upsert.
 
 ## CLI
 
@@ -145,7 +150,9 @@ brain decision   append a decision
 brain attempt    append an attempt
 brain handoff    append a session handoff
 brain status     show mode, paths, schema, engine version
-brain review     state age, questions, evidence, attempts + findings (stale/contradictory knowledge); --fix applies heuristic state fixes (see below)
+brain review     state age, questions, evidence, attempts + findings (stale/contradictory knowledge, pending proposals); --fix applies heuristic state fixes (see below)
+brain digest     cross-project morning summary; --source <conn> previews proposals from stored raw items (--write persists)
+brain promote    promote or dismiss one proposal; the only path into curated records
 brain catchup    what changed since the latest handoff
 brain record     list|show records; status|supersede decisions; trash|restore|trash-list (local/git)
 brain session    start|end handlers for agent session hooks
@@ -237,6 +244,63 @@ resolved by Git.
 - `gitstore` shells out to the git CLI with an argument vector, a per-command
   timeout, `GIT_TERMINAL_PROMPT=0`, and sanitized errors so remote URLs with
   credentials do not leak.
+
+## Proposals, digest and promotion (Phase 4.1)
+
+Ingestion writes the raw zone only; it never writes curated records. Phase 4.1
+adds a review step between them:
+
+- **Storage.** `proposals/<project>/<proposal-id>.md` sits at the data-dir root.
+  `proposals/.gitignore` contains `*`, is created (and repaired) on the first
+  proposal write, and keeps the whole zone out of git; `CurrentRevision` also
+  excludes `proposals/`, so a digest never changes the data revision. Proposals
+  are machine-local derived data: they are not synced, not exported and not
+  served by the server API. There is one candidate per
+  `(project, connection, external item)`; the id is
+  `proposal-<connection>-<12 hex>`, where the hex is the first 12 characters
+  of `sha256(project NUL connection NUL externalID)`. The proposal store is an
+  optional adapter: server mode has none, so review and context simply report
+  no proposals there.
+- **Digest.** `brain digest --source <connection>` reads the stored items of one
+  connection only. It never contacts the provider, never runs a connector, and
+  has no LLM or network dependency. The default window is 30 days; `--since`,
+  `--all`, `--limit` (default 500), `--rule`, `--project`, `--dry-run`, `--json`
+  and `--write` narrow or persist the run. A preview is the default and writes
+  nothing. The destination project comes from `--project`, else the
+  connection's single configured project, else the unambiguous `ProjectID` of
+  the stored items; an empty or ambiguous result is a validation error
+  (exit 2).
+- **Rules.** One deterministic rule per item, in precedence order:
+  `closed-issue` (closed/resolved issue or closed/done/resolved/fixed/completed
+  label) → decision; `decision-label` (`decision`, `adr`, `rfc`,
+  `architecture`) → decision; `incident` (Sentry, or `incident`, `outage`,
+  `sev0`–`sev3`, `production` labels) → attempt; `merged-change` (merged PR/MR)
+  → note; `commit` → note. Confidence is a heuristic in `[0,1]` used for
+  ordering and display only; nothing is auto-accepted. Reruns are idempotent,
+  and a `promoted` or `dismissed` proposal is terminal, so a later digest never
+  overwrites it.
+- **Promotion.** `brain promote <id>` writes through the ordinary
+  Decision/Attempt/Note use case. `--project` scopes the lookup (otherwise all
+  registered projects are searched), `--as` overrides the kind, `--status`
+  selects `proposed` or `accepted` for a decision, `--title` overrides the
+  title, `--dismiss` rejects the candidate, `--dry-run` reports only, and
+  `--json` prints the result. The curated id is `<kind>-<proposal id without
+  its "proposal-" prefix>`; the record carries `source.proposal_id`,
+  connection, external id, URL, observed time and confidence. Promotion is
+  record-first: a retry scans curated records for `source.proposal_id` and
+  repairs the proposal status instead of creating a second record. A source
+  whose connection or provider is `local-only` (including an unknown provider)
+  requires `--yes`; a stale or orphaned candidate requires `--force`.
+- **Review and context.** `brain review` lists up to 20 pending proposals
+  (kind, title, confidence, age, id) and adds three report-only findings:
+  `proposal-stale` (not refreshed for 14 days, source changed, or no longer
+  matches a rule), `proposal-orphan` (connection or item gone, tombstoned, or
+  moved to another project) and `proposal-contradicted` (a later accepted
+  decision or failed attempt with a similar title). `brain review --fix` never
+  promotes, dismisses or rewrites a proposal. `brain context` adds only the
+  header line `pending_proposals: N`; proposal bodies and raw-item text never
+  enter context. Proposals are not indexed in FTS5, so `brain search` stays
+  curated-only.
 
 ## Server
 
@@ -506,7 +570,7 @@ left untouched and the command exits non-zero.
 | Multi-replica deployment unsupported | the SSE broker and login rate limiter are per-process even with durable tokens |
 | Server raw items require PostgreSQL | connector runs persist raw items, checkpoints and run records with `BRAIN_DATABASE_URL`; the in-memory development store returns `unsupported` instead of discarding output |
 | Raw-zone deletes are not inferred | sources report tombstones only; `Deletes` is false without authoritative tombstones |
-| No curation or desktop in this phase | ingestion never writes curated records; no digest/promotion UI |
+| Curation is local and rule-based | `brain digest --source` and `brain promote` run in local/git mode only, read stored items, and write machine-local git-ignored proposals; server mode, the local API and the desktop app have no proposal surface, and there is no scheduled digest, raw context excerpt/allow-list (4.2), or proposal merge/trash |
 | CLI index is local-only | `brain search` in server mode uses `GET /v1/search`; no local index is built |
 | No server-side Markdown import/export | migrate into Markdown first; server records go through the API |
 | Server auto-update not implemented | upgrade by pulling a new image; `BRAIN_SERVER_AUTO_UPDATE` is reserved |

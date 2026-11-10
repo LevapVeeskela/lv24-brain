@@ -142,7 +142,9 @@ ok: git (not required in local mode)
 
 The data directory contains `brain.yaml`, `registry.json`, and
 `projects/<id>/` with `state.md`, `notes/`, `decisions/`, `attempts/`, and
-`handoffs/`. Markdown is the source of truth.
+`handoffs/`. `proposals/<id>/` holds machine-local candidates when
+`brain digest --source` is used; it is git-ignored and never synced. Markdown
+is the source of truth.
 
 ### Local search
 
@@ -258,6 +260,44 @@ one, and `GET /v1/connectors/runs/{id}/markdown` exports it as Markdown.
 `BRAIN_CONNECTOR_TIMEOUT` (default `5m`, clamped to `10s`–`1h`) bounds a server run.
 The CLI allows `1h10s` for this synchronous request, including persistence;
 ordinary API and authentication requests retain the `30s` default timeout.
+
+### Digest and promotion (Phase 4.1)
+
+Raw items stay raw until you review a candidate and promote it:
+
+```sh
+./bin/brain connection run gh-main --days 30 --config ~/brain/brain.yaml
+./bin/brain digest --source gh-main --since 7d --config ~/brain/brain.yaml   # preview only
+./bin/brain digest --source gh-main --project demo --write --config ~/brain/brain.yaml
+./bin/brain review --project demo --config ~/brain/brain.yaml
+./bin/brain promote proposal-gh-main-1a2b3c4d5e6f --as decision --status accepted --config ~/brain/brain.yaml
+./bin/brain promote proposal-gh-main-1a2b3c4d5e6f --dismiss --config ~/brain/brain.yaml
+```
+
+`--source` reads the items that connection already stored; it never re-runs the
+connector and has no network or model dependency. The preview writes nothing.
+`--write` persists proposals under `<data-dir>/proposals/<project>/`; the zone
+is machine-local, self-ignored with `proposals/.gitignore`, excluded from the
+data revision, never synced, and never indexed for search. Rules are
+deterministic (closed issue → decision, decision/ADR label → decision,
+incident/Sentry → attempt, merged PR → note, commit → note); confidence is a
+heuristic and nothing is accepted automatically. `--project` is required when
+the connection or its items do not resolve to one project. `--all` ignores the
+window (default `30d`), `--limit` defaults to 500, `--rule` narrows the rules,
+`--dry-run` is the default and cannot be combined with `--write`, and `--json`
+prints the `mode: "proposals"` envelope. Server mode rejects `--source`.
+
+`brain review` lists pending proposals and reports `proposal-stale`,
+`proposal-orphan` and `proposal-contradicted`; `--fix` never changes a
+proposal. `brain context` adds only `pending_proposals: N`. Promotion writes a
+normal decision, attempt or note with `source.proposal_id`, a deterministic
+record id, and provenance (connection, external id, URL, observed time).
+Reruns are idempotent. A `local-only` source needs `--yes`; a stale or orphaned
+proposal needs `--force`; `--dismiss` is terminal. Promotion is the only path
+from a proposal into curated records.
+
+Not in this phase: scheduled digest, proposal merge/trash, raw context excerpts
+or allow-lists (4.2), and server/desktop proposal surfaces.
 
 ### OAuth for GitHub and GitLab (v0.12.0)
 
@@ -629,7 +669,10 @@ also accepts `--config <path>`.
 | `brain event commit` | `--project <id>`, `--repo <path>` (default `.`), `--quiet` (print nothing on success; used by the hook). Local and git mode. |
 | `brain search <query>` | `--project <id>`, `--limit <n>` (default 20), `--kind <kind>` (`note,decision,attempt,handoff,dump,item`; raw-zone `item` is excluded by default), `--dumps` (legacy dumps; also un-excludes server items), `--since <24h\|7d\|2w\|2026-11-01\|RFC3339>`. English and Russian word forms match as a prefix. |
 | `brain links <id>` | `--project <id>`, `--json`; `--broken` lists `[[id]]` references to missing records. Write `[[<id>]]`, `[[<id>\|text]]` or `[[<project>/<id>]]` in record text; `brain record show` lists Links and Backlinks. |
-| `brain context <task>` | `--project <id>`, `--budget <runes>` (default 4000), `--kind decision\|attempt\|note` (repeatable), `--since <24h\|7d\|2w\|date>`, `--json`. State, review findings, latest handoff, best-matching records and failed attempts for the task. MCP: `brain_context`. |
+| `brain review` | `--project <id>`, `--since <7d>`, `--fix`, `--fix-kind <kinds>`, `--json`. Lists pending proposals (at most 20) and findings; `broken-link`, `near-duplicate`, `proposal-stale`, `proposal-orphan`, `proposal-contradicted` are report-only. Proposal findings are local/git only, and `--fix` never touches proposals. |
+| `brain digest` | `--since <90m\|24h\|7d>` (default `24h`; with `--source` the default is `30d`), `--project <id>`, `--json`, `--write` (saves `<data_dir>/digests/YYYY-MM-DD.md`). With `--source <connection>`: `--all`, `--limit <n>` (default 500), `--rule <names>`, `--dry-run` (default; conflicts with `--write`), `--write` (persists proposals). `--source` is local/git only. |
+| `brain promote <id>` | `--project <id>`, `--as decision\|attempt\|note`, `--status proposed\|accepted` (decision only), `--title <text>`, `--dismiss`, `--force` (stale/orphan), `--yes` (local-only source), `--dry-run`, `--json`. Local/git only. |
+| `brain context <task>` | `--project <id>`, `--budget <runes>` (default 4000), `--kind decision\|attempt\|note` (repeatable), `--since <24h\|7d\|2w\|date>`, `--json`. State, review findings, latest handoff, best-matching records and failed attempts for the task; adds only `pending_proposals: N` when proposals exist. MCP: `brain_context`. |
 | `brain sync` | `--status` (read-only divergence and conflict report), `--push` (push after committing) |
 | `brain index` | `--rebuild` (delete the local index and rebuild it from Markdown) |
 

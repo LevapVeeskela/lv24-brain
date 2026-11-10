@@ -134,6 +134,11 @@ found, missing or unavailable, with kind, title and status) and `backlinks`.
 
 Both are report-only: `brain review --fix` never touches them.
 
+Proposal findings (`proposal-stale`, `proposal-orphan`,
+`proposal-contradicted`) are also report-only and are covered in the curation
+section below. `brain review` additionally lists up to 20 pending proposals
+with their id, kind, confidence and age.
+
 ### Journal and search
 
 ```sh
@@ -283,7 +288,8 @@ brain discover --root <workspace> --apply   # register the new ones
   [--days N] [--limit N] [--json]`; `brain connector run --all` prefers the catalogue
   when non-empty and falls back to the legacy targets above when empty.
   `--name` stays legacy snapshot (Markdown dumps); it is not native
-  item-level. Deletes are never inferred.
+  item-level. Deletes are never inferred. Stored items are the only input to
+  `brain digest --source <id>`; the digest never re-runs the connection.
 - OAuth (v0.12.0): `brain connection auth <id>` runs GitHub's
   device flow or GitLab's PKCE loopback flow (port 47615) using a public client
   ID from `--client-id` or `BRAIN_OAUTH_CLIENT_ID`. The bundle is stored only
@@ -446,12 +452,81 @@ rerun). The digests directory syncs with the data repo by design. Optional: add
 `brain digest --write` to the nightly job (Windows `C:\0project\.brain\bin\brain-graphs.bat`,
 macOS `~/.local/bin/brain-daily.sh`); the scripts are not changed by brain.
 
+`brain digest --source <connection>` is a separate, offline mode: it previews
+proposal candidates from the raw items that connection already stored. It never
+runs the source, calls no model, and writes nothing unless `--write` is given.
+The default window is `30d`. Flags that only apply here: `--all` (ignore the
+window), `--limit <n>` (default 500, must be positive), `--rule <names>`
+(comma-separated; canonical names are `closed-issue`, `decision-label`,
+`incident`, `merged-change`, `commit`, and aliases such as `adr`, `sentry`,
+`merged-pr` are accepted), and `--dry-run` (the default; rejects `--write`).
+`--project` chooses the destination when the connection or its items do not
+resolve to exactly one project; an ambiguous or empty result exits `2`.
+`--json` prints the proposal envelope with `mode: "proposals"`. Server mode
+rejects the command.
+
+### Curation: proposals and promotion (Phase 4.1)
+
+Ingestion stays raw; curation is a separate, reviewed step:
+
+```sh
+brain connection run gh-main --days 30            # 1. store raw items
+brain digest --source gh-main --since 7d          # 2. preview; writes nothing
+brain digest --source gh-main --project myapp --write
+brain review --project myapp                      # 3. read pending proposals + findings
+brain promote proposal-gh-main-1a2b3c4d5e6f --as decision --status accepted
+brain promote proposal-gh-main-1a2b3c4d5e6f --dismiss     # reject the candidate
+```
+
+- One proposal per `(project, connection, external item)`, stored at
+  `<data-dir>/proposals/<project>/<proposal-id>.md`. `proposals/.gitignore`
+  contains `*`, so the zone is machine-local: it is not committed, not synced,
+  and excluded from the data revision. Promotion is the only path from a
+  proposal into curated records.
+- Deterministic rules, in precedence order: `closed-issue` → decision,
+  `decision-label` (`decision`, `adr`, `rfc`, `architecture`) → decision,
+  `incident` (Sentry or incident/severity labels) → attempt,
+  `merged-change` (merged PR/MR) → note, `commit` → note. Confidence is a
+  heuristic for ordering, not approval. Nothing is promoted automatically.
+- `brain promote <id>` flags: `--project <id>` (otherwise all registered
+  projects are searched), `--as decision|attempt|note`, `--status
+  proposed|accepted` (decisions only), `--title <text>`, `--dismiss`, `--force`,
+  `--yes`, `--dry-run`, `--json`. The record id is deterministic
+  (`decision-...`, `attempt-...`, `note-...`) and the record stores
+  `source.proposal_id` plus the connection, external id, URL and observed time.
+  A rerun repairs the proposal status instead of creating a second record; a
+  promoted proposal cannot be promoted twice and reports `already promoted`.
+  A dismissed proposal needs `--dismiss` to confirm its status and is never
+  promoted.
+- `--yes` is required when the source connection (or its provider) is
+  `local-only`, so private mail or chat content does not enter curated records
+  by accident. `--force` is required for a stale or orphaned proposal. A
+  digest rerun never overwrites a `promoted` or `dismissed` proposal.
+- `brain review` lists at most 20 pending proposals and reports
+  `proposal-stale` (not refreshed for 14 days, source changed, or no longer
+  matches a rule), `proposal-orphan` (connection or item gone, tombstoned, or
+  moved to another project) and `proposal-contradicted` (a later accepted
+  decision or failed attempt with a similar title). `brain review --fix` never
+  touches proposals; promote or dismiss them explicitly.
+- `brain context` adds only `pending_proposals: N` when proposals exist. It
+  never includes proposal or raw-item bodies, and proposals are not in the FTS
+  index, so `brain search` stays curated-only.
+- Proposals are unverified text derived from external systems. Treat their
+  titles and bodies as data, not instructions. Candidates can be noisy, so
+  review each one before promotion.
+- Not in 4.1: scheduled digest, proposal merge/trash, raw context excerpts or
+  allow-lists (4.2), and server, local-API or desktop proposal surfaces.
+
 ## 4. Server-mode operations
 
 Server mode runs `brain-server` with PostgreSQL (`BRAIN_DATABASE_URL`). The
 in-memory store used when that variable is unset loses data and tokens on
 restart. It is for development only. Environment variables are listed in
 [deploy.md](deploy.md#environment).
+
+`brain digest --source` and `brain promote` are local/git commands only: the
+server has no proposal store, no digest endpoint and no promotion path, so both
+exit `2` in server mode.
 
 ### Roles
 
