@@ -186,27 +186,56 @@ func (i *Index) prepareSchema(ctx context.Context) error {
 }
 
 // prepareSchemaOnce creates the schema or, when the stored schemaVersion
-// differs, drops the derived tables and recreates them. The version is stored
+// differs, drops the derived tables and recreates them. The whole bootstrap is
+// one IMMEDIATE transaction so concurrent first opens cannot both decide to
+// rebuild and wipe rows inserted by the other process. The version is stored
 // last, so an interrupted rebuild is retried on the next open.
 func (i *Index) prepareSchemaOnce(ctx context.Context) error {
+	conn, err := i.db.Conn(ctx)
+	if err != nil {
+		return fmt.Errorf("sqliteindex: acquire schema connection: %w", err)
+	}
+	defer func() { _ = conn.Close() }()
+
+	if _, err := conn.ExecContext(ctx, "BEGIN IMMEDIATE"); err != nil {
+		return fmt.Errorf("sqliteindex: begin schema transaction: %w", err)
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_, _ = conn.ExecContext(context.Background(), "ROLLBACK")
+		}
+	}()
+
 	var version int
-	if err := i.db.QueryRowContext(ctx, "PRAGMA user_version").Scan(&version); err != nil {
+	if err := conn.QueryRowContext(ctx, "PRAGMA user_version").Scan(&version); err != nil {
 		return fmt.Errorf("sqliteindex: read schema version: %w", err)
 	}
 	if version == schemaVersion {
-		return i.applySchema(ctx)
+		if err := applySchema(ctx, conn); err != nil {
+			return err
+		}
+		if _, err := conn.ExecContext(ctx, "COMMIT"); err != nil {
+			return fmt.Errorf("sqliteindex: commit schema transaction: %w", err)
+		}
+		committed = true
+		return nil
 	}
 	for _, statement := range dropStatements {
-		if _, err := i.db.ExecContext(ctx, statement); err != nil {
+		if _, err := conn.ExecContext(ctx, statement); err != nil {
 			return fmt.Errorf("sqliteindex: drop old schema: %w", err)
 		}
 	}
-	if err := i.applySchema(ctx); err != nil {
+	if err := applySchema(ctx, conn); err != nil {
 		return err
 	}
-	if _, err := i.db.ExecContext(ctx, fmt.Sprintf("PRAGMA user_version = %d", schemaVersion)); err != nil {
+	if _, err := conn.ExecContext(ctx, fmt.Sprintf("PRAGMA user_version = %d", schemaVersion)); err != nil {
 		return fmt.Errorf("sqliteindex: write schema version: %w", err)
 	}
+	if _, err := conn.ExecContext(ctx, "COMMIT"); err != nil {
+		return fmt.Errorf("sqliteindex: commit schema transaction: %w", err)
+	}
+	committed = true
 	i.needsReindex = true
 	return nil
 }
@@ -217,9 +246,13 @@ func (i *Index) NeedsReindex() bool {
 	return i.needsReindex
 }
 
-func (i *Index) applySchema(ctx context.Context) error {
+type schemaExecer interface {
+	ExecContext(context.Context, string, ...any) (sql.Result, error)
+}
+
+func applySchema(ctx context.Context, db schemaExecer) error {
 	for _, statement := range schemaStatements {
-		if _, err := i.db.ExecContext(ctx, statement); err != nil {
+		if _, err := db.ExecContext(ctx, statement); err != nil {
 			return fmt.Errorf("sqliteindex: apply schema: %w", err)
 		}
 	}
