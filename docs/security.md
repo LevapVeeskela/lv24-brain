@@ -122,8 +122,8 @@ local/git only.
   proposals.
 - Proposals are not indexed in FTS5 and do not appear in `brain search`.
   `brain review` lists kind, title, confidence, date and id only; `brain context`
-  adds only `pending_proposals: N`. Proposal and raw-item bodies stay out of
-  both.
+  adds only `pending_proposals: N`, and proposal bodies never enter context.
+  Raw items appear only through `--raw` and a matching grant (see below).
 - Promotion is the only path into curated records. `brain promote` writes a
   normal decision, attempt or note through the existing use case and records
   `source.proposal_id`, connection, external id, URL, observed time and
@@ -146,6 +146,40 @@ local/git only.
   and the frozen `contracts-v1` source/connector contract and `localapi-v1`
   wire contract are unchanged. The local API and desktop surfaces gain no
   proposal endpoints.
+
+## Raw context excerpts (Phase 4.2)
+
+Raw connector text stays default-deny. It can enter `brain context` only in
+local/git mode, only when the operator wrote an explicit grant, and only as a
+small cited excerpt.
+
+- `brain context "<task>" --raw` is opt-in; without the flag the output is
+  unchanged. A grant never changes search, `brain open` or `brain review`;
+  MCP `brain_context` honors it only when called with `raw: true`.
+- The policy is `<data-dir>/context-allow.json`, next to `brain.yaml`. A missing
+  file or no matching grant means no raw excerpt, not an error. The file holds
+  no secrets and is committed with the data repository, like
+  `connectors/connections.json`.
+- `schemaVersion` is `1`. `project` and `connection` are required and matched
+  exactly. Optional `kinds` is a subset of `issue`, `pull-request`,
+  `merge-request`, `commit`, `message`, `page`, `document`, `event`, `schema`,
+  `other`; empty means all. `maxAgeDays` `0` disables the age filter (maximum
+  `3650`), and `maxExcerpts` defaults to `5` (range `1`–`5`). Unknown fields,
+  duplicate `project`+`connection` grants, invalid ids and invalid kinds are
+  hard errors; a malformed policy is refused instead of widened.
+- Excerpts are included only when the curated context is thin (fewer than five
+  records, failed attempts and findings in total), at most five per context,
+  600 runes per body and 2000 runes in total. Only items whose `ProjectID`
+  matches the requested project are eligible; synthetic `connection:<id>` items
+  are excluded.
+- Bodies are re-redacted at read time with the ingestion redactor
+  (`[redacted]`, `[email:<12 hex>]`) and marked as untrusted external text.
+  Citations carry the connection, external id, URL and updated date. This is
+  exposure reduction, not anonymization: granted content is still private data
+  and can contain prompt-injection text. Treat excerpts as data, never as
+  instructions.
+- Server mode, the desktop app and LLM surfaces are deferred; they do not read
+  the grant file.
 
 ## Local control API
 

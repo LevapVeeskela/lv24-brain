@@ -99,6 +99,7 @@ Markdown is the source of truth in local and Git modes. `fsstore` uses:
 
 ```text
 registry.json                          project index (managed by brain project)
+context-allow.json                     explicit raw-context grants (no secrets; committed)
 projects/<id>/state.md                 goal, active, blocked, next action, questions
 projects/<id>/notes/YYYY-MM-DD.md      dated note sections
 projects/<id>/decisions/YYYY-MM-DD-<slug>.md
@@ -118,13 +119,14 @@ files before rebuilding. When a write cannot update the index, or `brain sync`
 pulls commits from another machine, the engine sets `index/dirty`; sync then
 reindexes at once, and the next search repairs the index if that failed.
 `brain doctor` warns while the marker is set. A reindex removes entries whose
-source files are gone. The data revision (`CurrentRevision`) covers the
-top-level data directory except `secrets/`, `index/`, `backups/`, `mail/`,
-`github/`, `gitlab/`, `connectors/`, `journal/` and `proposals/`. So curated
-records and `brain.yaml`, `registry.json`, `global/` and `projects/` are
-covered, while secrets, the index, backups, connector dumps and runs, journal
-lines, and machine-local proposals are excluded, so mail sync, journal lines
-and a proposal digest do not change it.
+source files are gone. `context-allow.json` is a plain committed data file,
+like `connectors/connections.json`, and holds no secrets. The data revision
+(`CurrentRevision`) covers the top-level data directory except `secrets/`,
+`index/`, `backups/`, `mail/`, `github/`, `gitlab/`, `connectors/`, `journal/`
+and `proposals/`. So curated records and `brain.yaml`, `registry.json`,
+`global/` and `projects/` are covered, while secrets, the index, backups,
+connector dumps and runs, journal lines, and machine-local proposals are
+excluded, so mail sync, journal lines and a proposal digest do not change it.
 
 Listing never stops at one damaged file: unreadable, malformed or empty record
 files are skipped and reported by `brain doctor` (check `records`). A daily
@@ -145,6 +147,7 @@ brain init       create an instance and write brain.yaml
 brain open       [path|id] bootstrap pack + ## Git + ## Graphs (--brief: state only)
 brain project    list, show, or set registry projects
 brain bootstrap  build bounded agent context
+brain context    [task] context for one task (--raw appends granted raw excerpts; local/git only)
 brain note       append a dated note
 brain decision   append a decision
 brain attempt    append an attempt
@@ -298,9 +301,43 @@ adds a review step between them:
   moved to another project) and `proposal-contradicted` (a later accepted
   decision or failed attempt with a similar title). `brain review --fix` never
   promotes, dismisses or rewrites a proposal. `brain context` adds only the
-  header line `pending_proposals: N`; proposal bodies and raw-item text never
-  enter context. Proposals are not indexed in FTS5, so `brain search` stays
+  header line `pending_proposals: N`; proposal bodies never enter context, and
+  raw-item text does not enter it without `--raw` and a matching grant (see
+  below). Proposals are not indexed in FTS5, so `brain search` stays
   curated-only.
+
+## Context and raw excerpts (Phase 4.2)
+
+`brain context` is curated-first: state, review findings, the latest handoff,
+the best-matching records and failed attempts. `--raw` is off by default and
+does not change that output; it may append a bounded set of stored raw items.
+
+- **Grant file.** `<data-dir>/context-allow.json` sits next to `brain.yaml`.
+  The file is optional and contains no secrets; like
+  `connectors/connections.json` it is committed. A missing file is an empty
+  policy, not an error, so every raw excerpt is default-deny until a grant
+  matches.
+- **Schema.** `schemaVersion` is `1`. Each grant has required exact `project`
+  and `connection`, optional `kinds` (empty means every kind: `issue`,
+  `pull-request`, `merge-request`, `commit`, `message`, `page`, `document`,
+  `event`, `schema`, `other`), optional `maxAgeDays` (`0` disables the age
+  filter, maximum `3650`) and optional `maxExcerpts` (default `5`, range
+  `1`–`5`). Unknown fields, a duplicate `project`+`connection`, invalid ids and
+  invalid kinds are hard errors; nothing widens a malformed grant.
+- **Selection.** Only local/git mode reads the file. A raw item is eligible only
+  when its `ProjectID` equals the requested project exactly, its connection has
+  a matching grant and its kind and age pass the grant. Synthetic
+  `connection:<id>` items are excluded. Excerpts appear only when the curated
+  context is thin (fewer than five records, failed attempts and findings in
+  total), and at most five are added to one context. Each body is capped at 600
+  runes and all bodies together at 2000 runes.
+- **Presentation.** Bodies are re-redacted at read time with the ingestion
+  redactor, marked as untrusted external text, and cited with connection,
+  external id, URL and updated date. The stored raw item itself is never
+  rewritten.
+- **Scope.** Server mode, the desktop app and LLM surfaces do not read raw
+  excerpts. The MCP `brain_context` tool accepts an explicit `raw` boolean;
+  like the CLI, it only works in local/git mode and only with a matching grant.
 
 ## Server
 
@@ -570,7 +607,8 @@ left untouched and the command exits non-zero.
 | Multi-replica deployment unsupported | the SSE broker and login rate limiter are per-process even with durable tokens |
 | Server raw items require PostgreSQL | connector runs persist raw items, checkpoints and run records with `BRAIN_DATABASE_URL`; the in-memory development store returns `unsupported` instead of discarding output |
 | Raw-zone deletes are not inferred | sources report tombstones only; `Deletes` is false without authoritative tombstones |
-| Curation is local and rule-based | `brain digest --source` and `brain promote` run in local/git mode only, read stored items, and write machine-local git-ignored proposals; server mode, the local API and the desktop app have no proposal surface, and there is no scheduled digest, raw context excerpt/allow-list (4.2), or proposal merge/trash |
+| Curation is local and rule-based | `brain digest --source` and `brain promote` run in local/git mode only, read stored items, and write machine-local git-ignored proposals; server mode, the local API and the desktop app have no proposal surface, and there is no scheduled digest or proposal merge/trash |
+| Raw context excerpts are local/git only | `brain context --raw` reads `context-allow.json` and stored raw items only in local/git mode; server mode, the desktop app and LLM surfaces have no raw context path |
 | CLI index is local-only | `brain search` in server mode uses `GET /v1/search`; no local index is built |
 | No server-side Markdown import/export | migrate into Markdown first; server records go through the API |
 | Server auto-update not implemented | upgrade by pulling a new image; `BRAIN_SERVER_AUTO_UPDATE` is reserved |

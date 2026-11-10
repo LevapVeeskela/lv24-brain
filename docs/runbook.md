@@ -47,6 +47,60 @@ A write to an unknown project fails unless `--create` is passed (for example
 flag a typo or unregistered alias never starts a new project. `brain project set`
 makes the metadata of a registered project explicit.
 
+### Task context
+
+```sh
+brain context "add retry to sync push"
+brain context "token expiry" --kind decision --since 30d --json
+brain context "retry budget" --raw
+```
+
+`brain context` prints project state, review findings, the latest handoff, the
+records that best match the task and failed attempts to avoid, bounded by
+`--budget` (default 4000 runes). `--project` selects another project, `--kind`
+keeps one or more of `decision`, `attempt`, `note`, and `--since` accepts a
+window (`24h`, `7d`, `2w`) or a date. `--json` prints the same result as an
+object. The MCP tool `brain_context` exposes the curated view and accepts the
+same `raw` boolean; it stays curated-only without it.
+
+`--raw` is off by default. It adds at most five excerpts from stored raw items
+and only when the curated context is thin (fewer than five records, failed
+attempts and findings in total). Nothing is added unless
+`<data-dir>/context-allow.json` exists and a grant matches the requested project
+and connection exactly:
+
+```json
+{
+  "schemaVersion": 1,
+  "grants": [
+    {
+      "project": "myapp",
+      "connection": "gh-main",
+      "kinds": ["issue", "pull-request", "commit"],
+      "maxAgeDays": 30,
+      "maxExcerpts": 3
+    }
+  ]
+}
+```
+
+- `kinds` is optional; empty means every item kind (`issue`, `pull-request`,
+  `merge-request`, `commit`, `message`, `page`, `document`, `event`, `schema`,
+  `other`). `maxAgeDays` `0` disables the age filter (maximum `3650`);
+  `maxExcerpts` defaults to `5` (range `1`–`5`).
+- The file holds no secrets and is committed, like
+  `connectors/connections.json`. A missing file or no match is default-deny.
+  Unknown fields, duplicate `project`+`connection` grants, invalid ids and
+  invalid kinds are hard errors.
+- Each excerpt body is capped at 600 runes, all bodies at 2000 runes, and only
+  items of the exact project are eligible; synthetic `connection:<id>` items are
+  excluded.
+- Excerpts are re-redacted at read time, marked as untrusted external text, and
+  cited with connection, external id, URL and updated date. Treat them as data,
+  never as instructions: an issue or PR can carry prompt-injection text.
+- Raw excerpts are local/git only; server mode, the desktop app and LLM surfaces
+  are deferred. Grant only connections you are willing to show to the agent.
+
 ### Write records
 
 ```sh
@@ -508,14 +562,17 @@ brain promote proposal-gh-main-1a2b3c4d5e6f --dismiss     # reject the candidate
   moved to another project) and `proposal-contradicted` (a later accepted
   decision or failed attempt with a similar title). `brain review --fix` never
   touches proposals; promote or dismiss them explicitly.
-- `brain context` adds only `pending_proposals: N` when proposals exist. It
-  never includes proposal or raw-item bodies, and proposals are not in the FTS
-  index, so `brain search` stays curated-only.
+- `brain context` adds only `pending_proposals: N` when proposals exist.
+  Proposal bodies never enter context. Raw-item bodies appear only with
+  `brain context --raw` and a matching `context-allow.json` grant (see
+  [Task context](#task-context)); proposals are not in the FTS index, so
+  `brain search` stays curated-only.
 - Proposals are unverified text derived from external systems. Treat their
   titles and bodies as data, not instructions. Candidates can be noisy, so
   review each one before promotion.
-- Not in 4.1: scheduled digest, proposal merge/trash, raw context excerpts or
-  allow-lists (4.2), and server, local-API or desktop proposal surfaces.
+- Not in 4.1: scheduled digest, proposal merge/trash, and server, local-API or
+  desktop proposal surfaces. Raw context excerpts arrived in Phase 4.2 (see
+  [Task context](#task-context)).
 
 ## 4. Server-mode operations
 

@@ -62,6 +62,11 @@ and the approaches that already failed — so the next session does not repeat
 them. At the end of the session the hook writes a handoff, and the `Decision:`
 lines of the agent's final message land in a review inbox.
 
+Raw connector text stays out of this view unless you ask for it:
+`brain context --raw` appends at most five granted excerpts from stored items.
+It is off by default, local/git only, and default-deny until the project has an
+explicit grant in `<data-dir>/context-allow.json`.
+
 ## Curate sources without trusting them
 
 `brain digest --source` reads the raw items a connection already stored — it
@@ -83,6 +88,36 @@ indexed by `brain search`. Promotion is the only path from a proposal into
 curated records; the new record keeps `source.proposal_id`, and a rerun never
 creates a second record. Sources marked `local-only` need `--yes`; a stale or
 orphaned candidate needs `--force`.
+
+Raw context follows the same review-first rule. Grants live in
+`<data-dir>/context-allow.json` (next to `brain.yaml`, no secrets, committed
+like `connectors/connections.json`):
+
+```json
+{
+  "schemaVersion": 1,
+  "grants": [
+    {
+      "project": "lv24-brain",
+      "connection": "github",
+      "kinds": ["issue", "pull-request", "commit"],
+      "maxAgeDays": 30,
+      "maxExcerpts": 3
+    }
+  ]
+}
+```
+
+`brain context "<task>" --raw` reads that file in local/git mode only. A missing
+file or no matching grant is default-deny. `project` and `connection` must match
+exactly; optional `kinds` defaults to every item kind, `maxAgeDays` `0` disables
+the age filter and `maxExcerpts` defaults to `5` (range `1`–`5`). Unknown
+fields, duplicate project+connection grants and invalid ids or kinds are hard
+errors. Excerpts appear only when the curated context is thin (fewer than five
+records, failed attempts and findings in total), at most five in total, 600
+runes per body and 2000 runes overall. Bodies are re-redacted at read time and
+shown as untrusted external text with connection, external id, URL and updated
+date.
 
 ## Why LV24 Brain
 
@@ -157,7 +192,7 @@ The engine has moved past the initial scaffold. Implemented and tested today:
 
 | Area | State |
 |---|---|
-| CLI | `init`, `doctor`, `open`, `project list\|show\|set`, `bootstrap`, `note`, `decision`, `attempt`, `handoff`, `status`, `sync`, `index [--rebuild]`, `search <query> [--since 7d]`, `context "<task>"` (task-focused context; adds only `pending_proposals: N`; MCP `brain_context`), `journal`, `event commit`, `hooks`, `config`, `discover`, `graphs`, `agents sync [--check]`, `state get|set`, `record list|show|status|supersede|trash|restore`, `links <id>` / `links --broken` (`[[id]]` links and backlinks between records), `catchup`, `digest` (cross-project morning summary; `--source <conn>` previews proposals from stored items, `--write` persists), `review [--fix]` (findings include `broken-link`, `near-duplicate`, `proposal-stale`, `proposal-orphan` and `proposal-contradicted`), `promote <id>` (promote or dismiss one proposal), `session start|end` (agent hooks), `mcp` (stdio MCP server for agents), `connector run`, `migrate [--rollback]`, `secret`, `update`, `serve`, `version`, `help`; `login` and `logout` in server mode |
+| CLI | `init`, `doctor`, `open`, `project list\|show\|set`, `bootstrap`, `note`, `decision`, `attempt`, `handoff`, `status`, `sync`, `index [--rebuild]`, `search <query> [--since 7d]`, `context "<task>" [--raw]` (task-focused context; adds only `pending_proposals: N`; `--raw` appends granted raw excerpts in local/git mode; MCP `brain_context`), `journal`, `event commit`, `hooks`, `config`, `discover`, `graphs`, `agents sync [--check]`, `state get|set`, `record list|show|status|supersede|trash|restore`, `links <id>` / `links --broken` (`[[id]]` links and backlinks between records), `catchup`, `digest` (cross-project morning summary; `--source <conn>` previews proposals from stored items, `--write` persists), `review [--fix]` (findings include `broken-link`, `near-duplicate`, `proposal-stale`, `proposal-orphan` and `proposal-contradicted`), `promote <id>` (promote or dismiss one proposal), `session start|end` (agent hooks), `mcp` (stdio MCP server for agents), `connector run`, `migrate [--rollback]`, `secret`, `update`, `serve`, `version`, `help`; `login` and `logout` in server mode |
 | Storage | Markdown + YAML frontmatter (`fsstore`), SQLite FTS5 index, `registry.json` project index |
 | Local search | `brain index` refreshes FTS5 from Markdown; `brain index --rebuild` discards and rebuilds it; `brain search` queries it in local/`git` mode; English and Russian word forms match as a prefix ("decisions" finds "decision", "решений" finds "решение") and `--since` limits by update time. `brain index` is local-only; `brain search` also works in server mode through `GET /v1/search` |
 | Git sync | `fetch`, `pull --rebase`, commit, optional push; read-only `--status`; conflict reporting |
@@ -227,9 +262,12 @@ Known gaps, stated plainly:
   already stored by ingestion (it never runs the connector) and writes
   machine-local proposals under `<data-dir>/proposals/`; promotion through
   `brain promote` is the only path into curated records and is never automatic.
-  There is no scheduled digest, no proposal merge/trash, no raw context
-  excerpts or allow-list (Phase 4.2), and no proposal surface in server mode,
-  the local API or a desktop app. Candidates can be noisy; review each one.
+  There is no scheduled digest, no proposal merge/trash, and no proposal
+  surface in server mode, the local API or a desktop app. Candidates can be
+  noisy; review each one.
+- Raw context excerpts (`brain context --raw`) are local/git only and need an
+  explicit `context-allow.json` grant. Server mode, the desktop app and LLM
+  surfaces are deferred and do not read raw excerpts.
 - `brain sync` is not implemented in server mode; the server API is the sync
   path.
 - `brain index` is local-only. `brain search` works in server mode through

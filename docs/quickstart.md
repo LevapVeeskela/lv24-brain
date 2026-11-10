@@ -26,12 +26,18 @@ Before starting a specific task, ask for just the context it needs:
 ```sh
 brain context "add retry to sync push"
 brain context "token expiry" --kind decision --since 30d --json
+brain context "retry budget" --raw
 ```
 
 It prints the project state, review findings, the latest handoff, the records
 that best match the task (decisions rank above attempts and notes, newer above
 older) and failed attempts to avoid repeating, bounded by `--budget` (default
 4000 runes). Agents call the same thing through the MCP tool `brain_context`.
+
+`--raw` is off by default. It appends at most five granted raw excerpts when the
+curated context is thin and only in local/git mode; without a matching grant in
+`<data-dir>/context-allow.json` it adds nothing. See
+[Raw context excerpts](#raw-context-excerpts-phase-42).
 
 | Mode | Storage | Sync | Best for |
 |---|---|---|---|
@@ -289,15 +295,63 @@ prints the `mode: "proposals"` envelope. Server mode rejects `--source`.
 
 `brain review` lists pending proposals and reports `proposal-stale`,
 `proposal-orphan` and `proposal-contradicted`; `--fix` never changes a
-proposal. `brain context` adds only `pending_proposals: N`. Promotion writes a
-normal decision, attempt or note with `source.proposal_id`, a deterministic
-record id, and provenance (connection, external id, URL, observed time).
-Reruns are idempotent. A `local-only` source needs `--yes`; a stale or orphaned
-proposal needs `--force`; `--dismiss` is terminal. Promotion is the only path
-from a proposal into curated records.
+proposal. `brain context` adds only `pending_proposals: N` unless `--raw` adds a
+granted excerpt (see below). Promotion writes a normal decision, attempt or note
+with `source.proposal_id`, a deterministic record id, and provenance
+(connection, external id, URL, observed time). Reruns are idempotent. A
+`local-only` source needs `--yes`; a stale or orphaned proposal needs `--force`;
+`--dismiss` is terminal. Promotion is the only path from a proposal into
+curated records.
 
-Not in this phase: scheduled digest, proposal merge/trash, raw context excerpts
-or allow-lists (4.2), and server/desktop proposal surfaces.
+Not in 4.1: scheduled digest, proposal merge/trash, and server/desktop proposal
+surfaces. Raw context excerpts arrived in Phase 4.2 and are local/git only.
+
+### Raw context excerpts (Phase 4.2)
+
+Curated context is the default. To let an agent see a few stored raw items, add
+an explicit grant in `<data-dir>/context-allow.json` next to `brain.yaml`;
+without the file, or without a matching grant, nothing raw is shown:
+
+```json
+{
+  "schemaVersion": 1,
+  "grants": [
+    {
+      "project": "demo",
+      "connection": "gh-main",
+      "kinds": ["issue", "pull-request", "commit"],
+      "maxAgeDays": 30,
+      "maxExcerpts": 3
+    }
+  ]
+}
+```
+
+```sh
+./bin/brain context "retry budget" --raw --config ~/brain/brain.yaml
+```
+
+- `project` and `connection` are required and matched exactly; `connection` is
+  the id from `brain connection list`.
+- `kinds` is optional. Empty (or omitted) allows every item kind: `issue`,
+  `pull-request`, `merge-request`, `commit`, `message`, `page`, `document`,
+  `event`, `schema`, `other`.
+- `maxAgeDays` is optional; `0` means no age limit and the maximum is `3650`.
+- `maxExcerpts` is optional; it defaults to `5` and accepts `1`–`5`.
+- Unknown fields, a duplicate `project`+`connection`, invalid ids and invalid
+  kinds are hard errors. Nothing falls back to a wider grant.
+
+Excerpts are added only when the curated context is thin (fewer than five
+records, failed attempts and findings in total), at most five per context, with
+each body capped at 600 runes and all bodies at 2000 runes. Only items stored
+for the exact project and connection are eligible; synthetic `connection:<id>`
+items are excluded. Every excerpt is cited with its connection, external id, URL
+and updated date, is marked as untrusted external text, and is re-redacted with
+the ingest redactor at read time. The file holds no secrets and is committed
+like `connectors/connections.json`. Raw excerpts are local/git only; server
+mode, the desktop app and LLM surfaces are deferred. The MCP `brain_context`
+tool accepts the same explicit `raw` boolean and remains curated-only without
+it.
 
 ### OAuth for GitHub and GitLab (v0.12.0)
 
@@ -672,7 +726,7 @@ also accepts `--config <path>`.
 | `brain review` | `--project <id>`, `--since <7d>`, `--fix`, `--fix-kind <kinds>`, `--json`. Lists pending proposals (at most 20) and findings; `broken-link`, `near-duplicate`, `proposal-stale`, `proposal-orphan`, `proposal-contradicted` are report-only. Proposal findings are local/git only, and `--fix` never touches proposals. |
 | `brain digest` | `--since <90m\|24h\|7d>` (default `24h`; with `--source` the default is `30d`), `--project <id>`, `--json`, `--write` (saves `<data_dir>/digests/YYYY-MM-DD.md`). With `--source <connection>`: `--all`, `--limit <n>` (default 500), `--rule <names>`, `--dry-run` (default; conflicts with `--write`), `--write` (persists proposals). `--source` is local/git only. |
 | `brain promote <id>` | `--project <id>`, `--as decision\|attempt\|note`, `--status proposed\|accepted` (decision only), `--title <text>`, `--dismiss`, `--force` (stale/orphan), `--yes` (local-only source), `--dry-run`, `--json`. Local/git only. |
-| `brain context <task>` | `--project <id>`, `--budget <runes>` (default 4000), `--kind decision\|attempt\|note` (repeatable), `--since <24h\|7d\|2w\|date>`, `--json`. State, review findings, latest handoff, best-matching records and failed attempts for the task; adds only `pending_proposals: N` when proposals exist. MCP: `brain_context`. |
+| `brain context <task>` | `--project <id>`, `--budget <runes>` (default 4000), `--kind decision\|attempt\|note` (repeatable), `--since <24h\|7d\|2w\|date>`, `--json`, `--raw` (off by default; local/git only; appends at most five excerpts allowed by `<data-dir>/context-allow.json` when the curated context is thin). State, review findings, latest handoff, best-matching records and failed attempts for the task; adds only `pending_proposals: N` when proposals exist, plus granted excerpts with `--raw`. MCP: `brain_context`. |
 | `brain sync` | `--status` (read-only divergence and conflict report), `--push` (push after committing) |
 | `brain index` | `--rebuild` (delete the local index and rebuild it from Markdown) |
 
