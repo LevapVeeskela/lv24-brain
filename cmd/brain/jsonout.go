@@ -46,6 +46,20 @@ func writeJSONReport(stdout, stderr io.Writer, command string, data any) int {
 	return 0
 }
 
+// jsonModeEnvelope is the shared schema envelope with an explicit mode, used
+// when one command emits more than one payload shape (`digest --source`).
+type jsonModeEnvelope struct {
+	Schema int    `json:"schema"`
+	Mode   string `json:"mode"`
+	Data   any    `json:"data"`
+}
+
+// writeJSONMode prints data inside {schema, mode, data}: indented, one
+// document, nothing else on stdout.
+func writeJSONMode(w io.Writer, mode string, data any) error {
+	return encodeJSON(w, jsonModeEnvelope{Schema: jsonSchemaVersion, Mode: mode, Data: data})
+}
+
 // jsonTime renders a timestamp as RFC 3339 in UTC, or null when unset.
 func jsonTime(value time.Time) *string {
 	if value.IsZero() {
@@ -212,6 +226,143 @@ func toJSONHits(hits []ports.Hit) []jsonHit {
 		})
 	}
 	return out
+}
+
+// jsonProposalDigest is `brain digest --source --json`. Mode is "proposals" so
+// a consumer can tell it apart from the activity digest payload.
+type jsonProposalDigest struct {
+	Mode        string              `json:"mode"`
+	Project     string              `json:"project"`
+	Connection  string              `json:"connection"`
+	Window      string              `json:"window"`
+	Since       *string             `json:"since"`
+	GeneratedAt *string             `json:"generated_at"`
+	All         bool                `json:"all"`
+	Write       bool                `json:"write"`
+	DryRun      bool                `json:"dry_run"`
+	Counts      jsonProposalCounts  `json:"counts"`
+	Proposals   []jsonProposalEntry `json:"proposals"`
+}
+
+// jsonProposalCounts is the digest counter block.
+type jsonProposalCounts struct {
+	Scanned   int  `json:"scanned"`
+	Created   int  `json:"created"`
+	Updated   int  `json:"updated"`
+	Unchanged int  `json:"unchanged"`
+	Skipped   int  `json:"skipped"`
+	Truncated bool `json:"truncated"`
+}
+
+// jsonProposalEntry is one candidate record and what the digest did with it.
+type jsonProposalEntry struct {
+	ID          string                 `json:"id"`
+	Project     string                 `json:"project"`
+	Connection  string                 `json:"connection"`
+	Kind        string                 `json:"kind"`
+	Rule        string                 `json:"rule"`
+	Confidence  float64                `json:"confidence"`
+	Title       string                 `json:"title"`
+	Body        string                 `json:"body,omitempty"`
+	Action      string                 `json:"action"`
+	Status      string                 `json:"status"`
+	ExternalID  string                 `json:"external_id"`
+	ItemKey     string                 `json:"item_key,omitempty"`
+	URL         string                 `json:"url,omitempty"`
+	PayloadHash string                 `json:"payload_hash"`
+	Sections    []jsonProposalSection  `json:"sections"`
+	Citations   []jsonProposalCitation `json:"citations"`
+	CreatedAt   *string                `json:"created_at,omitempty"`
+	UpdatedAt   *string                `json:"updated_at,omitempty"`
+}
+
+// jsonProposalSection is one ordered Markdown section.
+type jsonProposalSection struct {
+	Heading string `json:"heading"`
+	Body    string `json:"body,omitempty"`
+}
+
+// jsonProposalCitation points back to the stored raw item.
+type jsonProposalCitation struct {
+	ConnectionID string  `json:"connection_id"`
+	ItemKey      string  `json:"item_key,omitempty"`
+	ExternalID   string  `json:"external_id,omitempty"`
+	URL          string  `json:"url,omitempty"`
+	Title        string  `json:"title,omitempty"`
+	ObservedAt   *string `json:"observed_at"`
+}
+
+func toJSONProposalDigest(digest app.ProposalDigest, window string, dryRun bool) jsonProposalDigest {
+	out := jsonProposalDigest{
+		Mode:        "proposals",
+		Project:     digest.ProjectID,
+		Connection:  digest.ConnectionID,
+		Window:      window,
+		Since:       jsonOptionalTime(digest.Since),
+		GeneratedAt: jsonTime(digest.GeneratedAt),
+		All:         digest.All,
+		Write:       digest.Write,
+		DryRun:      dryRun,
+		Counts: jsonProposalCounts{
+			Scanned:   digest.Counts.Scanned,
+			Created:   digest.Counts.Created,
+			Updated:   digest.Counts.Updated,
+			Unchanged: digest.Counts.Unchanged,
+			Skipped:   digest.Counts.Skipped,
+			Truncated: digest.Counts.Truncated,
+		},
+		Proposals: make([]jsonProposalEntry, 0, len(digest.Entries)),
+	}
+	for _, entry := range digest.Entries {
+		proposal := entry.Proposal
+		item := jsonProposalEntry{
+			ID:          proposal.ID,
+			Project:     proposal.ProjectID,
+			Connection:  proposal.ConnectionID,
+			Kind:        string(proposal.Kind),
+			Rule:        proposal.Rule,
+			Confidence:  proposal.Confidence,
+			Title:       proposal.Title,
+			Body:        proposal.Body,
+			Action:      string(entry.Action),
+			Status:      string(proposal.StatusOrPending()),
+			ExternalID:  proposal.ExternalID,
+			PayloadHash: proposal.PayloadHash,
+			Sections:    make([]jsonProposalSection, 0, len(proposal.Sections)),
+			Citations:   make([]jsonProposalCitation, 0, len(proposal.Citations)),
+			CreatedAt:   jsonTime(proposal.CreatedAt),
+			UpdatedAt:   jsonTime(proposal.UpdatedAt),
+		}
+		for _, section := range proposal.Sections {
+			item.Sections = append(item.Sections, jsonProposalSection{Heading: section.Heading, Body: section.Body})
+		}
+		for _, citation := range proposal.Citations {
+			if item.ItemKey == "" {
+				item.ItemKey = citation.ItemKey
+			}
+			if item.URL == "" {
+				item.URL = citation.URL
+			}
+			item.Citations = append(item.Citations, jsonProposalCitation{
+				ConnectionID: citation.ConnectionID,
+				ItemKey:      citation.ItemKey,
+				ExternalID:   citation.ExternalID,
+				URL:          citation.URL,
+				Title:        citation.Title,
+				ObservedAt:   jsonTime(citation.ObservedAt),
+			})
+		}
+		out.Proposals = append(out.Proposals, item)
+	}
+	return out
+}
+
+// jsonOptionalTime renders an optional timestamp, or null when nil.
+func jsonOptionalTime(value *time.Time) *string {
+	if value == nil {
+		return nil
+	}
+	return jsonTime(*value)
 }
 
 // jsonJournalEntry is one activity journal line.

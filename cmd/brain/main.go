@@ -233,7 +233,7 @@ Commands:
   agents     Sync the shared agent instructions (agents sync [--check])
   state      Get or set a project's goal, next action, blockers and questions
   catchup    what changed since the latest handoff
-  digest     Morning summary across projects: changes, and what needs you (--write saves it)
+  digest     Morning summary across projects: changes, and what needs you (--write saves it); --source <conn> previews proposals
   record     List, show, change status, trash and restore records
   links      [[id]] links and backlinks of a record; --broken lists dangling links
   session    start|end handlers for agent session hooks

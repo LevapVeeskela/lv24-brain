@@ -3,6 +3,8 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
+	"flag"
 	"fmt"
 	"io"
 	"os"
@@ -14,6 +16,7 @@ import (
 
 	"github.com/levapveeskela/lv24-brain/internal/app"
 	"github.com/levapveeskela/lv24-brain/internal/config"
+	"github.com/levapveeskela/lv24-brain/internal/domain"
 )
 
 const (
@@ -45,13 +48,19 @@ type digestFindingItem struct {
 
 // runDigest implements `brain digest`: a morning summary across registered
 // projects (or one with --project) of what changed in the window and what
-// still needs the owner.
+// still needs the owner. With --source it previews proposals from the stored
+// raw items of one connection and never runs the source.
 func runDigest(args []string, stdout, stderr io.Writer) int {
 	fs := newFlagSet("digest", stderr)
-	since := fs.String("since", digestDefaultSince, "window to report: Go duration (90m, 24h) or days (7d)")
+	since := fs.String("since", digestDefaultSince, "window to report: Go duration (90m, 24h) or days (7d); with --source the default is 30d")
 	project := fs.String("project", "", "report one registered project only")
+	source := fs.String("source", "", "preview proposals from the stored items of one connection (never runs the source)")
+	all := fs.Bool("all", false, "with --source: ignore --since and scan all stored items")
+	limit := fs.Int("limit", app.DefaultProposalDigestLimit, "with --source: maximum stored items to scan")
+	rule := fs.String("rule", "", "with --source: comma-separated rules ("+strings.Join(app.ProposalRuleNames(), ", ")+")")
 	asJSON := fs.Bool("json", false, "print JSON")
-	write := fs.Bool("write", false, "save the human digest to <data_dir>/digests/YYYY-MM-DD.md")
+	write := fs.Bool("write", false, "save the human digest to <data_dir>/digests/YYYY-MM-DD.md; with --source: persist proposals")
+	dryRun := fs.Bool("dry-run", false, "with --source: preview only (the default; cannot be combined with --write)")
 	cfgPath := configFlag(fs)
 	positional, err := parseInterspersed(fs, args)
 	if err != nil {
@@ -61,17 +70,31 @@ func runDigest(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "brain digest: unexpected arguments: %s\n", strings.Join(positional, " "))
 		return 2
 	}
-	window, err := parseDigestWindow(*since)
+	seen := map[string]bool{}
+	fs.Visit(func(f *flag.Flag) { seen[f.Name] = true })
+	if !seen["source"] {
+		if seen["all"] || seen["limit"] || seen["rule"] || seen["dry-run"] {
+			fmt.Fprintln(stderr, "brain digest: --all, --limit, --rule and --dry-run need --source <connection>")
+			return 2
+		}
+		return runActivityDigest(*since, *project, *cfgPath, *asJSON, *write, stdout, stderr)
+	}
+	return runProposalDigest(*source, *project, *since, *cfgPath, *all, *limit, *rule, *write, *dryRun, *asJSON, seen, stdout, stderr)
+}
+
+// runActivityDigest is the original cross-project digest.
+func runActivityDigest(sinceValue, project, cfgPath string, asJSON, write bool, stdout, stderr io.Writer) int {
+	window, err := parseDigestWindow(sinceValue)
 	if err != nil {
 		fmt.Fprintf(stderr, "brain digest: %v\n", err)
 		return 2
 	}
 	ctx := context.Background()
-	cfg, err := loadRequiredConfig(*cfgPath)
+	cfg, err := loadRequiredConfig(cfgPath)
 	if err != nil {
 		return reportError(stderr, "digest", err)
 	}
-	if *write && cfg.Mode == config.ModeServer {
+	if write && cfg.Mode == config.ModeServer {
 		fmt.Fprintln(stderr, "brain digest: --write needs local or git mode; run it on the machine that owns the data dir")
 		return 2
 	}
@@ -82,13 +105,13 @@ func runDigest(args []string, stdout, stderr io.Writer) int {
 	defer func() { _ = runtime.Close() }()
 
 	generated := time.Now()
-	digest, err := runtime.App.Digest(ctx, app.DigestOptions{ProjectID: *project, Since: generated.Add(-window)})
+	digest, err := runtime.App.Digest(ctx, app.DigestOptions{ProjectID: project, Since: generated.Add(-window)})
 	if err != nil {
 		return reportError(stderr, "digest", err)
 	}
-	human := renderDigest(digest, *since)
+	human := renderDigest(digest, sinceValue)
 	var writtenTo string
-	if *write {
+	if write {
 		status, err := runtime.App.Status(ctx)
 		if err != nil {
 			return reportError(stderr, "digest", err)
@@ -98,14 +121,129 @@ func runDigest(args []string, stdout, stderr io.Writer) int {
 			return reportError(stderr, "digest", err)
 		}
 	}
-	if *asJSON {
-		return writeJSONReport(stdout, stderr, "digest", toJSONDigest(digest, *since, writtenTo))
+	if asJSON {
+		return writeJSONReport(stdout, stderr, "digest", toJSONDigest(digest, sinceValue, writtenTo))
 	}
 	_, _ = io.WriteString(stdout, human)
 	if writtenTo != "" {
 		fmt.Fprintf(stdout, "wrote %s\n", writtenTo)
 	}
 	return 0
+}
+
+// runProposalDigest previews or writes proposals from stored raw items. It is
+// deliberately offline: only the item store, connection catalogue and proposal
+// store are read.
+func runProposalDigest(source, project, sinceValue, cfgPath string, all bool, limit int, rules string, write, dryRun, asJSON bool, seen map[string]bool, stdout, stderr io.Writer) int {
+	if strings.TrimSpace(source) == "" {
+		fmt.Fprintln(stderr, "brain digest: --source needs a connection id")
+		return 2
+	}
+	if write && dryRun {
+		fmt.Fprintln(stderr, "brain digest: --dry-run cannot be combined with --write")
+		return 2
+	}
+	if seen["limit"] && limit <= 0 {
+		fmt.Fprintln(stderr, "brain digest: --limit must be positive")
+		return 2
+	}
+	window := app.DefaultProposalDigestWindow
+	windowLabel := "30d"
+	if seen["since"] {
+		parsed, err := parseDigestWindow(sinceValue)
+		if err != nil {
+			fmt.Fprintf(stderr, "brain digest: %v\n", err)
+			return 2
+		}
+		window = parsed
+		windowLabel = strings.TrimSpace(sinceValue)
+	}
+	if all {
+		windowLabel = "all"
+	}
+	cfg, err := loadRequiredConfig(cfgPath)
+	if err != nil {
+		return reportError(stderr, "digest", err)
+	}
+	if cfg.Mode == config.ModeServer {
+		fmt.Fprintln(stderr, "brain digest: --source needs local or git mode; run it on the machine that owns the data dir")
+		return 2
+	}
+	runtime, err := buildRuntime(cfg)
+	if err != nil {
+		return reportError(stderr, "digest", err)
+	}
+	defer func() { _ = runtime.Close() }()
+
+	opts := app.ProposalDigestOptions{
+		ConnectionID: source,
+		ProjectID:    project,
+		All:          all,
+		Limit:        limit,
+		Rules:        splitList(rules),
+		Write:        write,
+		DryRun:       dryRun,
+	}
+	if seen["since"] && !all {
+		opts.Since = time.Now().Add(-window)
+	}
+	result, err := runtime.App.ProposalDigest(context.Background(), opts)
+	if err != nil {
+		if errors.Is(err, domain.ErrValidation) {
+			fmt.Fprintf(stderr, "brain digest: %v\n", err)
+			return 2
+		}
+		return reportError(stderr, "digest", err)
+	}
+	if asJSON {
+		if err := writeJSONMode(stdout, "proposals", toJSONProposalDigest(result, windowLabel, dryRun)); err != nil {
+			return reportError(stderr, "digest", err)
+		}
+		return 0
+	}
+	_, _ = io.WriteString(stdout, renderProposalDigest(result, windowLabel))
+	return 0
+}
+
+// renderProposalDigest is the human output of `brain digest --source`.
+func renderProposalDigest(result app.ProposalDigest, window string) string {
+	var b bytes.Buffer
+	mode := "preview"
+	if result.Write {
+		mode = "write"
+	}
+	fmt.Fprintf(&b, "brain digest --source %s — %s (%s)\n", result.ConnectionID, result.ProjectID, mode)
+	if result.All || result.Since == nil {
+		b.WriteString("window: all\n")
+	} else {
+		fmt.Fprintf(&b, "window: %s (since %s)\n", window, formatCatchupTime(*result.Since))
+	}
+	fmt.Fprintf(&b, "scanned: %d\n", result.Counts.Scanned)
+	fmt.Fprintf(&b, "created: %d\n", result.Counts.Created)
+	fmt.Fprintf(&b, "updated: %d\n", result.Counts.Updated)
+	fmt.Fprintf(&b, "unchanged: %d\n", result.Counts.Unchanged)
+	fmt.Fprintf(&b, "skipped: %d\n", result.Counts.Skipped)
+	if result.Counts.Truncated {
+		b.WriteString("truncated: true (raise --limit to scan more)\n")
+	} else {
+		b.WriteString("truncated: false\n")
+	}
+	b.WriteString("\nproposals:\n")
+	if len(result.Entries) == 0 {
+		b.WriteString("  none\n")
+	} else {
+		for _, entry := range result.Entries {
+			fmt.Fprintf(&b, "  %-9s %-8s %-15s %.2f  %s\n",
+				entry.Action, entry.Proposal.Kind, entry.Proposal.Rule,
+				entry.Proposal.Confidence, catchupLine(entry.Proposal.Title))
+		}
+	}
+	if result.Write {
+		fmt.Fprintf(&b, "\nwritten: %d\n", result.Written())
+	} else {
+		b.WriteString("\npreview: no proposal files written; rerun with --write to persist\n")
+	}
+	return b.String()
 }
 
 // parseDigestWindow accepts Go durations plus a whole number of days (7d).

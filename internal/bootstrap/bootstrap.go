@@ -73,7 +73,17 @@ func BuildWithOptions(cfg config.BrainConfig, opts Options) (*Runtime, error) {
 			return nil, err
 		}
 		if store != nil {
+			connections, connErr := fsstore.NewConnectionStore(cfg.DataDir)
+			if connErr != nil {
+				if openedIndex != nil {
+					_ = openedIndex.Close()
+				}
+				return nil, connErr
+			}
 			deps.Store = store
+			deps.Connections = connections
+			deps.Items = store.ItemZone()
+			deps.Proposals = store
 			runStore = store
 			index = openedIndex
 			deps.Index = index
