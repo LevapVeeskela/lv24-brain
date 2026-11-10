@@ -37,7 +37,7 @@ func newPromoteFixture(t *testing.T, publish domain.PublishPolicy) *promoteFixtu
 	if err != nil {
 		t.Fatal(err)
 	}
-	clock := time.Date(2026, 11, 10, 12, 0, 0, 0, time.UTC)
+	clock := time.Now().UTC().Truncate(time.Second)
 	cfg := config.Default()
 	cfg.Mode = config.ModeGit
 	cfg.User = "alice"
