@@ -146,12 +146,19 @@ type SyncStatus struct {
 	Behind    int
 	Dirty     bool
 	Conflicts []string
+	// LastSynced is the revision recorded after the last completed pull or
+	// push. It is zero when no sync has completed on this checkout yet.
+	LastSynced domain.SyncRevision
 }
 
 // SyncOptions controls a pull/commit/push cycle.
 type SyncOptions struct {
 	Push          bool
 	CommitMessage string
+	// Autostash stashes a dirty working tree before the rebase and restores it
+	// afterwards. Git rejects a rebase with unstaged changes, and a concurrent
+	// writer can dirty the tree between the commit and the pull.
+	Autostash bool
 }
 
 // SyncResult reports what a sync step changed.
@@ -159,6 +166,9 @@ type SyncResult struct {
 	Revision  domain.SyncRevision
 	Changed   int
 	Conflicts []string
+	// Recovered reports that an interrupted rebase or a leftover autostash
+	// from an earlier run was repaired before this sync proceeded.
+	Recovered bool
 }
 
 // SyncProvider synchronizes the local brain with a git remote or server.
@@ -167,6 +177,28 @@ type SyncProvider interface {
 	Pull(ctx context.Context, opts SyncOptions) (SyncResult, error)
 	Commit(ctx context.Context, message string) (domain.SyncRevision, error)
 	Push(ctx context.Context) (SyncResult, error)
+}
+
+// SyncLocker serializes sync runs on one data directory across processes. A
+// provider that writes a shared checkout implements it so that two `brain
+// sync` processes cannot interleave commit, rebase, and push.
+type SyncLocker interface {
+	// LockSync takes the lock and returns the release function. The release
+	// function must always be called.
+	LockSync(ctx context.Context) (func(), error)
+}
+
+// MergeDriverInstaller registers the deterministic git merge drivers in the
+// local clone of a data repository.
+type MergeDriverInstaller interface {
+	// MissingMergeDrivers names drivers configured in .gitattributes that the
+	// local repository has not registered. A data directory that is not a git
+	// repository reports domain.ErrUnsupported.
+	MissingMergeDrivers(ctx context.Context) ([]string, error)
+	// RegisterMergeDrivers writes the managed driver definitions for
+	// executable and reports whether anything changed. It is idempotent and
+	// does nothing when the data directory is not a git work tree.
+	RegisterMergeDrivers(ctx context.Context, executable string) (bool, error)
 }
 
 // GitPathLister is implemented by sync providers that can report which files

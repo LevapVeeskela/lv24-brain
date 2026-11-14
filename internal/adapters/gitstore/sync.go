@@ -2,10 +2,28 @@ package gitstore
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/levapveeskela/lv24-brain/internal/domain"
 	"github.com/levapveeskela/lv24-brain/internal/ports"
+)
+
+const (
+	// syncStateFile records the revision of the last completed pull or push.
+	// It lives inside .git, so it is never tracked and never dirties the tree.
+	syncStateFile = "brain-sync.json"
+	// autostashPrefix marks the stashes this package creates, so recovery
+	// never restores a stash written by a human.
+	autostashPrefix = "brain-sync-autostash"
+	// maxRecoveredStashes bounds how many of our stashes one recovery run
+	// restores; a crash loop cannot produce more than a handful.
+	maxRecoveredStashes = 10
 )
 
 // Status reports branch, divergence, dirtiness, and conflicts without touching
@@ -30,34 +48,41 @@ func (p *Provider) Status(ctx context.Context) (ports.SyncStatus, error) {
 		return ports.SyncStatus{}, err
 	}
 	return ports.SyncStatus{
-		Provider:  ProviderName,
-		Branch:    branch,
-		Ahead:     ahead,
-		Behind:    behind,
-		Dirty:     dirty,
-		Conflicts: conflicts,
+		Provider:   ProviderName,
+		Branch:     branch,
+		Ahead:      ahead,
+		Behind:     behind,
+		Dirty:      dirty,
+		Conflicts:  conflicts,
+		LastSynced: p.lastSyncedRevision(ctx),
 	}, nil
 }
 
-// Pull fetches the remote and rebases local commits on top of the upstream
-// branch. It never forces, merges, or resets. A rebase conflict returns a
-// ConflictError that wraps domain.ErrConflict together with the unmerged paths;
-// the repository is left in the conflicted state for manual resolution.
+// Pull repairs an interrupted earlier sync, fetches the remote and rebases
+// local commits on top of the upstream branch. It never forces, merges, or
+// resets. A dirty working tree is stashed before the rebase and restored after
+// it. A rebase conflict aborts the rebase (so the repository is never stuck),
+// restores the stash, and returns a ConflictError that wraps domain.ErrConflict
+// together with the paths that conflicted.
 //
 // opts.Push pushes local commits after a successful rebase. Pull never creates
 // a commit: opts.CommitMessage is ignored because a rebase requires a clean
 // working tree. Callers that need to commit run Commit before or after Pull.
 func (p *Provider) Pull(ctx context.Context, opts ports.SyncOptions) (ports.SyncResult, error) {
+	recovered, err := p.recoverInterruptedSync(ctx)
+	if err != nil {
+		return ports.SyncResult{Recovered: recovered}, err
+	}
 	if _, err := p.run(ctx, "fetch", "--prune", p.remote); err != nil {
-		return ports.SyncResult{}, err
+		return ports.SyncResult{Recovered: recovered}, err
 	}
 	branch, err := p.branch(ctx)
 	if err != nil {
-		return ports.SyncResult{}, err
+		return ports.SyncResult{Recovered: recovered}, err
 	}
 	_, behind, err := p.divergence(ctx, branch)
 	if err != nil {
-		return ports.SyncResult{}, err
+		return ports.SyncResult{Recovered: recovered}, err
 	}
 
 	// A new, empty data repository has no remote branch yet: there is
@@ -65,33 +90,21 @@ func (p *Provider) Pull(ctx context.Context, opts ports.SyncOptions) (ports.Sync
 	if branch != "" && !p.remoteBranchExists(ctx, branch) {
 		revision, err := p.revision(ctx)
 		if err != nil {
-			return ports.SyncResult{}, err
+			return ports.SyncResult{Recovered: recovered}, err
 		}
 		if !opts.Push {
-			return ports.SyncResult{Revision: revision}, nil
+			return ports.SyncResult{Revision: revision, Recovered: recovered}, nil
 		}
-		return p.Push(ctx)
+		result, err := p.Push(ctx)
+		result.Recovered = recovered
+		return result, err
 	}
 
-	if _, err := p.run(ctx, "pull", "--rebase"); err != nil {
-		conflicts, conflictErr := p.conflictedPaths(ctx)
-		if conflictErr != nil {
-			return ports.SyncResult{}, err
-		}
-		if len(conflicts) > 0 {
-			return ports.SyncResult{Conflicts: conflicts}, &ConflictError{
-				Operation: "pull",
-				Paths:     conflicts,
-			}
-		}
-		return ports.SyncResult{}, err
-	}
-
-	revision, err := p.revision(ctx)
+	result, err := p.rebasePull(ctx, opts.Autostash, behind)
+	result.Recovered = recovered
 	if err != nil {
-		return ports.SyncResult{}, err
+		return result, err
 	}
-	result := ports.SyncResult{Revision: revision, Changed: behind}
 	if !opts.Push {
 		return result, nil
 	}
@@ -104,6 +117,45 @@ func (p *Provider) Pull(ctx context.Context, opts ports.SyncOptions) (ports.Sync
 	result.Changed += pushed.Changed
 	result.Conflicts = pushed.Conflicts
 	return result, nil
+}
+
+// rebasePull stashes a dirty tree, runs the rebase, and restores the stash.
+// On a rebase conflict it captures the unmerged paths, aborts the rebase, and
+// restores the stash, so the caller always gets an usable repository back.
+func (p *Provider) rebasePull(ctx context.Context, autostash bool, behind int) (ports.SyncResult, error) {
+	stashed, err := p.stashIfDirty(ctx, autostash)
+	if err != nil {
+		return ports.SyncResult{}, err
+	}
+	if _, err := p.run(ctx, "pull", "--rebase"); err != nil {
+		conflicts, _ := p.conflictedPaths(ctx)
+		rebase := p.rebaseInProgress(ctx)
+		if rebase {
+			if _, abortErr := p.run(ctx, "rebase", "--abort"); abortErr != nil {
+				return ports.SyncResult{Conflicts: conflicts}, fmt.Errorf("gitstore: abort the conflicted rebase: %w", abortErr)
+			}
+		}
+		_, stashConflicts, restoreErr := p.restoreAutostash(ctx, stashed)
+		paths := uniquePaths(append(conflicts, stashConflicts...))
+		if len(paths) > 0 || rebase {
+			return ports.SyncResult{Conflicts: paths}, &ConflictError{Operation: "pull", Paths: paths, Aborted: rebase}
+		}
+		if restoreErr != nil {
+			return ports.SyncResult{}, restoreErr
+		}
+		return ports.SyncResult{}, err
+	}
+
+	_, stashConflicts, err := p.restoreAutostash(ctx, stashed)
+	if err != nil {
+		return ports.SyncResult{Conflicts: stashConflicts}, err
+	}
+	revision, err := p.revision(ctx)
+	if err != nil {
+		return ports.SyncResult{}, err
+	}
+	p.recordSyncedRevision(ctx, revision)
+	return ports.SyncResult{Revision: revision, Changed: behind}, nil
 }
 
 // Commit stages every non-ignored change under the repository root and creates
@@ -137,32 +189,305 @@ func (p *Provider) Commit(ctx context.Context, message string) (domain.SyncRevis
 	return p.revision(ctx)
 }
 
-// Push publishes local commits to the configured upstream. It never forces and
-// does not set an upstream automatically; a branch without tracking
-// information fails with a sanitized git error. Changed reports the number of
-// commits that were ahead before the push.
+// Push publishes local commits to the configured upstream. It never forces.
+// A rejected push is retried up to the configured attempts (3 by default, with
+// backoff), fetching and rebasing onto the upstream between attempts. A rebase
+// conflict during a retry returns a ConflictError, so the caller can report
+// exit code 3 instead of a generic failure. Changed reports the number of
+// commits that were ahead before the successful push.
 func (p *Provider) Push(ctx context.Context) (ports.SyncResult, error) {
 	branch, err := p.branch(ctx)
 	if err != nil {
 		return ports.SyncResult{}, err
 	}
-	ahead, _, err := p.divergence(ctx, branch)
-	if err != nil {
-		return ports.SyncResult{}, err
+	attempts := p.pushAttempts
+	if attempts < 1 {
+		attempts = 1
 	}
+	var lastErr error
+	for attempt := 1; attempt <= attempts; attempt++ {
+		ahead, _, err := p.divergence(ctx, branch)
+		if err != nil {
+			return ports.SyncResult{}, err
+		}
+		if _, err := p.run(ctx, "push"); err != nil {
+			lastErr = err
+			if attempt == attempts || !retryablePushError(err) {
+				break
+			}
+			if err := sleepContext(ctx, time.Duration(attempt)*p.pushBackoff); err != nil {
+				return ports.SyncResult{}, err
+			}
+			rebaseResult, err := p.rebaseAfterRejectedPush(ctx)
+			if err != nil {
+				return rebaseResult, err
+			}
+			continue
+		}
+		revision, err := p.revision(ctx)
+		if err != nil {
+			return ports.SyncResult{}, err
+		}
+		p.recordSyncedRevision(ctx, revision)
+		return ports.SyncResult{Revision: revision, Changed: ahead}, nil
+	}
+	return ports.SyncResult{}, lastErr
+}
 
-	if _, err := p.run(ctx, "push"); err != nil {
+// rebaseAfterRejectedPush fetches the upstream and rebases local commits on
+// top of it before another push attempt. A conflict aborts the rebase and
+// returns the unmerged paths.
+func (p *Provider) rebaseAfterRejectedPush(ctx context.Context) (ports.SyncResult, error) {
+	if _, err := p.run(ctx, "fetch", "--prune", p.remote); err != nil {
 		return ports.SyncResult{}, err
 	}
-	revision, err := p.revision(ctx)
+	branch, err := p.branch(ctx)
 	if err != nil {
 		return ports.SyncResult{}, err
 	}
-	return ports.SyncResult{Revision: revision, Changed: ahead}, nil
+	if branch == "" || !p.remoteBranchExists(ctx, branch) {
+		return ports.SyncResult{}, nil
+	}
+	return p.rebasePull(ctx, true, 0)
+}
+
+// recoverInterruptedSync repairs a run killed between stash and push: an
+// in-progress rebase is aborted and a stash created by this package is
+// restored. A user-created stash is never touched.
+func (p *Provider) recoverInterruptedSync(ctx context.Context) (bool, error) {
+	recovered := false
+	if p.rebaseInProgress(ctx) {
+		if _, err := p.run(ctx, "rebase", "--abort"); err != nil {
+			return recovered, fmt.Errorf("gitstore: abort the interrupted rebase: %w", err)
+		}
+		recovered = true
+	}
+	restored, conflicts, err := p.restoreAutostash(ctx, true)
+	if restored > 0 {
+		recovered = true
+	}
+	if len(conflicts) > 0 {
+		return recovered, &ConflictError{Operation: "stash restore", Paths: conflicts}
+	}
+	return recovered, err
+}
+
+// stashIfDirty saves the working tree when autostash is enabled and the tree
+// has changes, so the rebase can run. It reports whether a stash was created.
+func (p *Provider) stashIfDirty(ctx context.Context, autostash bool) (bool, error) {
+	if !autostash {
+		return false, nil
+	}
+	dirty, err := p.isDirty(ctx)
+	if err != nil {
+		return false, err
+	}
+	if !dirty {
+		return false, nil
+	}
+	message := autostashPrefix + " " + time.Now().UTC().Format(time.RFC3339Nano)
+	if _, err := p.run(ctx, "stash", "push", "--include-untracked", "--message="+message); err != nil {
+		return false, fmt.Errorf("gitstore: stash the working tree: %w", err)
+	}
+	return true, nil
+}
+
+// restoreAutostash pops our stashes until none is left. When enabled is false
+// it does nothing. A pop conflict is reported with the unmerged paths; the
+// stash entry is then dropped because git has already written both sides into
+// the working tree as conflict markers, and keeping it would re-apply the same
+// changes on the next sync.
+func (p *Provider) restoreAutostash(ctx context.Context, enabled bool) (int, []string, error) {
+	if !enabled {
+		return 0, nil, nil
+	}
+	for restored := 0; restored < maxRecoveredStashes; restored++ {
+		ref, ok, err := p.autostashRef(ctx)
+		if err != nil {
+			return restored, nil, err
+		}
+		if !ok {
+			return restored, nil, nil
+		}
+		if _, err := p.run(ctx, "stash", "pop", ref); err != nil {
+			conflicts, _ := p.conflictedPaths(ctx)
+			_, _ = p.run(ctx, "stash", "drop", ref)
+			return restored + 1, conflicts, &ConflictError{Operation: "stash restore", Paths: conflicts}
+		}
+	}
+	return maxRecoveredStashes, nil, nil
+}
+
+// autostashRef finds the newest stash created by this package.
+func (p *Provider) autostashRef(ctx context.Context) (string, bool, error) {
+	out, err := p.run(ctx, "stash", "list", "--format=%gd%x09%s")
+	if err != nil {
+		return "", false, err
+	}
+	for _, line := range strings.Split(out, "\n") {
+		ref, message, ok := strings.Cut(strings.TrimSpace(line), "\t")
+		if !ok || strings.TrimSpace(ref) == "" {
+			continue
+		}
+		// %s is the stash subject, "On <branch>: <message>", so the marker is
+		// matched anywhere in it rather than at the start.
+		if strings.Contains(message, autostashPrefix) {
+			return strings.TrimSpace(ref), true, nil
+		}
+	}
+	return "", false, nil
+}
+
+// rebaseInProgress reports whether .git holds a rebase state directory.
+func (p *Provider) rebaseInProgress(ctx context.Context) bool {
+	for _, name := range []string{"rebase-merge", "rebase-apply"} {
+		out, err := p.run(ctx, "rev-parse", "--git-path", name)
+		if err != nil {
+			return false
+		}
+		path := strings.TrimSpace(out)
+		if path == "" {
+			continue
+		}
+		if !filepath.IsAbs(path) {
+			path = filepath.Join(p.dir, path)
+		}
+		if info, err := os.Stat(path); err == nil && info.IsDir() {
+			return true
+		}
+	}
+	return false
 }
 
 // remoteBranchExists reports whether the last fetch saw branch on the remote.
 func (p *Provider) remoteBranchExists(ctx context.Context, branch string) bool {
 	_, err := p.run(ctx, "rev-parse", "--verify", "--quiet", "refs/remotes/"+p.remote+"/"+branch)
 	return err == nil
+}
+
+// recordSyncedRevision stores the revision of a completed sync for
+// `brain sync --status`. The write is best effort: a failed status file never
+// fails a successful sync.
+func (p *Provider) recordSyncedRevision(ctx context.Context, revision domain.SyncRevision) {
+	if revision.Value == "" {
+		return
+	}
+	payload, err := json.Marshal(struct {
+		Revision string    `json:"revision"`
+		At       time.Time `json:"at"`
+	}{Revision: revision.Value, At: revision.At})
+	if err != nil {
+		return
+	}
+	path := p.syncStatePath(ctx)
+	if path == "" {
+		return
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return
+	}
+	_ = os.WriteFile(path, append(payload, '\n'), 0o644)
+}
+
+// syncStatePath resolves <git-dir>/brain-sync.json. A worktree puts the git
+// directory elsewhere, so the path comes from git rather than from p.dir.
+func (p *Provider) syncStatePath(ctx context.Context) string {
+	out, err := p.run(ctx, "rev-parse", "--git-path", syncStateFile)
+	if err != nil {
+		return ""
+	}
+	path := strings.TrimSpace(out)
+	if path == "" {
+		return ""
+	}
+	if !filepath.IsAbs(path) {
+		path = filepath.Join(p.dir, path)
+	}
+	return path
+}
+
+func (p *Provider) lastSyncedRevision(ctx context.Context) domain.SyncRevision {
+	path := p.syncStatePath(ctx)
+	if path == "" {
+		return domain.SyncRevision{}
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return domain.SyncRevision{}
+	}
+	var state struct {
+		Revision string    `json:"revision"`
+		At       time.Time `json:"at"`
+	}
+	if err := json.Unmarshal(raw, &state); err != nil || strings.TrimSpace(state.Revision) == "" {
+		return domain.SyncRevision{}
+	}
+	return domain.SyncRevision{Kind: domain.SyncKindGit, Value: state.Revision, At: state.At.UTC()}
+}
+
+// retryablePushError reports whether a rejected push may succeed after a fetch
+// and rebase. Git gives no typed errors, so this inspects the sanitized stderr
+// for the non-fast-forward and transport failures that a retry can fix.
+func retryablePushError(err error) bool {
+	var commandErr *CommandError
+	if !errors.As(err, &commandErr) {
+		return false
+	}
+	stderr := strings.ToLower(commandErr.Stderr)
+	for _, needle := range []string{
+		"non-fast-forward",
+		"fetch first",
+		"failed to push some refs",
+		"cannot lock ref",
+		"could not resolve host",
+		"unable to access",
+		"failed to connect",
+		"connection timed out",
+		"connection reset",
+		"connection refused",
+		"network is unreachable",
+		"temporary failure in name resolution",
+		"rpc failed",
+		"remote end hung up",
+		"early eof",
+		"operation timed out",
+		"tls",
+		"ssl",
+	} {
+		if strings.Contains(stderr, needle) {
+			return true
+		}
+	}
+	return false
+}
+
+func sleepContext(ctx context.Context, delay time.Duration) error {
+	if delay <= 0 {
+		return nil
+	}
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
+}
+
+func uniquePaths(paths []string) []string {
+	seen := make(map[string]struct{}, len(paths))
+	result := make([]string, 0, len(paths))
+	for _, path := range paths {
+		path = strings.TrimSpace(path)
+		if path == "" {
+			continue
+		}
+		if _, ok := seen[path]; ok {
+			continue
+		}
+		seen[path] = struct{}{}
+		result = append(result, path)
+	}
+	return result
 }

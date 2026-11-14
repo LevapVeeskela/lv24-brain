@@ -288,7 +288,8 @@ func TestMCPServerToolsCallSearch(t *testing.T) {
 	if hit["id"] != "note-alpha-1" || hit["project_id"] != "alpha" || hit["kind"] != "note" || hit["snippet"] == "" {
 		t.Fatalf("hit = %v", hit)
 	}
-	if backend.search.Query != "cache" || backend.search.ProjectID != "alpha" || backend.search.Limit != 5 {
+	// The tool asks for one look-ahead row past the page so has_more is exact.
+	if backend.search.Query != "cache" || backend.search.ProjectID != "alpha" || backend.search.Limit != 6 {
 		t.Fatalf("search call = %+v", backend.search)
 	}
 	if len(backend.search.Kinds) != 0 || backend.search.IncludeDumps {
@@ -393,7 +394,8 @@ func TestMCPServerToolsCallJournal(t *testing.T) {
 	if entry["event"] != "note" || entry["id"] != "note-alpha-1" || entry["time"] != "2026-11-07T10:00:00Z" {
 		t.Fatalf("entry = %v", entry)
 	}
-	if backend.journalQuery.Limit != DefaultJournalLimit || backend.journalQuery.ProjectID != "alpha" {
+	// Default page of 20 plus one look-ahead row.
+	if backend.journalQuery.Limit != DefaultJournalLimit+1 || backend.journalQuery.ProjectID != "alpha" {
 		t.Fatalf("journal query = %+v", backend.journalQuery)
 	}
 }

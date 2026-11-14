@@ -53,7 +53,8 @@ func TestMCPServerRecordsListTool(t *testing.T) {
 	if got["isError"] == true {
 		t.Fatalf("brain_records error: %+v", got)
 	}
-	if backend.query.ProjectID != "alpha" || backend.query.Status != "proposed" || backend.query.Limit != 5 {
+	// Page size 5 plus one look-ahead row.
+	if backend.query.ProjectID != "alpha" || backend.query.Status != "proposed" || backend.query.Limit != 6 {
 		t.Fatalf("query = %+v", backend.query)
 	}
 	if len(backend.query.Kinds) != 1 || backend.query.Kinds[0] != "decision" {

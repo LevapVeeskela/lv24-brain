@@ -153,11 +153,22 @@ type toolResult struct {
 
 type toolFunc func(ctx context.Context, args json.RawMessage) (toolResult, error)
 
+// tool is one MCP tool: its protocol metadata and its handler.
 type tool struct {
 	Name        string
 	Description string
-	InputSchema map[string]any
-	run         toolFunc
+	// Annotations carries the title and the behaviour hints hosts read before
+	// asking the user to approve a call.
+	Annotations  Annotations
+	InputSchema  map[string]any
+	OutputSchema map[string]any
+	// Limits are the caps the catalogue reports for this tool.
+	Limits map[string]int
+	// confirm returns the question to ask the user before the call runs, or
+	// nil when the call needs no confirmation. It is consulted only for 2026
+	// clients that declared elicitation (see mrtr.go).
+	confirm func(args json.RawMessage) *confirmation
+	run     toolFunc
 }
 
 func (s *Server) toolList() []tool {
@@ -171,38 +182,61 @@ func (s *Server) coreTools() []tool {
 	return []tool{
 		{
 			Name:        "brain_open",
+			Annotations: readOnlyAnnotations("Open project context"),
 			Description: "Load the curated context of a project: state, recent decisions, attempts and the latest handoff. Call at the start of a session.",
 			InputSchema: objectSchema(nil, map[string]any{
 				"project": project,
 				"budget":  intProp("Summary size budget in runes; 0 selects the default.", 0),
 			}),
+			OutputSchema: outputObject(map[string]any{
+				"workspace":  boolProp("True when the selector resolved to a workspace root; overview then holds its projects."),
+				"overview":   stringProp("Workspace overview text, in workspace mode."),
+				"project_id": stringProp("Resolved project id, in project mode."),
+				"path":       stringProp("Checkout path the project resolved through."),
+				"summary":    stringProp("Bounded context summary, in project mode."),
+			}),
 			run: s.open,
 		},
 		{
 			Name:        "brain_search",
+			Annotations: readOnlyAnnotations("Search the brain"),
 			Description: "Full-text search over notes, decisions, attempts and handoffs. Searches every project unless project is given. Connector dumps (mail, GitHub/GitLab issues and PRs) are excluded unless include_dumps is true or kinds contains \"dump\". Raw-zone external items are excluded unless kinds contains \"item\".",
 			InputSchema: objectSchema([]string{"query"}, map[string]any{
 				"query":         stringProp("Words to search for."),
 				"project":       project,
-				"limit":         intProp("Maximum hits; 0 selects the default.", 0),
+				"limit":         intProp("Page size; 0 selects the default page of 20.", 0),
+				"cursor":        cursorProp(),
 				"kinds":         stringArrayProp("Keep only these kinds: note, decision, attempt, handoff, dump, item. Omit for curated kinds; raw-zone dumps and external items require an explicit request."),
 				"include_dumps": boolProp("Include connector dumps in an unfiltered search."),
 				"since":         stringProp("Only documents updated since: a duration (24h, 7d), a date (2026-11-01) or an RFC3339 time. Omit for all time."),
 			}),
-			run: s.search,
+			OutputSchema: outputObject(pageOutput(map[string]any{
+				"hits": arrayProp("Ranked hits, best first.", outputObject(map[string]any{
+					"id":         stringProp("Record id."),
+					"project_id": stringProp("Project that owns the record."),
+					"kind":       stringProp("Record kind."),
+					"title":      stringProp("Record title."),
+					"snippet":    stringProp("Matching excerpt."),
+				}, "id", "project_id", "kind", "title", "snippet")),
+			}), "hits", "page", "page_size", "has_more"),
+			Limits: limitsOf(pageLimitsFor("brain_search")),
+			run:    s.search,
 		},
 		{
 			Name:        "brain_note",
+			Annotations: appendOnlyAnnotations("Record a note"),
 			Description: "Append a dated note to the project's knowledge base.",
 			InputSchema: objectSchema([]string{"text"}, map[string]any{
 				"text":    stringProp("Note body."),
 				"title":   stringProp("Optional short title; defaults to the first line of text."),
 				"project": project,
 			}),
-			run: s.note,
+			OutputSchema: recordOutputSchema(),
+			run:          s.note,
 		},
 		{
 			Name:        "brain_decision",
+			Annotations: appendOnlyAnnotations("Record a decision"),
 			Description: "Record a decision with its context, alternatives and consequences. Pass paths for decisions about specific code so review flags them when that code changes.",
 			InputSchema: objectSchema([]string{"title"}, map[string]any{
 				"title":        stringProp("Decision title."),
@@ -213,10 +247,12 @@ func (s *Server) coreTools() []tool {
 				"status":       enumProp("Lifecycle status.", decisionStatuses),
 				"project":      project,
 			}),
-			run: s.decision,
+			OutputSchema: recordOutputSchema(),
+			run:          s.decision,
 		},
 		{
 			Name:        "brain_attempt",
+			Annotations: appendOnlyAnnotations("Record an attempt"),
 			Description: "Record an approach that was tried, with its result and the reason it was kept or abandoned.",
 			InputSchema: objectSchema([]string{"title"}, map[string]any{
 				"title":      stringProp("What was attempted."),
@@ -225,32 +261,59 @@ func (s *Server) coreTools() []tool {
 				"reason":     stringProp("Why it was abandoned or kept."),
 				"project":    project,
 			}),
-			run: s.attempt,
+			OutputSchema: recordOutputSchema(),
+			run:          s.attempt,
 		},
 		{
 			Name:        "brain_handoff",
+			Annotations: appendOnlyAnnotations("Record a handoff"),
 			Description: "Record a session handoff with a summary and next action. Git context of the project checkout is captured automatically.",
 			InputSchema: objectSchema([]string{"summary"}, map[string]any{
 				"summary": stringProp("What was done and what state it is in."),
 				"next":    stringProp("The next action for the following session."),
 				"project": project,
 			}),
-			run: s.handoff,
+			OutputSchema: recordOutputSchema(),
+			run:          s.handoff,
 		},
 		{
 			Name:        "brain_journal",
+			Annotations: readOnlyAnnotations("Read the activity journal"),
 			Description: "List recent activity (notes, decisions, attempts, handoffs, commits), newest first.",
 			InputSchema: objectSchema(nil, map[string]any{
 				"project": project,
-				"limit":   intProp("Maximum entries; 0 selects the default of 20.", 0),
+				"limit":   intProp("Page size; 0 selects the default page of 20.", 0),
+				"cursor":  cursorProp(),
 			}),
-			run: s.journal,
+			OutputSchema: outputObject(pageOutput(map[string]any{
+				"entries": arrayProp("Journal entries, newest first.", outputObject(map[string]any{
+					"time":    stringProp("RFC3339 time of the event."),
+					"user":    stringProp("User or harness that recorded it."),
+					"event":   stringProp("Event name, for example note or commit."),
+					"project": stringProp("Project the event belongs to."),
+					"id":      stringProp("Record id, when the event has one."),
+					"title":   stringProp("Human summary of the event."),
+					"fields":  anyProp("Event-specific fields."),
+				}, "time", "user", "event")),
+			}), "entries", "page", "page_size", "has_more"),
+			Limits: limitsOf(pageLimitsFor("brain_journal")),
+			run:    s.journal,
 		},
 		{
 			Name:        "brain_projects",
+			Annotations: readOnlyAnnotations("List projects"),
 			Description: "List registered projects with their kind, checkout paths and repository URL.",
 			InputSchema: objectSchema(nil, map[string]any{}),
-			run:         s.projects,
+			OutputSchema: outputObject(map[string]any{
+				"projects": arrayProp("Registered projects.", outputObject(map[string]any{
+					"id":       stringProp("Project id."),
+					"name":     stringProp("Display name."),
+					"kind":     stringProp("Project kind, for example repository."),
+					"paths":    arrayProp("Checkout paths.", stringProp("Path.")),
+					"repo_url": stringProp("Repository URL, when known."),
+				}, "id", "name", "kind", "paths", "repo_url")),
+			}, "projects"),
+			run: s.projects,
 		},
 	}
 }
@@ -264,7 +327,7 @@ func (s *Server) open(ctx context.Context, raw json.RawMessage) (toolResult, err
 		return toolResult{}, err
 	}
 	if args.Budget < 0 {
-		return toolResult{}, errors.New("budget must not be negative")
+		return toolResult{}, refusalInvalid("budget must not be negative")
 	}
 	target, err := s.backend.Resolve(ctx, strings.TrimSpace(args.Project))
 	var overview *WorkspaceOverview
@@ -299,6 +362,7 @@ func (s *Server) search(ctx context.Context, raw json.RawMessage) (toolResult, e
 		Query        string   `json:"query"`
 		Project      string   `json:"project"`
 		Limit        int      `json:"limit"`
+		Cursor       string   `json:"cursor"`
 		Kinds        []string `json:"kinds"`
 		IncludeDumps bool     `json:"include_dumps"`
 		Since        string   `json:"since"`
@@ -310,43 +374,53 @@ func (s *Server) search(ctx context.Context, raw json.RawMessage) (toolResult, e
 	if err != nil {
 		return toolResult{}, err
 	}
-	if args.Limit < 0 {
-		return toolResult{}, errors.New("limit must not be negative")
-	}
 	projectID, err := s.optionalProject(ctx, args.Project)
 	if err != nil {
 		return toolResult{}, err
 	}
+	since := strings.TrimSpace(args.Since)
+	limits := pageLimitsFor("brain_search")
+	filter := filterFingerprint(query, projectID, since, strings.Join(args.Kinds, ","), fmt.Sprint(args.IncludeDumps))
+	offset, size, err := pageRequest("brain_search", limits, args.Limit, args.Cursor, filter)
+	if err != nil {
+		return toolResult{}, err
+	}
+	requested := fetchLimit(offset, size, limits)
 	hits, err := s.backend.Search(ctx, SearchInput{
 		Query:        query,
 		ProjectID:    projectID,
-		Limit:        args.Limit,
+		Limit:        requested,
 		Kinds:        args.Kinds,
 		IncludeDumps: args.IncludeDumps,
-		Since:        strings.TrimSpace(args.Since),
+		Since:        since,
 	})
 	if err != nil {
 		return toolResult{}, err
 	}
-	if hits == nil {
-		hits = []Hit{}
+	pageHits, page := paginate(hits, offset, size, requested, "brain_search", filter)
+	if pageHits == nil {
+		pageHits = []Hit{}
 	}
 	var text strings.Builder
-	if len(hits) == 0 {
+	if len(pageHits) == 0 {
 		text.WriteString("no matches")
 	}
-	for _, hit := range hits {
+	for _, hit := range pageHits {
 		fmt.Fprintf(&text, "- [%s] %s (%s, %s)", hit.Kind, hit.Title, hit.ID, hit.ProjectID)
 		if hit.Snippet != "" {
 			fmt.Fprintf(&text, ": %s", hit.Snippet)
 		}
 		text.WriteString("\n")
 	}
+	if footer := pageFooter(page); footer != "" {
+		text.WriteString(footer)
+	}
 	return toolResult{
 		Text: strings.TrimRight(text.String(), "\n"),
 		Structured: struct {
 			Hits []Hit `json:"hits"`
-		}{Hits: hits},
+			Page
+		}{Hits: pageHits, Page: page},
 	}, nil
 }
 
@@ -395,7 +469,7 @@ func (s *Server) decision(ctx context.Context, raw json.RawMessage) (toolResult,
 		return toolResult{}, err
 	}
 	if args.Status != "" && !slices.Contains(decisionStatuses, args.Status) {
-		return toolResult{}, fmt.Errorf("status must be one of %s", strings.Join(decisionStatuses, ", "))
+		return toolResult{}, refusalInvalidf("status must be one of %s", strings.Join(decisionStatuses, ", "))
 	}
 	target, err := s.backend.Resolve(ctx, strings.TrimSpace(args.Project))
 	if err != nil {
@@ -480,32 +554,35 @@ func (s *Server) journal(ctx context.Context, raw json.RawMessage) (toolResult, 
 	var args struct {
 		Project string `json:"project"`
 		Limit   int    `json:"limit"`
+		Cursor  string `json:"cursor"`
 	}
 	if err := decodeArgs(raw, &args); err != nil {
 		return toolResult{}, err
-	}
-	if args.Limit < 0 {
-		return toolResult{}, errors.New("limit must not be negative")
-	}
-	if args.Limit == 0 {
-		args.Limit = DefaultJournalLimit
 	}
 	projectID, err := s.optionalProject(ctx, args.Project)
 	if err != nil {
 		return toolResult{}, err
 	}
-	entries, err := s.backend.Journal(ctx, JournalQuery{ProjectID: projectID, Limit: args.Limit})
+	limits := pageLimitsFor("brain_journal")
+	filter := filterFingerprint(projectID)
+	offset, size, err := pageRequest("brain_journal", limits, args.Limit, args.Cursor, filter)
 	if err != nil {
 		return toolResult{}, err
 	}
-	if entries == nil {
-		entries = []JournalEntry{}
+	requested := fetchLimit(offset, size, limits)
+	entries, err := s.backend.Journal(ctx, JournalQuery{ProjectID: projectID, Limit: requested})
+	if err != nil {
+		return toolResult{}, err
+	}
+	pageEntries, page := paginate(entries, offset, size, requested, "brain_journal", filter)
+	if pageEntries == nil {
+		pageEntries = []JournalEntry{}
 	}
 	var text strings.Builder
-	if len(entries) == 0 {
+	if len(pageEntries) == 0 {
 		text.WriteString("no entries")
 	}
-	for _, entry := range entries {
+	for _, entry := range pageEntries {
 		line := fmt.Sprintf("%s  %s  %s", entry.Time.UTC().Format(time.RFC3339), entry.User, entry.Event)
 		if entry.Project != "" {
 			line += "  " + entry.Project
@@ -518,11 +595,15 @@ func (s *Server) journal(ctx context.Context, raw json.RawMessage) (toolResult, 
 		}
 		text.WriteString(line + "\n")
 	}
+	if footer := pageFooter(page); footer != "" {
+		text.WriteString(footer)
+	}
 	return toolResult{
 		Text: strings.TrimRight(text.String(), "\n"),
 		Structured: struct {
 			Entries []JournalEntry `json:"entries"`
-		}{Entries: entries},
+			Page
+		}{Entries: pageEntries, Page: page},
 	}, nil
 }
 
@@ -590,10 +671,10 @@ func decodeArgs(raw json.RawMessage, dst any) error {
 	dec := json.NewDecoder(bytes.NewReader(trimmed))
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(dst); err != nil {
-		return fmt.Errorf("invalid arguments: %w", err)
+		return refusalInvalid("invalid arguments: " + err.Error())
 	}
 	if dec.More() {
-		return errors.New("invalid arguments: unexpected data after the object")
+		return refusalInvalid("invalid arguments: unexpected data after the object")
 	}
 	return nil
 }
@@ -601,7 +682,7 @@ func decodeArgs(raw json.RawMessage, dst any) error {
 func requireText(field, value string) (string, error) {
 	trimmed := strings.TrimSpace(value)
 	if trimmed == "" {
-		return "", fmt.Errorf("%s is required", field)
+		return "", refusalInvalid(field + " is required")
 	}
 	return trimmed, nil
 }
@@ -616,6 +697,34 @@ func objectSchema(required []string, properties map[string]any) map[string]any {
 		schema["required"] = required
 	}
 	return schema
+}
+
+// outputObject is the JSON Schema of a structured tool result. Unlike an input
+// schema it does not forbid extra properties: a client validates what the tool
+// promises, and the server may add fields without a protocol bump.
+func outputObject(properties map[string]any, required ...string) map[string]any {
+	schema := map[string]any{"type": "object", "properties": properties}
+	if len(required) > 0 {
+		schema["required"] = required
+	}
+	return schema
+}
+
+// pageOutput merges the pagination fields into a list tool's output properties.
+func pageOutput(properties map[string]any) map[string]any {
+	out := pageOutputProps()
+	for key, value := range properties {
+		out[key] = value
+	}
+	return out
+}
+
+// recordOutputSchema is the structured output of the record-append tools.
+func recordOutputSchema() map[string]any {
+	return outputObject(map[string]any{
+		"id":         stringProp("New record id."),
+		"project_id": stringProp("Project that owns the record."),
+	}, "id", "project_id")
 }
 
 func stringProp(description string) map[string]any {
@@ -640,4 +749,19 @@ func boolProp(description string) map[string]any {
 
 func enumProp(description string, values []string) map[string]any {
 	return map[string]any{"type": "string", "description": description, "enum": values}
+}
+
+// arrayProp is an array property with described items.
+func arrayProp(description string, items map[string]any) map[string]any {
+	return map[string]any{"type": "array", "description": description, "items": items}
+}
+
+// objectProp is an object property with fixed keys described by the caller.
+func objectProp(description string) map[string]any {
+	return map[string]any{"type": "object", "description": description}
+}
+
+// anyProp is a property whose type the schema does not fix.
+func anyProp(description string) map[string]any {
+	return map[string]any{"description": description}
 }

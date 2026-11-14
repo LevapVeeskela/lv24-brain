@@ -143,7 +143,8 @@ type RunConnectionResult struct {
 // run record: a failed run (nothing stored) also returns its error; a partial
 // run (some batches stored, then an error or cancellation) returns nil with
 // Run.Status partial and Run.Error set; a run cut by Limit, MaxBatches or
-// Deadline is a success with Stats.Truncated set.
+// Deadline is a success with Stats.Truncated set. A context that ends during
+// preparation (before the source is read) truncates the run the same way.
 func (s *Ingestion) RunConnection(ctx context.Context, opts RunConnectionOptions) (RunConnectionResult, error) {
 	if ctx == nil {
 		ctx = context.Background()
@@ -215,7 +216,8 @@ type ingestRun struct {
 }
 
 func (r *ingestRun) execute(ctx context.Context) {
-	if r.err = r.prepare(ctx); r.err != nil {
+	if err := r.prepare(ctx); err != nil {
+		r.recordPrepareError(ctx, err)
 		return
 	}
 	maxBatches := r.opts.MaxBatches
@@ -265,6 +267,25 @@ func (r *ingestRun) prepare(ctx context.Context) error {
 	}
 	r.since = r.initialSince()
 	return nil
+}
+
+// recordPrepareError records a preparation failure. Preparation is setup only:
+// a run whose budget ends while applying the publish policy or loading
+// checkpoints has read nothing from the source, so it is truncated exactly like
+// a deadline that ends a read instead of being reported as a failed connector.
+// The error must be a context error from the run's own context; a sub-operation
+// deadline that expired on its own stays a real failure, and every other
+// preparation error fails the run even when the context ended meanwhile.
+func (r *ingestRun) recordPrepareError(ctx context.Context, err error) {
+	if ctxErr := ctx.Err(); ctxErr != nil && isContextError(err) {
+		r.stats.Truncated = contextReason(ctxErr)
+		return
+	}
+	r.err = err
+}
+
+func isContextError(err error) bool {
+	return errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
 }
 
 func (r *ingestRun) applyPublishPolicy(ctx context.Context) error {

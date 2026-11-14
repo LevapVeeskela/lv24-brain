@@ -60,6 +60,22 @@ type ProposalStore interface {
 	SetStatus(ctx context.Context, projectID, id string, status domain.ProposalStatus, recordID string) (domain.Proposal, error)
 }
 
+// ProposalLocker serializes the read-decide-write window of one proposal
+// between processes and goroutines. It is optional: a store without it keeps
+// the plain use-case behavior, which is safe for a single writer but lets two
+// concurrent promotions of the same pending proposal each write a record
+// because both pass the idempotency scan before either marks the proposal.
+//
+// The lock is scoped to one (project, proposal) pair, so promotions of
+// different proposals still run in parallel. fn runs while the lock is held and
+// its error is returned unchanged; the lock is released on every path,
+// including a panic in fn. A callback that re-enters with the same pair must
+// not be used: the lock is not reentrant, because the store's own SetStatus
+// takes a separate write lock for the same file.
+type ProposalLocker interface {
+	WithProposalLock(ctx context.Context, projectID, proposalID string, fn func() error) error
+}
+
 // ProposalProblemReporter is implemented by stores whose proposal listing
 // skips damaged files. Kind is "proposal" for every returned problem. Path is
 // relative to the data directory (forward slashes) so diagnostics never expose

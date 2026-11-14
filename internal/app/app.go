@@ -43,8 +43,11 @@ type Dependencies struct {
 	Journal ports.Journal
 	Sync    ports.SyncProvider
 	Secrets ports.SecretStore
-	Auth    ports.AuthProvider
-	Updater ports.Updater
+	// MergeDrivers registers the deterministic git merge drivers on the local
+	// clone. It is optional and uses the same adapter as Sync.
+	MergeDrivers ports.MergeDriverInstaller
+	Auth         ports.AuthProvider
+	Updater      ports.Updater
 	// Connections, Items and Proposals back the local raw zone and derived
 	// proposal zone. All three are optional: adapters without them keep their
 	// current behavior, and proposal use cases report that the feature is not
@@ -90,6 +93,9 @@ type DoctorOptions struct {
 	// ConfigPath is the brain.yaml path used for the run. Empty skips the file
 	// existence probe and checks the in-memory configuration only.
 	ConfigPath string
+	// Fix applies the safe repairs doctor can make itself. It registers the
+	// managed git merge drivers and never edits records, locks, or configuration.
+	Fix bool
 }
 
 // DoctorCheck is one compatibility probe.
@@ -252,15 +258,26 @@ type ReviewResult struct {
 type SyncOptions struct {
 	StatusOnly bool
 	Push       bool
+	// DisableAutostash keeps a dirty working tree in place; git then refuses
+	// the rebase. The default stashes and restores it around the pull.
+	DisableAutostash bool
 }
 
 // SyncResult is the sync outcome.
 type SyncResult struct {
 	Provider  string
+	Branch    string
 	Ahead     int
 	Behind    int
 	Changed   int
 	Conflicts []string
+	Dirty     bool
+	// LastSynced is the revision recorded after the last completed sync on
+	// this checkout, or zero when none has completed yet.
+	LastSynced domain.SyncRevision
+	// Recovered reports that an interrupted rebase or leftover autostash was
+	// repaired before this sync proceeded.
+	Recovered bool
 	// Reindexed reports that pulled records were added to the search index.
 	Reindexed bool
 }

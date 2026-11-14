@@ -41,19 +41,26 @@ func (e *CommandError) Error() string {
 // Unwrap exposes the underlying exec error.
 func (e *CommandError) Unwrap() error { return e.Err }
 
-// ConflictError reports unmerged paths left by pull --rebase. It unwraps to
-// domain.ErrConflict so callers can branch on errors.Is.
+// ConflictError reports unmerged paths left by pull --rebase or an autostash
+// restore. It unwraps to domain.ErrConflict so callers can branch on errors.Is.
 type ConflictError struct {
 	Operation string
 	Paths     []string
+	// Aborted reports that an in-progress rebase was aborted before the error
+	// was returned, so the checkout is usable and needs no `git rebase --abort`.
+	Aborted bool
 }
 
 // Error implements error.
 func (e *ConflictError) Error() string {
-	if len(e.Paths) == 0 {
-		return fmt.Sprintf("gitstore: %s stopped on a conflict", e.Operation)
+	message := fmt.Sprintf("gitstore: %s stopped on a conflict", e.Operation)
+	if len(e.Paths) > 0 {
+		message += " in " + strings.Join(e.Paths, ", ")
 	}
-	return fmt.Sprintf("gitstore: %s stopped on a conflict in %s", e.Operation, strings.Join(e.Paths, ", "))
+	if e.Aborted {
+		message += " (rebase aborted; local commits and the autostash are restored)"
+	}
+	return message
 }
 
 // Unwrap maps the conflict to the domain sentinel.

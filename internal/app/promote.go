@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/levapveeskela/lv24-brain/internal/domain"
+	"github.com/levapveeskela/lv24-brain/internal/ports"
 )
 
 // PromoteOptions selects one proposal and how to promote or dismiss it.
@@ -57,6 +58,12 @@ type PromoteResult struct {
 // proposal. It writes through the ordinary Decision/Attempt/Note use cases and
 // records source.proposal_id, so a retry never duplicates the record: the
 // record is created first and the proposal status is repaired afterwards.
+//
+// When the proposal store implements ports.ProposalLocker, the whole
+// load-decide-write window for one (project, proposal) runs under that lock, so
+// two concurrent promotions of the same pending proposal cannot both pass the
+// idempotency scan and each write a record. Stores without the port (server
+// mode has no proposals) keep the previous single-writer behavior.
 func (a *App) Promote(ctx context.Context, opts PromoteOptions) (PromoteResult, error) {
 	if ctx == nil {
 		ctx = context.Background()
@@ -75,10 +82,37 @@ func (a *App) Promote(ctx context.Context, opts PromoteOptions) (PromoteResult, 
 		return PromoteResult{}, err
 	}
 	opts.ProposalID = proposalID
+	// Resolve the project first: with --project omitted the id is looked up
+	// across registered projects, which is a read-only scan. The decision
+	// itself then re-reads the proposal inside the lock, so a concurrent
+	// promotion cannot slip between the load and the write.
 	proposal, err := a.loadProposal(ctx, opts.ProjectID, proposalID)
 	if err != nil {
 		return PromoteResult{}, err
 	}
+	locker, locked := a.deps.Proposals.(ports.ProposalLocker)
+	if !locked {
+		return a.promoteLocked(ctx, opts, proposal)
+	}
+	var result PromoteResult
+	lockErr := locker.WithProposalLock(ctx, proposal.ProjectID, proposal.ID, func() error {
+		current, err := a.deps.Proposals.Get(ctx, proposal.ProjectID, proposal.ID)
+		if err != nil {
+			return fmt.Errorf("load proposal %s: %w", proposal.ID, err)
+		}
+		result, err = a.promoteLocked(ctx, opts, current)
+		return err
+	})
+	if lockErr != nil {
+		return result, lockErr
+	}
+	return result, nil
+}
+
+// promoteLocked runs the promotion decision for one already loaded proposal.
+// Callers that hold the proposal lock pass the proposal as re-read under it;
+// the record-first repair and idempotent rerun semantics live here.
+func (a *App) promoteLocked(ctx context.Context, opts PromoteOptions, proposal domain.Proposal) (PromoteResult, error) {
 	targetKind, status, err := promoteTarget(proposal, opts)
 	if err != nil {
 		return PromoteResult{}, err

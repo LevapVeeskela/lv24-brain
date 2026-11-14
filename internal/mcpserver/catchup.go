@@ -3,7 +3,6 @@ package mcpserver
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -41,11 +40,12 @@ type CatchupBackend interface {
 }
 
 func (s *Server) catchupTools() []tool {
-	if _, ok := s.backend.(CatchupBackend); !ok {
+	if _, ok := s.backend.(CatchupBackend); !ok && !s.catalog {
 		return nil
 	}
 	return []tool{{
-		Name: "brain_catchup",
+		Name:        "brain_catchup",
+		Annotations: readOnlyAnnotations("Catch up since handoff"),
 		Description: "What changed in a project since its latest handoff (or the last since_hours): notes, decisions, attempts, " +
 			"handoffs, state changes and commits from other sessions and machines. Call at session start after brain_open when continuing work.",
 		InputSchema: objectSchema(nil, map[string]any{
@@ -53,8 +53,31 @@ func (s *Server) catchupTools() []tool {
 			"since_hours": intProp("Look back this many hours instead of to the latest handoff; 0 uses the latest handoff.", 0),
 			"limit":       intProp("Maximum items per list; 0 selects the default of 20.", 0),
 		}),
+		OutputSchema: outputObject(map[string]any{
+			"project_id":       stringProp("Project the changes belong to."),
+			"since":            stringProp("RFC3339 baseline the changes are measured from."),
+			"since_source":     stringProp("How the baseline was chosen, for example handoff or hours."),
+			"baseline_summary": stringProp("Summary of the baseline handoff, when there is one."),
+			"state_changed":    boolProp("Whether the project state changed after the baseline."),
+			"state":            anyProp("Current state, when it changed."),
+			"notes":            arrayProp("Notes written after the baseline.", catchupItemSchema()),
+			"decisions":        arrayProp("Decisions written or updated after the baseline.", catchupItemSchema()),
+			"attempts":         arrayProp("Attempts written after the baseline.", catchupItemSchema()),
+			"handoffs":         arrayProp("Handoffs written after the baseline.", catchupItemSchema()),
+			"journal":          arrayProp("Activity lines after the baseline.", stringProp("One journal line.")),
+		}, "project_id", "since", "since_source", "state_changed", "notes", "decisions", "attempts", "handoffs", "journal"),
 		run: s.catchup,
 	}}
+}
+
+// catchupItemSchema is one changed record in the catch-up report.
+func catchupItemSchema() map[string]any {
+	return outputObject(map[string]any{
+		"kind":       stringProp("Record kind."),
+		"id":         stringProp("Record id."),
+		"title":      stringProp("Human summary."),
+		"created_at": stringProp("RFC3339 write time."),
+	}, "kind", "id", "title", "created_at")
 }
 
 func (s *Server) catchup(ctx context.Context, raw json.RawMessage) (toolResult, error) {
@@ -67,10 +90,10 @@ func (s *Server) catchup(ctx context.Context, raw json.RawMessage) (toolResult, 
 		return toolResult{}, err
 	}
 	if args.SinceHours < 0 {
-		return toolResult{}, errors.New("since_hours must not be negative")
+		return toolResult{}, refusalInvalid("since_hours must not be negative")
 	}
 	if args.Limit < 0 {
-		return toolResult{}, errors.New("limit must not be negative")
+		return toolResult{}, refusalInvalid("limit must not be negative")
 	}
 	target, err := s.backend.Resolve(ctx, strings.TrimSpace(args.Project))
 	if err != nil {

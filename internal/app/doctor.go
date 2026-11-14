@@ -45,6 +45,7 @@ func (a *App) Doctor(ctx context.Context, opts DoctorOptions) (DoctorReport, err
 	checks = append(checks, a.doctorIDs(ctx))
 	checks = append(checks, a.doctorDuplicates(ctx))
 	checks = append(checks, a.doctorGit(ctx))
+	checks = append(checks, a.doctorMergeDrivers(ctx, opts.Fix))
 	checks = append(checks, a.doctorRawZone(ctx))
 	checks = append(checks, a.doctorRetiredPaths(ctx))
 	return DoctorReport{Checks: checks}, nil
@@ -314,6 +315,78 @@ func (a *App) doctorGit(ctx context.Context) DoctorCheck {
 		message = fmt.Sprintf("branch %s, ahead %d, behind %d", status.Branch, status.Ahead, status.Behind)
 	}
 	return DoctorCheck{Name: "git", Status: doctorOK, Message: message}
+}
+
+// doctorMergeDrivers checks that the deterministic merge drivers named in
+// .gitattributes are registered in this clone. Git silently falls back to a
+// normal content conflict when a driver is missing, so an unregistered clone
+// still works but conflicts on every state or registry change. --fix registers
+// them; it changes only .git/config.
+func (a *App) doctorMergeDrivers(ctx context.Context, fix bool) DoctorCheck {
+	if a.cfg.Mode != config.ModeGit {
+		return DoctorCheck{Name: "merge-drivers", Status: doctorOK, Message: "not used in this mode"}
+	}
+	if strings.TrimSpace(a.cfg.DataDir) == "" {
+		return DoctorCheck{Name: "merge-drivers", Status: doctorFail, Message: "config.data_dir is empty"}
+	}
+	if fix {
+		if err := ensureGitattributes(a.cfg.DataDir); err != nil {
+			return DoctorCheck{Name: "merge-drivers", Status: doctorFail, Message: err.Error()}
+		}
+		// sync.lock and .tmp-* files must never be staged; an older data
+		// repository may predate the managed ignore block.
+		if err := ensureGitignore(a.cfg.DataDir); err != nil {
+			return DoctorCheck{Name: "merge-drivers", Status: doctorFail, Message: err.Error()}
+		}
+	}
+	missingAttributes, err := missingGitattributesLines(a.cfg.DataDir)
+	if err != nil {
+		return DoctorCheck{Name: "merge-drivers", Status: doctorFail, Message: err.Error()}
+	}
+	if len(missingAttributes) > 0 && !fix {
+		return DoctorCheck{
+			Name:   "merge-drivers",
+			Status: doctorWarn,
+			Code:   "merge-drivers-attributes-missing",
+			Message: ".gitattributes misses " + strings.Join(missingAttributes, ", ") +
+				"; run brain doctor --fix",
+		}
+	}
+
+	installer := a.deps.MergeDrivers
+	if installer == nil {
+		return DoctorCheck{Name: "merge-drivers", Status: doctorWarn, Message: "git merge driver registration is not available"}
+	}
+	missing, err := installer.MissingMergeDrivers(ctx)
+	if errors.Is(err, domain.ErrUnsupported) {
+		return DoctorCheck{Name: "merge-drivers", Status: doctorOK, Message: "data directory is not a git repository yet"}
+	}
+	if err != nil {
+		return DoctorCheck{Name: "merge-drivers", Status: doctorFail, Message: err.Error()}
+	}
+	if len(missing) == 0 {
+		return DoctorCheck{Name: "merge-drivers", Status: doctorOK, Message: "state, notes, and registry drivers are registered"}
+	}
+	if fix {
+		executable, execErr := os.Executable()
+		if execErr != nil {
+			return DoctorCheck{Name: "merge-drivers", Status: doctorFail, Message: "resolve the brain executable: " + execErr.Error()}
+		}
+		if _, err := installer.RegisterMergeDrivers(ctx, executable); err != nil {
+			return DoctorCheck{Name: "merge-drivers", Status: doctorFail, Message: err.Error()}
+		}
+		return DoctorCheck{
+			Name:    "merge-drivers",
+			Status:  doctorOK,
+			Message: "registered " + strings.Join(missing, ", "),
+		}
+	}
+	return DoctorCheck{
+		Name:    "merge-drivers",
+		Status:  doctorWarn,
+		Code:    "merge-drivers-missing",
+		Message: "missing " + strings.Join(missing, ", ") + "; run brain doctor --fix",
+	}
 }
 
 // doctorRawZone reports machine-local raw-zone files that the shared tree

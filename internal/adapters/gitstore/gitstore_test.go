@@ -419,21 +419,32 @@ func TestPullConflictReportsPaths(t *testing.T) {
 	if len(result.Conflicts) != 1 || result.Conflicts[0] != "projects/demo/state.md" {
 		t.Errorf("Conflicts = %v, want [projects/demo/state.md]", result.Conflicts)
 	}
+	if !conflictErr.Aborted {
+		t.Error("ConflictError.Aborted = false, want a rebase aborted for recovery")
+	}
 
+	// A conflict must leave a recoverable repository: the rebase is aborted
+	// and the local commit is intact, without manual `git rebase --abort`.
 	content := readFile(t, repo.dir, "projects/demo/state.md")
-	if !strings.Contains(content, "<<<<<<<") {
-		t.Errorf("working tree has no conflict markers:\n%s", content)
+	if strings.Contains(content, "<<<<<<<") {
+		t.Errorf("working tree still has conflict markers:\n%s", content)
+	}
+	if content != "goal: ours\n" {
+		t.Errorf("working tree = %q, want the local version", content)
+	}
+	if _, err := os.Stat(filepath.Join(repo.dir, ".git", "rebase-merge")); !os.IsNotExist(err) {
+		t.Errorf(".git/rebase-merge exists after a conflicted pull: %v", err)
+	}
+	if log := repo.run("log", "--format=%s"); !strings.Contains(log, "brain: ours") {
+		t.Errorf("the local commit was lost:\n%s", log)
 	}
 
 	status, statusErr := provider.Status(ctx)
 	if statusErr != nil {
 		t.Fatalf("Status: %v", statusErr)
 	}
-	if len(status.Conflicts) != 1 || status.Conflicts[0] != "projects/demo/state.md" {
-		t.Errorf("Status.Conflicts = %v, want the unmerged path", status.Conflicts)
-	}
-	if !status.Dirty {
-		t.Error("Status.Dirty = false, want true during a conflict")
+	if len(status.Conflicts) != 0 || status.Dirty {
+		t.Errorf("status after aborted rebase = %+v, want clean", status)
 	}
 }
 

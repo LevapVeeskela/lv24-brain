@@ -36,6 +36,11 @@ const (
 	DefaultRemote = "origin"
 	// DefaultTimeout bounds one git invocation when Options.Timeout is zero.
 	DefaultTimeout = 60 * time.Second
+	// DefaultPushAttempts is the number of push attempts on a retryable
+	// rejection (non-fast-forward or a transport error).
+	DefaultPushAttempts = 3
+	// DefaultPushRetryBackoff is the base delay between push attempts.
+	DefaultPushRetryBackoff = 250 * time.Millisecond
 
 	// waitDelay releases pipes when a killed git process leaves children
 	// behind (for example git-remote-https after a timeout).
@@ -50,14 +55,22 @@ type Options struct {
 	GitPath string
 	// Timeout bounds each git invocation. Zero uses DefaultTimeout.
 	Timeout time.Duration
+	// PushAttempts bounds push attempts on a retryable rejection. Zero uses
+	// DefaultPushAttempts; values below one mean one attempt.
+	PushAttempts int
+	// PushRetryBackoff is the base backoff between push attempts. Zero uses
+	// DefaultPushRetryBackoff.
+	PushRetryBackoff time.Duration
 }
 
 // Provider synchronizes a brain data repository through the git CLI.
 type Provider struct {
-	dir     string
-	remote  string
-	gitPath string
-	timeout time.Duration
+	dir          string
+	remote       string
+	gitPath      string
+	timeout      time.Duration
+	pushAttempts int
+	pushBackoff  time.Duration
 }
 
 var _ ports.SyncProvider = (*Provider)(nil)
@@ -100,12 +113,25 @@ func Open(dir string, opts Options) (*Provider, error) {
 	if timeout < 0 {
 		return nil, domain.NewValidationError("gitstore.timeout", "must not be negative")
 	}
+	pushAttempts := opts.PushAttempts
+	if pushAttempts == 0 {
+		pushAttempts = DefaultPushAttempts
+	}
+	pushBackoff := opts.PushRetryBackoff
+	if pushBackoff == 0 {
+		pushBackoff = DefaultPushRetryBackoff
+	}
+	if pushBackoff < 0 {
+		return nil, domain.NewValidationError("gitstore.push_retry_backoff", "must not be negative")
+	}
 
 	return &Provider{
-		dir:     abs,
-		remote:  remote,
-		gitPath: gitPath,
-		timeout: timeout,
+		dir:          abs,
+		remote:       remote,
+		gitPath:      gitPath,
+		timeout:      timeout,
+		pushAttempts: pushAttempts,
+		pushBackoff:  pushBackoff,
 	}, nil
 }
 

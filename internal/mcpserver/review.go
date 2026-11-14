@@ -31,17 +31,29 @@ type ReviewBackend interface {
 }
 
 func (s *Server) reviewTools() []tool {
-	if _, ok := s.backend.(ReviewBackend); !ok {
+	if _, ok := s.backend.(ReviewBackend); !ok && !s.catalog {
 		return nil
 	}
 	return []tool{{
-		Name: "brain_review",
+		Name:        "brain_review",
+		Annotations: readOnlyAnnotations("Review stale knowledge"),
 		Description: "Find stale or contradictory knowledge in a project: a next action behind the latest handoff or already done by a commit, " +
 			"open questions answered by later decisions, decisions contradicted by later failed attempts, expired state. " +
 			"Run `brain review --fix` in a shell to apply the safe fixes.",
 		InputSchema: objectSchema(nil, map[string]any{
 			"project": stringProp("Project id, alias or checkout path. Omit to use the project of the working directory."),
 		}),
+		OutputSchema: outputObject(map[string]any{
+			"project_id": stringProp("Project that was reviewed."),
+			"summary":    stringProp("Rendered review summary, the text content of the result."),
+			"findings": arrayProp("Findings that still apply.", outputObject(map[string]any{
+				"kind":     stringProp("Finding kind."),
+				"message":  stringProp("What looks stale or contradictory."),
+				"evidence": stringProp("The record or commit that supports the finding."),
+				"fixable":  boolProp("Whether `brain review --fix` repairs it."),
+				"fix":      stringProp("The fix that applies."),
+			}, "kind", "message", "evidence", "fixable", "fix")),
+		}, "project_id", "summary", "findings"),
 		run: s.review,
 	}}
 }

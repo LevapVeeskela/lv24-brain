@@ -24,6 +24,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/levapveeskela/lv24-brain/internal/adapters/fsstore"
+	"github.com/levapveeskela/lv24-brain/internal/adapters/gitstore"
 	"github.com/levapveeskela/lv24-brain/internal/adapters/httpclient"
 	"github.com/levapveeskela/lv24-brain/internal/adapters/secrets"
 	"github.com/levapveeskela/lv24-brain/internal/app"
@@ -132,6 +133,8 @@ func runCommand(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return runPromote(rest, stdout, stderr)
 	case "sync":
 		return runSync(rest, stdout, stderr)
+	case "merge-driver":
+		return runMergeDriver(rest, stdout, stderr)
 	case "index":
 		return runIndex(rest, stdout, stderr)
 	case "search":
@@ -224,7 +227,7 @@ Commands:
   status     Show the configured instance
   review     Build a review report; --fix applies the safe fixes
   promote    Promote or dismiss a proposal candidate
-  sync       Pull, commit, and push brain data
+  sync       Pull, commit, and push brain data (exit 3 on conflict)
   index      Rebuild or refresh the local search index
   search     Search notes, decisions, attempts and handoffs (--dumps adds connector dumps)
   journal    Show the per-user activity journal (local/git)
@@ -258,6 +261,9 @@ Commands:
 
 Global flags:
   --config <path>   Path to brain.yaml (default: $BRAIN_CONFIG or brain.yaml)
+
+Exit codes:
+  0 success, 1 runtime error, 2 usage error, 3 sync conflict (unmerged paths)
 
 Server mode authentication:
   Store a session with:
@@ -390,13 +396,35 @@ func runInit(args []string, stdout, stderr io.Writer) int {
 	if result.Mode == config.ModeServer {
 		fmt.Fprintf(stdout, "next: run brain login --config %s (or set BRAIN_TOKEN)\n", result.ConfigPath)
 	}
+	if result.Mode == config.ModeGit && result.DataDir != "" {
+		registerMergeDrivers(result.DataDir, stderr)
+	}
 	return 0
+}
+
+// registerMergeDrivers installs the managed git merge drivers when the data
+// directory is already a git work tree. A fresh `brain init` usually is not,
+// and brain doctor --fix registers them later; a failure is a warning because
+// the data layout itself is valid and git falls back to a normal merge.
+func registerMergeDrivers(dataDir string, stderr io.Writer) {
+	provider, err := gitstore.Open(dataDir, gitstore.Options{})
+	if err != nil {
+		return
+	}
+	executable, err := os.Executable()
+	if err != nil {
+		return
+	}
+	if _, err := provider.RegisterMergeDrivers(context.Background(), executable); err != nil {
+		fmt.Fprintf(stderr, "brain init: warning: register merge drivers: %v\n", err)
+	}
 }
 
 func runDoctor(args []string, stdout, stderr io.Writer) int {
 	fs := newFlagSet("doctor", stderr)
 	cfgPath := configFlag(fs)
 	asJSON := fs.Bool("json", false, "print JSON")
+	fix := fs.Bool("fix", false, "apply safe repairs (register the git merge drivers)")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -409,7 +437,7 @@ func runDoctor(args []string, stdout, stderr io.Writer) int {
 		return reportError(stderr, "doctor", err)
 	}
 	defer func() { _ = useCase.Close() }()
-	report, err := useCase.App.Doctor(context.Background(), app.DoctorOptions{ConfigPath: *cfgPath})
+	report, err := useCase.App.Doctor(context.Background(), app.DoctorOptions{ConfigPath: *cfgPath, Fix: *fix})
 	if err != nil {
 		return reportError(stderr, "doctor", err)
 	}
@@ -1296,41 +1324,116 @@ func toJSONFindings(findings []app.Finding) []jsonFinding {
 	})
 }
 
+// jsonSync is the machine-readable sync report, including --status --json.
+type jsonSync struct {
+	Provider   string               `json:"provider"`
+	Branch     string               `json:"branch"`
+	Ahead      int                  `json:"ahead"`
+	Behind     int                  `json:"behind"`
+	Changed    int                  `json:"changed"`
+	Dirty      bool                 `json:"dirty"`
+	Unmerged   bool                 `json:"unmerged"`
+	Conflicts  []string             `json:"conflicts"`
+	Recovered  bool                 `json:"recovered"`
+	Reindexed  bool                 `json:"reindexed"`
+	LastSynced *domain.SyncRevision `json:"last_synced_revision,omitempty"`
+}
+
 func runSync(args []string, stdout, stderr io.Writer) int {
 	fs := newFlagSet("sync", stderr)
-	statusOnly := fs.Bool("status", false, "only show divergence and conflicts")
+	statusOnly := fs.Bool("status", false, "only show divergence, dirtiness, and conflicts")
 	push := fs.Bool("push", false, "push after committing")
+	asJSON := fs.Bool("json", false, "print JSON")
+	autostash := fs.Bool("autostash", true, "stash and restore uncommitted changes around the pull (--autostash=false disables)")
 	cfgPath := configFlag(fs)
 	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	if fs.NArg() > 0 {
+		fmt.Fprintf(stderr, "brain sync: unexpected arguments: %s\n", strings.Join(fs.Args(), " "))
 		return 2
 	}
 	cfg, err := loadRequiredConfig(*cfgPath)
 	if err != nil {
 		return reportError(stderr, "sync", err)
 	}
-	useCase, err := bootstrap.Build(cfg)
+	useCase, err := buildRuntime(cfg)
 	if err != nil {
 		return reportError(stderr, "sync", err)
 	}
 	defer func() { _ = useCase.Close() }()
 	result, err := useCase.App.Sync(context.Background(), app.SyncOptions{
-		StatusOnly: *statusOnly,
-		Push:       *push,
+		StatusOnly:       *statusOnly,
+		Push:             *push,
+		DisableAutostash: !*autostash,
 	})
-	if err != nil {
-		return reportError(stderr, "sync", err)
+	conflicts := result.Conflicts
+	if conflicts == nil {
+		conflicts = []string{}
 	}
+	var lastSynced *domain.SyncRevision
+	if result.LastSynced.Value != "" {
+		revision := result.LastSynced
+		lastSynced = &revision
+	}
+	if *asJSON {
+		payload := jsonSync{
+			Provider:   result.Provider,
+			Branch:     result.Branch,
+			Ahead:      result.Ahead,
+			Behind:     result.Behind,
+			Changed:    result.Changed,
+			Dirty:      result.Dirty,
+			Unmerged:   len(conflicts) > 0,
+			Conflicts:  conflicts,
+			Recovered:  result.Recovered,
+			Reindexed:  result.Reindexed,
+			LastSynced: lastSynced,
+		}
+		if code := writeJSONReport(stdout, stderr, "sync", payload); code != 0 {
+			return code
+		}
+		if err != nil {
+			return syncErrorCode(stderr, err)
+		}
+		return 0
+	}
+
 	if result.Provider != "" {
 		fmt.Fprintf(stdout, "provider: %s\n", result.Provider)
 	}
-	fmt.Fprintf(stdout, "ahead: %d\nbehind: %d\nchanged: %d\n", result.Ahead, result.Behind, result.Changed)
-	for _, conflict := range result.Conflicts {
+	if result.Branch != "" {
+		fmt.Fprintf(stdout, "branch: %s\n", result.Branch)
+	}
+	fmt.Fprintf(stdout, "ahead: %d\nbehind: %d\nchanged: %d\ndirty: %t\n", result.Ahead, result.Behind, result.Changed, result.Dirty)
+	for _, conflict := range conflicts {
 		fmt.Fprintf(stdout, "conflict: %s\n", conflict)
+	}
+	if result.Recovered {
+		fmt.Fprintln(stdout, "recovered: repaired an interrupted rebase or autostash from an earlier run")
+	}
+	if lastSynced != nil {
+		fmt.Fprintf(stdout, "last_synced_revision: %s (%s)\n", lastSynced.Value, lastSynced.At.UTC().Format(time.RFC3339))
 	}
 	if result.Reindexed {
 		fmt.Fprintln(stdout, "reindexed: pulled records are searchable")
 	}
+	if err != nil {
+		return syncErrorCode(stderr, err)
+	}
 	return 0
+}
+
+// syncErrorCode maps a sync failure to the documented exit codes. A content
+// conflict is 3 so hooks and scripts can distinguish it from a runtime error.
+// The conflict paths were already printed above.
+func syncErrorCode(stderr io.Writer, err error) int {
+	if errors.Is(err, domain.ErrConflict) {
+		fmt.Fprintf(stderr, "brain sync: %v\n", err)
+		fmt.Fprintln(stderr, "brain sync: resolve the conflicting files, then run brain sync again")
+		return 3
+	}
+	return reportError(stderr, "sync", err)
 }
 
 func runIndex(args []string, stdout, stderr io.Writer) int {

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"strings"
@@ -22,11 +23,20 @@ import (
 func runMCP(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	fs := newFlagSet("mcp", stderr)
 	cfgPath := configFlag(fs)
+	listTools := fs.Bool("list-tools", false, "print the tool catalogue (name, title, annotations, schemas, limits) and exit without serving")
+	asJSON := fs.Bool("json", false, "with --list-tools, print the catalogue as JSON")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
 	if fs.NArg() > 0 {
 		fmt.Fprintf(stderr, "brain mcp: unexpected arguments: %s\n", strings.Join(fs.Args(), " "))
+		return 2
+	}
+	if *listTools {
+		return printMCPTools(stdout, stderr, *asJSON)
+	}
+	if *asJSON {
+		fmt.Fprintln(stderr, "brain mcp: --json is only valid with --list-tools")
 		return 2
 	}
 	cfg, err := loadRequiredConfig(*cfgPath)
@@ -40,6 +50,41 @@ func runMCP(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	defer func() { _ = useCase.Close() }()
 	server := mcpserver.New(mcpBackend{app: useCase.App}, version.Version)
 	if err := server.Serve(context.Background(), stdin, stdout); err != nil {
+		return reportError(stderr, "mcp", err)
+	}
+	return 0
+}
+
+// mcpCatalogue is the `brain mcp --list-tools --json` document.
+type mcpCatalogue struct {
+	Server struct {
+		Name    string `json:"name"`
+		Version string `json:"version"`
+	} `json:"server"`
+	ProtocolVersions []string             `json:"protocol_versions"`
+	Tools            []mcpserver.ToolSpec `json:"tools"`
+}
+
+// printMCPTools writes the tool contract without serving. It needs no config:
+// the catalogue is static, so an operator can diff it before deploying.
+func printMCPTools(stdout, stderr io.Writer, asJSON bool) int {
+	tools := mcpserver.Catalog(version.Version)
+	if !asJSON {
+		for _, tool := range tools {
+			kind := "write"
+			if tool.Annotations.ReadOnlyHint {
+				kind = "read"
+			}
+			fmt.Fprintf(stdout, "%-22s %-5s %s\n", tool.Name, kind, tool.Title)
+		}
+		return 0
+	}
+	catalogue := mcpCatalogue{ProtocolVersions: mcpserver.SupportedVersions(), Tools: tools}
+	catalogue.Server.Name = mcpserver.ServerName
+	catalogue.Server.Version = version.Version
+	encoder := json.NewEncoder(stdout)
+	encoder.SetIndent("", "  ")
+	if err := encoder.Encode(catalogue); err != nil {
 		return reportError(stderr, "mcp", err)
 	}
 	return 0

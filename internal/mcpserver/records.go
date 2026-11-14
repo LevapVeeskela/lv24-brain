@@ -1,9 +1,9 @@
 package mcpserver
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"slices"
 	"strings"
@@ -99,16 +99,19 @@ type RecordBackend interface {
 type RecordList struct {
 	ProjectID string          `json:"project_id"`
 	Records   []RecordSummary `json:"records"`
+	// Page is embedded, so page/page_size/has_more/next_cursor are top-level.
+	Page
 }
 
 func (s *Server) recordTools() []tool {
-	if _, ok := s.backend.(RecordBackend); !ok {
+	if _, ok := s.backend.(RecordBackend); !ok && !s.catalog {
 		return nil
 	}
 	project := stringProp("Project id, alias or checkout path. Omit to use the project of the working directory.")
 	return []tool{
 		{
-			Name: "brain_records",
+			Name:        "brain_records",
+			Annotations: readOnlyAnnotations("List records"),
 			Description: "List a project's notes, decisions, attempts and handoffs, newest first. Use it to find record ids, " +
 				"for example proposed decisions (kinds [\"decision\"], status \"proposed\") awaiting confirmation.",
 			InputSchema: objectSchema(nil, map[string]any{
@@ -116,21 +119,50 @@ func (s *Server) recordTools() []tool {
 				"kinds":      stringArrayProp("Keep only these kinds: note, decision, attempt, handoff. Omit for every kind."),
 				"since_days": intProp("Keep records created or updated in the last N days; 0 keeps all.", 0),
 				"status":     enumProp("Keep decisions with this status (drops other kinds).", decisionStatuses),
-				"limit":      intProp("Maximum records; 0 selects the default of 50.", 0),
+				"limit":      intProp("Page size; 0 selects the default page of 50.", 0),
+				"cursor":     cursorProp(),
 			}),
-			run: s.recordsList,
+			OutputSchema: outputObject(pageOutput(map[string]any{
+				"project_id": stringProp("Project the records belong to."),
+				"records":    arrayProp("Records, newest first.", recordSummarySchema()),
+			}), "project_id", "records", "page", "page_size", "has_more"),
+			Limits: limitsOf(pageLimitsFor("brain_records")),
+			run:    s.recordsList,
 		},
 		{
 			Name:        "brain_record",
+			Annotations: readOnlyAnnotations("Read a record"),
 			Description: "Read one record in full by id (note, decision, attempt or handoff), including its body, context, evidence or reason, its [[id]] links (resolved) and backlinks from the same project.",
 			InputSchema: objectSchema([]string{"id"}, map[string]any{
 				"id":      stringProp("Record id, as returned by brain_records or brain_search."),
 				"project": project,
 			}),
+			OutputSchema: outputObject(map[string]any{
+				"kind":         stringProp("Record kind."),
+				"id":           stringProp("Record id."),
+				"project_id":   stringProp("Project that owns the record."),
+				"title":        stringProp("Record title."),
+				"status":       stringProp("Decision status, when the record is a decision."),
+				"body":         stringProp("Note body."),
+				"context":      stringProp("Why a decision was needed."),
+				"alternatives": arrayProp("Options that were considered.", stringProp("Option.")),
+				"consequences": arrayProp("Expected consequences.", stringProp("Consequence.")),
+				"evidence":     arrayProp("Supporting evidence.", stringProp("Evidence.")),
+				"hypothesis":   stringProp("What an attempt expected to work."),
+				"result":       stringProp("What an attempt produced."),
+				"reason":       stringProp("Why an attempt was kept or abandoned."),
+				"next_action":  stringProp("Next action of a handoff."),
+				"git_context":  stringProp("Git context captured with a handoff."),
+				"created_at":   stringProp("RFC3339 creation time."),
+				"updated_at":   stringProp("RFC3339 last update."),
+				"links":        arrayProp("Outgoing [[id]] references, resolved.", objectProp("One resolved reference.")),
+				"backlinks":    arrayProp("Records of the same project that reference this one.", objectProp("One backlink.")),
+			}, "kind", "id", "project_id", "title", "links", "backlinks"),
 			run: s.recordShow,
 		},
 		{
-			Name: "brain_decision_status",
+			Name:        "brain_decision_status",
+			Annotations: mutatingAnnotations("Change decision status"),
 			Description: "Change a decision's status. Accept a proposed decision once it is confirmed; reject one that was dropped; " +
 				"mark it superseded by the decision that replaces it by passing superseded_by (status is then ignored).",
 			InputSchema: objectSchema([]string{"id"}, map[string]any{
@@ -139,9 +171,52 @@ func (s *Server) recordTools() []tool {
 				"superseded_by": stringProp("Id of the live decision that replaces this one."),
 				"project":       project,
 			}),
-			run: s.decisionStatus,
+			OutputSchema: recordSummarySchema(),
+			confirm:      confirmSupersede,
+			run:          s.decisionStatus,
 		},
 	}
+}
+
+// recordSummarySchema is the structured output of one decision summary.
+func recordSummarySchema() map[string]any {
+	return outputObject(map[string]any{
+		"kind":       stringProp("Record kind."),
+		"id":         stringProp("Record id."),
+		"project_id": stringProp("Project that owns the record."),
+		"title":      stringProp("Record title."),
+		"status":     stringProp("Decision status."),
+		"created_at": stringProp("RFC3339 creation time."),
+		"updated_at": stringProp("RFC3339 last update."),
+	}, "kind", "id", "project_id", "title")
+}
+
+// confirmSupersede asks the user to confirm making a decision superseded: the
+// change is a curation decision about the record, not an append.
+func confirmSupersede(args json.RawMessage) *confirmation {
+	var probe struct {
+		ID           string `json:"id"`
+		SupersededBy string `json:"superseded_by"`
+	}
+	if err := json.Unmarshal(argsOrDefault(args), &probe); err != nil {
+		return nil
+	}
+	id := strings.TrimSpace(probe.ID)
+	superseding := strings.TrimSpace(probe.SupersededBy)
+	if id == "" || superseding == "" {
+		return nil
+	}
+	return &confirmation{Message: fmt.Sprintf("Mark decision %s as superseded by %s? The old decision stays in the record but is no longer current.", id, superseding)}
+}
+
+// argsOrDefault returns the arguments as a JSON object, so an absent or null
+// argument set decodes to {}.
+func argsOrDefault(raw json.RawMessage) []byte {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
+		return []byte("{}")
+	}
+	return trimmed
 }
 
 func (s *Server) recordsList(ctx context.Context, raw json.RawMessage) (toolResult, error) {
@@ -151,12 +226,13 @@ func (s *Server) recordsList(ctx context.Context, raw json.RawMessage) (toolResu
 		SinceDays int      `json:"since_days"`
 		Status    string   `json:"status"`
 		Limit     int      `json:"limit"`
+		Cursor    string   `json:"cursor"`
 	}
 	if err := decodeArgs(raw, &args); err != nil {
 		return toolResult{}, err
 	}
-	if args.SinceDays < 0 || args.Limit < 0 {
-		return toolResult{}, errors.New("since_days and limit must not be negative")
+	if args.SinceDays < 0 {
+		return toolResult{}, refusalInvalid("since_days must not be negative")
 	}
 	if args.Status != "" {
 		if err := checkDecisionStatus(args.Status); err != nil {
@@ -167,7 +243,14 @@ func (s *Server) recordsList(ctx context.Context, raw json.RawMessage) (toolResu
 	if err != nil {
 		return toolResult{}, err
 	}
-	query := RecordQuery{ProjectID: target.ID, Kinds: args.Kinds, Status: args.Status, Limit: args.Limit}
+	limits := pageLimitsFor("brain_records")
+	filter := filterFingerprint(target.ID, strings.Join(args.Kinds, ","), fmt.Sprint(args.SinceDays), args.Status)
+	offset, size, err := pageRequest("brain_records", limits, args.Limit, args.Cursor, filter)
+	if err != nil {
+		return toolResult{}, err
+	}
+	requested := fetchLimit(offset, size, limits)
+	query := RecordQuery{ProjectID: target.ID, Kinds: args.Kinds, Status: args.Status, Limit: requested}
 	if args.SinceDays > 0 {
 		query.Since = time.Now().Add(-time.Duration(args.SinceDays) * 24 * time.Hour)
 	}
@@ -175,14 +258,21 @@ func (s *Server) recordsList(ctx context.Context, raw json.RawMessage) (toolResu
 	if err != nil {
 		return toolResult{}, err
 	}
-	if records == nil {
-		records = []RecordSummary{}
+	pageRecords, page := paginate(records, offset, size, requested, "brain_records", filter)
+	if pageRecords == nil {
+		pageRecords = []RecordSummary{}
 	}
 	lines := []string{"project: " + target.ID}
-	for _, record := range records {
+	for _, record := range pageRecords {
 		lines = append(lines, summaryLine(record))
 	}
-	return toolResult{Text: strings.Join(lines, "\n"), Structured: RecordList{ProjectID: target.ID, Records: records}}, nil
+	if footer := pageFooter(page); footer != "" {
+		lines = append(lines, footer)
+	}
+	return toolResult{
+		Text:       strings.Join(lines, "\n"),
+		Structured: RecordList{ProjectID: target.ID, Records: pageRecords, Page: page},
+	}, nil
 }
 
 func (s *Server) recordShow(ctx context.Context, raw json.RawMessage) (toolResult, error) {
@@ -249,10 +339,10 @@ func (s *Server) decisionStatus(ctx context.Context, raw json.RawMessage) (toolR
 // JSON schema enum is advisory for clients, so the handler enforces it too.
 func checkDecisionStatus(status string) error {
 	if status == "" {
-		return errors.New("pass status, or superseded_by to mark the decision superseded")
+		return refusalUnsupported("pass status, or superseded_by to mark the decision superseded", "pass status=accepted|rejected, or superseded_by=<decision id>")
 	}
 	if !slices.Contains(decisionStatuses, status) {
-		return fmt.Errorf("unknown status %q (proposed, accepted, rejected, superseded)", status)
+		return refusalInvalidf("unknown status %q (proposed, accepted, rejected, superseded)", status)
 	}
 	return nil
 }

@@ -3,7 +3,6 @@ package mcpserver
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"strings"
 	"time"
 )
@@ -84,11 +83,12 @@ type ContextBackend interface {
 }
 
 func (s *Server) contextTools() []tool {
-	if _, ok := s.backend.(ContextBackend); !ok {
+	if _, ok := s.backend.(ContextBackend); !ok && !s.catalog {
 		return nil
 	}
 	return []tool{{
-		Name: "brain_context",
+		Name:        "brain_context",
+		Annotations: readOnlyAnnotations("Task context"),
 		Description: "Load the context relevant to one task in a single call: project state, review findings, the latest handoff, " +
 			"the decisions, attempts and notes that best match the task, and failed attempts to avoid repeating. " +
 			"Call before starting a task; brain_open stays the general session start.",
@@ -100,6 +100,22 @@ func (s *Server) contextTools() []tool {
 			"since":   stringProp("Drop records and handoffs older than a window (24h, 7d, 2w) or a date (2026-11-01)."),
 			"raw":     boolProp("Include granted raw-zone excerpts when curated context is thin (default false)."),
 		}),
+		OutputSchema: outputObject(map[string]any{
+			"project_id":      stringProp("Project the context belongs to."),
+			"project_name":    stringProp("Display name of the project."),
+			"mode":            stringProp("Context mode, for example task or bootstrap."),
+			"query":           stringProp("The task the context was built for."),
+			"since":           stringProp("RFC3339 start of the window, when one was applied."),
+			"budget":          intProp("Rune budget of the summary.", 0),
+			"state":           objectProp("Project state: goal, next action, active work, blockers, open questions."),
+			"handoff":         anyProp("Latest handoff, or null."),
+			"records":         arrayProp("Records ranked for the task.", objectProp("One ranked record with id, kind, title, detail and score.")),
+			"failed_attempts": arrayProp("Attempts that failed, to avoid repeating.", objectProp("One failed attempt.")),
+			"findings":        arrayProp("Review findings that still apply.", objectProp("One finding with kind, message and fix.")),
+			"raw_excerpts":    arrayProp("Granted raw-zone excerpts; their text is external and untrusted.", objectProp("One excerpt with connection, item, citation and body.")),
+			"skipped":         arrayProp("Reasons content was left out.", stringProp("Reason.")),
+			"summary":         stringProp("Rendered context, the text content of the result."),
+		}, "project_id", "summary"),
 		run: s.taskContext,
 	}}
 }
@@ -121,7 +137,7 @@ func (s *Server) taskContext(ctx context.Context, raw json.RawMessage) (toolResu
 		return toolResult{}, err
 	}
 	if args.Budget < 0 {
-		return toolResult{}, errors.New("budget must not be negative")
+		return toolResult{}, refusalInvalid("budget must not be negative")
 	}
 	target, err := s.backend.Resolve(ctx, strings.TrimSpace(args.Project))
 	if err != nil {

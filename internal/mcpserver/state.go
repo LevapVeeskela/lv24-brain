@@ -3,7 +3,6 @@ package mcpserver
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -42,19 +41,22 @@ type StateBackend interface {
 }
 
 func (s *Server) stateTools() []tool {
-	if _, ok := s.backend.(StateBackend); !ok {
+	if _, ok := s.backend.(StateBackend); !ok && !s.catalog {
 		return nil
 	}
 	project := stringProp("Project id, alias or checkout path. Omit to use the project of the working directory.")
 	return []tool{
 		{
-			Name:        "brain_state_get",
-			Description: "Read a project's state: goal, next action, active work, blockers and open questions.",
-			InputSchema: objectSchema(nil, map[string]any{"project": project}),
-			run:         s.stateGet,
+			Name:         "brain_state_get",
+			Annotations:  readOnlyAnnotations("Read project state"),
+			Description:  "Read a project's state: goal, next action, active work, blockers and open questions.",
+			InputSchema:  objectSchema(nil, map[string]any{"project": project}),
+			OutputSchema: stateSchema(),
+			run:          s.stateGet,
 		},
 		{
-			Name: "brain_state_set",
+			Name:        "brain_state_set",
+			Annotations: mutatingAnnotations("Update project state"),
 			Description: "Update a project's state so the next session starts from current facts. Only the given fields change; " +
 				"a list replaces the stored list and an empty list clears it. Call when the goal or the next step changes.",
 			InputSchema: objectSchema(nil, map[string]any{
@@ -66,9 +68,24 @@ func (s *Server) stateTools() []tool {
 				"open_questions":  stringArrayProp("Open questions (replaces the list)."),
 				"fresh_for_hours": intProp("Mark the state current for this many hours; 0 keeps the stored value.", 0),
 			}),
-			run: s.stateSet,
+			OutputSchema: stateSchema(),
+			run:          s.stateSet,
 		},
 	}
+}
+
+// stateSchema is the structured output of the state tools.
+func stateSchema() map[string]any {
+	return outputObject(map[string]any{
+		"project_id":     stringProp("Project the state belongs to."),
+		"goal":           stringProp("Project goal."),
+		"next_action":    stringProp("The next action."),
+		"active":         arrayProp("Active work items.", stringProp("Work item.")),
+		"blocked":        arrayProp("Blockers.", stringProp("Blocker.")),
+		"open_questions": arrayProp("Open questions.", stringProp("Question.")),
+		"updated_at":     stringProp("RFC3339 last update."),
+		"fresh_until":    stringProp("RFC3339 time the state stops being current."),
+	}, "project_id", "goal", "next_action")
 }
 
 func (s *Server) stateGet(ctx context.Context, raw json.RawMessage) (toolResult, error) {
@@ -103,7 +120,7 @@ func (s *Server) stateSet(ctx context.Context, raw json.RawMessage) (toolResult,
 		return toolResult{}, err
 	}
 	if args.FreshForHours < 0 {
-		return toolResult{}, errors.New("fresh_for_hours must not be negative")
+		return toolResult{}, refusalInvalid("fresh_for_hours must not be negative")
 	}
 	in := StateInput{Goal: args.Goal, NextAction: args.Next, Active: args.Active, Blocked: args.Blocked, OpenQuestions: args.OpenQuestions}
 	if args.FreshForHours > 0 {
@@ -111,7 +128,7 @@ func (s *Server) stateSet(ctx context.Context, raw json.RawMessage) (toolResult,
 		in.FreshUntil = &until
 	}
 	if in.Goal == nil && in.NextAction == nil && in.Active == nil && in.Blocked == nil && in.OpenQuestions == nil && in.FreshUntil == nil {
-		return toolResult{}, errors.New("nothing to change; pass at least one field")
+		return toolResult{}, refusalInvalid("nothing to change; pass at least one field")
 	}
 	target, err := s.backend.Resolve(ctx, strings.TrimSpace(args.Project))
 	if err != nil {

@@ -23,6 +23,8 @@ import (
 //	proposals/.gitignore                         "*", so nothing is committed
 //	proposals/<project>/<proposal-id>.md          one candidate record
 //	proposals/<project>/<proposal-id>.md.lock     cross-process write lock
+//	proposals/<project>/<proposal-id>.md.promote.lock
+//	                                              promotion/dismiss lock
 //
 // proposals/ is machine-local derived data. CurrentRevision excludes the
 // directory (see isExcludedRootDir), so digesting external items never changes
@@ -419,6 +421,36 @@ func (s *Store) quarantineProposal(path string, cause error, now time.Time) erro
 		return fmt.Errorf("fsstore: preserve damaged proposal: %w", err)
 	}
 	return fmt.Errorf("%w (original preserved at %s)", cause, s.proposalRelativePath(aside))
+}
+
+// proposalLockSuffix names the promotion lock beside a proposal file:
+// "<id>.md.promote.lock". It is separate from the "<id>.md.lock" write lock
+// that Put and SetStatus take, so Promote can hold it across a SetStatus call
+// without deadlocking on its own lock. Both live in the proposals directory,
+// which is excluded from the curated revision and from listings.
+const proposalLockSuffix = ".promote"
+
+var _ ports.ProposalLocker = (*Store)(nil)
+
+// WithProposalLock runs fn while holding the cross-process promotion lock for
+// one proposal. The lock is a sibling file of the proposal, so it is per
+// (project, proposal) and survives the proposal file being rewritten. See
+// ports.ProposalLocker.
+func (s *Store) WithProposalLock(ctx context.Context, projectID, proposalID string, fn func() error) error {
+	if err := contextError(ctx); err != nil {
+		return err
+	}
+	if fn == nil {
+		return domain.NewValidationError("proposal.lock", "callback is required")
+	}
+	if err := s.requireProject(projectID); err != nil {
+		return err
+	}
+	path, err := s.proposalPath(projectID, proposalID)
+	if err != nil {
+		return err
+	}
+	return withFileLock(ctx, path+proposalLockSuffix, fn)
 }
 
 // ProposalProblems reports proposal files that List skips because they are

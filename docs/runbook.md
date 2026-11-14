@@ -253,43 +253,67 @@ The data repository is private and holds the shared brain. The sync commands
 are available in git mode only; server mode uses the API instead.
 
 ```sh
-brain sync --status --config ~/brain-data/brain.yaml   # read-only: ahead, behind, changed, conflicts
-brain sync --config ~/brain-data/brain.yaml            # commit local changes, then pull (rebase)
-brain sync --config ~/brain-data/brain.yaml --push     # the same, then push
-brain index --config ~/brain-data/brain.yaml           # after pulled Markdown changed
+brain sync --status --config ~/brain-data/brain.yaml        # read-only summary
+brain sync --status --json --config ~/brain-data/brain.yaml # ahead/behind, dirty, unmerged, last revision
+brain sync --config ~/brain-data/brain.yaml                 # commit local changes, then pull (rebase)
+brain sync --config ~/brain-data/brain.yaml --push          # the same, then push
+brain index --config ~/brain-data/brain.yaml                # after pulled Markdown changed
 ```
 
 What `brain sync` does, in order:
 
-1. Stops with an error and changes nothing if conflicts are already reported.
-2. Commits local changes when the working tree is dirty. The message is
+1. Takes the data-directory lock; a second sync waits instead of colliding on
+   `.git/index.lock`.
+2. Repairs a rebase or an autostash left by a killed earlier run.
+3. Stops with exit **3** and changes nothing if conflicts are already present.
+4. Commits local changes when the working tree is dirty. The message is
    `brain sync: <timestamp>`.
-3. Fetches and rebases onto the upstream branch.
-4. Pushes only with `--push`.
+5. Fetches, stashes a tree dirtied by a concurrent writer, rebases onto the
+   upstream branch, and restores the stash. `--autostash=false` disables the
+   stash step; the default is on.
+6. Pushes only with `--push`. A rejected push is retried up to 3 times with
+   backoff, fetching and rebasing before each retry. Nothing is ever forced.
 
-It never force-pushes and never resolves conflicts automatically.
-`--status` never changes anything.
+Exit codes: **0** success, **1** runtime error, **2** usage error, **3** sync
+conflict with unmerged paths. `--status` never changes anything.
 
-### Conflicts
+### Conflicts and merge drivers
 
 `brain sync --status` lists conflicting paths as `conflict: <path>` lines.
 `brain sync` refuses to run while they exist, and reports
-`unresolved conflicts in <paths>`.
+`unresolved conflicts in <paths>` with exit 3.
 
-To resolve:
+Most single-file conflicts never reach you: `.gitattributes` routes
+`projects/*/state.md`, `registry.json`, and `projects/*/notes/*.md` through the
+deterministic drivers. `brain init` and `brain doctor --fix` register them in
+`.git/config`; `brain doctor` warns when a clone is missing them. A clone
+without drivers falls back to a normal Git conflict.
 
-1. Inspect the repository: `git -C ~/brain-data status`.
+- A state field both sides changed differently keeps the current value in
+  `state.md` and writes both values to
+  `projects/<id>/state-conflicts/<UTC>-<field>.md`.
+- A registry alias claimed by two projects keeps one owner and writes
+  `registry-conflicts/<UTC>-<alias>.md`.
+- Notes are unioned by heading plus body hash and ordered by creation time.
+
+To resolve a real conflict:
+
+1. Inspect the repository: `git -C ~/brain-data status`. `brain sync` aborts the
+   rebase before returning, so no rebase is in progress; the local commits and
+   the autostash are restored.
 2. Edit the conflicting Markdown files by hand. Keep the content that is still
    correct. When both sides hold different knowledge, keep both as separate
-   records (for example with `brain note`).
-3. Stage the files with `git add`. Then finish the rebase with
-   `git rebase --continue`, or with `git commit` if no rebase is in progress.
+   records (for example with `brain note`), and open the newest
+   `state-conflicts/` or `registry-conflicts/` record when one exists.
+3. Stage the files with `git add` and commit, or remove the conflict markers the
+   stash restore left and stage the result. If a stash restore conflicted, its
+   entry is dropped after the markers are written; resolve the markers and do
+   not pop it again.
 4. Run `brain sync --status` until it reports no conflicts, then `brain sync --push`.
 
 Do not use `git reset --hard`, do not take one side of a whole directory with
 `--ours` or `--theirs`, and do not force-push. If a conflict cannot be resolved
-safely, stop and ask the maintainer. While a rebase is still in progress,
-`git rebase --abort` returns the branch to its state before the rebase.
+safely, stop and ask the maintainer.
 
 ### Raw zone and publishing (since 0.15)
 
@@ -438,7 +462,14 @@ brain discover --root <workspace> --apply   # register the new ones
 
 ## 3a2. MCP server for coding agents
 
-`brain mcp` serves the brain over stdio (MCP 2025-06-18) with these tools:
+`brain mcp` serves the brain over stdio with two protocol revisions: the
+stateless `2026-07-28` revision (`server/discover`, per-request `_meta`,
+`resultType` on every result, MRTR confirmations) and the `2025-06-18`
+handshake revision for older clients. Tool annotations, output schemas, the
+typed refusal envelope, pagination limits and the raw JSON-RPC harness are
+documented in [mcp.md](mcp.md).
+
+The 16 tools are:
 
 - `brain_open` - load a project's state, recent decisions, attempts and last handoff.
 - `brain_context` - context for one task: state, review findings, latest handoff, best-matching decisions/attempts/notes and failed attempts to avoid (`query`, optional `project`, `budget`, `kinds`, `since`).
@@ -453,9 +484,12 @@ brain discover --root <workspace> --apply   # register the new ones
 - `brain_state_set` - update the state; only the given fields change.
 - `brain_catchup` - what changed since the latest handoff (or the last `since_hours`).
 - `brain_review` - find stale or contradictory knowledge; read-only, `brain review --fix` applies fixes in a shell.
-- `brain_records` - list a project's records with ids and status, newest first.
+- `brain_records` - list a project's records with ids and status, newest first (`limit`, `cursor`; paginated).
 - `brain_record` - read one record in full by id.
-- `brain_decision_status` - accept, reject or supersede a decision.
+- `brain_decision_status` - accept, reject or supersede a decision; a 2026 client that declared elicitation is asked to confirm a supersede first.
+
+`brain mcp --list-tools --json` prints the whole contract (titles, annotations,
+schemas, page limits) without a config or a running server.
 
 Register it once per machine with an explicit config, because
 agents may start servers without the variables that locate the default config:
@@ -1091,8 +1125,11 @@ file as a compromise.
 
 Follow section 2, Conflicts. Summary:
 
-1. `brain sync --status` lists the conflicting paths.
-2. Resolve them by hand in the data repository, then finish the rebase or commit.
+1. `brain sync --status` lists the conflicting paths; a conflicted sync exits 3
+   after aborting its rebase and restoring the autostash.
+2. Resolve them by hand in the data repository. Check the newest
+   `projects/<id>/state-conflicts/` and `registry-conflicts/` records for values
+   the merge drivers preserved, then commit the resolution.
 3. `brain sync --status` must report no conflicts.
 4. `brain sync --push`, then `brain index` on each machine that pulled changes.
 5. Never force-push and never discard the other side's changes without reviewing them.

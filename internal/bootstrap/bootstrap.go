@@ -106,6 +106,7 @@ func BuildWithOptions(cfg config.BrainConfig, opts Options) (*Runtime, error) {
 				return nil, syncErr
 			}
 			deps.Sync = sync
+			deps.MergeDrivers = sync
 		}
 	case config.ModeServer:
 		if strings.TrimSpace(cfg.ServerURL) != "" {

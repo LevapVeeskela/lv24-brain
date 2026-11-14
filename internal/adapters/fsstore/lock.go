@@ -356,3 +356,12 @@ func withFileLock(ctx context.Context, target string, fn func() error) error {
 	defer release()
 	return fn()
 }
+
+// LockSync takes the interprocess lock of the data directory, used to
+// serialize git sync runs on one checkout. It reuses the owner-safe record
+// lock: a live holder is never broken, while a dead pid past the TTL or a lock
+// from another host is removed. The lock file is <data-dir>/sync.lock and is
+// ignored by the managed .gitignore, so it is never published.
+func (s *Store) LockSync(ctx context.Context) (func(), error) {
+	return acquireFileLock(ctx, filepath.Join(s.root, "sync"))
+}

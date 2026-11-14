@@ -53,6 +53,7 @@ internal/connectors/       shared run records, retry/rate-limit helpers, redacti
 internal/daemon/           background engine: scheduler, queue, runtime, logs
 internal/agentcontrol/     local control API composition (daemon <-> localapi)
 internal/migrate/          legacy .brain importer
+internal/mcpserver/        MCP server over stdio: 2026-07-28 and 2025-06-18
 internal/server/           server config and process wiring
 internal/update/           release check, verify, stage, apply, rollback
 internal/version/          build identity
@@ -243,18 +244,60 @@ supports writes; context sections simply report nothing.
 ## Git sync
 
 One private data repository is the shared brain. Each user owns
-`journal/<user>.jsonl`; shared files are edited normally and conflicts are
-resolved by Git.
+`journal/<user>.jsonl`; shared files are edited normally.
 
-- `brain sync --status` is read-only.
-- `brain sync` commits staged non-ignored changes, runs `fetch --prune`,
-  `pull --rebase`, and pushes only with `--push`.
-- No force-push and no automatic destructive conflict resolution.
-- A conflict returns the unmerged paths and leaves the repository for manual
-  repair.
+- `brain sync --status [--json]` is read-only. It reports branch, ahead/behind,
+  dirtiness, unmerged paths, and the revision recorded by the last completed
+  pull or push (`<git-dir>/brain-sync.json`, never tracked).
+- `brain sync` holds an interprocess lock on the data directory for the whole
+  run, so two syncs in one checkout cannot interleave. It commits non-ignored
+  changes, fetches, stashes a tree dirtied by a concurrent writer, rebases,
+  restores the stash, and pushes only with `--push`. `--autostash=false`
+  disables the stash step.
+- A rejected push is retried up to 3 attempts with backoff; every retry fetches
+  and rebases first. It never force-pushes.
+- A conflict aborts the rebase, restores the autostash, prints the unmerged
+  paths, and exits **3** (0 success, 1 runtime, 2 usage). The next sync also
+  repairs a rebase or autostash left by a killed run, so no manual
+  `git rebase --abort` is required.
 - `gitstore` shells out to the git CLI with an argument vector, a per-command
   timeout, `GIT_TERMINAL_PROMPT=0`, and sanitized errors so remote URLs with
   credentials do not leak.
+
+### Merge drivers
+
+The data-repository `.gitattributes` (maintained by `brain init` and
+`brain doctor --fix`) routes single mutable files through deterministic
+three-way drivers:
+
+```gitattributes
+journal/*.jsonl merge=union
+projects/*/state.md merge=lv24-state
+registry.json merge=lv24-registry
+projects/*/notes/*.md merge=lv24-notes
+```
+
+Git stores drivers per clone in `.git/config`; `brain init` and
+`brain doctor --fix` register `merge.<name>.driver` pointing at the current
+`brain` executable, and `brain doctor` warns when they are missing. A clone
+without drivers falls back to a normal content conflict, which is safe.
+
+- **state** merges `goal` and `next_action` three-way and unions the ordered
+  lists `active`, `blocked`, and `open questions`. When both sides changed the
+  same scalar differently, the current version stays in the file and the
+  incoming value is written to `projects/<id>/state-conflicts/<UTC>-<field>.md`.
+  Unknown sections are preserved and merged by name.
+- **notes** unions entries by heading plus body hash, orders them by marker
+  `created_at`, and respects an intentional deletion when the surviving side is
+  unchanged.
+- **registry** unions projects by id, takes the record with the later
+  `updated_at`, preserves unknown keys, and reports an alias claimed by two
+  projects in `registry-conflicts/<UTC>-<alias>.md`.
+
+The hidden `brain merge-driver <state|notes|registry> %O %A %B %L %P` command is
+what git invokes. It only rewrites `%A` and conflict files; diagnostics name
+paths and field names, while a conflict file carries the current and incoming
+values of that one field.
 
 ## Proposals, digest and promotion (Phase 4.1)
 

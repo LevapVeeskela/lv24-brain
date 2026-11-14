@@ -562,27 +562,40 @@ Write, then publish:
 ./bin/brain sync --status --config ~/brain-data/brain.yaml
 ```
 
-`brain sync` stages non-ignored files, commits when dirty, fetches, rebases onto
-the upstream branch, and pushes only with `--push`. A freshly created, empty
-data repository works too: the first `sync --push` creates its branch. It never force-pushes and
-never resolves conflicts automatically. `--status` is read-only.
+`brain sync` takes the data-directory lock, repairs an interrupted earlier run,
+stages non-ignored files, commits when dirty, fetches, rebases onto the upstream
+branch (stashing and restoring a tree dirtied by a concurrent writer), and
+pushes only with `--push`. A rejected push is retried up to 3 times with
+backoff, fetching and rebasing first. A freshly created, empty data repository
+works too: the first `sync --push` creates its branch. It never force-pushes.
+
+`brain init` and `brain doctor --fix` register the deterministic merge drivers
+for `state.md`, `notes/*.md`, and `registry.json`, so concurrent edits usually
+merge field by field. When both machines changed the same state field, the
+current value stays in the file and the incoming value is recorded under
+`projects/<id>/state-conflicts/`. `--status` is read-only. Exit codes are 0
+success, 1 runtime, 2 usage, and 3 sync conflict.
 
 Expected `sync --status` output:
 
 ```text
 provider: git
+branch: main
 ahead: 0
 behind: 0
 changed: 0
+dirty: false
 ```
 
 A publish run reports the commits it created or moved:
 
 ```text
 provider: git
+branch: main
 ahead: 0
 behind: 0
 changed: 1
+dirty: false
 ```
 
 The data repository `.gitignore` excludes `secrets/`, `index/`, `backups/`,
@@ -751,7 +764,8 @@ also accepts `--config <path>`.
 | `brain digest` | `--since <90m\|24h\|7d>` (default `24h`; with `--source` the default is `30d`), `--project <id>`, `--json`, `--write` (saves `<data_dir>/digests/YYYY-MM-DD.md`). With `--source <connection>`: `--all`, `--limit <n>` (default 500), `--rule <names>`, `--dry-run` (default; conflicts with `--write`), `--write` (persists proposals). `--source` is local/git only. |
 | `brain promote <id>` | `--project <id>`, `--as decision\|attempt\|note`, `--status proposed\|accepted` (decision only), `--title <text>`, `--dismiss`, `--force` (stale/orphan), `--yes` (local-only source), `--dry-run`, `--json`. Local/git only. |
 | `brain context <task>` | `--project <id>`, `--budget <runes>` (default 4000), `--kind decision\|attempt\|note` (repeatable), `--since <24h\|7d\|2w\|date>`, `--json`, `--raw` (off by default; local/git only; appends at most five excerpts allowed by `<data-dir>/context-allow.json` when the curated context is thin). State, review findings, latest handoff, best-matching records and failed attempts for the task; adds only `pending_proposals: N` when proposals exist, plus granted excerpts with `--raw`. MCP: `brain_context`. |
-| `brain sync` | `--status` (read-only divergence and conflict report), `--push` (push after committing) |
+| `brain sync` | `--status` (read-only branch, ahead/behind, dirty, unmerged paths, last synced revision), `--json`, `--push` (push after committing), `--autostash` (default on; `--autostash=false` disables the stash around the rebase). Exit 3 means an unmerged conflict. |
+| `brain doctor` | `--json`, `--fix` (register the git merge drivers and add their `.gitattributes` lines) |
 | `brain index` | `--rebuild` (delete the local index and rebuild it from Markdown) |
 
 Positional text is joined with spaces. Flags may appear before or after it.
@@ -804,8 +818,11 @@ by `brain config use` (stored under the OS user config directory).
   or correct `brain.yaml`.
 - `local mode has no remote` from `sync` — local mode does not sync; use `git`
   mode.
-- `brain sync` fails with a conflict — resolve the Git conflict manually, then
-  rerun. The engine never discards changes.
+- `brain sync` exits `3` — the rebase conflicted; the engine already aborted it
+  and restored the autostash, so fix the listed paths (and any
+  `state-conflicts/` record), then rerun. The engine never discards changes.
+- `brain doctor` warns about missing merge drivers — run
+  `brain doctor --fix` on that clone.
 - Server exits with `BRAIN_JWT_SECRET is required` — set a signing key of at
   least 32 bytes.
 - `401` on server requests — the HTTP client refreshes once automatically, so a

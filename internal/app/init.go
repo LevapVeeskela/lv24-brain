@@ -151,6 +151,13 @@ func ensureGitignore(dataDir string) error {
 // whose file was written by an older engine, without touching the user's own
 // lines: lock and temp files must never be published on any machine.
 func ensureIgnorePatterns(path, content string) error {
+	return ensureManagedLines(path, content, "# Added by brain init: locks and temporary files are never published")
+}
+
+// ensureManagedLines writes content when path is missing and otherwise appends
+// only the managed non-comment lines the file lacks. It never rewrites or
+// deletes a user line, so it can upgrade a file written by an older engine.
+func ensureManagedLines(path, content, header string) error {
 	raw, err := os.ReadFile(path)
 	if err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("init: read %s: %w", path, err)
@@ -162,6 +169,21 @@ func ensureIgnorePatterns(path, content string) error {
 		return nil
 	}
 	existing := string(raw)
+	missing := missingManagedLines(content, existing)
+	if len(missing) == 0 {
+		return nil
+	}
+	if !strings.HasSuffix(existing, "\n") {
+		existing += "\n"
+	}
+	existing += "\n" + header + "\n" + strings.Join(missing, "\n") + "\n"
+	if err := os.WriteFile(path, []byte(existing), 0o644); err != nil {
+		return fmt.Errorf("init: write %s: %w", path, err)
+	}
+	return nil
+}
+
+func missingManagedLines(content, existing string) []string {
 	var missing []string
 	for _, line := range strings.Split(content, "\n") {
 		pattern := strings.TrimSpace(line)
@@ -172,18 +194,7 @@ func ensureIgnorePatterns(path, content string) error {
 			missing = append(missing, pattern)
 		}
 	}
-	if len(missing) == 0 {
-		return nil
-	}
-	if !strings.HasSuffix(existing, "\n") {
-		existing += "\n"
-	}
-	existing += "\n# Added by brain init: locks and temporary files are never published\n" +
-		strings.Join(missing, "\n") + "\n"
-	if err := os.WriteFile(path, []byte(existing), 0o644); err != nil {
-		return fmt.Errorf("init: write %s: %w", path, err)
-	}
-	return nil
+	return missing
 }
 
 func hasIgnoreLine(content, pattern string) bool {
@@ -195,23 +206,39 @@ func hasIgnoreLine(content, pattern string) bool {
 	return false
 }
 
+// missingGitattributesLines reports the managed driver lines the data
+// repository does not carry yet. A missing .gitattributes reports every line.
+func missingGitattributesLines(dataDir string) ([]string, error) {
+	path := filepath.Join(dataDir, ".gitattributes")
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return missingManagedLines(gitattributesContent, ""), nil
+		}
+		return nil, fmt.Errorf("init: read %s: %w", path, err)
+	}
+	return missingManagedLines(gitattributesContent, string(raw)), nil
+}
+
 // gitattributesContent makes git keep every line of append-only journals that
-// several machines of one user write concurrently (journal/<user>.jsonl), so a
-// sync never stops on a journal conflict.
+// several machines of one user write concurrently (journal/<user>.jsonl), and
+// routes the single mutable files through the deterministic merge drivers.
+// A clone without the drivers registered falls back to a normal conflict,
+// which is safe; brain init and brain doctor --fix register them.
 const gitattributesContent = `# Journals are append-only JSON Lines written by several machines; union
 # merge keeps every line from both sides instead of stopping on a conflict.
 journal/*.jsonl merge=union
+
+# Single mutable files are merged field by field, not line by line.
+projects/*/state.md merge=lv24-state
+registry.json merge=lv24-registry
+projects/*/notes/*.md merge=lv24-notes
 `
 
 func ensureGitattributes(dataDir string) error {
-	path := filepath.Join(dataDir, ".gitattributes")
-	if _, err := os.Stat(path); err == nil {
-		return nil
-	} else if !os.IsNotExist(err) {
-		return fmt.Errorf("init: inspect %s: %w", path, err)
-	}
-	if err := os.WriteFile(path, []byte(gitattributesContent), 0o644); err != nil {
-		return fmt.Errorf("init: write %s: %w", path, err)
-	}
-	return nil
+	return ensureManagedLines(
+		filepath.Join(dataDir, ".gitattributes"),
+		gitattributesContent,
+		"# Added by brain: deterministic merge drivers for concurrent edits",
+	)
 }

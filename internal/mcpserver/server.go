@@ -1,6 +1,15 @@
-// Package mcpserver implements the Model Context Protocol (revision
-// 2025-06-18) over newline-delimited JSON-RPC 2.0 messages on a byte stream,
-// and exposes brain operations as MCP tools.
+// Package mcpserver implements the Model Context Protocol over
+// newline-delimited JSON-RPC 2.0 messages on a byte stream, and exposes brain
+// operations as MCP tools.
+//
+// Two revisions are served from the same process:
+//
+//   - 2026-07-28, the stateless revision. A request carries its revision and
+//     capabilities in `_meta`, no initialize handshake is needed, every result
+//     carries resultType and _meta.serverInfo, and server/discover advertises
+//     the supported versions.
+//   - 2025-06-18 and older, the handshake revision. A client that opens with
+//     initialize gets the 2025 result shapes without resultType.
 //
 // Only protocol messages may be written to the output stream: diagnostics
 // belong on stderr.
@@ -16,14 +25,8 @@ import (
 	"slices"
 )
 
-// ProtocolVersion is the revision this server speaks when the client asks for
-// a version it does not know.
-const ProtocolVersion = "2025-06-18"
-
-// serverName is reported in serverInfo.
-const serverName = "lv24-brain"
-
-// serverInstructions is sent to clients during initialize.
+// serverInstructions is sent to clients during initialize and in the discovery
+// result.
 const serverInstructions = "Company Brain is the curated memory of this project. " +
 	"Call brain_open at the start of a session to load the project's state, decisions, attempts and last handoff, " +
 	"and use brain_search or brain_journal to find earlier work. " +
@@ -31,16 +34,16 @@ const serverInstructions = "Company Brain is the curated memory of this project.
 	"Call brain_handoff at the end of the session with a summary and the next action; git context is captured automatically. " +
 	"Never store secrets, tokens or personal data in the brain."
 
-// supportedVersions lists the protocol revisions that may be echoed back.
-var supportedVersions = []string{"2025-06-18", "2025-03-26", "2024-11-05"}
-
-// JSON-RPC 2.0 error codes.
+// JSON-RPC 2.0 error codes, plus the MCP error codes the server emits.
 const (
 	codeParseError     = -32700
 	codeInvalidRequest = -32600
 	codeMethodNotFound = -32601
 	codeInvalidParams  = -32602
 	codeInternalError  = -32603
+	// codeUnsupportedProtocolVersion is the MCP UnsupportedProtocolVersion
+	// error: the request declared a revision this server does not serve.
+	codeUnsupportedProtocolVersion = -32022
 )
 
 // Server answers MCP requests against a Backend.
@@ -48,11 +51,16 @@ type Server struct {
 	backend Backend
 	version string
 	tools   []tool
+	// catalog makes toolList report every tool group, including the ones a
+	// given backend would hide. It is set by Catalog only.
+	catalog bool
+	// mrtKey signs MRTR requestState.
+	mrtKey []byte
 }
 
 // New builds a Server. version is reported as serverInfo.version.
 func New(backend Backend, version string) *Server {
-	s := &Server{backend: backend, version: version}
+	s := &Server{backend: backend, version: version, mrtKey: newMRTRKey()}
 	s.tools = s.toolList()
 	return s
 }
@@ -68,6 +76,9 @@ type request struct {
 type rpcError struct {
 	Code    int    `json:"code"`
 	Message string `json:"message"`
+	// Data carries the structured payload of a defined MCP error, such as the
+	// supported versions of UnsupportedProtocolVersion.
+	Data any `json:"data,omitempty"`
 }
 
 // response is one outgoing JSON-RPC message. Exactly one of Result and Error
@@ -154,23 +165,34 @@ func (s *Server) handleMessage(ctx context.Context, line []byte) []byte {
 		// a notification must never trigger a tool call.
 		return nil
 	}
-	result, rpcErr := s.dispatch(ctx, req)
+	env, rpcErr := requestEnvelope(req.Method, req.Params)
 	if rpcErr != nil {
 		return encodeResponse(response{JSONRPC: "2.0", ID: req.ID, Error: rpcErr})
 	}
-	return encodeResponse(response{JSONRPC: "2.0", ID: req.ID, Result: result})
+	if req.Method == "server/discover" {
+		// Discovery is the 2026 entry point: its result always has the 2026
+		// shape, even when the probe itself declared no revision.
+		env.revision = revisionModern
+	}
+	result, rpcErr := s.dispatch(ctx, env, req)
+	if rpcErr != nil {
+		return encodeResponse(response{JSONRPC: "2.0", ID: req.ID, Error: rpcErr})
+	}
+	return encodeResponse(response{JSONRPC: "2.0", ID: req.ID, Result: s.finalizeResult(env, req.Method, result)})
 }
 
-func (s *Server) dispatch(ctx context.Context, req request) (json.RawMessage, *rpcError) {
+func (s *Server) dispatch(ctx context.Context, env envelope, req request) (json.RawMessage, *rpcError) {
 	switch req.Method {
 	case "initialize":
 		return s.initialize(req.Params)
+	case "server/discover":
+		return s.discover()
 	case "ping":
 		return json.RawMessage(`{}`), nil
 	case "tools/list":
-		return s.listTools()
+		return s.listTools(req.Params)
 	case "tools/call":
-		return s.callTool(ctx, req.Params)
+		return s.callTool(ctx, env, req.Params)
 	default:
 		return nil, &rpcError{Code: codeMethodNotFound, Message: "method not found: " + req.Method}
 	}
@@ -182,26 +204,49 @@ func (s *Server) initialize(params json.RawMessage) (json.RawMessage, *rpcError)
 		return nil, invalidParams("initialize params: " + err.Error())
 	}
 	version := ProtocolVersion
-	if slices.Contains(supportedVersions, p.ProtocolVersion) {
+	if slices.Contains(legacyProtocolVersions, p.ProtocolVersion) {
 		version = p.ProtocolVersion
 	}
 	return marshalResult(initializeResult{
 		ProtocolVersion: version,
 		Capabilities:    capabilities{Tools: toolsCapability{ListChanged: false}},
-		ServerInfo:      serverInfo{Name: serverName, Version: s.version},
+		ServerInfo:      serverInfo{Name: ServerName, Version: s.version},
 		Instructions:    serverInstructions,
 	})
 }
 
-func (s *Server) listTools() (json.RawMessage, *rpcError) {
-	type toolInfo struct {
-		Name        string         `json:"name"`
-		Description string         `json:"description"`
-		InputSchema map[string]any `json:"inputSchema"`
+// toolInfo is one entry of tools/list.
+type toolInfo struct {
+	Name         string         `json:"name"`
+	Title        string         `json:"title,omitempty"`
+	Description  string         `json:"description"`
+	InputSchema  map[string]any `json:"inputSchema"`
+	OutputSchema map[string]any `json:"outputSchema,omitempty"`
+	Annotations  Annotations    `json:"annotations"`
+}
+
+func (s *Server) listTools(params json.RawMessage) (json.RawMessage, *rpcError) {
+	var p struct {
+		Cursor string `json:"cursor"`
+	}
+	if err := decodeParams(params, &p); err != nil {
+		return nil, invalidParams("tools/list params: " + err.Error())
+	}
+	if p.Cursor != "" {
+		// The catalogue is smaller than one page, so this server never issues a
+		// cursor; an unknown cursor is a client error.
+		return nil, invalidParams("tools/list: unknown cursor")
 	}
 	infos := make([]toolInfo, 0, len(s.tools))
 	for _, t := range s.tools {
-		infos = append(infos, toolInfo{Name: t.Name, Description: t.Description, InputSchema: t.InputSchema})
+		infos = append(infos, toolInfo{
+			Name:         t.Name,
+			Title:        t.Annotations.Title,
+			Description:  t.Description,
+			InputSchema:  t.InputSchema,
+			OutputSchema: t.OutputSchema,
+			Annotations:  t.Annotations,
+		})
 	}
 	return marshalResult(struct {
 		Tools []toolInfo `json:"tools"`
@@ -219,11 +264,16 @@ type callResult struct {
 	IsError           bool          `json:"isError"`
 }
 
-func (s *Server) callTool(ctx context.Context, params json.RawMessage) (json.RawMessage, *rpcError) {
-	var p struct {
-		Name      string          `json:"name"`
-		Arguments json.RawMessage `json:"arguments"`
-	}
+// callToolParams is one tools/call, including the MRTR retry fields.
+type callToolParams struct {
+	Name           string                     `json:"name"`
+	Arguments      json.RawMessage            `json:"arguments"`
+	InputResponses map[string]json.RawMessage `json:"inputResponses"`
+	RequestState   string                     `json:"requestState"`
+}
+
+func (s *Server) callTool(ctx context.Context, env envelope, params json.RawMessage) (json.RawMessage, *rpcError) {
+	var p callToolParams
 	if err := decodeParams(params, &p); err != nil {
 		return nil, invalidParams("tools/call params: " + err.Error())
 	}
@@ -234,14 +284,18 @@ func (s *Server) callTool(ctx context.Context, params json.RawMessage) (json.Raw
 	if !ok {
 		return nil, invalidParams("unknown tool: " + p.Name)
 	}
+	outcome := s.checkInput(env, t, p)
+	if outcome.refusal != nil {
+		return refusalResult(*outcome.refusal)
+	}
+	if outcome.result != nil {
+		return marshalResult(outcome.result)
+	}
 	out, err := t.run(ctx, p.Arguments)
 	if err != nil {
 		// Tool failures are reported in the result so the model can read and
 		// correct them; they are not JSON-RPC protocol errors.
-		return marshalResult(callResult{
-			Content: []contentItem{{Type: "text", Text: err.Error()}},
-			IsError: true,
-		})
+		return refusalResult(refusalFrom(err))
 	}
 	return marshalResult(callResult{
 		Content:           []contentItem{{Type: "text", Text: out.Text}},

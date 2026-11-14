@@ -72,7 +72,7 @@ func (c completionCmd) withPos(index int, label string, values ...string) comple
 // in step with the --help output of every command.
 var completionTable = []completionCmd{
 	cmdLeaf("init", choiceFlag("mode", "local", "git", "server"), valueFlag("data-dir"), valueFlag("server-url"), valueFlag("config")),
-	cmdLeaf("doctor", boolFlag("json"), valueFlag("config")),
+	cmdLeaf("doctor", boolFlag("json"), boolFlag("fix"), valueFlag("config")),
 	cmdLeaf("open", valueFlag("project"), valueFlag("budget"), boolFlag("brief"), boolFlag("json"), valueFlag("config")),
 	cmdGroup("project",
 		cmdLeaf("list", boolFlag("json"), valueFlag("config")),
@@ -95,7 +95,7 @@ var completionTable = []completionCmd{
 	cmdLeaf("promote", valueFlag("project"), choiceFlag("as", "decision", "attempt", "note"),
 		choiceFlag("status", "proposed", "accepted"), valueFlag("title"), boolFlag("dismiss"), boolFlag("force"),
 		boolFlag("yes"), boolFlag("dry-run"), boolFlag("json"), valueFlag("config")),
-	cmdLeaf("sync", boolFlag("status"), boolFlag("push"), valueFlag("config")),
+	cmdLeaf("sync", boolFlag("status"), boolFlag("push"), boolFlag("json"), boolFlag("autostash"), valueFlag("config")),
 	cmdLeaf("index", boolFlag("rebuild"), valueFlag("config")),
 	cmdLeaf("search", valueFlag("project"), valueFlag("limit"), choiceFlag("kind", "note", "decision", "attempt", "handoff", "dump", "item"),
 		boolFlag("dumps"), valueFlag("since"), boolFlag("json"), valueFlag("config")),
@@ -139,7 +139,7 @@ var completionTable = []completionCmd{
 		cmdLeaf("start", choiceFlag("hook", "claude", "codex", "opencode"), valueFlag("cwd"), valueFlag("config")),
 		cmdLeaf("end", choiceFlag("hook", "claude", "codex", "opencode"), valueFlag("cwd"), valueFlag("config")),
 	),
-	cmdLeaf("mcp", valueFlag("config")),
+	cmdLeaf("mcp", boolFlag("list-tools"), boolFlag("json"), valueFlag("config")),
 	cmdGroup("connector",
 		cmdLeaf("run", choiceFlag("name", connectorbuild.SnapshotProviders()...), valueFlag("project"), valueFlag("brain-project"), valueFlag("account"),
 			boolFlag("all"), valueFlag("days"), valueFlag("since"), valueFlag("limit"),
