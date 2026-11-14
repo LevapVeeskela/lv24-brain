@@ -11,6 +11,9 @@ import (
 	"github.com/levapveeskela/lv24-brain/internal/domain"
 )
 
+// gitignoreContent excludes machine-local state and, crucially, lock and
+// temporary files. A committed "<file>.lock" would make every other machine
+// wait for it after a clone, and a committed ".tmp-*" is a partial write.
 const gitignoreContent = `# LV24 Brain local data exclusions
 secrets/
 index/
@@ -21,6 +24,9 @@ agent/
 *.db
 *.sqlite
 *.sqlite3
+.tmp-*
+*.lock
+**/.lock
 .env
 `
 
@@ -137,16 +143,56 @@ func defaultDataDir(mode string) string {
 }
 
 func ensureGitignore(dataDir string) error {
-	path := filepath.Join(dataDir, ".gitignore")
-	if _, err := os.Stat(path); err == nil {
-		return nil
-	} else if !os.IsNotExist(err) {
-		return fmt.Errorf("init: inspect %s: %w", path, err)
+	return ensureIgnorePatterns(filepath.Join(dataDir, ".gitignore"), gitignoreContent)
+}
+
+// ensureIgnorePatterns creates the ignore file when missing and appends any
+// managed pattern it is missing. That upgrades an existing data repository,
+// whose file was written by an older engine, without touching the user's own
+// lines: lock and temp files must never be published on any machine.
+func ensureIgnorePatterns(path, content string) error {
+	raw, err := os.ReadFile(path)
+	if err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("init: read %s: %w", path, err)
 	}
-	if err := os.WriteFile(path, []byte(gitignoreContent), 0o644); err != nil {
+	if os.IsNotExist(err) {
+		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+			return fmt.Errorf("init: write %s: %w", path, err)
+		}
+		return nil
+	}
+	existing := string(raw)
+	var missing []string
+	for _, line := range strings.Split(content, "\n") {
+		pattern := strings.TrimSpace(line)
+		if pattern == "" || strings.HasPrefix(pattern, "#") {
+			continue
+		}
+		if !hasIgnoreLine(existing, pattern) {
+			missing = append(missing, pattern)
+		}
+	}
+	if len(missing) == 0 {
+		return nil
+	}
+	if !strings.HasSuffix(existing, "\n") {
+		existing += "\n"
+	}
+	existing += "\n# Added by brain init: locks and temporary files are never published\n" +
+		strings.Join(missing, "\n") + "\n"
+	if err := os.WriteFile(path, []byte(existing), 0o644); err != nil {
 		return fmt.Errorf("init: write %s: %w", path, err)
 	}
 	return nil
+}
+
+func hasIgnoreLine(content, pattern string) bool {
+	for _, line := range strings.Split(content, "\n") {
+		if strings.TrimSpace(line) == pattern {
+			return true
+		}
+	}
+	return false
 }
 
 // gitattributesContent makes git keep every line of append-only journals that

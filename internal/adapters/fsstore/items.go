@@ -21,18 +21,22 @@ import (
 
 // Raw zone layout (contracts-v1, WP0.2). Every connection owns one directory:
 //
-//	connectors/<connectionID>/.gitignore                 publish policy (see SetPublishPolicy)
+//	connectors/<connectionID>/.gitignore                 publish policy (default: local-only, see SetPublishPolicy)
 //	connectors/<connectionID>/items/<40 hex>.md          one item or tombstone
 //	connectors/<connectionID>/items.lock                 cross-process write lock
 //	connectors/<connectionID>/checkpoints/<stream>.json  one checkpoint per stream
 //
-// The item file name is the hash part of Item.Key(), so the key is the path:
-// "<connectionID>/<hex>" -> connectors/<connectionID>/items/<hex>.md. Files
-// are YAML frontmatter (provenance, double-quoted so no value can break the
-// "---" delimiter) plus the Markdown body; a tombstone keeps only ref,
-// deleted, observed_at and hash, and has no body. connectors/ is excluded
-// from CurrentRevision (see isExcludedRootDir), so item churn never changes
-// the curated revision.
+// The zone is machine-local by default: the marker ignores the whole directory,
+// so only an explicit `publish: shared` connection publishes items, and
+// checkpoints are never published. The item file name is the hash part of
+// Item.Key(), so the key is the path: "<connectionID>/<hex>" ->
+// connectors/<connectionID>/items/<hex>.md. Files are YAML frontmatter
+// (provenance, double-quoted so no value can break the "---" delimiter) plus
+// the Markdown body; a tombstone keeps only ref, deleted, observed_at and hash,
+// and has no body. A shared item file omits the host observation time, so two
+// machines that read the same item write the same bytes at the same path.
+// connectors/ is excluded from CurrentRevision (see isExcludedRootDir), so item
+// churn never changes the curated revision.
 const (
 	itemsDir          = "items"
 	itemFileExt       = ".md"
@@ -47,13 +51,16 @@ const (
 )
 
 // localOnlyIgnore is written to connectors/<id>/.gitignore for a local-only
-// connection: "*" ignores everything in the directory, the file included, so
-// `git add --all` in brain sync never stages its items or checkpoints.
+// connection, the default: "*" ignores everything in the directory, the file
+// included, so `git add --all` in brain sync never stages its items or
+// checkpoints. The marker is deliberately not committed: every checkout writes
+// its own, so a clone without the directory starts local-only too.
 const localOnlyIgnore = "# lv24-brain: local-only connection; nothing in this directory is committed.\n*\n"
 
-// sharedIgnore is the default for other connections: items and checkpoints
-// are shared, transient lock and temporary files are not.
-const sharedIgnore = "# lv24-brain: shared connection; only lock and temporary files are ignored.\n*.lock\n.tmp-*\n"
+// sharedIgnore is written for a connection that explicitly publishes its raw
+// items (`publish: shared`). Items are committed; checkpoints hold host cursors
+// and stay machine-local even here, as do lock and temporary files.
+const sharedIgnore = "# lv24-brain: shared items; checkpoints, lock and temporary files stay machine-local.\n*.lock\n.tmp-*\ncheckpoints/\n"
 
 // reservedConnectionIDs are connectors/ entries used by other features: a
 // connection with such an ID would mix its items with them.
@@ -128,10 +135,14 @@ func (s *ItemStore) Upsert(ctx context.Context, item domain.Item) (ports.UpsertO
 	if err != nil {
 		return "", err
 	}
+	shared, err := s.publishesItems(prepared.Ref.ConnectionID)
+	if err != nil {
+		return "", err
+	}
 	var outcome ports.UpsertOutcome
 	err = s.withConnectionLock(ctx, prepared.Ref.ConnectionID, func() error {
 		var writeErr error
-		outcome, writeErr = s.upsertLocked(prepared)
+		outcome, writeErr = s.upsertLocked(prepared, shared)
 		return writeErr
 	})
 	return outcome, err
@@ -146,10 +157,14 @@ func (s *ItemStore) Delete(ctx context.Context, ref domain.ItemRef, at time.Time
 	if err := ref.Validate(); err != nil {
 		return false, err
 	}
+	shared, err := s.publishesItems(ref.ConnectionID)
+	if err != nil {
+		return false, err
+	}
 	var existed bool
-	err := s.withConnectionLock(ctx, ref.ConnectionID, func() error {
+	err = s.withConnectionLock(ctx, ref.ConnectionID, func() error {
 		var writeErr error
-		existed, _, writeErr = s.deleteLocked(ref, at)
+		existed, _, writeErr = s.deleteLocked(ref, at, shared)
 		return writeErr
 	})
 	return existed, err
@@ -295,12 +310,16 @@ func (s *ItemStore) Apply(ctx context.Context, items []domain.Item) ([]ports.Ups
 			end++
 		}
 		group := prepared[start:end]
-		err := s.withConnectionLock(ctx, connectionID, func() error {
+		shared, err := s.publishesItems(connectionID)
+		if err != nil {
+			return outcomes, err
+		}
+		err = s.withConnectionLock(ctx, connectionID, func() error {
 			for _, item := range group {
 				if err := contextError(ctx); err != nil {
 					return err
 				}
-				outcome, err := s.applyLocked(item)
+				outcome, err := s.applyLocked(item, shared)
 				if err != nil {
 					return err
 				}
@@ -343,12 +362,13 @@ func (s *ItemStore) Connections(ctx context.Context) ([]string, error) {
 }
 
 // SetPublishPolicy records where a connection's raw data may travel by
-// writing connectors/<id>/.gitignore: local-only ignores the whole directory
-// (items and checkpoints are never committed by brain sync); shared ignores
-// only lock and temporary files. The host calls it before a connection's
-// first run and whenever the policy changes. Files committed while the
-// connection was shared stay tracked until removed from the index
-// (git rm --cached); this store never runs git.
+// writing connectors/<id>/.gitignore: local-only (the default) ignores the
+// whole directory, so items and checkpoints are never committed by brain sync;
+// shared publishes items only. Switching to shared first rewrites every stored
+// item without the host observation time, so two machines that later publish
+// the same item write byte-identical files instead of conflicting at the same
+// path. Files committed while a connection was shared stay tracked until
+// removed from the index (git rm --cached); this store never runs git.
 func (s *ItemStore) SetPublishPolicy(ctx context.Context, connectionID string, policy domain.PublishPolicy) error {
 	if err := contextError(ctx); err != nil {
 		return err
@@ -360,6 +380,15 @@ func (s *ItemStore) SetPublishPolicy(ctx context.Context, connectionID string, p
 	if err != nil {
 		return err
 	}
+	current, err := s.PublishPolicy(ctx, connectionID)
+	if err != nil {
+		return err
+	}
+	if policy == domain.PublishShared && current != domain.PublishShared {
+		if err := s.stripObservedAt(ctx, connectionID); err != nil {
+			return err
+		}
+	}
 	content := sharedIgnore
 	if policy == domain.PublishLocalOnly {
 		content = localOnlyIgnore
@@ -368,7 +397,10 @@ func (s *ItemStore) SetPublishPolicy(ctx context.Context, connectionID string, p
 }
 
 // PublishPolicy reads the policy SetPublishPolicy recorded. A directory
-// without the local-only marker is shared.
+// without a marker is local-only: the raw zone is machine-local unless a
+// connection explicitly opts into publishing. A legacy marker written by an
+// earlier engine (which ignored only lock and temporary files) still reads as
+// shared until the next run applies the connection policy.
 func (s *ItemStore) PublishPolicy(ctx context.Context, connectionID string) (domain.PublishPolicy, error) {
 	if err := contextError(ctx); err != nil {
 		return "", err
@@ -378,7 +410,10 @@ func (s *ItemStore) PublishPolicy(ctx context.Context, connectionID string) (dom
 		return "", err
 	}
 	raw, err := os.ReadFile(filepath.Join(dir, connectionIgnoreFile))
-	if err != nil && !errors.Is(err, fs.ErrNotExist) {
+	if errors.Is(err, fs.ErrNotExist) {
+		return domain.PublishLocalOnly, nil
+	}
+	if err != nil {
 		return "", fmt.Errorf("fsstore: read publish policy of %s: %w", connectionID, err)
 	}
 	if string(raw) == localOnlyIgnore {
@@ -387,7 +422,64 @@ func (s *ItemStore) PublishPolicy(ctx context.Context, connectionID string) (dom
 	return domain.PublishShared, nil
 }
 
-func (s *ItemStore) upsertLocked(item domain.Item) (ports.UpsertOutcome, error) {
+// publishesItems reports whether item files of the connection are host-neutral
+// because they may be committed. It writes the local-only default marker when
+// the connection has none yet.
+func (s *ItemStore) publishesItems(connectionID string) (bool, error) {
+	dir, err := s.store.connectionDir(connectionID)
+	if err != nil {
+		return false, err
+	}
+	path := filepath.Join(dir, connectionIgnoreFile)
+	raw, err := os.ReadFile(path)
+	if errors.Is(err, fs.ErrNotExist) {
+		if err := writeFileAtomic(path, []byte(localOnlyIgnore)); err != nil {
+			return false, err
+		}
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("fsstore: check %s: %w", path, err)
+	}
+	return string(raw) != localOnlyIgnore, nil
+}
+
+// stripObservedAt rewrites the connection's stored items without the host
+// observation time. It is idempotent: a file that already lacks the field is
+// left untouched, and damaged files are skipped so a rewrite never replaces
+// content it could not parse.
+func (s *ItemStore) stripObservedAt(ctx context.Context, connectionID string) error {
+	dir, err := s.itemsDirFor(connectionID)
+	if err != nil {
+		return err
+	}
+	if names, err := itemFileHexes(dir); err != nil || len(names) == 0 {
+		return err
+	}
+	return s.withConnectionLock(ctx, connectionID, func() error {
+		names, err := itemFileHexes(dir)
+		if err != nil {
+			return err
+		}
+		for _, hexPart := range names {
+			if err := contextError(ctx); err != nil {
+				return err
+			}
+			path := filepath.Join(dir, hexPart+itemFileExt)
+			item, readErr := readItemFile(path, connectionID+"/"+hexPart)
+			if readErr != nil || item.ObservedAt.IsZero() {
+				continue
+			}
+			item.ObservedAt = time.Time{}
+			if err := s.writeItem(path, item, true); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
+
+func (s *ItemStore) upsertLocked(item domain.Item, shared bool) (ports.UpsertOutcome, error) {
 	path, err := s.itemPathForKey(item.Key())
 	if err != nil {
 		return "", err
@@ -403,7 +495,7 @@ func (s *ItemStore) upsertLocked(item domain.Item) (ports.UpsertOutcome, error) 
 		// A damaged file is repaired by the new content.
 		outcome = ports.UpsertUpdated
 	}
-	if err := s.writeItem(path, item); err != nil {
+	if err := s.writeItem(path, item, shared); err != nil {
 		return "", err
 	}
 	return outcome, nil
@@ -411,7 +503,7 @@ func (s *ItemStore) upsertLocked(item domain.Item) (ports.UpsertOutcome, error) 
 
 // deleteLocked writes a tombstone unless one is already stored. It reports
 // whether a live item existed and whether anything was written.
-func (s *ItemStore) deleteLocked(ref domain.ItemRef, at time.Time) (bool, bool, error) {
+func (s *ItemStore) deleteLocked(ref domain.ItemRef, at time.Time, shared bool) (bool, bool, error) {
 	path, err := s.itemPathForKey(ref.Key())
 	if err != nil {
 		return false, false, err
@@ -421,17 +513,17 @@ func (s *ItemStore) deleteLocked(ref domain.ItemRef, at time.Time) (bool, bool, 
 		return false, false, nil
 	}
 	tombstone := domain.Item{Ref: ref, Deleted: true, ObservedAt: at.UTC()}.WithHash()
-	if err := s.writeItem(path, tombstone); err != nil {
+	if err := s.writeItem(path, tombstone, shared); err != nil {
 		return false, false, err
 	}
 	return readErr == nil, true, nil
 }
 
-func (s *ItemStore) applyLocked(item domain.Item) (ports.UpsertOutcome, error) {
+func (s *ItemStore) applyLocked(item domain.Item, shared bool) (ports.UpsertOutcome, error) {
 	if !item.Deleted {
-		return s.upsertLocked(item)
+		return s.upsertLocked(item, shared)
 	}
-	existed, _, err := s.deleteLocked(item.Ref, item.ObservedAt)
+	existed, _, err := s.deleteLocked(item.Ref, item.ObservedAt, shared)
 	if err != nil {
 		return "", err
 	}
@@ -441,32 +533,12 @@ func (s *ItemStore) applyLocked(item domain.Item) (ports.UpsertOutcome, error) {
 	return ports.UpsertUnchanged, nil
 }
 
-func (s *ItemStore) writeItem(path string, item domain.Item) error {
-	raw, err := encodeItem(item)
+func (s *ItemStore) writeItem(path string, item domain.Item, shared bool) error {
+	raw, err := encodeItem(item, shared)
 	if err != nil {
-		return err
-	}
-	if err := s.ensureConnectionIgnore(item.Ref.ConnectionID); err != nil {
 		return err
 	}
 	return writeFileAtomic(path, raw)
-}
-
-// ensureConnectionIgnore writes the shared default .gitignore when the
-// connection has none yet, so lock and temporary files are never committed.
-// An existing file (for example the local-only marker) is kept.
-func (s *ItemStore) ensureConnectionIgnore(connectionID string) error {
-	dir, err := s.store.connectionDir(connectionID)
-	if err != nil {
-		return err
-	}
-	path := filepath.Join(dir, connectionIgnoreFile)
-	if _, err := os.Stat(path); err == nil {
-		return nil
-	} else if !errors.Is(err, fs.ErrNotExist) {
-		return fmt.Errorf("fsstore: check %s: %w", path, err)
-	}
-	return writeFileAtomic(path, []byte(sharedIgnore))
 }
 
 func (s *ItemStore) withConnectionLock(ctx context.Context, connectionID string, fn func() error) error {
@@ -618,13 +690,21 @@ func itemFileHexes(dir string) ([]string, error) {
 	return hexes, nil
 }
 
-func encodeItem(item domain.Item) ([]byte, error) {
+// encodeItem renders one item file. observed_at is the host clock, so it is
+// stored only for a local-only connection: a shared item is committed at a path
+// derived from the item identity, and two machines that read the same item must
+// write byte-identical files instead of a same-path/different-bytes conflict.
+// Every other field comes from the source or from validated connection
+// settings, so it is the same on every host.
+func encodeItem(item domain.Item, shared bool) ([]byte, error) {
 	front := itemFrontmatter{
 		SchemaVersion: itemSchemaVersion,
 		Ref:           itemRefFrontmatter{ConnectionID: item.Ref.ConnectionID, ExternalID: item.Ref.ExternalID},
-		ObservedAt:    formatItemTime(item.ObservedAt),
 		Hash:          item.Hash,
 		Deleted:       item.Deleted,
+	}
+	if !shared {
+		front.ObservedAt = formatItemTime(item.ObservedAt)
 	}
 	body := ""
 	if !item.Deleted {

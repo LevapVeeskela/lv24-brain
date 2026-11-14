@@ -9,11 +9,26 @@ import (
 )
 
 type connectorRunRequest struct {
-	Name      string     `json:"name"`
-	ProjectID string     `json:"projectId,omitempty"`
-	Projects  []string   `json:"projects,omitempty"`
-	Since     *time.Time `json:"since,omitempty"`
-	Limit     int        `json:"limit,omitempty"`
+	Name           string     `json:"name"`
+	ProjectID      string     `json:"projectId,omitempty"`
+	Projects       []string   `json:"projects,omitempty"`
+	Since          *time.Time `json:"since,omitempty"`
+	Limit          int        `json:"limit,omitempty"`
+	Publish        string     `json:"publish,omitempty"`
+	AllowLocalOnly bool       `json:"allowLocalOnly,omitempty"`
+}
+
+// ConnectorRunOptions selects one server connector run. It mirrors
+// httpapi.ConnectorRunRequest without importing the HTTP adapter.
+type ConnectorRunOptions struct {
+	Projects  []string
+	Since     *time.Time
+	Limit     int
+	ProjectID string
+	// Publish is "shared" or "local-only"; empty keeps the provider default.
+	Publish string
+	// AllowLocalOnly is the explicit admin opt-in a local-only run needs.
+	AllowLocalOnly bool
 }
 
 // RunConnector asks the server to run one read-only connector. The returned
@@ -26,13 +41,27 @@ func (c *Client) RunConnector(ctx context.Context, name string, projects []strin
 // RunConnectorMapped maps raw items to a brain project on the server while
 // retaining the repository/project target filters of RunConnector.
 func (c *Client) RunConnectorMapped(ctx context.Context, name string, projects []string, since *time.Time, limit int, projectID string) (domain.ConnectorRun, error) {
-	var run domain.ConnectorRun
-	if err := c.executeWithClient(ctx, http.MethodPost, "/v1/connectors/run", nil, connectorRunRequest{
-		Name:      name,
-		ProjectID: projectID,
+	return c.RunConnectorWithOptions(ctx, name, ConnectorRunOptions{
 		Projects:  projects,
 		Since:     since,
 		Limit:     limit,
+		ProjectID: projectID,
+	})
+}
+
+// RunConnectorWithOptions is RunConnectorMapped plus the server-mode publish
+// policy: publish=shared stores raw items for project members, while a
+// local-only run needs AllowLocalOnly and stores nothing in the shared zone.
+func (c *Client) RunConnectorWithOptions(ctx context.Context, name string, opts ConnectorRunOptions) (domain.ConnectorRun, error) {
+	var run domain.ConnectorRun
+	if err := c.executeWithClient(ctx, http.MethodPost, "/v1/connectors/run", nil, connectorRunRequest{
+		Name:           name,
+		ProjectID:      opts.ProjectID,
+		Projects:       opts.Projects,
+		Since:          opts.Since,
+		Limit:          opts.Limit,
+		Publish:        opts.Publish,
+		AllowLocalOnly: opts.AllowLocalOnly,
 	}, &run, "", false, true, c.connectorHTTPClient); err != nil {
 		return domain.ConnectorRun{}, err
 	}

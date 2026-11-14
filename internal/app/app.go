@@ -97,6 +97,10 @@ type DoctorCheck struct {
 	Name    string
 	Status  string
 	Message string
+	// Code identifies the finding a check reports, for example
+	// "duplicate-id". It is empty when the check passed or has no specific
+	// finding.
+	Code string
 }
 
 // DoctorReport is the aggregated doctor result.

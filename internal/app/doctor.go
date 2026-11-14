@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -9,6 +10,7 @@ import (
 	"time"
 
 	"github.com/levapveeskela/lv24-brain/internal/config"
+	"github.com/levapveeskela/lv24-brain/internal/domain"
 	"github.com/levapveeskela/lv24-brain/internal/ports"
 	"github.com/levapveeskela/lv24-brain/internal/version"
 )
@@ -35,6 +37,7 @@ func (a *App) Doctor(ctx context.Context, opts DoctorOptions) (DoctorReport, err
 		checks = append(checks, a.doctorServer(ctx))
 	}
 	checks = append(checks, a.doctorDataDir())
+	checks = append(checks, a.doctorLocks(ctx))
 	checks = append(checks, a.doctorSchema())
 	checks = append(checks, a.doctorIndex(ctx))
 	checks = append(checks, a.doctorRecords(ctx))
@@ -42,6 +45,8 @@ func (a *App) Doctor(ctx context.Context, opts DoctorOptions) (DoctorReport, err
 	checks = append(checks, a.doctorIDs(ctx))
 	checks = append(checks, a.doctorDuplicates(ctx))
 	checks = append(checks, a.doctorGit(ctx))
+	checks = append(checks, a.doctorRawZone(ctx))
+	checks = append(checks, a.doctorRetiredPaths(ctx))
 	return DoctorReport{Checks: checks}, nil
 }
 
@@ -151,7 +156,49 @@ func (a *App) doctorIDs(ctx context.Context) DoctorCheck {
 	if len(duplicates) == 0 {
 		return DoctorCheck{Name: "ids", Status: doctorOK, Message: fmt.Sprintf("%d record ids are unique", len(seen))}
 	}
-	return DoctorCheck{Name: "ids", Status: doctorWarn, Message: fmt.Sprintf("%d duplicate record ids: %s", len(duplicates), strings.Join(duplicates[:min(len(duplicates), maxListedProblems)], "; "))}
+	return DoctorCheck{Name: "ids", Status: doctorWarn, Code: "duplicate-id", Message: fmt.Sprintf("%d duplicate record ids: %s", len(duplicates), strings.Join(duplicates[:min(len(duplicates), maxListedProblems)], "; "))}
+}
+
+// doctorLocks reports lock files no writer will respect: their owner is dead
+// past the TTL, they came from another host, or a previous boot wrote them.
+// Locks are machine-local and never published, so a reported file is a
+// leftover from a pull or a crash, not a live writer.
+func (a *App) doctorLocks(ctx context.Context) DoctorCheck {
+	if a.cfg.Mode == config.ModeServer {
+		return DoctorCheck{Name: "locks", Status: doctorOK, Message: "not used in server mode"}
+	}
+	inspector, ok := a.deps.Store.(ports.LockInspector)
+	if !ok {
+		return DoctorCheck{Name: "locks", Status: doctorOK, Message: "not checked for this store"}
+	}
+	stale, err := inspector.StaleLocks(ctx)
+	if err != nil {
+		return DoctorCheck{Name: "locks", Status: doctorFail, Message: err.Error()}
+	}
+	if len(stale) == 0 {
+		return DoctorCheck{Name: "locks", Status: doctorOK, Message: "no stale lock files"}
+	}
+	listed := make([]string, 0, maxListedProblems)
+	for _, path := range stale[:min(len(stale), maxListedProblems)] {
+		listed = append(listed, a.displayPath(path))
+	}
+	return DoctorCheck{
+		Name:   "locks",
+		Status: doctorWarn,
+		Code:   "stale-lock",
+		Message: fmt.Sprintf("%d stale lock files (dead owner past the TTL, another host or boot): %s; a writer removes one itself before waiting, so delete it only if writes keep timing out",
+			len(stale), strings.Join(listed, "; ")),
+	}
+}
+
+// displayPath makes a data-directory path readable in a check message.
+func (a *App) displayPath(path string) string {
+	if dataDir := strings.TrimSpace(a.cfg.DataDir); dataDir != "" {
+		if rel, err := filepath.Rel(dataDir, path); err == nil && !strings.HasPrefix(rel, "..") {
+			return filepath.ToSlash(rel)
+		}
+	}
+	return path
 }
 
 // doctorJournal reports recent records that no journal mentions.
@@ -267,4 +314,90 @@ func (a *App) doctorGit(ctx context.Context) DoctorCheck {
 		message = fmt.Sprintf("branch %s, ahead %d, behind %d", status.Branch, status.Ahead, status.Behind)
 	}
 	return DoctorCheck{Name: "git", Status: doctorOK, Message: message}
+}
+
+// doctorRawZone reports machine-local raw-zone files that the shared tree
+// tracks: checkpoints (never shared) and items of a connection that is not
+// explicitly shared. Items and checkpoints carry host-specific bytes
+// (observation time, cursors), so a tracked machine-local file is a finding, not
+// something doctor repairs: untracking is the owner's decision
+// (`git rm --cached -r`) and no data is deleted here.
+func (a *App) doctorRawZone(ctx context.Context) DoctorCheck {
+	if a.cfg.Mode != config.ModeGit || a.deps.Sync == nil {
+		return DoctorCheck{Name: "raw-zone", Status: doctorOK, Message: "not used in this mode"}
+	}
+	lister, ok := a.deps.Sync.(ports.GitPathLister)
+	if !ok {
+		return DoctorCheck{Name: "raw-zone", Status: doctorOK, Message: "not checked for this sync provider"}
+	}
+	paths, err := lister.TrackedPaths(ctx, "connectors")
+	if err != nil {
+		return DoctorCheck{Name: "raw-zone", Status: doctorWarn, Message: "cannot list tracked raw-zone files: " + err.Error()}
+	}
+	tracked := make([]string, 0, len(paths))
+	var connections []string
+	seen := map[string]struct{}{}
+	for _, path := range paths {
+		connectionID, kind, ok := rawZonePath(path)
+		if !ok {
+			continue
+		}
+		local, localErr := a.rawZoneFileIsMachineLocal(ctx, connectionID, kind)
+		if localErr != nil {
+			return DoctorCheck{Name: "raw-zone", Status: doctorWarn, Message: localErr.Error()}
+		}
+		if !local {
+			continue
+		}
+		tracked = append(tracked, path)
+		if _, ok := seen[connectionID]; !ok {
+			seen[connectionID] = struct{}{}
+			connections = append(connections, connectionID)
+		}
+	}
+	if len(tracked) == 0 {
+		return DoctorCheck{Name: "raw-zone", Status: doctorOK, Message: "raw items and checkpoints stay machine-local"}
+	}
+	listed := strings.Join(tracked[:min(len(tracked), maxListedProblems)], "; ")
+	return DoctorCheck{
+		Name:    "raw-zone",
+		Status:  doctorWarn,
+		Code:    "raw-zone-tracked",
+		Message: fmt.Sprintf("%d machine-local raw-zone files of %s are tracked by git (%s); checkpoints are never shared and items stay local unless a connection sets publish: shared: untrack them with git rm --cached -r connectors/<id>", len(tracked), strings.Join(connections, ", "), listed),
+	}
+}
+
+// rawZoneFileIsMachineLocal reports whether a tracked raw-zone file should not
+// be in the shared tree. A checkpoint always is machine-local; an item is
+// unless its connection explicitly sets `publish: shared` in the catalogue. A
+// provider default is not an opt-in, and an unknown connection counts as local.
+func (a *App) rawZoneFileIsMachineLocal(ctx context.Context, connectionID, kind string) (bool, error) {
+	if kind != "items" || a.deps.Connections == nil {
+		return true, nil
+	}
+	connection, err := a.deps.Connections.Get(ctx, connectionID)
+	if errors.Is(err, domain.ErrNotFound) {
+		return true, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("read connection %s: %w", connectionID, err)
+	}
+	return connection.Publish != domain.PublishShared, nil
+}
+
+// rawZonePath reports whether path is connectors/<id>/items/... or
+// connectors/<id>/checkpoints/... and returns the connection ID and the kind.
+func rawZonePath(path string) (string, string, bool) {
+	rest, ok := strings.CutPrefix(filepath.ToSlash(path), "connectors/")
+	if !ok {
+		return "", "", false
+	}
+	parts := strings.SplitN(rest, "/", 3)
+	if len(parts) < 3 || parts[0] == "" || parts[2] == "" {
+		return "", "", false
+	}
+	if parts[1] != "items" && parts[1] != "checkpoints" {
+		return "", "", false
+	}
+	return parts[0], parts[1], true
 }

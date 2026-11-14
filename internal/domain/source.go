@@ -394,6 +394,20 @@ func (c Connection) EffectivePublish(d SourceDescriptor) PublishPolicy {
 	return d.DefaultPublish
 }
 
+// RawZonePublish returns the publish policy of the connection's raw zone
+// (items and checkpoints). Raw payloads are machine-local unless the connection
+// explicitly opts in with `publish: shared`: a provider default alone never
+// publishes what a host happened to read, because those files carry
+// host-specific time even at an otherwise identical path. EffectivePublish
+// answers the wider question ("may data derived from this source be shared?")
+// and keeps its descriptor fallback.
+func (c Connection) RawZonePublish() PublishPolicy {
+	if c.Publish == PublishShared {
+		return PublishShared
+	}
+	return PublishLocalOnly
+}
+
 // Identity is the canonical provider|endpoint|account triple. Two
 // connections with the same identity read the same data; ConnectionStore
 // rejects such duplicates and treats the identity as immutable. Invalid base

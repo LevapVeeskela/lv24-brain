@@ -104,7 +104,12 @@ func (s *Store) nowUTC() time.Time {
 	return clock().UTC().Truncate(time.Second)
 }
 
-func (s *Store) revisionAfterWrite(ctx context.Context) (domain.SyncRevision, error) {
+// revisionAfterWrite computes the revision a write reports. It is a variable so
+// a test that publishes thousands of records can skip the whole-tree hash;
+// production always uses computeRevisionAfterWrite.
+var revisionAfterWrite = (*Store).computeRevisionAfterWrite
+
+func (s *Store) computeRevisionAfterWrite(ctx context.Context) (domain.SyncRevision, error) {
 	revision, err := s.CurrentRevision(ctx)
 	if err != nil {
 		return domain.SyncRevision{}, fmt.Errorf("fsstore: revision after write: %w", err)
@@ -390,6 +395,63 @@ func publishRecordFile(dir, base string, render func(stem string) ([]byte, error
 		return stem, nil
 	}
 	return "", fmt.Errorf("fsstore: no free record name for %q", base)
+}
+
+// publishRecordFileExact creates dir/<id>.md for complete content and fails
+// with a typed ErrTargetExists when the name is taken. It never picks a
+// numeric suffix: a globally unique id collides only with itself.
+func publishRecordFileExact(dir, kind, id string, render func() ([]byte, error)) error {
+	raw, err := render()
+	if err != nil {
+		return err
+	}
+	return publishRecordBytesExact(dir, kind, id, raw)
+}
+
+// publishRecordBytesExact claims dir/<id>.md for content raw. Like
+// publishRecordFile it writes a complete temporary file and hard-links it, so
+// the record appears whole or not at all; without hard links it reserves the
+// name with O_EXCL and replaces the placeholder.
+func publishRecordBytesExact(dir, kind, id string, raw []byte) error {
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return fmt.Errorf("fsstore: create directory %s: %w", dir, err)
+	}
+	path := filepath.Join(dir, id+".md")
+	tempName, err := writeTempFile(dir, raw)
+	if err != nil {
+		return err
+	}
+	linkErr := hardLink(tempName, path)
+	_ = os.Remove(tempName)
+	if linkErr == nil {
+		return nil
+	}
+	if os.IsExist(linkErr) {
+		return existingRecordError(kind, id, path)
+	}
+	placeholder, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
+	if err != nil {
+		if os.IsExist(err) {
+			return existingRecordError(kind, id, path)
+		}
+		return fmt.Errorf("fsstore: reserve %s: %w", path, err)
+	}
+	_ = placeholder.Close()
+	if err := writeFileAtomic(path, raw); err != nil {
+		_ = os.Remove(path)
+		return err
+	}
+	return nil
+}
+
+// existingRecordError names the record that already occupies path, so a
+// restore or a create can tell the user which id was in the way.
+func existingRecordError(kind, id, path string) error {
+	existingID := id
+	if headerID, _, err := readRecordHeader(kind, path); err == nil && headerID != "" {
+		existingID = headerID
+	}
+	return domain.NewTargetExistsError(kind, existingID, path)
 }
 
 // reserveRecordFile atomically claims an unused "<base>.md" name in dir and

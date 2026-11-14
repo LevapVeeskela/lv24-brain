@@ -217,6 +217,9 @@ func buildServerConnection(req httpapi.ConnectorRunRequest) (domain.Connection, 
 	if projectID != "" {
 		conn.Projects = []string{projectID}
 	}
+	if publish := strings.ToLower(strings.TrimSpace(req.Publish)); publish != "" {
+		conn.Publish = domain.PublishPolicy(publish)
+	}
 	if err := conn.Validate(); err != nil {
 		return domain.Connection{}, err
 	}
@@ -244,6 +247,9 @@ func (r *connectorRunner) newIngestion(raw rawStore, conn domain.Connection) *ap
 		Locker:      raw,
 		Index:       nil,
 		Runs:        nil,
+		// The server's only item store is the shared raw zone. A local-only
+		// connection must never put its items there (WB-0.8).
+		DisallowLocalOnlyItems: true,
 	}
 }
 

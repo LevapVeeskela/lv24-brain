@@ -469,6 +469,7 @@ type jsonDoctorCheck struct {
 	OK     bool   `json:"ok"`
 	Status string `json:"status"`
 	Detail string `json:"detail"`
+	Code   string `json:"code,omitempty"`
 }
 
 // jsonDoctor is `brain doctor --json`.

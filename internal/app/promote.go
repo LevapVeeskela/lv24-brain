@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/levapveeskela/lv24-brain/internal/domain"
 )
@@ -163,8 +164,15 @@ func (a *App) Promote(ctx context.Context, opts PromoteOptions) (PromoteResult, 
 		return PromoteResult{Proposal: updated, Dismissed: true}, nil
 	}
 
-	planned := PromoteRecord{Kind: targetKind, ID: proposalRecordID(targetKind, proposal.ID), Title: title}
+	planned := PromoteRecord{Kind: targetKind, Title: title}
 	if opts.DryRun {
+		// The preview id is informational: the real write allocates its own
+		// ULID, so a rerun reports a fresh candidate id.
+		previewID, err := a.plannedRecordID(targetKind, title, a.now())
+		if err != nil {
+			return PromoteResult{}, err
+		}
+		planned.ID = previewID
 		return PromoteResult{Proposal: proposal, Record: planned, DryRun: true}, nil
 	}
 
@@ -177,7 +185,6 @@ func (a *App) Promote(ctx context.Context, opts PromoteOptions) (PromoteResult, 
 			Status:    status,
 			Context:   promoteDecisionContext(proposal),
 			Evidence:  promoteEvidence(proposal),
-			ID:        planned.ID,
 			Source:    source,
 		})
 		if err != nil {
@@ -191,7 +198,6 @@ func (a *App) Promote(ctx context.Context, opts PromoteOptions) (PromoteResult, 
 			Hypothesis: promoteAttemptHypothesis(proposal),
 			Result:     proposalSection(proposal, "Result"),
 			Reason:     promoteAttemptReason(proposal),
-			ID:         planned.ID,
 			Source:     source,
 		})
 		if err != nil {
@@ -207,7 +213,6 @@ func (a *App) Promote(ctx context.Context, opts PromoteOptions) (PromoteResult, 
 			ProjectID: proposal.ProjectID,
 			Title:     title,
 			Body:      body,
-			ID:        planned.ID,
 			Source:    source,
 		})
 		if err != nil {
@@ -323,10 +328,14 @@ func (a *App) findPromotedRecord(ctx context.Context, projectID, proposalID stri
 	return PromoteRecord{}, false, nil
 }
 
-// proposalRecordID is the deterministic curated id for one promotion. The kind
-// prefix keeps a proposal promoted as another kind from colliding.
-func proposalRecordID(kind domain.ProposalKind, proposalID string) string {
-	return string(kind) + "-" + strings.TrimPrefix(proposalID, "proposal-")
+// plannedRecordID previews the id of the record a promotion would create. The
+// real write allocates its own ULID, so the preview is informational.
+func (a *App) plannedRecordID(kind domain.ProposalKind, title string, now time.Time) (string, error) {
+	ulid, err := domain.NewULID(now)
+	if err != nil {
+		return "", err
+	}
+	return domain.NewRecordID(string(kind), now, domain.Slugify(title), ulid), nil
 }
 
 // proposalRecordKind recovers the kind from a curated record id prefix, which

@@ -47,10 +47,10 @@ func TestAgentWorkflowFromRepositoryDirectory(t *testing.T) {
 	t.Chdir(filepath.Join(repo))
 
 	code, stdout, stderr := runForTest(t, "note", "Fixed the cache\nlonger body line", "--config", cfgPath)
-	if code != 0 || !strings.HasPrefix(stdout, "note note-alpha-") {
+	if code != 0 || !strings.HasPrefix(stdout, "note note-") || !strings.Contains(stdout, "fixed-the-cache") {
 		t.Fatalf("positional note: %d %q %s", code, stdout, stderr)
 	}
-	if code, stdout, stderr = runForTest(t, "decision", "Adopt Go engine", "--config", cfgPath); code != 0 || !strings.Contains(stdout, "decision-alpha-") {
+	if code, stdout, stderr = runForTest(t, "decision", "Adopt Go engine", "--config", cfgPath); code != 0 || !strings.Contains(stdout, "decision-") || !strings.Contains(stdout, "adopt-go-engine") {
 		t.Fatalf("positional decision: %d %q %s", code, stdout, stderr)
 	}
 	if code, _, _ = runForTest(t, "decision", "A", "--title", "B", "--config", cfgPath); code != 2 {
@@ -100,7 +100,7 @@ func TestConfigUseMakesFlaglessCommandsWork(t *testing.T) {
 	if code, stdout, stderr := runForTest(t, "config", "use", filepath.Join(dataDir, "brain.yaml")); code != 0 || !strings.Contains(stdout, "default config:") {
 		t.Fatalf("config use: %d %q %s", code, stdout, stderr)
 	}
-	if code, stdout, stderr := runForTest(t, "note", "--create", "--project", "p", "flagless"); code != 0 || !strings.HasPrefix(stdout, "note note-p-") {
+	if code, stdout, stderr := runForTest(t, "note", "--create", "--project", "p", "flagless"); code != 0 || !strings.HasPrefix(stdout, "note note-") || !strings.Contains(stdout, "-flagless-") {
 		t.Fatalf("flagless note: %d %q %s", code, stdout, stderr)
 	}
 	if code, stdout, _ := runForTest(t, "config", "show"); code != 0 || !strings.Contains(stdout, "user default") {

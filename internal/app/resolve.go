@@ -16,6 +16,9 @@ type Resolved struct {
 	// Path is the project checkout the selector resolved through (or the
 	// project's first registered path for an id/alias match); "" if none.
 	Path string
+	// Warning explains a redirect, e.g. a selector that named a retired
+	// checkout; it is empty for a normal resolution.
+	Warning string
 }
 
 // ResolveSelector maps a selector to a registered project, matching the
@@ -38,6 +41,10 @@ func (a *App) ResolveSelector(ctx context.Context, selector string) (Resolved, e
 				return Resolved{Project: project, Path: firstPath(project)}, nil
 			}
 		}
+		// A former project name ("brotato") resolves to whatever replaced it.
+		if entry, ok := retiredPathBySlug(a.cfg, selector); ok {
+			return a.resolveRetired(projects, entry)
+		}
 	}
 	target := selector
 	if target == "" || target == "." {
@@ -51,6 +58,9 @@ func (a *App) ResolveSelector(ctx context.Context, selector string) (Resolved, e
 			"\""+selector+"\" is not a registered project id or alias (pass a path with a separator, e.g. ./dir, to select by path)")
 	}
 	full := normalizePath(target)
+	if entry, ok := RetiredPathMatch(a.cfg, full); ok {
+		return a.resolveRetired(projects, entry)
+	}
 
 	var best domain.Project
 	bestPath := ""

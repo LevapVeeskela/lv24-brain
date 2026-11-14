@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sort"
 	"strings"
 
@@ -71,6 +72,30 @@ func (a *App) SaveProject(ctx context.Context, input ProjectInput) (domain.Proje
 	}
 	if project.ID == "" {
 		project.ID = projectID
+	}
+	// A retired project name never (re)enters the registry either.
+	if creating {
+		if entry, retired := retiredPathBySlug(a.cfg, projectID); retired {
+			return domain.Project{}, domain.NewValidationError("project.id",
+				fmt.Sprintf("%q is a retired project name (replaced by %s); use that id instead", projectID, entry.ReplacedBy))
+		}
+	}
+	// A retired checkout never (re)enters the registry; a project that already
+	// stored one keeps it, so unrelated edits are not blocked.
+	if input.Paths != nil {
+		stored := make(map[string]bool, len(project.Paths))
+		for _, path := range project.Paths {
+			stored[normalizePath(path)] = true
+		}
+		for _, path := range *input.Paths {
+			clean := cleanPath(path)
+			entry, retired := RetiredPathMatch(a.cfg, clean)
+			if !retired || stored[normalizePath(clean)] {
+				continue
+			}
+			return domain.Project{}, domain.NewValidationError("project.paths",
+				fmt.Sprintf("%q is a retired checkout (replaced by %s); register the replacement project instead", clean, entry.ReplacedBy))
+		}
 	}
 
 	if input.Name != nil {

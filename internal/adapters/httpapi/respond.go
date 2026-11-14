@@ -63,6 +63,8 @@ func (a *API) writeError(w http.ResponseWriter, r *http.Request, err error) {
 		writeErrorCode(w, http.StatusConflict, "last_admin", "cannot demote or delete the last admin; promote another admin first")
 	case errors.Is(err, domain.ErrUnsupported):
 		writeErrorCode(w, http.StatusNotImplemented, "unsupported", err.Error())
+	case errors.Is(err, domain.ErrForbidden):
+		writeErrorCode(w, http.StatusForbidden, "forbidden", err.Error())
 	case errors.Is(err, auth.ErrInvalidCredentials),
 		errors.Is(err, auth.ErrInvalidToken),
 		errors.Is(err, auth.ErrInvalidRefresh):

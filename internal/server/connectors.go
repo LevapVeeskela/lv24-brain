@@ -79,6 +79,9 @@ func (r *connectorRunner) Run(ctx context.Context, req httpapi.ConnectorRunReque
 	if err != nil {
 		return domain.ConnectorRun{}, err
 	}
+	if err := r.resolvePublishPolicy(&conn, req.AllowLocalOnly); err != nil {
+		return domain.ConnectorRun{}, err
+	}
 
 	runCtx := ctx
 	cancel := func() {}
@@ -122,6 +125,38 @@ func (r *connectorRunner) Run(ctx context.Context, req httpapi.ConnectorRunReque
 		"duration_ms", time.Since(started).Milliseconds(),
 	)
 	return run, nil
+}
+
+// resolvePublishPolicy decides the raw-zone policy of one server run. The
+// server's only item store is shared, so a local-only connection needs the
+// explicit admin opt-in; otherwise the run is refused before it reads anything.
+// A shared-default provider becomes explicitly shared: the app-level raw-zone
+// policy is local-only unless a connection opts in.
+func (r *connectorRunner) resolvePublishPolicy(conn *domain.Connection, allowLocalOnly bool) error {
+	registry := r.registry
+	if registry == nil {
+		registry = connectorbuild.Builtin()
+	}
+	registration, err := registry.Lookup(conn.Provider)
+	if err != nil {
+		return err
+	}
+	policy := conn.Publish
+	if policy == "" {
+		if registration.Descriptor.DefaultPublish == domain.PublishLocalOnly {
+			if !allowLocalOnly {
+				return fmt.Errorf("%w: provider %q defaults to publish=local-only and server mode has no local-only raw zone; send allowLocalOnly=true to run without storing items, or publish=shared to store them for project members", domain.ErrForbidden, conn.Provider)
+			}
+			policy = domain.PublishLocalOnly
+		} else {
+			policy = domain.PublishShared
+		}
+	}
+	if policy == domain.PublishLocalOnly && !allowLocalOnly {
+		return fmt.Errorf("%w: publish=local-only needs allowLocalOnly=true in server mode", domain.ErrForbidden)
+	}
+	conn.Publish = policy
+	return nil
 }
 
 // runIngestion runs one ephemeral connection through the host, converting a

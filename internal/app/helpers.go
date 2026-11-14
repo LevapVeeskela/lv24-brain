@@ -106,6 +106,18 @@ func (a *App) ensureProject(ctx context.Context, projectID string, create bool) 
 	} else if ok {
 		return project, nil
 	}
+	// A retired project name is a redirect, not a new project: "brotato"
+	// resolves to the project that replaced it and never reaches the registry.
+	if entry, retired := retiredPathBySlug(a.cfg, id); retired {
+		if replacement, ok, err := a.LookupProject(ctx, entry.ReplacedBy); err != nil {
+			return domain.Project{}, err
+		} else if ok {
+			return replacement, nil
+		}
+		return domain.Project{}, domain.NewValidationError("project", fmt.Sprintf(
+			"%q is the retired name of %q, which is not registered here; register %s instead",
+			id, entry.ReplacedBy, entry.ReplacedBy))
+	}
 	if !create {
 		return domain.Project{}, domain.NewValidationError("project",
 			fmt.Sprintf("%q is not a registered project id or alias; pass --create to register it", id))
@@ -174,63 +186,19 @@ func (a *App) listHandoffs(ctx context.Context, projectID string) ([]domain.Hand
 	return lister.ListHandoffs(ctx, projectID)
 }
 
-func recordID(prefix, projectID string, now time.Time) string {
-	return prefix + "-" + projectID + "-" + now.UTC().Format("20060102-150405")
-}
-
-func availableID(base string, used map[string]struct{}) string {
-	if _, exists := used[base]; !exists {
-		return base
+// nextRecordID returns the globally unique id of a new record:
+// <kind>-<YYYY-MM-DD>-<slug>-<ULID>. On the first try a caller-pinned id is
+// used as is; every retry allocates a fresh ULID, so a taken name is never
+// resolved with a numeric suffix that would keep the duplicate identity.
+func nextRecordID(kind, slug string, now time.Time, pinned string, first bool) (string, error) {
+	if first && pinned != "" {
+		return pinned, nil
 	}
-	for suffix := 2; suffix <= maxRecordIDAttempts; suffix++ {
-		candidate := base + "-" + strconv.Itoa(suffix)
-		if _, exists := used[candidate]; !exists {
-			return candidate
-		}
+	ulid, err := domain.NewULID(now)
+	if err != nil {
+		return "", err
 	}
-	return base + "-" + strconv.FormatInt(time.Now().UnixNano(), 36)
-}
-
-func stringSet(values ...[]string) map[string]struct{} {
-	used := make(map[string]struct{})
-	for _, group := range values {
-		for _, value := range group {
-			used[value] = struct{}{}
-		}
-	}
-	return used
-}
-
-func noteIDs(notes []domain.Note) []string {
-	ids := make([]string, 0, len(notes))
-	for _, note := range notes {
-		ids = append(ids, note.ID)
-	}
-	return ids
-}
-
-func decisionIDs(decisions []domain.Decision) []string {
-	ids := make([]string, 0, len(decisions))
-	for _, decision := range decisions {
-		ids = append(ids, decision.ID)
-	}
-	return ids
-}
-
-func attemptIDs(attempts []domain.Attempt) []string {
-	ids := make([]string, 0, len(attempts))
-	for _, attempt := range attempts {
-		ids = append(ids, attempt.ID)
-	}
-	return ids
-}
-
-func handoffIDs(handoffs []domain.Handoff) []string {
-	ids := make([]string, 0, len(handoffs))
-	for _, handoff := range handoffs {
-		ids = append(ids, handoff.ID)
-	}
-	return ids
+	return domain.NewRecordID(kind, now, slug, ulid), nil
 }
 
 // upsertIndex updates the search projection after a write. On failure it

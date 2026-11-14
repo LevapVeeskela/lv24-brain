@@ -303,6 +303,9 @@ func (a *API) putState(w http.ResponseWriter, r *http.Request) {
 	if _, ok := a.requireProject(w, r, r.PathValue("id"), levelWrite); !ok {
 		return
 	}
+	redactions := redactTexts(&body.Goal, &body.NextAction)
+	redactions += redactList(body.Active) + redactList(body.Blocked) + redactList(body.OpenQuestions)
+	a.redactWrite(r, "state", r.PathValue("id"), redactions)
 	state := domain.State{
 		ProjectID:     r.PathValue("id"),
 		Goal:          body.Goal,
@@ -350,6 +353,23 @@ func (a *API) search(w http.ResponseWriter, r *http.Request) {
 		ExcludeKinds: excludeKinds,
 		Since:        since,
 	}
+	// Raw connector text never reaches a project reader through the server
+	// API: there is no context-allow.json on a server, so only an admin may
+	// request it, and an unfiltered search excludes it entirely.
+	principal, _ := principalFrom(r.Context())
+	rawAllowed := principal.User.Role == domain.RoleAdmin
+	if !rawAllowed {
+		if wantsRawSearch(kinds) {
+			a.audit(r, "", SecurityEvent{
+				Action:     AuditSearchRawDenied,
+				EntityKind: "search",
+				Detail:     map[string]any{"projectId": query.ProjectID, "kinds": kinds},
+			})
+			writeErrorCode(w, http.StatusForbidden, "forbidden", rawSearchRefusal)
+			return
+		}
+		query.ExcludeKinds = append(query.ExcludeKinds, searchKindItem)
+	}
 	scope, empty, ok := a.searchScope(w, r, query.ProjectID)
 	if !ok {
 		return
@@ -363,7 +383,37 @@ func (a *API) search(w http.ResponseWriter, r *http.Request) {
 		a.writeError(w, r, err)
 		return
 	}
+	if !rawAllowed {
+		hits = dropRawHits(hits)
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"items": hits})
+}
+
+// rawSearchRefusal explains why a project reader cannot search raw connector
+// items on the server.
+const rawSearchRefusal = "raw connector items are admin-only on the server API; a project reader can search curated kinds, and raw context grants exist only in local/git mode"
+
+// wantsRawSearch reports whether a kind filter asks for raw connector text.
+func wantsRawSearch(kinds []string) bool {
+	for _, kind := range kinds {
+		if kind == searchKindItem || kind == searchKindDump {
+			return true
+		}
+	}
+	return false
+}
+
+// dropRawHits removes raw-zone hits from a server response even when a store
+// ignored the exclude filter. Curated kinds are kept as they are.
+func dropRawHits(hits []ports.Hit) []ports.Hit {
+	kept := make([]ports.Hit, 0, len(hits))
+	for _, hit := range hits {
+		if hit.Kind == searchKindItem || hit.Kind == searchKindDump {
+			continue
+		}
+		kept = append(kept, hit)
+	}
+	return kept
 }
 
 // searchKinds lists the document kinds a search may filter on. Raw-zone
@@ -371,6 +421,13 @@ func (a *API) search(w http.ResponseWriter, r *http.Request) {
 var searchKinds = map[string]struct{}{
 	"note": {}, "decision": {}, "attempt": {}, "handoff": {}, "state": {}, "dump": {}, "item": {},
 }
+
+// Raw search kinds: legacy connector dumps and raw-zone items. Both are
+// external text and stay admin-only on the server API.
+const (
+	searchKindDump = "dump"
+	searchKindItem = "item"
+)
 
 // searchSinceParam reads the optional since query parameter (RFC3339). An
 // empty value means no time filter; a malformed one is a validation error.

@@ -204,7 +204,9 @@
           "projectId": { "type": "string", "description": "Existing brain project for raw items; unmapped items are stored but excluded from server search." },
           "projects": { "type": "array", "items": { "type": "string" } },
           "since": { "type": "string", "format": "date-time" },
-          "limit": { "type": "integer", "minimum": 0 }
+          "limit": { "type": "integer", "minimum": 0 },
+          "publish": { "type": "string", "enum": ["shared", "local-only"], "description": "Raw-zone policy. shared stores items for project members; local-only runs without storing items in the shared raw zone and needs allowLocalOnly." },
+          "allowLocalOnly": { "type": "boolean", "description": "Explicit admin opt-in for a local-only connection. Without it a provider that defaults to local-only (mail) is refused with 403." }
         }
       }
     }

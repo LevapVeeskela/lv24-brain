@@ -171,7 +171,7 @@ func stateTarget(ctx context.Context, cfgPath, project string, positional []stri
 	if err != nil {
 		return nil, app.Resolved{}, reportError(stderr, name, err)
 	}
-	target, err := resolveTarget(ctx, runtime.App, project, selector)
+	target, err := resolveTarget(ctx, runtime.App, project, selector, stderr)
 	if err != nil {
 		_ = runtime.Close()
 		return nil, app.Resolved{}, reportError(stderr, name, err)

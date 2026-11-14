@@ -67,7 +67,7 @@ func TestReadItemRejectsUnknownState(t *testing.T) {
 	item := testItem("gh-acme", "issue/7", "Closed issue")
 	item.State = "bogus"
 	item = item.WithHash()
-	raw, err := encodeItem(item)
+	raw, err := encodeItem(item, false)
 	if err != nil {
 		t.Fatalf("encode item: %v", err)
 	}

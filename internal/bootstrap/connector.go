@@ -18,6 +18,12 @@ type ConnectorOptions struct {
 	Project      string
 	BrainProject string
 	Limit        int
+	// Publish and AllowLocalOnly are server-mode policy fields: publish the
+	// raw zone explicitly (shared) or acknowledge a local-only run that stores
+	// nothing in the shared raw zone. Local/git mode reads the connection
+	// catalogue instead.
+	Publish        string
+	AllowLocalOnly bool
 	// Data-derived targets; see connectorbuild.Options.
 	Repos          []string
 	GitLabProjects []string

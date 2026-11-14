@@ -257,8 +257,13 @@ are persisted server-side in the `connector_runs` table (migration `0001`).
 Server connector runs use the native item-level path: with PostgreSQL they
 store raw items and checkpoints in `connector_items`/`connector_checkpoints`
 (schema 9) and export each run record on demand through
-`GET /v1/connectors/runs/{id}/markdown`. The in-memory development store has no
-raw zone and rejects connector runs as unsupported.
+`GET /v1/connectors/runs/{id}/markdown`. Raw items are stored only for an
+explicitly shared run (`publish: shared` in `POST /v1/connectors/run`, or
+`brain connector run --publish shared`); a local-only connection is refused
+with 403 and an audit event unless the request carries the admin opt-in
+`allowLocalOnly`, in which case the run stores no items. Server search returns
+raw items only to admins. The in-memory development store has no raw zone and
+rejects connector runs as unsupported.
 
 Current limits:
 

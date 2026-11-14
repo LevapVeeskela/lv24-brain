@@ -53,7 +53,7 @@ func runContext(args []string, stdout, stderr io.Writer) int {
 	}
 	defer func() { _ = runtime.Close() }()
 	ctx := context.Background()
-	target, err := resolveTarget(ctx, runtime.App, *project, "")
+	target, err := resolveTarget(ctx, runtime.App, *project, "", stderr)
 	if err != nil {
 		return reportError(stderr, "context", err)
 	}

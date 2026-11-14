@@ -89,9 +89,17 @@ Adapters never leak into domain or app.
 | `server` | HTTP API (`httpclient` in the CLI) | Postgres when `BRAIN_DATABASE_URL` is set; in-memory fallback | API + SSE; no `brain sync` | server API and CLI client implemented |
 
 `brain.yaml` records `mode`, `data_dir`, `server_url`, `user`,
-`schema_version`, `min_engine_version`, and `update_channel`. Local and Git
-modes require `data_dir`; server mode requires `server_url` and has no data
-directory.
+`schema_version`, `min_engine_version`, `update_channel`, and optional
+`retired_paths`. Local and Git modes require `data_dir`; server mode requires
+`server_url` and has no data directory.
+
+`retired_paths` maps a checkout that no longer exists to the project that
+replaced it (`path` + `replaced_by`, a project id or alias). The engine ships
+no entries: each workspace configures its own, e.g. `<root>/old-checkout`. A
+selector inside a retired path resolves to the replacement with a warning,
+`brain discover` skips it, `brain project set --path` refuses it, and
+`brain doctor` reports it when the directory or a registration still exists.
+Nothing is ever deleted or created by this guard.
 
 ## Data layout
 
@@ -335,9 +343,15 @@ does not change that output; it may append a bounded set of stored raw items.
   redactor, marked as untrusted external text, and cited with connection,
   external id, URL and updated date. The stored raw item itself is never
   rewritten.
-- **Scope.** Server mode, the desktop app and LLM surfaces do not read raw
-  excerpts. The MCP `brain_context` tool accepts an explicit `raw` boolean;
-  like the CLI, it only works in local/git mode and only with a matching grant.
+- **Scope.** Every raw read path is gated by the same policy: `brain context
+  --raw`, `brain search --include-dumps`, `brain search --kind item`, MCP
+  `brain_search` with `kinds:["item"]`, and the server-mode search client. A
+  search that asks for raw text without a matching grant returns the curated
+  hits only, plus one actionable stderr hint; legacy connector dumps have no
+  connection identity and stay default-deny. The desktop app and LLM surfaces do
+  not read raw excerpts. The MCP `brain_context` tool accepts an explicit `raw`
+  boolean; like the CLI, it only works in local/git mode and only with a
+  matching grant.
 
 ## Server
 
@@ -516,28 +530,47 @@ the PAT for `token` lookups; `brain connection auth <id>` drives the flow
 (GitHub device, GitLab PKCE) and `--remove` falls back to the PAT path.
 Atlassian/Notion stay token-based for MVP.
 
-Raw zone (v0.9.0): in local/git mode the ingestion host stores one
-Markdown file per item at `connectors/<id>/items/<40 hex>.md` (provenance
-frontmatter), one checkpoint per stream at
-`connectors/<id>/checkpoints/<stream>.json`, and tombstones (ref, deleted,
-observed_at only) for reported deletes. Items are written before checkpoints;
-a run then updates the per-item index (`item:<conn>/<id>`, kind `item`,
-excluded from default search) and persists the run record. Publish policy is
-applied before the first write: `local-only` writes a `connectors/<id>/.gitignore`
-that ignores everything, and on a shared-to-local-only switch the caller
-untracks `connectors/<id>` (`git rm --cached -r`) before private payload
-writes. That untrack does not erase prior git history. Mail connections
-default to `local-only`; mail addresses are hashed to `[email:<12 hex>]`
-(exposure reduction, not anonymization). Sources never infer deletes from
-absence.
+Raw zone (v0.9.0; machine-local by default since 0.15): in local/git mode the
+ingestion host stores one Markdown file per item at
+`connectors/<id>/items/<40 hex>.md` (provenance frontmatter), one checkpoint
+per stream at `connectors/<id>/checkpoints/<stream>.json`, and tombstones
+(ref, deleted, observed_at only) for reported deletes. Items are written before
+checkpoints; a run then updates the per-item index (`item:<conn>/<id>`, kind
+`item`, excluded from default search) and persists the run record.
+
+The raw zone stays on the machine that wrote it unless the connection
+explicitly sets `publish: shared`: a provider default alone never publishes it.
+A per-connection `connectors/<id>/.gitignore` marker carries the policy.
+Local-only (the default, and the policy of a directory without a marker)
+ignores the whole directory. Shared commits items and still ignores
+`checkpoints/`, lock and temporary files, because a cursor belongs to the host
+that read the stream. A shared item file omits `observed_at` (the host clock),
+so two machines that read the same item write byte-identical files at the same
+path instead of conflicting on every sync; switching a connection to shared
+rewrites its stored items without that field. On a shared-to-local-only switch
+the caller untracks `connectors/<id>` (`git rm --cached -r`) before private
+payload writes, and a shared run untracks `connectors/<id>/checkpoints/`;
+neither erases prior git history. `brain doctor` warns when raw items or
+checkpoints are still tracked. Mail connections default to `local-only`; mail
+addresses are hashed to `[email:<12 hex>]` (exposure reduction, not
+anonymization). Sources never infer deletes from absence.
 
 In server mode the same host writes raw items and checkpoints to PostgreSQL
 (`connector_items`, `connector_checkpoints`, migration `0009`) and run
-`connection_id`/`stats`; server search includes mapped items. The in-memory
-development store has no raw zone, so connector runs return `unsupported`
-instead of reporting a false success. A request may pass `projectId` to map
-items to an existing project; unmapped items stay stored but out of
-project-scoped search.
+`connection_id`/`stats`. The server has no local-only raw zone, so the publish
+policy is enforced at the API boundary: a connection whose policy resolves to
+local-only (a provider default such as mail, or an explicit
+`publish: local-only`) is refused with 403 and an audit event unless the
+request carries the explicit admin opt-in `allowLocalOnly`; with the opt-in the
+run stores its run record and checkpoints but drops every item (reported as
+`skipped`). A provider that defaults to local-only therefore never reaches the
+shared item table by accident. A request may pass `projectId` to map items to
+an existing project; unmapped items stay stored but out of project-scoped
+search. Server
+search returns raw item hits only to admins; viewers and members get curated
+kinds, and an explicit `kind=item`/`kind=dump` request is refused and audited.
+The in-memory development store has no raw zone, so connector runs return
+`unsupported` instead of reporting a false success.
 
 ## Auto-update
 
@@ -608,7 +641,7 @@ left untouched and the command exits non-zero.
 | Server raw items require PostgreSQL | connector runs persist raw items, checkpoints and run records with `BRAIN_DATABASE_URL`; the in-memory development store returns `unsupported` instead of discarding output |
 | Raw-zone deletes are not inferred | sources report tombstones only; `Deletes` is false without authoritative tombstones |
 | Curation is local and rule-based | `brain digest --source` and `brain promote` run in local/git mode only, read stored items, and write machine-local git-ignored proposals; server mode, the local API and the desktop app have no proposal surface, and there is no scheduled digest or proposal merge/trash |
-| Raw context excerpts are local/git only | `brain context --raw` reads `context-allow.json` and stored raw items only in local/git mode; server mode, the desktop app and LLM surfaces have no raw context path |
+| Raw context excerpts are local/git only | `brain context --raw` and every raw search path read `context-allow.json`; excerpts exist only in local/git mode, and server search never returns raw items to viewers or members |
 | CLI index is local-only | `brain search` in server mode uses `GET /v1/search`; no local index is built |
 | No server-side Markdown import/export | migrate into Markdown first; server records go through the API |
 | Server auto-update not implemented | upgrade by pulling a new image; `BRAIN_SERVER_AUTO_UPDATE` is reserved |

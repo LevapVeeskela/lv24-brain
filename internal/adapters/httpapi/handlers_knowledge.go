@@ -40,6 +40,7 @@ func (a *API) createNote(w http.ResponseWriter, r *http.Request) {
 	if _, ok := a.requireProject(w, r, r.PathValue("id"), levelWrite); !ok {
 		return
 	}
+	a.redactWrite(r, "note", r.PathValue("id"), redactTexts(&body.Title, &body.Body)+redactList(body.Tags))
 	record, revision, err := a.store.CreateNote(r.Context(), domain.Note{
 		ProjectID: r.PathValue("id"),
 		Title:     body.Title,
@@ -81,6 +82,7 @@ func (a *API) updateNote(w http.ResponseWriter, r *http.Request) {
 	if !a.requireOwner(w, r, existing.ProjectID, existing.CreatedBy) {
 		return
 	}
+	a.redactWrite(r, "note", existing.ProjectID, redactTexts(&body.Title, &body.Body)+redactList(body.Tags))
 	record, revision, err := a.store.UpdateNote(r.Context(), domain.Note{
 		ID:        existing.ID,
 		ProjectID: existing.ProjectID,
@@ -152,6 +154,9 @@ func (a *API) createDecision(w http.ResponseWriter, r *http.Request) {
 	if _, ok := a.requireProject(w, r, r.PathValue("id"), levelWrite); !ok {
 		return
 	}
+	redactions := redactTexts(&body.Title, &body.Context)
+	redactions += redactList(body.Alternatives) + redactList(body.Consequences) + redactList(body.Evidence)
+	a.redactWrite(r, "decision", r.PathValue("id"), redactions)
 	record, revision, err := a.store.CreateDecision(r.Context(), domain.Decision{
 		ProjectID:    r.PathValue("id"),
 		Title:        body.Title,
@@ -196,6 +201,9 @@ func (a *API) updateDecision(w http.ResponseWriter, r *http.Request) {
 	if !a.requireOwner(w, r, existing.ProjectID, existing.CreatedBy) {
 		return
 	}
+	redactions := redactTexts(&body.Title, &body.Context)
+	redactions += redactList(body.Alternatives) + redactList(body.Consequences) + redactList(body.Evidence)
+	a.redactWrite(r, "decision", existing.ProjectID, redactions)
 	record, revision, err := a.store.UpdateDecision(r.Context(), domain.Decision{
 		ID:           existing.ID,
 		ProjectID:    existing.ProjectID,
@@ -268,6 +276,8 @@ func (a *API) createAttempt(w http.ResponseWriter, r *http.Request) {
 	if _, ok := a.requireProject(w, r, r.PathValue("id"), levelWrite); !ok {
 		return
 	}
+	a.redactWrite(r, "attempt", r.PathValue("id"),
+		redactTexts(&body.Title, &body.Hypothesis, &body.Result, &body.Reason))
 	record, revision, err := a.store.CreateAttempt(r.Context(), domain.Attempt{
 		ProjectID:  r.PathValue("id"),
 		Title:      body.Title,
@@ -310,6 +320,8 @@ func (a *API) updateAttempt(w http.ResponseWriter, r *http.Request) {
 	if !a.requireOwner(w, r, existing.ProjectID, existing.CreatedBy) {
 		return
 	}
+	a.redactWrite(r, "attempt", existing.ProjectID,
+		redactTexts(&body.Title, &body.Hypothesis, &body.Result, &body.Reason))
 	record, revision, err := a.store.UpdateAttempt(r.Context(), domain.Attempt{
 		ID:         existing.ID,
 		ProjectID:  existing.ProjectID,
@@ -378,6 +390,8 @@ func (a *API) createHandoff(w http.ResponseWriter, r *http.Request) {
 	if _, ok := a.requireProject(w, r, r.PathValue("id"), levelWrite); !ok {
 		return
 	}
+	a.redactWrite(r, "handoff", r.PathValue("id"),
+		redactTexts(&body.Summary, &body.GitContext, &body.NextAction))
 	record, revision, err := a.store.CreateHandoff(r.Context(), domain.Handoff{
 		ProjectID:  r.PathValue("id"),
 		Summary:    body.Summary,

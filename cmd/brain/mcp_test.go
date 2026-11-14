@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/levapveeskela/lv24-brain/internal/domain"
 )
 
 // runMCPForTest feeds newline-delimited requests to runMCP through a pipe and
@@ -112,8 +114,8 @@ func TestMCPServesBrainTools(t *testing.T) {
 		t.Fatalf("brain_note isError = %v", noteResult["isError"])
 	}
 	noteID, _ := mcpStructured(t, noteResult)["id"].(string)
-	if !strings.HasPrefix(noteID, "note-demo-") {
-		t.Fatalf("note id = %q", noteID)
+	if !domain.IsRecordID("note", noteID) {
+		t.Fatalf("note id = %q, want <kind>-<date>-<slug>-<ULID>", noteID)
 	}
 
 	searchResult := mcpResult(t, responses[3])

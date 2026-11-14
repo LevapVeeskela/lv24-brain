@@ -56,6 +56,13 @@ func (a *App) Reindex(ctx context.Context, opts IndexOptions) (IndexResult, erro
 	result := IndexResult{Rebuild: opts.Rebuild}
 	seen := map[string]struct{}{}
 	upsert := func(doc ports.Document) error {
+		if _, duplicate := seen[doc.ID]; duplicate {
+			// A legacy duplicate id would make search pick an arbitrary
+			// record. The listing returns records newest first, so keeping the
+			// first document makes the projection deterministic; doctor
+			// reports the duplicate as duplicate-id.
+			return nil
+		}
 		seen[doc.ID] = struct{}{}
 		return a.deps.Index.Upsert(ctx, doc)
 	}

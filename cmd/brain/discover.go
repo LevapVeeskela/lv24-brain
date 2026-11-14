@@ -54,12 +54,11 @@ func runDiscover(args []string, stdout, stderr io.Writer) int {
 		return 2
 	}
 	skip := discoverSkipSet(*exclude)
-	candidates, err := discoverCandidates(absRoot, skip)
+	cfg, err := loadRequiredConfig(*cfgPath)
 	if err != nil {
 		return reportError(stderr, "discover", err)
 	}
-
-	cfg, err := loadRequiredConfig(*cfgPath)
+	candidates, err := discoverCandidates(absRoot, skip)
 	if err != nil {
 		return reportError(stderr, "discover", err)
 	}
@@ -94,6 +93,12 @@ func runDiscover(args []string, stdout, stderr io.Writer) int {
 	claimed := map[string]bool{} // ids already assigned to a new candidate in this run
 	newCount := 0
 	for _, c := range candidates {
+		// A retired checkout is never registered, even when it was recreated
+		// with its own .git; the project that replaced it owns the work.
+		if entry, retired := app.RetiredPathMatch(cfg, c.path); retired {
+			fmt.Fprintf(stdout, "retired %s %s (replaced by %s)\n", c.id, c.path, entry.ReplacedBy)
+			continue
+		}
 		switch {
 		case knownPaths[pathKey(c.path)]:
 			fmt.Fprintf(stdout, "known %s %s\n", c.id, c.path)

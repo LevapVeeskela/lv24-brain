@@ -33,33 +33,43 @@ func parseInterspersed(fs *flag.FlagSet, args []string) ([]string, error) {
 
 // resolveTarget picks the project for a command: --project (id or alias)
 // wins, then a positional selector (id, alias or path), then the working
-// directory. The resolved checkout path is used for git context.
-func resolveTarget(ctx context.Context, a *app.App, projectFlag, selector string) (app.Resolved, error) {
+// directory. The resolved checkout path is used for git context. A selector
+// that names a retired checkout resolves to its replacement and prints the
+// redirect to stderr.
+func resolveTarget(ctx context.Context, a *app.App, projectFlag, selector string, stderr io.Writer) (app.Resolved, error) {
+	done := func(resolved app.Resolved, err error) (app.Resolved, error) {
+		if err == nil && resolved.Warning != "" && stderr != nil {
+			fmt.Fprintf(stderr, "brain: warning: %s\n", resolved.Warning)
+		}
+		return resolved, err
+	}
 	switch {
 	case strings.TrimSpace(projectFlag) != "":
 		// --project names a project (id or alias), never a path.
 		project, ok, err := a.LookupProject(ctx, projectFlag)
 		if err != nil {
-			return app.Resolved{}, err
+			return done(app.Resolved{}, err)
 		}
 		if !ok {
-			return app.Resolved{}, domain.NewValidationError("project",
-				fmt.Sprintf("%q is not a registered project id or alias", strings.TrimSpace(projectFlag)))
+			return done(app.Resolved{}, domain.NewValidationError("project",
+				fmt.Sprintf("%q is not a registered project id or alias", strings.TrimSpace(projectFlag))))
 		}
-		return a.ResolveSelector(ctx, project.ID)
+		resolved, err := a.ResolveSelector(ctx, project.ID)
+		return done(resolved, err)
 	case strings.TrimSpace(selector) != "":
-		return a.ResolveSelector(ctx, selector)
+		resolved, err := a.ResolveSelector(ctx, selector)
+		return done(resolved, err)
 	default:
 		resolved, err := a.ResolveSelector(ctx, "")
 		if err == nil {
-			return resolved, nil
+			return done(resolved, nil)
 		}
 		// Keep the single-project convenience of earlier releases.
 		projects, listErr := a.ListProjects(ctx)
 		if listErr == nil && len(projects) == 1 {
-			return app.Resolved{Project: projects[0]}, nil
+			return done(app.Resolved{Project: projects[0]}, nil)
 		}
-		return app.Resolved{}, err
+		return done(app.Resolved{}, err)
 	}
 }
 

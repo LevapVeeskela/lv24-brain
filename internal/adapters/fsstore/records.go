@@ -157,7 +157,7 @@ func (s *Store) AppendNote(ctx context.Context, note domain.Note) (domain.SyncRe
 	if err != nil {
 		return domain.SyncRevision{}, err
 	}
-	return s.revisionAfterWrite(ctx)
+	return revisionAfterWrite(s, ctx)
 }
 
 const (
@@ -291,8 +291,10 @@ func (s *Store) AppendDecision(ctx context.Context, decision domain.Decision) (d
 	createdAt := recordCreatedAt(decision.CreatedAt, s.nowUTC())
 	updatedAt := s.nowUTC()
 
-	_, err = publishRecordFile(
+	_, err = publishRecord(
 		filepath.Join(dir, decisionsDir),
+		"decision",
+		decision.ID,
 		createdAt.Format("2006-01-02")+"-"+slugify(decision.Title),
 		func(stem string) ([]byte, error) {
 			id := strings.TrimSpace(decision.ID)
@@ -323,7 +325,7 @@ func (s *Store) AppendDecision(ctx context.Context, decision domain.Decision) (d
 	if err != nil {
 		return domain.SyncRevision{}, fmt.Errorf("fsstore: write decision %q: %w", decision.Title, err)
 	}
-	return s.revisionAfterWrite(ctx)
+	return revisionAfterWrite(s, ctx)
 }
 
 // AppendAttempt writes projects/<id>/attempts/YYYY-MM-DD-<slug>.md.
@@ -344,8 +346,10 @@ func (s *Store) AppendAttempt(ctx context.Context, attempt domain.Attempt) (doma
 	createdAt := recordCreatedAt(attempt.CreatedAt, s.nowUTC())
 	updatedAt := s.nowUTC()
 
-	_, err = publishRecordFile(
+	_, err = publishRecord(
 		filepath.Join(dir, attemptsDir),
+		"attempt",
+		attempt.ID,
 		createdAt.Format("2006-01-02")+"-"+slugify(attempt.Title),
 		func(stem string) ([]byte, error) {
 			id := strings.TrimSpace(attempt.ID)
@@ -375,7 +379,7 @@ func (s *Store) AppendAttempt(ctx context.Context, attempt domain.Attempt) (doma
 	if err != nil {
 		return domain.SyncRevision{}, fmt.Errorf("fsstore: write attempt %q: %w", attempt.Title, err)
 	}
-	return s.revisionAfterWrite(ctx)
+	return revisionAfterWrite(s, ctx)
 }
 
 // AppendHandoff writes projects/<id>/handoffs/YYYY-MM-DD-HHMMSS.md.
@@ -395,8 +399,10 @@ func (s *Store) AppendHandoff(ctx context.Context, handoff domain.Handoff) (doma
 	}
 	createdAt := recordCreatedAt(handoff.CreatedAt, s.nowUTC())
 
-	_, err = publishRecordFile(
+	_, err = publishRecord(
 		filepath.Join(dir, handoffsDir),
+		"handoff",
+		handoff.ID,
 		createdAt.Format("2006-01-02-150405"),
 		func(stem string) ([]byte, error) {
 			id := strings.TrimSpace(handoff.ID)
@@ -424,7 +430,7 @@ func (s *Store) AppendHandoff(ctx context.Context, handoff domain.Handoff) (doma
 	if err != nil {
 		return domain.SyncRevision{}, fmt.Errorf("fsstore: write handoff: %w", err)
 	}
-	return s.revisionAfterWrite(ctx)
+	return revisionAfterWrite(s, ctx)
 }
 
 func recordCreatedAt(value time.Time, fallback time.Time) time.Time {
@@ -432,6 +438,24 @@ func recordCreatedAt(value time.Time, fallback time.Time) time.Time {
 		return fallback
 	}
 	return value.UTC()
+}
+
+// publishRecord writes one create-only record file. A globally unique id
+// (<kind>-<date>-<slug>-<ULID>) is used as the file name and a taken name is
+// reported as ErrTargetExists, never as a "-2" file with the same id. An empty
+// or legacy id keeps the human-readable <legacyBase>.md name and the numeric
+// suffix rule of older engines, so old callers and old data stay readable.
+func publishRecord(dir, kind, id, legacyBase string, render func(stem string) ([]byte, error)) (string, error) {
+	if recordID := strings.TrimSpace(id); domain.IsRecordID(kind, recordID) {
+		err := publishRecordFileExact(dir, kind, recordID, func() ([]byte, error) {
+			return render(recordID)
+		})
+		if err != nil {
+			return "", err
+		}
+		return recordID, nil
+	}
+	return publishRecordFile(dir, legacyBase, render)
 }
 
 func nextNoteID(used map[string]struct{}, date, title string) string {

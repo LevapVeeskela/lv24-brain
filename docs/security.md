@@ -61,6 +61,12 @@ matching `.gitignore` into the data directory.
 
 ## Redaction and error handling
 
+- Every knowledge write through the server API (notes, decisions, attempts,
+  handoffs and project state, including updates) runs the same shared redactor
+  as the CLI and ingestion (`internal/redact`) before persistence. A write that
+  carried a credential is logged (`knowledge write redacted secrets`) and
+  audited as `knowledge.redacted` with the entity and count only; the text is
+  never echoed. The shared pattern set cannot drift between paths.
 - Server request logs contain request id, method, path, status, and duration.
   Authorization headers and request bodies are not logged.
 - Client-facing server errors are short typed envelopes; internal details stay
@@ -94,16 +100,30 @@ matching `.gitignore` into the data directory.
   store raw items at `connectors/<id>/items/*.md`, checkpoints at
   `connectors/<id>/checkpoints/*.json`, and tombstones for reported deletes;
   ingest redacts secrets to `[redacted]` and hashes mail addresses to
-  `[email:<12 hex>]` (exposure reduction, not anonymization). Switching a
+  `[email:<12 hex>]` (exposure reduction, not anonymization). The raw zone is
+  machine-local by default (since 0.15): only a connection with an explicit
+  `publish: shared` commits items, an item file in that mode omits the host
+  `observed_at`, checkpoints are never committed, and `brain doctor` reports
+  raw files that the shared tree tracks instead of deleting them. Switching a
   connection to `local-only` untracks `connectors/<id>` from git before
   private payload writes (`git rm --cached -r`); it does not erase prior git
   history, and mail defaults to `local-only`. Server mode runs the same
   native item-level path through `POST /v1/connectors/run` (admin only): with
   PostgreSQL it persists raw items, checkpoints and the run record (schema 9);
   the in-memory development store has no raw zone and rejects connector runs
-  as unsupported instead of discarding output. The per-run Markdown export
-  contains only status, counts and the sanitized error. Connector events are
-  telemetry about the run, not message content.
+  as unsupported instead of discarding output. The server has no local-only
+  raw zone, so it enforces the policy at admission: a connection whose publish
+  policy is local-only (any connection without an explicit `publish: shared`)
+  is refused with 403 and `connector.local_only.denied` in the audit trail
+  unless the request carries the explicit admin opt-in `allowLocalOnly`; with
+  the opt-in the run stores its run record and checkpoints and drops every raw
+  item (counted as `skipped`). The checkpoint still advances, so a later
+  `publish: shared` run with the same targets reads only newer items; use
+  `--since` to backfill deliberately. `brain connector run --publish shared`
+  is the explicit way to store items for project members, and
+  `--allow-local-only` is the explicit local-only acknowledgement. The per-run
+  Markdown export contains only status, counts and the sanitized error.
+  Connector events are telemetry about the run, not message content.
 
 ## Proposals and promotion
 
@@ -154,8 +174,9 @@ local/git mode, only when the operator wrote an explicit grant, and only as a
 small cited excerpt.
 
 - `brain context "<task>" --raw` is opt-in; without the flag the output is
-  unchanged. A grant never changes search, `brain open` or `brain review`;
-  MCP `brain_context` honors it only when called with `raw: true`.
+  unchanged. A grant never changes curated search, `brain open` or
+  `brain review`; it gates raw search (see below), and MCP `brain_context`
+  honors it only when called with `raw: true`.
 - The policy is `<data-dir>/context-allow.json`, next to `brain.yaml`. A missing
   file or no matching grant means no raw excerpt, not an error. The file holds
   no secrets and is committed with the data repository, like
@@ -180,6 +201,18 @@ small cited excerpt.
   instructions.
 - Server mode, the desktop app and LLM surfaces are deferred; they do not read
   the grant file.
+- The same grant policy gates every raw search path, not only context:
+  `brain search --include-dumps`, `brain search --kind item` and MCP
+  `brain_search` with `kinds:["item"]` return a granted connection's items and
+  nothing otherwise (curated hits are unaffected). A denied request prints one
+  hint pointing at `context-allow.json`. Legacy connector dumps under `mail/`,
+  `github/` and `gitlab/` carry no connection identity, so no connection grant
+  can authorize them and they stay default-deny.
+- The server API has no grant file. Server search therefore never returns raw
+  connector items to viewers or members: an unfiltered search excludes them,
+  and an explicit `kind=item`/`kind=dump` request is refused with 403 and
+  `search.raw.denied` in the audit trail. Only a global admin can request raw
+  items there.
 
 ## Local control API
 
@@ -245,7 +278,11 @@ Implemented in `internal/adapters/httpapi` and `internal/auth`:
 - Security audit log: successful and failed logins, login rate limiting,
   logouts, refresh-token reuse, API-token creation and revocation, and OIDC
   login/link/signup/refusal are recorded with the actor and client address,
-  never with passwords or tokens. They carry no revision, so only admins can
+  never with passwords or tokens. Refused raw access is recorded too:
+  `knowledge.redacted` (a write carried a credential, count only),
+  `connector.local_only.denied` (a local-only connector run without the admin
+  opt-in) and `search.raw.denied` (a project reader requested raw items from
+  server search). They carry no revision, so only admins can
   read them (`GET /v1/audit`, filterable by actor, action, entity, and time);
   viewers never see them through revisions or SSE. Entity changes keep their
   revision plus audit row, now with the authenticated actor. Audit writes are

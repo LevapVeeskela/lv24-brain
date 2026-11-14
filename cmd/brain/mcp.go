@@ -52,7 +52,7 @@ type mcpBackend struct {
 }
 
 func (b mcpBackend) Resolve(ctx context.Context, selector string) (mcpserver.Target, error) {
-	resolved, err := resolveTarget(ctx, b.app, "", selector)
+	resolved, err := resolveTarget(ctx, b.app, "", selector, io.Discard)
 	if workspace, ok := app.AsWorkspace(err); ok {
 		if text, overviewErr := b.app.WorkspaceOverview(ctx, workspace); overviewErr == nil {
 			return mcpserver.Target{}, &mcpserver.WorkspaceOverview{Text: text, Message: err.Error()}

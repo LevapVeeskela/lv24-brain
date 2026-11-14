@@ -122,6 +122,18 @@ func (g ContextGrants) Match(projectID, connectionID string, kind ItemKind) (Con
 	return ContextGrant{}, false
 }
 
+// MatchConnection returns the first grant for projectID and connectionID
+// regardless of its kind filter. It never matches a different project or
+// connection. Callers that already know the kind use Match.
+func (g ContextGrants) MatchConnection(projectID, connectionID string) (ContextGrant, bool) {
+	for _, grant := range g.Grants {
+		if grant.Project == projectID && grant.Connection == connectionID {
+			return grant, true
+		}
+	}
+	return ContextGrant{}, false
+}
+
 // AllowsAge reports whether at passes the grant age filter. A zero at or a
 // zero MaxAgeDays keeps the item.
 func (g ContextGrant) AllowsAge(at, now time.Time) bool {

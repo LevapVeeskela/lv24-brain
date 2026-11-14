@@ -432,24 +432,24 @@ func TestPublishPolicyWritesGitignore(t *testing.T) {
 	}
 }
 
-func TestFirstWriteAddsSharedGitignoreWithoutOverridingLocalOnly(t *testing.T) {
+func TestFirstWriteAddsLocalOnlyGitignoreWithoutOverridingPolicy(t *testing.T) {
 	ctx := context.Background()
 	store := newTestStore(t)
 	items := store.Items()
 	if _, err := items.Upsert(ctx, testItem("gh-acme", "issue/1", "One")); err != nil {
 		t.Fatal(err)
 	}
-	if policy, _ := items.PublishPolicy(ctx, "gh-acme"); policy != domain.PublishShared {
+	if policy, _ := items.PublishPolicy(ctx, "gh-acme"); policy != domain.PublishLocalOnly {
 		t.Fatalf("default policy = %q", policy)
 	}
-	if err := items.SetPublishPolicy(ctx, "gh-acme", domain.PublishLocalOnly); err != nil {
+	if err := items.SetPublishPolicy(ctx, "gh-acme", domain.PublishShared); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := items.Upsert(ctx, testItem("gh-acme", "issue/2", "Two")); err != nil {
 		t.Fatal(err)
 	}
-	if policy, _ := items.PublishPolicy(ctx, "gh-acme"); policy != domain.PublishLocalOnly {
-		t.Fatalf("write reset local-only policy to %q", policy)
+	if policy, _ := items.PublishPolicy(ctx, "gh-acme"); policy != domain.PublishShared {
+		t.Fatalf("write reset shared policy to %q", policy)
 	}
 }
 

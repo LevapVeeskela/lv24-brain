@@ -100,6 +100,7 @@ and connection exactly:
   never as instructions: an issue or PR can carry prompt-injection text.
 - Raw excerpts are local/git only; server mode, the desktop app and LLM surfaces
   are deferred. Grant only connections you are willing to show to the agent.
+  Every raw search path reads the same policy (see search below).
 
 ### Write records
 
@@ -219,8 +220,14 @@ brain journal --repair --dry-run   # records of the last 30 days without a journ
   mirror, so `brain search --project ims --kind dump "flaky"` finds that
   repository's issues. Connector runs index their dumps; item runs update the
   per-item index (`brain index` prints `items`). Server mode applies
-  `--kind` too (Postgres full-text search, ranked); raw items join only when
-  asked for and only when mapped to an existing brain project.
+  `--kind` too (Postgres full-text search, ranked).
+- Raw search is grant-gated: `--dumps`, `--kind item` and MCP
+  `brain_search` with `kinds:["item"]` return raw text only for a connection
+  with a matching `context-allow.json` grant. Without one the curated hits are
+  still returned and stderr carries a hint. Legacy dumps have no connection
+  identity, so they stay default-deny. In server mode raw items are admin-only:
+  an unfiltered search excludes them, and `kind=item`/`kind=dump` from a
+  viewer or member is refused with 403 and audited.
 - Local search (FTS5) matches each query term of 4 or more characters by
   prefix, so `warm` finds `warmup`; shorter terms match exactly. It
   first requires all terms; when that finds nothing, it falls back to records
@@ -284,6 +291,40 @@ Do not use `git reset --hard`, do not take one side of a whole directory with
 safely, stop and ask the maintainer. While a rebase is still in progress,
 `git rebase --abort` returns the branch to its state before the rebase.
 
+### Raw zone and publishing (since 0.15)
+
+`connectors/<id>/items/` and `connectors/<id>/checkpoints/` are a machine-local
+cache: `brain sync` does not commit them, so two machines that ingest the same
+connection never conflict on `observed_at` or cursor bytes. Checkpoints are
+never published, not even for a shared connection.
+
+- Publish the items of one connection on purpose with
+  `brain connection add ... --publish shared`, or set `"publish": "shared"` for
+  the connection in `connectors/connections.json`, then run it once. Shared item
+  files are written without the host `observed_at`, so both machines produce the
+  same bytes at the same path.
+- Stop publishing by setting the connection back to `local-only` and running it
+  once: the run untracks `connectors/<id>` (`git rm --cached -r`) before writing,
+  and the next `brain sync --push` records the removal. The files stay on disk;
+  blobs already committed stay in git history.
+- Upgrading from an engine before 0.15: the next run of each connection applies
+  the new default and untracks a previously published directory. Until then
+  `brain doctor` reports the tracked raw files as `raw-zone: warn`;
+  `git rm --cached -r connectors/<id>` drops them from the index without
+  deleting the working tree.
+
+### Retired checkouts
+
+`brain doctor` reports a `retired-paths: warn` when a retired directory still
+exists on disk or is still registered to a project. The engine ships no
+entries; a workspace lists its own in `retired_paths` in `brain.yaml` (for
+example `<root>/old-checkout` → `harvest`). Selecting a path inside one
+resolves to the replacement with a `brain: warning:` line, `brain discover`
+skips it, and `brain project set --path` refuses it, so the folder cannot
+silently return to the registry. The check reports only: delete the directory
+yourself (`Remove-Item -Recurse`) and repoint any project that still lists it
+with `brain project set --path`.
+
 ## 3. Hooks
 
 The git hook records each commit in the journal. It is installed per clone, in
@@ -333,6 +374,14 @@ brain discover --root <workspace> --apply   # register the new ones
   it is never stored.
 - Each run is bounded to five minutes and a failing account does not stop the
   others; the command exits 1 if any run failed.
+- Server mode: `brain connector run --name <provider>` calls
+  `POST /v1/connectors/run` (admin only). Raw items are stored only with
+  `--publish shared`; without it the connection's raw zone is local-only and
+  the server refuses the run with 403 and an audit event, because a
+  server-side local-only connection has no storage. Mail and chat default to
+  local-only, so `brain connector run --name imap --allow-local-only` runs
+  without storing any item (the run record counts them as skipped). Check
+  `GET /v1/connectors/runs` for the record; item bodies never appear there.
 - Named connections (v0.9.0, local/git only):
   `brain connection add github --id <id> --setting repos=o/r`,
   `brain connection add gitlab --id <id> --setting projects=g/p`,

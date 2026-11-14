@@ -42,21 +42,20 @@ func (a *App) Note(ctx context.Context, input NoteInput) (NoteResult, error) {
 			return NoteResult{Note: prior}, a.afterWrite(ctx, JournalNote, prior.ProjectID, prior.ID, prior.Title, noteDocument(prior))
 		}
 	}
-	used := stringSet(noteIDs(existing))
-	base := input.ID
-	if base == "" {
-		base = recordID("note", project.ID, now)
-	}
-	for attempt := 1; attempt <= maxRecordIDAttempts; attempt++ {
-		note.ID = availableID(base, used)
+	slug := domain.Slugify(note.Title)
+	for try := 0; try < maxRecordIDAttempts; try++ {
+		id, idErr := nextRecordID("note", slug, now, input.ID, try == 0)
+		if idErr != nil {
+			return NoteResult{}, idErr
+		}
+		note.ID = id
 		revision, appendErr := a.deps.Store.AppendNote(ctx, note)
 		if appendErr == nil {
 			return a.finishNote(ctx, note, revision)
 		}
-		if !errors.Is(appendErr, domain.ErrConflict) {
+		if !errors.Is(appendErr, domain.ErrConflict) && !errors.Is(appendErr, domain.ErrTargetExists) {
 			return NoteResult{}, appendErr
 		}
-		used[note.ID] = struct{}{}
 	}
 	return NoteResult{}, fmt.Errorf("note: %w: no free record id", domain.ErrConflict)
 }
@@ -110,13 +109,23 @@ func (a *App) Decision(ctx context.Context, input DecisionInput) (DecisionResult
 			return DecisionResult{Decision: prior}, a.afterWrite(ctx, JournalDecision, prior.ProjectID, prior.ID, prior.Title, decisionDocument(prior))
 		}
 	}
-	decision.ID = availableID(baseRecordID(input.ID, "decision", project.ID, now), stringSet(decisionIDs(existing)))
-	revision, err := a.deps.Store.AppendDecision(ctx, decision)
-	if err != nil {
-		return DecisionResult{}, err
+	slug := domain.Slugify(decision.Title)
+	for try := 0; try < maxRecordIDAttempts; try++ {
+		id, idErr := nextRecordID("decision", slug, now, input.ID, try == 0)
+		if idErr != nil {
+			return DecisionResult{}, idErr
+		}
+		decision.ID = id
+		revision, appendErr := a.deps.Store.AppendDecision(ctx, decision)
+		if appendErr == nil {
+			result := DecisionResult{Decision: decision, Revision: revision}
+			return result, a.afterWrite(ctx, JournalDecision, decision.ProjectID, decision.ID, decision.Title, decisionDocument(decision))
+		}
+		if !errors.Is(appendErr, domain.ErrTargetExists) {
+			return DecisionResult{}, appendErr
+		}
 	}
-	result := DecisionResult{Decision: decision, Revision: revision}
-	return result, a.afterWrite(ctx, JournalDecision, decision.ProjectID, decision.ID, decision.Title, decisionDocument(decision))
+	return DecisionResult{}, fmt.Errorf("decision: %w: no free record id", domain.ErrConflict)
 }
 
 // Attempt appends an attempt record and indexes it for search.
@@ -153,13 +162,23 @@ func (a *App) Attempt(ctx context.Context, input AttemptInput) (AttemptResult, e
 			return AttemptResult{Attempt: prior}, a.afterWrite(ctx, JournalAttempt, prior.ProjectID, prior.ID, prior.Title, attemptDocument(prior))
 		}
 	}
-	attempt.ID = availableID(baseRecordID(input.ID, "attempt", project.ID, now), stringSet(attemptIDs(existing)))
-	revision, err := a.deps.Store.AppendAttempt(ctx, attempt)
-	if err != nil {
-		return AttemptResult{}, err
+	slug := domain.Slugify(attempt.Title)
+	for try := 0; try < maxRecordIDAttempts; try++ {
+		id, idErr := nextRecordID("attempt", slug, now, input.ID, try == 0)
+		if idErr != nil {
+			return AttemptResult{}, idErr
+		}
+		attempt.ID = id
+		revision, appendErr := a.deps.Store.AppendAttempt(ctx, attempt)
+		if appendErr == nil {
+			result := AttemptResult{Attempt: attempt, Revision: revision}
+			return result, a.afterWrite(ctx, JournalAttempt, attempt.ProjectID, attempt.ID, attempt.Title, attemptDocument(attempt))
+		}
+		if !errors.Is(appendErr, domain.ErrTargetExists) {
+			return AttemptResult{}, appendErr
+		}
 	}
-	result := AttemptResult{Attempt: attempt, Revision: revision}
-	return result, a.afterWrite(ctx, JournalAttempt, attempt.ProjectID, attempt.ID, attempt.Title, attemptDocument(attempt))
+	return AttemptResult{}, fmt.Errorf("attempt: %w: no free record id", domain.ErrConflict)
 }
 
 // Handoff appends a session handoff and indexes it for search.
@@ -192,22 +211,25 @@ func (a *App) Handoff(ctx context.Context, input HandoffInput) (HandoffResult, e
 			return HandoffResult{Handoff: prior}, a.afterWrite(ctx, JournalHandoff, prior.ProjectID, prior.ID, prior.Summary, handoffDocument(prior))
 		}
 	}
-	handoff.ID = availableID(recordID("handoff", project.ID, now), stringSet(handoffIDs(existing)))
-	revision, err := a.deps.Store.AppendHandoff(ctx, handoff)
-	if err != nil {
-		return HandoffResult{}, err
+	// A handoff has no title, so its id keeps the human readable time segment
+	// (<date>-<HHMMSS>) that older handoff ids and file names used.
+	slug := now.Format("150405")
+	for try := 0; try < maxRecordIDAttempts; try++ {
+		id, idErr := nextRecordID("handoff", slug, now, "", try == 0)
+		if idErr != nil {
+			return HandoffResult{}, idErr
+		}
+		handoff.ID = id
+		revision, appendErr := a.deps.Store.AppendHandoff(ctx, handoff)
+		if appendErr == nil {
+			result := HandoffResult{Handoff: handoff, Revision: revision}
+			return result, a.afterWrite(ctx, JournalHandoff, handoff.ProjectID, handoff.ID, handoff.Summary, handoffDocument(handoff))
+		}
+		if !errors.Is(appendErr, domain.ErrTargetExists) {
+			return HandoffResult{}, appendErr
+		}
 	}
-	result := HandoffResult{Handoff: handoff, Revision: revision}
-	return result, a.afterWrite(ctx, JournalHandoff, handoff.ProjectID, handoff.ID, handoff.Summary, handoffDocument(handoff))
-}
-
-// baseRecordID uses an explicit id when the caller pinned one (promotion uses
-// a deterministic id) and otherwise the dated default.
-func baseRecordID(id, prefix, projectID string, now time.Time) string {
-	if id != "" {
-		return id
-	}
-	return recordID(prefix, projectID, now)
+	return HandoffResult{}, fmt.Errorf("handoff: %w: no free record id", domain.ErrConflict)
 }
 
 // sameRecordSource scopes the retry heuristic. A plain user write has no

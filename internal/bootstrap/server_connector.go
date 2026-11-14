@@ -41,5 +41,12 @@ func RunServerConnector(ctx context.Context, cfg config.BrainConfig, opts Connec
 	if project := strings.TrimSpace(opts.Project); project != "" {
 		projects = append(projects, project)
 	}
-	return client.RunConnectorMapped(ctx, opts.Name, projects, since, opts.Limit, opts.BrainProject)
+	return client.RunConnectorWithOptions(ctx, opts.Name, httpclient.ConnectorRunOptions{
+		Projects:       projects,
+		Since:          since,
+		Limit:          opts.Limit,
+		ProjectID:      opts.BrainProject,
+		Publish:        opts.Publish,
+		AllowLocalOnly: opts.AllowLocalOnly,
+	})
 }

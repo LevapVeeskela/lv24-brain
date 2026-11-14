@@ -161,6 +161,15 @@ type ConnectorRunRequest struct {
 	Projects  []string   `json:"projects,omitempty"`
 	Since     *time.Time `json:"since,omitempty"`
 	Limit     int        `json:"limit,omitempty"`
+	// Publish selects the connection's raw-zone policy: "shared" stores items
+	// for project members, "local-only" runs without storing items in the
+	// shared raw zone. Empty keeps the provider default (a provider whose
+	// descriptor defaults to local-only still needs the explicit opt-in).
+	Publish string `json:"publish,omitempty"`
+	// AllowLocalOnly is the explicit admin opt-in a local-only connection
+	// needs in server mode. Without it such a run is refused with 403 and an
+	// audit event, because the server has no local-only raw zone.
+	AllowLocalOnly bool `json:"allowLocalOnly,omitempty"`
 }
 
 // ConnectorRunner executes one connector and persists its run record. The

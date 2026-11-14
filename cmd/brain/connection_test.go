@@ -449,8 +449,16 @@ func TestConnectionItemsSearchAndIndex(t *testing.T) {
 		t.Fatalf("index: %d %s %s", code, out, errOut)
 	}
 	code, out, errOut = runForTest(t, "search", "uniquerawitem", "--kind", "item", "--json", "--config", cfg)
+	if code != 0 || strings.Contains(out, `"kind": "item"`) || !strings.Contains(errOut, "context-allow.json") {
+		t.Fatalf("ungranted raw search: %d %s %s", code, out, errOut)
+	}
+	grant := `{"schemaVersion":1,"grants":[{"project":"demo","connection":"work"}]}`
+	if err := os.WriteFile(filepath.Join(dataDir, fsstore.ContextAllowPath), []byte(grant), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	code, out, errOut = runForTest(t, "search", "uniquerawitem", "--kind", "item", "--json", "--config", cfg)
 	if code != 0 || !strings.Contains(out, `"kind": "item"`) {
-		t.Fatalf("search: %d %s %s", code, out, errOut)
+		t.Fatalf("granted raw search: %d %s %s", code, out, errOut)
 	}
 	code, out, errOut = runForTest(t, "search", "uniquerawitem", "--json", "--config", cfg)
 	if code != 0 || strings.Contains(out, `"kind": "item"`) {

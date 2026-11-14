@@ -78,6 +78,12 @@ type Ingestion struct {
 	// PreparePublish runs on every run before item writes. A local git runtime
 	// uses it to untrack committed data when a connection becomes local-only.
 	PreparePublish func(ctx context.Context, connectionID string, policy domain.PublishPolicy) error
+	// DisallowLocalOnlyItems makes the host refuse to persist items whose
+	// effective raw-zone policy is local-only. Server mode sets it because its
+	// only item store is shared; local and git mode leave it false, so a
+	// local-only connection still stores items on this machine. A refused item
+	// is counted and reported as a skip; the run still reads and checkpoints.
+	DisallowLocalOnlyItems bool
 	// Now is the clock; nil selects time.Now.
 	Now func() time.Time
 	// NewRunID returns a run ID; nil derives one from the start time.
@@ -262,7 +268,16 @@ func (r *ingestRun) prepare(ctx context.Context) error {
 }
 
 func (r *ingestRun) applyPublishPolicy(ctx context.Context) error {
-	policy := r.connection.EffectivePublish(r.descriptor)
+	// A machine-local raw zone (local and git mode) publishes nothing unless the
+	// connection explicitly opts in: the provider descriptor default never
+	// publishes it (see domain.Connection.RawZonePublish). A host that refuses
+	// local-only items has no machine-local zone at all (server mode), so it
+	// keeps the documented sensitivity policy: the descriptor default decides
+	// whether its items may be stored.
+	policy := r.connection.RawZonePublish()
+	if r.host.DisallowLocalOnlyItems {
+		policy = r.connection.EffectivePublish(r.descriptor)
+	}
 	r.result.Publish = policy
 	if setter, ok := r.host.Items.(publishPolicyStore); ok {
 		if reader, ok := r.host.Items.(publishPolicyReader); ok {
@@ -356,6 +371,8 @@ func (r *ingestRun) batch(ctx context.Context) (bool, error) {
 		return false, errors.New("source reported more data without returning items or new checkpoints")
 	}
 	items, report, skips, seen, skipped := r.normalize(lastPerRef(readBatch.Items))
+	items, skips, dropped := r.dropLocalOnlyItems(items, skips)
+	skipped += dropped
 	// A batch that was read is stored completely even if the run's context
 	// ends meanwhile; the grace timeout still bounds a stuck store.
 	writeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), persistGrace)
@@ -440,6 +457,26 @@ func (r *ingestRun) normalize(raw []domain.Item) ([]domain.Item, itemReport, []I
 	}
 	return items, report, skips, len(raw), skipped
 }
+
+// dropLocalOnlyItems discards normalized items when the host has no local-only
+// raw zone (server mode). The run still checkpoints, so the next run resumes;
+// every dropped item is reported as a skip instead of silently vanishing.
+func (r *ingestRun) dropLocalOnlyItems(items []domain.Item, skips []ItemSkip) ([]domain.Item, []ItemSkip, int) {
+	if !r.host.DisallowLocalOnlyItems || r.result.Publish != domain.PublishLocalOnly || len(items) == 0 {
+		return items, skips, 0
+	}
+	for _, item := range items {
+		if len(skips) >= maxReportedSkips {
+			break
+		}
+		skips = append(skips, ItemSkip{Key: item.Key(), Reason: localOnlySkipReason})
+	}
+	return nil, skips, len(items)
+}
+
+// localOnlySkipReason explains an item the host refused because the only item
+// store is shared (server mode).
+const localOnlySkipReason = "publish policy local-only: this host has no local-only raw zone"
 
 // store applies items and indexes their keys. Stats change only when both
 // succeed, so a failed batch leaves the counts of stored batches.

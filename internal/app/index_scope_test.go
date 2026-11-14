@@ -50,7 +50,7 @@ func newScopeFixture(t *testing.T, dataDir string) (*app.App, *sqliteindex.Index
 	cfg := config.Default()
 	cfg.Mode = config.ModeLocal
 	cfg.DataDir = dataDir
-	return app.New(cfg, app.Dependencies{Store: store, Index: index}), index
+	return app.New(cfg, app.Dependencies{Store: store, Index: index, ContextGrants: scopeGrants()}), index
 }
 
 func appendSharedNote(t *testing.T, dataDir, projectID, body string) {

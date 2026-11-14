@@ -122,7 +122,7 @@ func (s *Store) putStateLocked(ctx context.Context, dir string, state domain.Sta
 	if err := writeFileAtomic(filepath.Join(dir, stateFile), raw); err != nil {
 		return domain.SyncRevision{}, fmt.Errorf("fsstore: write state %q: %w", state.ProjectID, err)
 	}
-	return s.revisionAfterWrite(ctx)
+	return revisionAfterWrite(s, ctx)
 }
 
 func renderStateBody(projectName string, state domain.State) string {

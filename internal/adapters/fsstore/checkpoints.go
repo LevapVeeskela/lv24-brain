@@ -29,6 +29,11 @@ const (
 // through a temporary file and rename, so a crash leaves the old or the new
 // checkpoint, never a mix.
 //
+// Checkpoints are always machine-local, even for a connection that publishes
+// its items (`publish: shared`): the cursor belongs to the host that read the
+// stream, so the connection marker ignores the checkpoints/ directory and brain
+// sync never stages it.
+//
 // Stream names are case-sensitive ("INBOX" and "inbox" are different
 // streams) while Windows and macOS file systems usually are not, so the file
 // name is the lowercased stream plus a short hash of the exact stream:
@@ -124,7 +129,7 @@ func (s *CheckpointStore) Put(ctx context.Context, connectionID string, checkpoi
 	if err != nil {
 		return fmt.Errorf("fsstore: encode checkpoint: %w", err)
 	}
-	if err := s.store.Items().ensureConnectionIgnore(connectionID); err != nil {
+	if _, err := s.store.Items().publishesItems(connectionID); err != nil {
 		return err
 	}
 	return writeFileAtomic(path, append(raw, '\n'))

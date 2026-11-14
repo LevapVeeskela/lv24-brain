@@ -424,6 +424,7 @@ func runDoctor(args []string, stdout, stderr io.Writer) int {
 			OK:     check.Status != "fail",
 			Status: check.Status,
 			Detail: check.Message,
+			Code:   check.Code,
 		})
 		if check.Status == "fail" {
 			failed = true
@@ -471,7 +472,7 @@ func runOpen(args []string, stdout, stderr io.Writer) int {
 	}
 	defer func() { _ = useCase.Close() }()
 	ctx := context.Background()
-	target, err := resolveTarget(ctx, useCase.App, *project, selector)
+	target, err := resolveTarget(ctx, useCase.App, *project, selector, stderr)
 	if workspace, ok := app.AsWorkspace(err); ok && !*asJSON {
 		// A workspace root: list its projects instead of failing.
 		text, overviewErr := useCase.App.WorkspaceOverview(ctx, workspace)
@@ -598,7 +599,7 @@ func runProject(args []string, stdout, stderr io.Writer) int {
 		return runProjectList(args[1:], stdout, stderr)
 	case "show":
 		return runProjectShow(args[1:], stdout, stderr)
-	case "set":
+	case "set", "add":
 		return runProjectSet(args[1:], stdout, stderr)
 	case "members":
 		return runProjectMembers(args[1:], stdout, stderr)
@@ -883,13 +884,15 @@ func printProjectUsage(w io.Writer) {
                     [--kind app|service|repository|infra|other]
                     [--repo <url>] [--branch <b>]
                     [--clear-paths] [--clear-aliases] [--json]
+  brain project add <id> ...   (synonym of set)
   brain project members <id> [add <login> --role viewer|member|maintainer | remove <login> | restrict | open]
 
 Repeat --path and --alias to replace the stored lists; --add-path appends to the
 stored paths (one checkout per machine, e.g. Windows and macOS). --clear-paths and
 --clear-aliases store an explicitly empty list and cannot be combined with the
 corresponding repeatable flag. Creating a project without --name uses the id
-as its name. Omitted flags keep their stored values.
+as its name. Omitted flags keep their stored values. A retired checkout path is
+refused; see retired_paths in brain.yaml.
 `)
 }
 
@@ -920,7 +923,7 @@ func runBootstrap(args []string, stdout, stderr io.Writer) int {
 	if len(positional) == 1 {
 		selector = positional[0]
 	}
-	target, err := resolveTarget(context.Background(), useCase.App, *project, selector)
+	target, err := resolveTarget(context.Background(), useCase.App, *project, selector, stderr)
 	if err != nil {
 		return reportError(stderr, "bootstrap", err)
 	}
@@ -1118,7 +1121,7 @@ func runHandoff(args []string, stdout, stderr io.Writer) int {
 	}
 	defer func() { _ = useCase.Close() }()
 	ctx := context.Background()
-	target, err := resolveTarget(ctx, useCase.App, *project, "")
+	target, err := resolveTarget(ctx, useCase.App, *project, "", stderr)
 	if err != nil && *create && strings.TrimSpace(*project) != "" {
 		// A new project has no checkout yet; the app registers it below.
 		target, err = app.Resolved{Project: domain.Project{ID: strings.TrimSpace(*project)}}, nil
@@ -1419,7 +1422,7 @@ func runSearch(args []string, stdout, stderr io.Writer) int {
 		return reportError(stderr, "search", err)
 	}
 	defer func() { _ = runtime.Close() }()
-	hits, err := runtime.App.SearchWith(context.Background(), app.SearchOptions{
+	hits, notice, err := runtime.App.SearchWithNotice(context.Background(), app.SearchOptions{
 		Text:         query,
 		ProjectID:    *project,
 		Limit:        *limit,
@@ -1429,6 +1432,9 @@ func runSearch(args []string, stdout, stderr io.Writer) int {
 	})
 	if err != nil {
 		return reportError(stderr, "search", err)
+	}
+	if notice != "" {
+		fmt.Fprintf(stderr, "brain search: %s\n", notice)
 	}
 	if *asJSON {
 		return writeJSONReport(stdout, stderr, "search", jsonSearch{Query: query, Hits: toJSONHits(hits)})
@@ -1468,6 +1474,8 @@ func runConnectorRun(args []string, stdout, stderr io.Writer) int {
 	days := fs.Int("days", 0, "only items updated in the last N days (alternative to --since)")
 	sinceRaw := fs.String("since", "", "only items updated at or after this RFC3339 time")
 	limit := fs.Int("limit", 0, "per-collection item limit (0 uses the connector default)")
+	publish := fs.String("publish", "", "server mode raw-zone policy: shared stores items for project members, local-only stores nothing")
+	allowLocalOnly := fs.Bool("allow-local-only", false, "server mode: explicitly allow a local-only run that stores no items")
 	cfgPath := configFlag(fs)
 	if err := fs.Parse(args); err != nil {
 		return 2
@@ -1495,6 +1503,16 @@ func runConnectorRun(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "brain connector run: --limit must not be negative")
 		return 2
 	}
+	switch strings.ToLower(strings.TrimSpace(*publish)) {
+	case "", "shared", "local-only":
+	default:
+		fmt.Fprintln(stderr, "brain connector run: --publish must be shared or local-only")
+		return 2
+	}
+	if *allowLocalOnly && strings.EqualFold(strings.TrimSpace(*publish), "shared") {
+		fmt.Fprintln(stderr, "brain connector run: --allow-local-only cannot be combined with --publish=shared")
+		return 2
+	}
 	if *days < 0 || (*days > 0 && strings.TrimSpace(*sinceRaw) != "") {
 		fmt.Fprintln(stderr, "brain connector run: --days must be positive and cannot be combined with --since")
 		return 2
@@ -1518,14 +1536,20 @@ func runConnectorRun(args []string, stdout, stderr io.Writer) int {
 		return reportError(stderr, "connector run", err)
 	}
 	opts := bootstrap.ConnectorOptions{
-		Name:         connectorName,
-		Project:      strings.TrimSpace(*project),
-		BrainProject: strings.TrimSpace(*brainProject),
-		Limit:        *limit,
+		Name:           connectorName,
+		Project:        strings.TrimSpace(*project),
+		BrainProject:   strings.TrimSpace(*brainProject),
+		Limit:          *limit,
+		Publish:        strings.ToLower(strings.TrimSpace(*publish)),
+		AllowLocalOnly: *allowLocalOnly,
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	if cfg.Mode != config.ModeServer && (strings.TrimSpace(*publish) != "" || *allowLocalOnly) {
+		fmt.Fprintln(stderr, "brain connector run: --publish and --allow-local-only apply to server mode only")
+		return 2
+	}
 	if cfg.Mode == config.ModeServer {
 		if *all || *account != "" {
 			fmt.Fprintln(stderr, "brain connector run: --all and --account need local or git mode (the server is configured by environment)")
@@ -1608,6 +1632,11 @@ Flags:
   --days <n>          Only collect items updated in the last n days
   --since <RFC3339>   Only collect items updated at or after this time
   --limit <n>         Per-collection item limit (0 uses the connector default)
+  --publish <mode>    Server mode raw-zone policy: shared (store items for
+                      project members) or local-only (store no items). Omit to
+                      keep the provider default; mail defaults to local-only.
+  --allow-local-only  Server mode: explicitly allow a local-only run. Without
+                      it such a run is refused with 403.
   --config <path>     Path to brain.yaml
 
 Targets (local/git) default to the brain data: GitHub repositories from
@@ -1635,8 +1664,10 @@ Credentials are resolved from BRAIN_SECRET_* environment variables or the OS
 secret store. Store one with: brain secret set <token-key>
 In local/git mode connector dumps are written below the brain data directory.
 In server mode the command calls POST /v1/connectors/run; the server stores the
-run record (PostgreSQL when configured) and discards bulk dumps. The run record
-is exported by GET /v1/connectors/runs/{id}/markdown. Values are never printed.
+run record (PostgreSQL when configured) and discards bulk dumps. Raw items are
+stored only with --publish shared; mail and chat default to local-only, which
+needs --allow-local-only and stores no items. The run record is exported by
+GET /v1/connectors/runs/{id}/markdown. Values are never printed.
 `, strings.Join(providers, "|"), strings.Join(providers, " + "))
 }
 

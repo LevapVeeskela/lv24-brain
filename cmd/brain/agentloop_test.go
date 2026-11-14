@@ -58,7 +58,7 @@ func TestAgentLoopCLI(t *testing.T) {
 		t.Fatalf("typo created a project: %s", stdout)
 	}
 	code, first, stderr := runForTest(t, "note", "--project", "lv", "Retried note", "--config", cfg)
-	if code != 0 || !strings.Contains(first, "note-city-") {
+	if code != 0 || !strings.Contains(first, "note-") || !strings.Contains(first, "retried-note") {
 		t.Fatalf("alias note: %d %q %s", code, first, stderr)
 	}
 	// The same write again (an agent retrying) returns the same record.

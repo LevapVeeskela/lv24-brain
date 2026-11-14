@@ -115,6 +115,18 @@ Write and read a record:
 project is an error, so a typo never creates a project. If exactly one project
 exists, `--project` can be omitted.
 
+A retired checkout is never registered. Selecting a path inside one (or its
+former bare name, e.g. `old-checkout`) resolves to the project that replaced it
+and prints a warning; `brain discover` skips it and `brain project set --path`
+refuses it. The engine ships no retired paths; a workspace adds its own with
+`retired_paths` in `brain.yaml`:
+
+```yaml
+retired_paths:
+  - path: <root>/old-checkout
+    replaced_by: demo
+```
+
 Expected `status` output (paths and version numbers vary):
 
 ```text
@@ -241,13 +253,18 @@ catalogue is non-empty (optional `--project` filters by connection project);
 when the catalogue is empty it falls back to the legacy data-derived targets.
 `brain connection run <id> [--since RFC3339] [--days N] [--limit N] [--json]` runs one
 connection through the ingestion host: per-connection lock (busy returns
-`connection busy`), publish policy applied before the first write (a
-shared-to-local-only switch untracks `connectors/<id>` from git via
+`connection busy`), the publish policy applied before the first write
+(shared-to-local-only untracks `connectors/<id>` from git via
 `git rm --cached -r` but does not rewrite prior git history), secret
 redaction (`[redacted]`), mail address hashing (`[email:<12 hex>]`, exposure
 reduction, not anonymization), body cap (512 KiB with truncation marker),
 per-stream checkpoints (`connectors/<id>/checkpoints/*.json`), tombstones for
-reported deletes, index update, and a run record. Sources do not infer
+reported deletes, index update, and a run record. Raw items and checkpoints
+stay machine-local unless the connection sets `publish: shared`
+(`brain connection add ... --publish shared`, or `"publish": "shared"` in
+`connectors/connections.json`): shared items are committed without the host
+`observed_at`, checkpoints are never committed, and `brain doctor` warns about
+raw files that are tracked anyway. Sources do not infer
 deletes from absence (`Deletes` is false without authoritative tombstones).
 
 The legacy `brain connector run --name ...` snapshot path uses
@@ -258,9 +275,14 @@ persists each run as Markdown under `connectors/runs/`; `connection run`
 instead writes raw items/checkpoints under `connectors/<id>/`. In server mode the same
 snapshot command calls `POST /v1/connectors/run`; with PostgreSQL the server persists
 raw items and checkpoints (schema 9) plus the run record, while the in-memory
-development store has no raw zone and rejects the run as unsupported. Pass
+development store has no raw zone and rejects the run as unsupported. The server
+has no local-only raw zone, so it stores items only when the run is explicitly
+shared: pass `--publish shared`. A provider whose raw zone defaults to
+local-only (mail, chat) is refused with 403 unless `--allow-local-only` is
+given, and such a run stores the record and checkpoints but no items. Pass
 `--brain-project <id>` to map items to a project; unmapped items stay stored but
-out of project-scoped search.
+out of project-scoped search. Viewers and members never receive raw items from
+server search; `kind=item` is admin-only there.
 `GET /v1/connectors/runs` lists records, `GET /v1/connectors/runs/{id}` returns
 one, and `GET /v1/connectors/runs/{id}/markdown` exports it as Markdown.
 `BRAIN_CONNECTOR_TIMEOUT` (default `5m`, clamped to `10s`–`1h`) bounds a server run.
@@ -310,7 +332,9 @@ surfaces. Raw context excerpts arrived in Phase 4.2 and are local/git only.
 
 Curated context is the default. To let an agent see a few stored raw items, add
 an explicit grant in `<data-dir>/context-allow.json` next to `brain.yaml`;
-without the file, or without a matching grant, nothing raw is shown:
+without the file, or without a matching grant, nothing raw is shown. The same
+grant gates `brain search --dumps`, `brain search --kind item` and MCP
+`brain_search` with `kinds:["item"]`; curated hits always remain. For example:
 
 ```json
 {
@@ -721,7 +745,7 @@ also accepts `--config <path>`.
 | `brain handoff [summary]` | `--project`, `--summary`, `--next <text>` (next action), `--git-context <text>` (default: read from the project checkout), `--no-git` (record no git context) |
 | `brain journal` | `--project`, `--user`, `--event <name>` (for example `note`, `decision`, `attempt`, `handoff`, `commit`), `--since <duration>` (for example `24h`), `--limit <n>` (default 20). Local and git mode. |
 | `brain event commit` | `--project <id>`, `--repo <path>` (default `.`), `--quiet` (print nothing on success; used by the hook). Local and git mode. |
-| `brain search <query>` | `--project <id>`, `--limit <n>` (default 20), `--kind <kind>` (`note,decision,attempt,handoff,dump,item`; raw-zone `item` is excluded by default), `--dumps` (legacy dumps; also un-excludes server items), `--since <24h\|7d\|2w\|2026-11-01\|RFC3339>`. English and Russian word forms match as a prefix. |
+| `brain search <query>` | `--project <id>`, `--limit <n>` (default 20), `--kind <kind>` (`note,decision,attempt,handoff,dump,item`; raw-zone `item` is excluded by default and needs a `context-allow.json` grant), `--dumps` (legacy dumps; also un-excludes server items, grant-gated), `--since <24h\|7d\|2w\|2026-11-01\|RFC3339>`. English and Russian word forms match as a prefix. |
 | `brain links <id>` | `--project <id>`, `--json`; `--broken` lists `[[id]]` references to missing records. Write `[[<id>]]`, `[[<id>\|text]]` or `[[<project>/<id>]]` in record text; `brain record show` lists Links and Backlinks. |
 | `brain review` | `--project <id>`, `--since <7d>`, `--fix`, `--fix-kind <kinds>`, `--json`. Lists pending proposals (at most 20) and findings; `broken-link`, `near-duplicate`, `proposal-stale`, `proposal-orphan`, `proposal-contradicted` are report-only. Proposal findings are local/git only, and `--fix` never touches proposals. |
 | `brain digest` | `--since <90m\|24h\|7d>` (default `24h`; with `--source` the default is `30d`), `--project <id>`, `--json`, `--write` (saves `<data_dir>/digests/YYYY-MM-DD.md`). With `--source <connection>`: `--all`, `--limit <n>` (default 500), `--rule <names>`, `--dry-run` (default; conflicts with `--write`), `--write` (persists proposals). `--source` is local/git only. |

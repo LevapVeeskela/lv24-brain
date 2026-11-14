@@ -37,21 +37,14 @@ func (a *App) contextExcerpts(ctx context.Context, project domain.Project, query
 	if curated >= contextThinCurated {
 		return nil, nil, nil
 	}
-	if a.deps.ContextGrants == nil {
+	access, err := a.loadRawAccess(ctx)
+	if err != nil {
+		return nil, nil, err
+	}
+	if !access.available {
 		return nil, []string{"raw excerpts: context grants are not available in this mode"}, nil
 	}
-	grants, err := a.deps.ContextGrants.ContextGrants(ctx)
-	if err != nil {
-		return nil, nil, fmt.Errorf("read context grants: %w", err)
-	}
-	hasGrant := false
-	for _, grant := range grants.Grants {
-		if grant.Project == project.ID {
-			hasGrant = true
-			break
-		}
-	}
-	if !hasGrant {
+	if !access.allowsProject(project.ID) {
 		return nil, []string{fmt.Sprintf("raw excerpts: no grant for project %q in context-allow.json", project.ID)}, nil
 	}
 	getter, ok := a.deps.Items.(itemKeyGetter)
@@ -94,7 +87,7 @@ func (a *App) contextExcerpts(ctx context.Context, project domain.Project, query
 		if item.Deleted || item.ProjectID != project.ID || item.Ref.ConnectionID != connectionID || item.Key() != key {
 			continue
 		}
-		grant, granted := grants.Match(project.ID, connectionID, item.Kind)
+		grant, granted := access.Match(project.ID, connectionID, item.Kind)
 		if !granted || perConnection[connectionID] >= grant.MaxExcerpts {
 			continue
 		}

@@ -19,6 +19,7 @@ coverage.*
 /index/
 /secrets/
 registry.json
+/ideas 
 
 # Databases
 *.db
@@ -48,3 +49,6 @@ __pycache__/
 /python/build/
 /python/dist/
 *.egg-info/
+
+# Tool caches
+.vigil/

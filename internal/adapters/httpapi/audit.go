@@ -13,20 +13,27 @@ import (
 // Security audit actions. They are recorded without a revision, so only
 // admins see them (GET /v1/audit), never viewers through revisions or SSE.
 const (
-	AuditLoginSucceeded    = "auth.login.succeeded"
-	AuditLoginFailed       = "auth.login.failed"
-	AuditLoginRateLimited  = "auth.login.rate_limited"
-	AuditLogout            = "auth.logout"
-	AuditRefreshReused     = "auth.refresh.reused"
-	AuditOIDCLogin         = "auth.oidc.login"
-	AuditOIDCLinked        = "auth.oidc.linked"
-	AuditOIDCSignup        = "auth.oidc.signup"
-	AuditOIDCRefused       = "auth.oidc.refused"
-	AuditAPITokenCreated   = "auth.token.created"
-	AuditAPITokenRevoked   = "auth.token.revoked"
-	AuditPasswordChanged   = "auth.password.changed"
-	AuditPasswordFailed    = "auth.password.failed"
-	AuditSessionsRevoked   = "auth.sessions.revoked"
+	AuditLoginSucceeded   = "auth.login.succeeded"
+	AuditLoginFailed      = "auth.login.failed"
+	AuditLoginRateLimited = "auth.login.rate_limited"
+	AuditLogout           = "auth.logout"
+	AuditRefreshReused    = "auth.refresh.reused"
+	AuditOIDCLogin        = "auth.oidc.login"
+	AuditOIDCLinked       = "auth.oidc.linked"
+	AuditOIDCSignup       = "auth.oidc.signup"
+	AuditOIDCRefused      = "auth.oidc.refused"
+	AuditAPITokenCreated  = "auth.token.created"
+	AuditAPITokenRevoked  = "auth.token.revoked"
+	AuditPasswordChanged  = "auth.password.changed"
+	AuditPasswordFailed   = "auth.password.failed"
+	AuditSessionsRevoked  = "auth.sessions.revoked"
+	// AuditConnectorLocalOnlyDenied records a server-mode connector run that
+	// would have put a local-only connection's items into the shared raw zone
+	// without the explicit admin opt-in. The run does not start.
+	AuditConnectorLocalOnlyDenied = "connector.local_only.denied"
+	// AuditSearchRawDenied records a project reader asking server search for
+	// raw connector items. Only admins may request them on the server API.
+	AuditSearchRawDenied   = "search.raw.denied"
 	auditEntityUser        = "user"
 	auditEntityAPIToken    = "api_token"
 	maxMemoryAuditEvents   = 10000

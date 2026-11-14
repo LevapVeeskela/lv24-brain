@@ -41,6 +41,14 @@ type ProblemReporter interface {
 	Problems(ctx context.Context, projectID string) ([]RecordProblem, error)
 }
 
+// LockInspector is implemented by stores whose writes guard shared files with
+// lock files. StaleLocks reports locks that no longer have a live owner: a
+// dead process past its TTL, a lock pulled from another host, or one left by a
+// previous boot. It never removes them.
+type LockInspector interface {
+	StaleLocks(ctx context.Context) ([]string, error)
+}
+
 // Store persists brain records. Implementations decide whether the backing
 // storage is Markdown files, git, or a server API.
 type Store interface {
@@ -159,6 +167,13 @@ type SyncProvider interface {
 	Pull(ctx context.Context, opts SyncOptions) (SyncResult, error)
 	Commit(ctx context.Context, message string) (domain.SyncRevision, error)
 	Push(ctx context.Context) (SyncResult, error)
+}
+
+// GitPathLister is implemented by sync providers that can report which files
+// the shared tree tracks. Doctor uses it to find machine-local files that were
+// published (raw items, checkpoints) without changing them.
+type GitPathLister interface {
+	TrackedPaths(ctx context.Context, prefix string) ([]string, error)
 }
 
 // SecretStore keeps connector credentials outside the data repository.

@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strings"
 
 	"github.com/levapveeskela/lv24-brain/internal/domain"
 	"gopkg.in/yaml.v3"
@@ -38,6 +39,25 @@ type BrainConfig struct {
 	SchemaVersion    int    `yaml:"schema_version"`
 	MinEngineVersion string `yaml:"min_engine_version,omitempty"`
 	UpdateChannel    string `yaml:"update_channel"`
+	// RetiredPaths lists retired checkouts of this workspace. The engine ships
+	// no defaults: selection redirects to ReplacedBy and registration is
+	// refused, but nothing on disk is touched.
+	RetiredPaths []RetiredPath `yaml:"retired_paths,omitempty"`
+}
+
+// RetiredPath is a checkout path that was retired in favor of another project.
+type RetiredPath struct {
+	// Path is the retired directory; selectors under it are redirected.
+	Path string `yaml:"path"`
+	// ReplacedBy is the project id or alias that now owns the work.
+	ReplacedBy string `yaml:"replaced_by"`
+}
+
+// EffectiveRetiredPaths returns the retired checkouts configured in
+// brain.yaml. There are no built-in paths: a machine-specific checkout belongs
+// to the workspace configuration, not to the public engine.
+func (c BrainConfig) EffectiveRetiredPaths() []RetiredPath {
+	return c.RetiredPaths
 }
 
 // Default returns a local-mode configuration for a new brain.
@@ -141,6 +161,14 @@ func (c BrainConfig) Validate() error {
 	}
 	if c.MinEngineVersion != "" && !engineVersionPattern.MatchString(c.MinEngineVersion) {
 		return domain.NewValidationError("config.min_engine_version", "must look like 1.2.3")
+	}
+	for _, entry := range c.RetiredPaths {
+		if strings.TrimSpace(entry.Path) == "" {
+			return domain.NewValidationError("config.retired_paths", "each entry needs a path")
+		}
+		if strings.TrimSpace(entry.ReplacedBy) == "" {
+			return domain.NewValidationError("config.retired_paths", "each entry needs replaced_by (a project id or alias)")
+		}
 	}
 	if c.Mode == ModeLocal || c.Mode == ModeGit {
 		if c.DataDir == "" {

@@ -193,8 +193,11 @@ func (s *Store) TrashRecord(ctx context.Context, projectID, kind, id string) err
 }
 
 // RestoreRecord moves a trashed record back to its live directory under its
-// original file name. A live record with the same ID, or a live file with the
-// same name, yields ErrConflict.
+// original file name. The name is claimed with the same exclusive publish a new
+// record uses, so a record created in the same instant is never overwritten. A
+// live record with the same ID, or a live file with the same name, yields a
+// typed domain.ErrTargetExists naming the existing record (it also matches
+// domain.ErrConflict for callers that already handle that conflict).
 func (s *Store) RestoreRecord(ctx context.Context, projectID, kind, id string) error {
 	if err := contextError(ctx); err != nil {
 		return err
@@ -221,25 +224,38 @@ func (s *Store) RestoreRecord(ctx context.Context, projectID, kind, id string) e
 	if err != nil {
 		return err
 	}
-	if _, err := findRecordPath(liveDir, kind, id); err == nil {
-		return conflictError(kind, id, "a live record already uses this ID")
+	if livePath, err := findRecordPath(liveDir, kind, id); err == nil {
+		// Identity is taken even when the file name differs: two records with
+		// one id would make show, trash and restore ambiguous.
+		return domain.NewTargetExistsError(kind, id, livePath)
 	} else if !errors.Is(err, domain.ErrNotFound) {
 		return err
 	}
 	target := filepath.Join(liveDir, filepath.Base(trashed))
 	return withFileLock(ctx, trashed, func() error {
-		taken, err := pathExists(target)
+		raw, err := os.ReadFile(trashed)
 		if err != nil {
-			return err
-		}
-		if taken {
-			return conflictError(kind, id, "the file name is taken in the live directory")
+			if os.IsNotExist(err) {
+				return notFound(kind, id)
+			}
+			return fmt.Errorf("fsstore: read trashed %s %q: %w", kind, id, err)
 		}
 		if err := os.MkdirAll(liveDir, 0o755); err != nil {
 			return fmt.Errorf("fsstore: create %s: %w", liveDir, err)
 		}
-		if err := renameFile(trashed, target); err != nil {
-			return fmt.Errorf("fsstore: restore %s %q: %w", kind, id, err)
+		// Claim the live name exactly like a new record does: write a complete
+		// temporary file and hard-link it to the target, so a record published
+		// between the ID check above and this claim is never replaced. There is
+		// deliberately no Stat of the target first.
+		stem := strings.TrimSuffix(filepath.Base(target), ".md")
+		if err := publishRecordBytesExact(liveDir, kind, stem, raw); err != nil {
+			return err
+		}
+		if err := removeFile(trashed); err != nil {
+			// The record is live; a leftover trash copy is harmless (doctor
+			// reports a record that is both live and trashed), so report it
+			// without undoing the restore.
+			return fmt.Errorf("fsstore: restored %s %q but the trash copy could not be removed: %w", kind, id, err)
 		}
 		return nil
 	})
