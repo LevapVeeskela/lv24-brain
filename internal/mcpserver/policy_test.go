@@ -6,6 +6,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 )
 
 // policyFake is the two-project backend the policy tests use: it reports alpha
@@ -14,6 +15,7 @@ import (
 type policyFake struct {
 	fullFake
 	reviewed  []ReviewRecordInput
+	prompts   []PromptInput
 	workspace bool
 }
 
@@ -36,6 +38,17 @@ func (f *policyFake) ReviewRecord(_ context.Context, in ReviewRecordInput) (Revi
 	return ReviewRecordResult{ProjectID: in.ProjectID, Reviewed: []RecordSummary{{
 		Kind: "decision", ID: in.ID, ProjectID: in.ProjectID, Title: "Use fsstore",
 	}}}, nil
+}
+
+func (f *policyFake) PromptsEnabled() bool { return true }
+
+func (f *policyFake) SavePrompt(_ context.Context, in PromptInput) (PromptHit, error) {
+	f.prompts = append(f.prompts, in)
+	return PromptHit{ProjectID: in.ProjectID, Text: in.Text, At: time.Date(2026, 11, 15, 8, 0, 0, 0, time.UTC)}, nil
+}
+
+func (f *policyFake) ListPrompts(context.Context, PromptQuery) ([]PromptHit, error) {
+	return []PromptHit{}, nil
 }
 
 // policyCall runs one legacy tools/call against a server with a policy and
@@ -97,7 +110,7 @@ func policySession(t *testing.T, backend Backend, policy Policy, messages ...str
 // writeTools are every tool whose annotations say it writes.
 var writeTools = []string{
 	"brain_note", "brain_decision", "brain_attempt", "brain_handoff",
-	"brain_state_set", "brain_decision_status", "brain_review_record", "brain_judge",
+	"brain_state", "brain_judge", "brain_prompt",
 }
 
 func TestReadOnlyPolicyOmitsEveryWriteTool(t *testing.T) {
@@ -107,7 +120,7 @@ func TestReadOnlyPolicyOmitsEveryWriteTool(t *testing.T) {
 			t.Fatalf("read-only server lists write tool %s", tool)
 		}
 	}
-	for _, tool := range []string{"brain_open", "brain_context", "brain_search", "brain_records", "brain_record"} {
+	for _, tool := range []string{"brain_open", "brain_context", "brain_search", "brain_record", "brain_catchup", "brain_review", "brain_projects", "brain_capabilities"} {
 		if !names[tool] {
 			t.Fatalf("read-only server dropped read tool %s", tool)
 		}
@@ -252,13 +265,13 @@ func TestWriteScopeLimitsWritesToTheWorkingDirectoryProject(t *testing.T) {
 
 func TestWriteScopeAppliesToEveryWriteTool(t *testing.T) {
 	calls := map[string]string{
-		"brain_note":            `{"text":"x","project":"beta"}`,
-		"brain_decision":        `{"title":"x","project":"beta"}`,
-		"brain_attempt":         `{"title":"x","project":"beta"}`,
-		"brain_handoff":         `{"summary":"x","project":"beta"}`,
-		"brain_state_set":       `{"goal":"x","project":"beta"}`,
-		"brain_decision_status": `{"id":"decision-alpha-1","status":"accepted","project":"beta"}`,
-		"brain_review_record":   `{"id":"decision-alpha-1","project":"beta"}`,
+		"brain_note":     `{"text":"x","project":"beta"}`,
+		"brain_decision": `{"title":"x","project":"beta"}`,
+		"brain_attempt":  `{"title":"x","project":"beta"}`,
+		"brain_handoff":  `{"summary":"x","project":"beta"}`,
+		"brain_state":    `{"action":"set","goal":"x","project":"beta"}`,
+		"brain_judge":    `{"action":"accept","id":"decision-alpha-1","project":"beta"}`,
+		"brain_prompt":   `{"action":"save","content":"x","project":"beta"}`,
 	}
 	policy := Policy{RestrictWrites: true, DefaultProject: "alpha"}
 	for name, args := range calls {
@@ -319,6 +332,11 @@ func TestReadOnlyWinsOverAllowWrite(t *testing.T) {
 	if policy.allowsWrite("alpha") || policy.allowsWrite("beta") {
 		t.Fatal("read-only policy allowed a write")
 	}
+	// An embedded read-only server has no RestrictWrites; the hint must still
+	// hold, because a read-only annotation is a promise to the host.
+	if (Policy{ReadOnly: true}).allowsWrite("alpha") {
+		t.Fatal("read-only policy without RestrictWrites allowed a write")
+	}
 }
 
 func TestPolicyInfoShape(t *testing.T) {
@@ -333,8 +351,8 @@ func TestPolicyInfoShape(t *testing.T) {
 }
 
 func TestCatalogForPolicySplitsVisibleAndOmitted(t *testing.T) {
-	visible, omitted := CatalogForPolicy("test", Policy{ReadOnly: true})
-	if len(visible)+len(omitted) != len(Catalog("test")) {
+	visible, omitted := CatalogForPolicy("test", DefaultProfile(), Policy{ReadOnly: true})
+	if len(visible)+len(omitted) != len(Catalog("test", DefaultProfile())) {
 		t.Fatalf("catalogue lost tools: %d visible, %d omitted", len(visible), len(omitted))
 	}
 	for _, tool := range writeTools {
@@ -347,8 +365,8 @@ func TestCatalogForPolicySplitsVisibleAndOmitted(t *testing.T) {
 			t.Fatalf("read-only catalogue lists %s", spec.Name)
 		}
 	}
-	visible, omitted = CatalogForPolicy("test", Policy{})
-	if len(omitted) != 0 || len(visible) != len(Catalog("test")) {
+	visible, omitted = CatalogForPolicy("test", DefaultProfile(), Policy{})
+	if len(omitted) != 0 || len(visible) != len(Catalog("test", DefaultProfile())) {
 		t.Fatalf("unrestricted catalogue = %d visible, %d omitted", len(visible), len(omitted))
 	}
 }

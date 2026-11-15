@@ -56,12 +56,47 @@ type RefusalError struct {
 
 func (e *RefusalError) Error() string { return e.Refusal.Message }
 
+// RefusalCodes returns the closed refusal vocabulary in documented order.
+func RefusalCodes() []string {
+	return []string{
+		RefusalInvalidArguments,
+		RefusalNotFound,
+		RefusalConflict,
+		RefusalDuplicate,
+		RefusalUnsupported,
+		RefusalDeclined,
+		RefusalFailed,
+	}
+}
+
 // refusalInvalid builds an INVALID_ARGUMENTS refusal.
 func refusalInvalid(message string) *RefusalError {
 	return &RefusalError{Refusal: Refusal{
 		Code:       RefusalInvalidArguments,
 		Message:    message,
 		TryInstead: "check the arguments against inputSchema",
+	}}
+}
+
+// refusalInvalidWith builds an INVALID_ARGUMENTS refusal with an explicit
+// recovery hint.
+func refusalInvalidWith(message, tryInstead string) *RefusalError {
+	return &RefusalError{Refusal: Refusal{
+		Code:       RefusalInvalidArguments,
+		Message:    message,
+		TryInstead: tryInstead,
+	}}
+}
+
+// refusalConflict builds a CONFLICT refusal that reports the revision the
+// caller has to reconcile with.
+func refusalConflict(message, currentRevision, tryInstead string) *RefusalError {
+	return &RefusalError{Refusal: Refusal{
+		Code:            RefusalConflict,
+		Message:         message,
+		TryInstead:      tryInstead,
+		CurrentRevision: currentRevision,
+		Retryable:       true,
 	}}
 }
 

@@ -13,11 +13,17 @@ type mcpCatalogueJSON struct {
 		Name    string `json:"name"`
 		Version string `json:"version"`
 	} `json:"server"`
+	Profile struct {
+		Name    string `json:"name"`
+		Version string `json:"version"`
+		Strict  bool   `json:"strict"`
+	} `json:"profile"`
 	ProtocolVersions []string `json:"protocol_versions"`
 	Tools            []struct {
 		Name         string `json:"name"`
 		Title        string `json:"title"`
 		Description  string `json:"description"`
+		Policy       string `json:"policy"`
 		Annotations  map[string]any
 		InputSchema  map[string]any `json:"input_schema"`
 		OutputSchema map[string]any `json:"output_schema"`
@@ -39,15 +45,21 @@ func TestMCPListToolsJSONNeedsNoConfig(t *testing.T) {
 	if catalogue.Server.Name != "lv24-brain" || catalogue.Server.Version == "" {
 		t.Fatalf("server = %+v", catalogue.Server)
 	}
+	if catalogue.Profile.Name != "lv24" || catalogue.Profile.Version == "" {
+		t.Fatalf("profile = %+v", catalogue.Profile)
+	}
 	if len(catalogue.ProtocolVersions) == 0 || catalogue.ProtocolVersions[0] != "2026-07-28" {
 		t.Fatalf("protocol_versions = %v", catalogue.ProtocolVersions)
 	}
-	if len(catalogue.Tools) != 19 {
-		t.Fatalf("tools = %d, want 19", len(catalogue.Tools))
+	if len(catalogue.Tools) != 15 {
+		t.Fatalf("tools = %d, want 15", len(catalogue.Tools))
 	}
 	for _, tool := range catalogue.Tools {
 		if tool.Name == "" || tool.Title == "" || tool.Description == "" {
 			t.Fatalf("incomplete tool: %+v", tool)
+		}
+		if tool.Policy != "read" && tool.Policy != "append" && tool.Policy != "destructive" {
+			t.Fatalf("%s policy = %q", tool.Name, tool.Policy)
 		}
 		for _, hint := range []string{"readOnlyHint", "destructiveHint", "idempotentHint", "openWorldHint", "title"} {
 			if _, ok := tool.Annotations[hint]; !ok {
@@ -62,15 +74,15 @@ func TestMCPListToolsJSONNeedsNoConfig(t *testing.T) {
 		}
 	}
 	for _, tool := range catalogue.Tools {
-		if tool.Name != "brain_records" {
+		if tool.Name != "brain_record" {
 			continue
 		}
 		if tool.Limits["default_page_size"] != 50 || tool.Limits["max_page_size"] != 200 {
-			t.Fatalf("brain_records limits = %v", tool.Limits)
+			t.Fatalf("brain_record limits = %v", tool.Limits)
 		}
 		return
 	}
-	t.Fatal("brain_records missing from the catalogue")
+	t.Fatal("brain_record missing from the catalogue")
 }
 
 func TestMCPListToolsTextSummary(t *testing.T) {
@@ -78,7 +90,7 @@ func TestMCPListToolsTextSummary(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("exit code = %d (stderr: %s)", code, stderr)
 	}
-	for _, want := range []string{"brain_open", "brain_search", "brain_decision_status", "read"} {
+	for _, want := range []string{"brain_open", "brain_search", "brain_judge", "destructive"} {
 		if !strings.Contains(stdout, want) {
 			t.Fatalf("stdout missing %q: %s", want, stdout)
 		}
@@ -114,6 +126,24 @@ func TestMCPListToolsJSONIsStable(t *testing.T) {
 // modernEnvelope is the _meta a 2026 client sends on every request.
 const modernEnvelope = `"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}`
 
+func TestMCPProfileFlag(t *testing.T) {
+	code, stdout, stderr := runForTest(t, "mcp", "--list-tools", "--json", "--profile", "lv24", "--profile-version", "1")
+	if code != 0 {
+		t.Fatalf("exit code = %d (stderr: %s)", code, stderr)
+	}
+	if !strings.Contains(stdout, `"name": "lv24"`) {
+		t.Fatalf("stdout does not report the lv24 profile: %s", stdout)
+	}
+	code, _, stderr = runForTest(t, "mcp", "--list-tools", "--profile", "engram")
+	if code != 2 || !strings.Contains(stderr, "unknown profile") {
+		t.Fatalf("unknown profile: code = %d, stderr = %q", code, stderr)
+	}
+	code, _, stderr = runForTest(t, "mcp", "--list-tools", "--profile", "lv24", "--profile-version", "9")
+	if code != 2 || !strings.Contains(stderr, "unsupported profile version") {
+		t.Fatalf("unknown version: code = %d, stderr = %q", code, stderr)
+	}
+}
+
 func TestMCPModernSessionAgainstRealBackend(t *testing.T) {
 	dataDir := filepath.Join(t.TempDir(), "brain")
 	cfgPath := filepath.Join(dataDir, "brain.yaml")
@@ -127,7 +157,7 @@ func TestMCPModernSessionAgainstRealBackend(t *testing.T) {
 	discover := `{"jsonrpc":"2.0","id":1,"method":"server/discover","params":{` + modernEnvelope + `}}`
 	list := `{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{` + modernEnvelope + `}}`
 	note := `{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"brain_note","arguments":{"text":"modern client note","project":"modern"},` + modernEnvelope + `}}`
-	records := `{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"brain_records","arguments":{"project":"modern","limit":1},` + modernEnvelope + `}}`
+	records := `{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"brain_record","arguments":{"action":"list","project":"modern","limit":1},` + modernEnvelope + `}}`
 
 	code, responses, stderr := runMCPForTest(t, cfgPath, discover, list, note, records)
 	if code != 0 {

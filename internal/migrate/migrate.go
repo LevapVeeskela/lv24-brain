@@ -36,6 +36,7 @@ const (
 	decisionsDir = "decisions"
 	attemptsDir  = "attempts"
 	handoffsDir  = "handoffs"
+	promptsDir   = "prompts"
 
 	tempFilePrefix = ".tmp-"
 )
@@ -87,6 +88,91 @@ type Result struct {
 	Unchanged int          `json:"unchanged"`
 	Conflicts int          `json:"conflicts"`
 	Failed    int          `json:"failed"`
+
+	// SourceSystem names the adapter that produced the run ("engram" for the
+	// engram importer). It is empty for the legacy .brain importer.
+	SourceSystem string `json:"source_system,omitempty"`
+	// Scanned is the number of source rows read (live rows only).
+	Scanned int `json:"scanned,omitempty"`
+	// Imported is the number of source rows that became a curated record.
+	Imported int `json:"imported,omitempty"`
+	// Collapsed is the number of source rows folded into a surviving record
+	// (duplicate sync ids and older session summaries).
+	Collapsed int `json:"collapsed,omitempty"`
+	// Quarantined is the number of records imported into engram-unmapped.
+	Quarantined int `json:"quarantined,omitempty"`
+	// QuarantinedRows is the number of source rows whose project mapped to
+	// quarantine, before duplicate and summary collapse.
+	QuarantinedRows int `json:"quarantined_rows,omitempty"`
+	// Skipped is the number of source rows deliberately not imported.
+	Skipped int `json:"skipped,omitempty"`
+	// Relations is the number of typed relations imported.
+	Relations int `json:"relations,omitempty"`
+	// RelationsSkipped is the number of source relations not imported.
+	RelationsSkipped int `json:"relations_skipped,omitempty"`
+	// PromptRows is the number of source prompts read; Prompts is the number
+	// imported and PromptsSkipped the number excluded.
+	PromptRows     int  `json:"prompt_rows,omitempty"`
+	Prompts        int  `json:"prompts,omitempty"`
+	PromptsSkipped int  `json:"prompts_skipped,omitempty"`
+	PromptsOptIn   bool `json:"prompts_opt_in,omitempty"`
+	// Sessions is the number of source sessions used as provenance only.
+	Sessions int `json:"sessions,omitempty"`
+	// Redacted counts secret patterns replaced by the redactor.
+	Redacted int `json:"redacted,omitempty"`
+	// TreeHashBefore and TreeHashAfter prove a dry run wrote nothing and give
+	// the application a verifiable before/after fingerprint.
+	TreeHashBefore string `json:"tree_hash_before,omitempty"`
+	TreeHashAfter  string `json:"tree_hash_after,omitempty"`
+
+	ProjectMapping []ProjectMapping   `json:"project_mapping,omitempty"`
+	Collapse       []CollapseGroup    `json:"collapse,omitempty"`
+	QuarantineRows []QuarantineRecord `json:"quarantine_rows,omitempty"`
+	SkippedRows    []QuarantineRecord `json:"skipped_rows,omitempty"`
+	Duplicates     []DuplicateRecord  `json:"duplicates,omitempty"`
+	Warnings       []string           `json:"warnings,omitempty"`
+}
+
+// ProjectMapping is one aggregated project remap decision.
+type ProjectMapping struct {
+	Source    string `json:"source"`
+	Directory string `json:"directory,omitempty"`
+	Target    string `json:"target,omitempty"`
+	Scope     string `json:"scope,omitempty"`
+	Action    string `json:"action"`
+	Reason    string `json:"reason"`
+	Rows      int    `json:"rows"`
+}
+
+// CollapseGroup reports rows folded into one record.
+type CollapseGroup struct {
+	Project string `json:"project"`
+	Title   string `json:"title"`
+	Reason  string `json:"reason"`
+	Rows    int    `json:"rows"`
+	Kept    string `json:"kept"`
+}
+
+// QuarantineRecord names one row that was quarantined, skipped or failed.
+type QuarantineRecord struct {
+	SourceID string `json:"source_id"`
+	Project  string `json:"project,omitempty"`
+	Type     string `json:"type,omitempty"`
+	Title    string `json:"title,omitempty"`
+	Target   string `json:"target,omitempty"`
+	Reason   string `json:"reason"`
+}
+
+// DuplicateRecord is a report-only duplicate finding. Imports never merge
+// cross-source duplicates; the pair is left for brain review and brain_judge.
+type DuplicateRecord struct {
+	Scope      string  `json:"scope"` // cross-source or internal
+	Kind       string  `json:"kind"`
+	Project    string  `json:"project"`
+	ImportedID string  `json:"imported_id"`
+	OtherID    string  `json:"other_id"`
+	Similarity float64 `json:"similarity"`
+	Title      string  `json:"title,omitempty"`
 }
 
 // IncompleteError is returned when at least one file conflicted or failed.
@@ -340,6 +426,21 @@ func (r *Result) conflict(projectID, kind, sourceRel, targetRel, message string)
 func (r *Result) fail(projectID, kind, sourceRel, targetRel, message string) {
 	r.Failed++
 	r.Files = append(r.Files, FileResult{ProjectID: projectID, Kind: kind, SourcePath: sourceRel, TargetPath: targetRel, Status: StatusFailed, Error: message})
+}
+
+// warn records a unique, bounded warning so a corrupt row cannot turn the
+// report into a second copy of the source.
+func (r *Result) warn(message string) {
+	const maxWarnings = 50
+	for _, existing := range r.Warnings {
+		if existing == message {
+			return
+		}
+	}
+	if len(r.Warnings) >= maxWarnings {
+		return
+	}
+	r.Warnings = append(r.Warnings, message)
 }
 
 func resolveDirs(opts Options) (string, string, error) {

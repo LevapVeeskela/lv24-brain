@@ -16,8 +16,8 @@ func listToolsWith(t *testing.T, backend Backend) map[string]any {
 func TestContractEveryToolIsAnnotated(t *testing.T) {
 	result := listToolsWith(t, &fullFake{})
 	tools := result["tools"].([]any)
-	if len(tools) != 18 {
-		t.Fatalf("tools = %d, want 18", len(tools))
+	if len(tools) != 15 {
+		t.Fatalf("tools = %d, want 15", len(tools))
 	}
 	for _, raw := range tools {
 		tool := raw.(map[string]any)
@@ -46,10 +46,10 @@ func TestContractEveryToolIsAnnotated(t *testing.T) {
 func TestContractReadOnlyHintsMatchTheTools(t *testing.T) {
 	result := listToolsWith(t, &fullFake{})
 	readOnly := map[string]bool{
-		"brain_open": true, "brain_context": true, "brain_search": true, "brain_journal": true,
-		"brain_projects": true, "brain_state_get": true, "brain_catchup": true, "brain_review": true,
-		"brain_records": true, "brain_record": true, "brain_relations": true,
+		"brain_open": true, "brain_context": true, "brain_search": true, "brain_record": true,
+		"brain_catchup": true, "brain_review": true, "brain_projects": true, "brain_capabilities": true,
 	}
+	seen := 0
 	for _, raw := range result["tools"].([]any) {
 		tool := raw.(map[string]any)
 		name := tool["name"].(string)
@@ -57,13 +57,19 @@ func TestContractReadOnlyHintsMatchTheTools(t *testing.T) {
 		if got != readOnly[name] {
 			t.Fatalf("%s readOnlyHint = %v, want %v", name, got, readOnly[name])
 		}
+		if got == true {
+			seen++
+		}
+	}
+	if seen != 8 {
+		t.Fatalf("read-only tools = %d, want 8", seen)
 	}
 }
 
 func TestContractCatalogueCoversEveryTool(t *testing.T) {
-	specs := Catalog("test-version")
-	if len(specs) != 19 {
-		t.Fatalf("catalogue = %d tools, want 19", len(specs))
+	specs := Catalog("test-version", DefaultProfile())
+	if len(specs) != 15 {
+		t.Fatalf("catalogue = %d tools, want 15", len(specs))
 	}
 	seen := map[string]bool{}
 	for _, spec := range specs {
@@ -78,7 +84,7 @@ func TestContractCatalogueCoversEveryTool(t *testing.T) {
 			t.Fatalf("%s schemas = %v / %v", spec.Name, spec.InputSchema["type"], spec.OutputSchema["type"])
 		}
 	}
-	for _, name := range []string{"brain_search", "brain_records", "brain_journal", "brain_relations"} {
+	for _, name := range []string{"brain_search", "brain_record", "brain_catchup", "brain_judge"} {
 		spec := findSpec(t, specs, name)
 		for _, key := range []string{"default_page_size", "max_page_size"} {
 			if spec.Limits[key] <= 0 {
@@ -109,12 +115,12 @@ func TestContractPaginationWalksThreePagesWithoutDuplicates(t *testing.T) {
 	var seen []string
 	cursor := ""
 	for page := 1; page <= 3; page++ {
-		args := `{"project":"alpha","limit":3`
+		args := `{"action":"list","project":"alpha","limit":3`
 		if cursor != "" {
 			args += fmt.Sprintf(`,"cursor":%q`, cursor)
 		}
 		args += "}"
-		result := toolCall(t, backend, "brain_records", args)
+		result := toolCall(t, backend, "brain_record", args)
 		if result["isError"] != false {
 			t.Fatalf("page %d error: %v", page, result)
 		}
@@ -174,13 +180,13 @@ func TestContractPaginationRejectsForeignCursor(t *testing.T) {
 		{Kind: "decision", ID: "decision-1", ProjectID: "alpha", Title: "one"},
 		{Kind: "decision", ID: "decision-2", ProjectID: "alpha", Title: "two"},
 	}
-	first := structured(t, toolCall(t, backend, "brain_records", `{"project":"alpha","limit":1}`))
+	first := structured(t, toolCall(t, backend, "brain_record", `{"action":"list","project":"alpha","limit":1}`))
 	cursor, _ := first["next_cursor"].(string)
 	if cursor == "" {
 		t.Fatalf("no cursor to reuse: %v", first)
 	}
 	// The same cursor for another project (a different query) must be refused.
-	result := toolCall(t, backend, "brain_records", fmt.Sprintf(`{"project":"beta","limit":1,"cursor":%q}`, cursor))
+	result := toolCall(t, backend, "brain_record", fmt.Sprintf(`{"action":"list","project":"beta","limit":1,"cursor":%q}`, cursor))
 	if result["isError"] != true {
 		t.Fatalf("foreign cursor accepted: %v", result)
 	}
@@ -244,7 +250,7 @@ func TestContractRefusalCodesFromTheBackend(t *testing.T) {
 		t.Fatalf("not-found code = %v", code)
 	}
 	conflict := &fullFake{conflicts: true}
-	result = toolCall(t, conflict, "brain_decision_status", `{"id":"decision-1","status":"accepted"}`)
+	result = toolCall(t, conflict, "brain_judge", `{"action":"accept","id":"decision-1"}`)
 	refusal := structured(t, result)
 	if refusal["code"] != RefusalConflict {
 		t.Fatalf("conflict code = %v", refusal["code"])
@@ -254,11 +260,11 @@ func TestContractRefusalCodesFromTheBackend(t *testing.T) {
 	}
 }
 
-func TestContractDecisionStatusRequiresStatusOrSupersede(t *testing.T) {
-	result := toolCall(t, &fullFake{}, "brain_decision_status", `{"id":"decision-1"}`)
+func TestContractSupersedeRequiresTarget(t *testing.T) {
+	result := toolCall(t, &fullFake{}, "brain_judge", `{"action":"supersede","id":"decision-1"}`)
 	refusal := structured(t, result)
-	if refusal["code"] != RefusalUnsupported {
-		t.Fatalf("code = %v, want %s", refusal["code"], RefusalUnsupported)
+	if refusal["code"] != RefusalInvalidArguments {
+		t.Fatalf("code = %v, want %s", refusal["code"], RefusalInvalidArguments)
 	}
 	if refusal["try_instead"] == "" {
 		t.Fatalf("no recovery hint: %v", refusal)
@@ -268,7 +274,7 @@ func TestContractDecisionStatusRequiresStatusOrSupersede(t *testing.T) {
 func TestContractPageLimitsAreCapped(t *testing.T) {
 	backend := &fullFake{}
 	backend.records = []RecordSummary{{Kind: "decision", ID: "decision-1", ProjectID: "alpha", Title: "one"}}
-	result := toolCall(t, backend, "brain_records", `{"project":"alpha","limit":10000}`)
+	result := toolCall(t, backend, "brain_record", `{"action":"list","project":"alpha","limit":10000}`)
 	obj := structured(t, result)
 	if obj["page_size"] != float64(recordsMaxPageSize) {
 		t.Fatalf("page_size = %v, want %d", obj["page_size"], recordsMaxPageSize)

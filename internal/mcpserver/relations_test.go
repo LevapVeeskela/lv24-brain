@@ -37,7 +37,7 @@ func threeRelations() []RelationRow {
 
 func TestRelationsListPagesWithTheCursorContract(t *testing.T) {
 	backend := &relationFake{fullFake: fullFake{relations: threeRelations()}}
-	first := toolCall(t, backend, "brain_relations", `{"project":"alpha","limit":2}`)
+	first := toolCall(t, backend, "brain_record", `{"action":"relations","project":"alpha","limit":2}`)
 	if first["isError"] != false {
 		t.Fatalf("first page = %v", first)
 	}
@@ -55,8 +55,8 @@ func TestRelationsListPagesWithTheCursorContract(t *testing.T) {
 	if cursor == "" {
 		t.Fatalf("next_cursor missing: %v", page)
 	}
-	second := structured(t, toolCall(t, backend, "brain_relations",
-		fmt.Sprintf(`{"project":"alpha","limit":2,"cursor":%q}`, cursor)))
+	second := structured(t, toolCall(t, backend, "brain_record",
+		fmt.Sprintf(`{"action":"relations","project":"alpha","limit":2,"cursor":%q}`, cursor)))
 	if rows := second["relations"].([]any); len(rows) != 1 {
 		t.Fatalf("second page rows = %d, want 1", len(rows))
 	}
@@ -70,8 +70,8 @@ func TestRelationsListPagesWithTheCursorContract(t *testing.T) {
 
 func TestRelationsListForwardsTheFilters(t *testing.T) {
 	backend := &relationFake{fullFake: fullFake{relations: threeRelations()}}
-	toolCall(t, backend, "brain_relations",
-		`{"project":"alpha","id":"note-1","status":"pending","relation":"relates_to","limit":5}`)
+	toolCall(t, backend, "brain_record",
+		`{"action":"relations","project":"alpha","id":"note-1","status":"pending","relation":"relates_to","limit":5}`)
 	query := backend.query
 	if query.ProjectID != "alpha" || query.ID != "note-1" || query.Target != "" {
 		t.Fatalf("query = %+v", query)
@@ -93,14 +93,14 @@ func TestRelationsListRefusals(t *testing.T) {
 		name string
 		args string
 	}{
-		{"both ends", `{"project":"alpha","id":"note-1","target":"note-2"}`},
-		{"unknown status", `{"project":"alpha","status":"someday"}`},
-		{"unknown relation", `{"project":"alpha","relation":"likes"}`},
+		{"both ends", `{"action":"relations","project":"alpha","id":"note-1","target":"note-2"}`},
+		{"unknown status", `{"action":"relations","project":"alpha","status":"someday"}`},
+		{"unknown relation", `{"action":"relations","project":"alpha","relation":"likes"}`},
 	}
 	for _, test := range cases {
 		t.Run(test.name, func(t *testing.T) {
 			backend := &relationFake{fullFake: fullFake{relations: threeRelations()}}
-			result := toolCall(t, backend, "brain_relations", test.args)
+			result := toolCall(t, backend, "brain_record", test.args)
 			if result["isError"] != true {
 				t.Fatalf("accepted: %v", result)
 			}
@@ -176,8 +176,8 @@ func TestReadOnlyPolicyDropsTheJudgeAndKeepsTheListing(t *testing.T) {
 	if names["brain_judge"] {
 		t.Fatal("read-only server lists brain_judge")
 	}
-	if !names["brain_relations"] {
-		t.Fatal("read-only server dropped brain_relations")
+	if !names["brain_record"] {
+		t.Fatal("read-only server dropped brain_record")
 	}
 	backend := &relationFake{}
 	result := policyCall(t, backend, Policy{ReadOnly: true}, "brain_judge",

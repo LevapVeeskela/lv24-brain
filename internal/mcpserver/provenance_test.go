@@ -7,8 +7,7 @@ import (
 	"time"
 )
 
-// quarantineReviewFake adds the quarantine review capability to fullFake, so tools/list
-// reports the temporary brain_review_record tool.
+// quarantineReviewFake adds the quarantine review capability to fullFake.
 type quarantineReviewFake struct {
 	fullFake
 	reviews []ReviewRecordInput
@@ -26,14 +25,13 @@ func (f *quarantineReviewFake) ReviewRecord(_ context.Context, in ReviewRecordIn
 	}, nil
 }
 
-func TestReviewRecordToolIsListedOnlyForReviewBackends(t *testing.T) {
+func TestReviewActionIsAlwaysListed(t *testing.T) {
 	plain := listToolsWith(t, &fullFake{})
-	if toolNameSet(plain)["brain_review_record"] {
-		t.Fatal("brain_review_record is listed for a backend that cannot review records")
+	if !toolNameSet(plain)["brain_judge"] {
+		t.Fatal("brain_judge is missing from the 15-tool surface")
 	}
-	review := listToolsWith(t, &quarantineReviewFake{})
-	if !toolNameSet(review)["brain_review_record"] {
-		t.Fatal("brain_review_record is missing for a review backend")
+	if toolNameSet(plain)["brain_review_record"] {
+		t.Fatal("retired brain_review_record is still listed")
 	}
 }
 
@@ -45,11 +43,11 @@ func toolNameSet(result map[string]any) map[string]bool {
 	return names
 }
 
-func TestReviewRecordToolCallsTheBackend(t *testing.T) {
+func TestReviewActionCallsTheBackend(t *testing.T) {
 	backend := &quarantineReviewFake{}
-	result := toolCall(t, backend, "brain_review_record", `{"id":"decision-alpha-1","trust":"stated"}`)
+	result := toolCall(t, backend, "brain_judge", `{"action":"review","id":"decision-alpha-1","trust":"stated"}`)
 	if result["isError"] != false {
-		t.Fatalf("brain_review_record error: %v", result)
+		t.Fatalf("brain_judge review error: %v", result)
 	}
 	if len(backend.reviews) != 1 {
 		t.Fatalf("reviews = %+v, want 1", backend.reviews)
@@ -65,19 +63,20 @@ func TestReviewRecordToolCallsTheBackend(t *testing.T) {
 		t.Fatalf("structured = %v", obj)
 	}
 
-	all := toolCall(t, backend, "brain_review_record", `{"all":true}`)
+	all := toolCall(t, backend, "brain_judge", `{"action":"review","ids":["*"]}`)
 	if all["isError"] != false || backend.reviews[1].All != true {
 		t.Fatalf("review all = %v, input %+v", all, backend.reviews)
 	}
 }
 
-func TestReviewRecordToolRejectsAmbiguousArguments(t *testing.T) {
+func TestReviewActionRejectsAmbiguousArguments(t *testing.T) {
 	for name, args := range map[string]string{
-		"neither": `{}`,
-		"both":    `{"id":"decision-alpha-1","all":true}`,
-		"trust":   `{"all":true,"trust":"guessed"}`,
+		"neither": `{"action":"review"}`,
+		"both":    `{"action":"review","id":"decision-alpha-1","ids":["decision-alpha-2"]}`,
+		"trust":   `{"action":"review","ids":["*"],"trust":"guessed"}`,
+		"wrong":   `{"action":"accept","id":"decision-alpha-1","trust":"stated"}`,
 	} {
-		result := toolCall(t, &quarantineReviewFake{}, "brain_review_record", args)
+		result := toolCall(t, &quarantineReviewFake{}, "brain_judge", args)
 		if result["isError"] != true {
 			t.Fatalf("%s: accepted %s", name, args)
 		}
@@ -117,24 +116,24 @@ func TestCatchupTextReportsQuarantinedIDs(t *testing.T) {
 	}
 }
 
-func TestReviewRecordToolIsMutatingAndAnnotated(t *testing.T) {
+func TestJudgeIsDestructiveAndAnnotated(t *testing.T) {
 	result := listToolsWith(t, &quarantineReviewFake{})
 	for _, raw := range result["tools"].([]any) {
 		tool := raw.(map[string]any)
-		if tool["name"] != "brain_review_record" {
+		if tool["name"] != "brain_judge" {
 			continue
 		}
 		annotations := tool["annotations"].(map[string]any)
 		if annotations["readOnlyHint"] != false {
-			t.Fatalf("review tool is read-only: %v", annotations)
+			t.Fatalf("judge tool is read-only: %v", annotations)
 		}
 		if annotations["destructiveHint"] != true {
-			t.Fatalf("review tool is not marked mutating: %v", annotations)
+			t.Fatalf("judge tool is not marked destructive: %v", annotations)
 		}
-		if !strings.Contains(tool["description"].(string), "brain_judge") {
-			t.Fatalf("temporary status is not documented: %v", tool["description"])
+		if !strings.Contains(tool["description"].(string), "action=judge") {
+			t.Fatalf("actions are not documented: %v", tool["description"])
 		}
 		return
 	}
-	t.Fatal("brain_review_record missing")
+	t.Fatal("brain_judge missing")
 }

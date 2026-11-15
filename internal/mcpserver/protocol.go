@@ -84,6 +84,12 @@ func mutatingAnnotations(title string) Annotations {
 	return Annotations{Title: title, ReadOnlyHint: false, DestructiveHint: true, IdempotentHint: true, OpenWorldHint: false}
 }
 
+// unrepeatedDestructiveAnnotations describes a destructive tool whose repeated
+// call is not a no-op, for example one that appends or discards local data.
+func unrepeatedDestructiveAnnotations(title string) Annotations {
+	return Annotations{Title: title, ReadOnlyHint: false, DestructiveHint: true, IdempotentHint: false, OpenWorldHint: false}
+}
+
 // revision is the protocol era one request is served under.
 type revision int
 

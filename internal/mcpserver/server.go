@@ -29,7 +29,7 @@ import (
 // result.
 const serverInstructions = "Company Brain is the curated memory of this project. " +
 	"Call brain_open at the start of a session to load the project's state, decisions, attempts and last handoff, " +
-	"and use brain_search or brain_journal to find earlier work. " +
+	"then brain_catchup and brain_search to find earlier work. " +
 	"Record durable findings as they happen with brain_note, brain_decision and brain_attempt (a failed approach, with its reason). " +
 	"Call brain_handoff at the end of the session with a summary and the next action; git context is captured automatically. " +
 	"Never store secrets, tokens or personal data in the brain."
@@ -50,6 +50,8 @@ const (
 type Server struct {
 	backend Backend
 	version string
+	// profile is the tool vocabulary this server exposes.
+	profile Profile
 	// tools is the effective tool list: what tools/list reports and what
 	// tools/call may run. allTools also holds the tools the policy omits, so a
 	// call to a hidden write tool gets a typed refusal.
@@ -64,17 +66,25 @@ type Server struct {
 }
 
 // New builds an unrestricted Server. version is reported as serverInfo.version.
-// It serves every tool over every registered project, as releases before 0.15
-// did; use NewWithPolicy for a least-privilege profile.
+// It serves the native profile over every registered project, as releases
+// before 0.15 did; use NewWithPolicy for a least-privilege profile.
 func New(backend Backend, version string) *Server {
 	return NewWithPolicy(backend, version, Policy{})
 }
 
-// NewWithPolicy builds a Server with a least-privilege policy. The policy is
-// applied when the server is built: a read-only server never lists a write
-// tool, so a host cannot call one it was not offered.
+// NewWithPolicy builds a Server with a least-privilege policy and the default
+// profile. The policy is applied when the server is built: a read-only server
+// never lists a write tool, so a host cannot call one it was not offered.
 func NewWithPolicy(backend Backend, version string, policy Policy) *Server {
-	s := &Server{backend: backend, version: version, policy: policy, mrtKey: newMRTRKey()}
+	return NewWithProfile(backend, version, DefaultProfile(), policy)
+}
+
+// NewWithProfile builds a Server with an explicit profile and policy.
+func NewWithProfile(backend Backend, version string, profile Profile, policy Policy) *Server {
+	if profile.Name == "" {
+		profile = DefaultProfile()
+	}
+	s := &Server{backend: backend, version: version, profile: profile, policy: policy, mrtKey: newMRTRKey()}
 	s.allTools = s.toolList()
 	s.tools = s.applyPolicy(s.allTools)
 	return s
@@ -252,6 +262,9 @@ type toolInfo struct {
 	InputSchema  map[string]any `json:"inputSchema"`
 	OutputSchema map[string]any `json:"outputSchema,omitempty"`
 	Annotations  Annotations    `json:"annotations"`
+	// ReadActions marks the non-mutating actions of a mixed tool; clients
+	// ignore unknown fields, hosts and docs use it.
+	ReadActions []string `json:"x-lv24-read-actions,omitempty"`
 }
 
 func (s *Server) listTools(params json.RawMessage) (json.RawMessage, *rpcError) {
@@ -275,6 +288,7 @@ func (s *Server) listTools(params json.RawMessage) (json.RawMessage, *rpcError) 
 			InputSchema:  t.InputSchema,
 			OutputSchema: t.OutputSchema,
 			Annotations:  t.Annotations,
+			ReadActions:  t.ReadActions,
 		})
 	}
 	return marshalResult(struct {
@@ -311,6 +325,11 @@ func (s *Server) callTool(ctx context.Context, env envelope, params json.RawMess
 	}
 	t, ok := s.findTool(p.Name)
 	if !ok {
+		if retired, known := retiredTools[p.Name]; known {
+			// 0.17 retired seven names. A typed NOT_FOUND with the native
+			// replacement keeps a stale client from guessing.
+			return refusalResult(retiredRefusal(p.Name, retired))
+		}
 		if hidden, known := s.findAnyTool(p.Name); known {
 			// The policy omitted the tool, so the call must not reach the
 			// backend. A typed refusal tells the caller what to do instead.

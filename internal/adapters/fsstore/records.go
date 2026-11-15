@@ -210,6 +210,7 @@ type sourceRefFrontmatter struct {
 	ItemKey      string  `yaml:"item_key,omitempty"`
 	ExternalID   string  `yaml:"external_id,omitempty"`
 	URL          string  `yaml:"url,omitempty"`
+	Session      string  `yaml:"session,omitempty"`
 	ObservedAt   string  `yaml:"observed_at,omitempty"`
 	ProposalID   string  `yaml:"proposal_id,omitempty"`
 	Confidence   float64 `yaml:"confidence,omitempty"`
@@ -225,6 +226,7 @@ func sourceRefToFrontmatter(source *domain.SourceRef) *sourceRefFrontmatter {
 		ItemKey:      source.ItemKey,
 		ExternalID:   source.ExternalID,
 		URL:          source.URL,
+		Session:      source.Session,
 		ObservedAt:   formatItemTime(source.ObservedAt),
 		ProposalID:   source.ProposalID,
 		Confidence:   source.Confidence,
@@ -244,6 +246,7 @@ func sourceRefFromFrontmatter(source *sourceRefFrontmatter) (*domain.SourceRef, 
 		ItemKey:      source.ItemKey,
 		ExternalID:   source.ExternalID,
 		URL:          source.URL,
+		Session:      strings.TrimSpace(source.Session),
 		ObservedAt:   observedAt,
 		ProposalID:   source.ProposalID,
 		Confidence:   source.Confidence,

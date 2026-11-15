@@ -239,8 +239,8 @@ func TestProtocolModernToolsListNeedsNoHandshake(t *testing.T) {
 	if meta, ok := result["_meta"].(map[string]any); !ok || meta[metaServerInfo] == nil {
 		t.Fatalf("_meta = %v", result["_meta"])
 	}
-	if got := len(toolNames(t, result)); got != 18 {
-		t.Fatalf("tools = %d, want 18", got)
+	if got := len(toolNames(t, result)); got != 15 {
+		t.Fatalf("tools = %d, want 15", got)
 	}
 }
 
@@ -356,13 +356,13 @@ func TestProtocolMRTRRetryCompletesTheCall(t *testing.T) {
 	backend := &fullFake{}
 	server := New(backend, "test-version")
 	prompt := resultOf(t, serveSession(t, server,
-		modernCall(1, "brain_decision_status", `{"id":"decision-alpha-1","superseded_by":"decision-alpha-2"}`, elicitationMeta),
+		modernCall(1, "brain_judge", `{"action":"supersede","id":"decision-alpha-1","to":"decision-alpha-2"}`, elicitationMeta),
 	)[0])
 	state := prompt["requestState"].(string)
 
-	args := `{"id":"decision-alpha-1","superseded_by":"decision-alpha-2"}`
+	args := `{"action":"supersede","id":"decision-alpha-1","to":"decision-alpha-2"}`
 	retry := modernRequest(2, "tools/call",
-		fmt.Sprintf(`"name":"brain_decision_status","arguments":%s,"inputResponses":{"%s":{"action":"accept","content":{"confirm":true}}},"requestState":%q`, args, confirmationKey, state),
+		fmt.Sprintf(`"name":"brain_judge","arguments":%s,"inputResponses":{"%s":{"action":"accept","content":{"confirm":true}}},"requestState":%q`, args, confirmationKey, state),
 		elicitationMeta)
 	result := resultOf(t, serveSession(t, server, retry)[0])
 	if result["resultType"] != resultComplete {
@@ -380,13 +380,13 @@ func TestProtocolMRTRDeclineChangesNothing(t *testing.T) {
 	backend := &fullFake{}
 	server := New(backend, "test-version")
 	prompt := resultOf(t, serveSession(t, server,
-		modernCall(1, "brain_decision_status", `{"id":"decision-alpha-1","superseded_by":"decision-alpha-2"}`, elicitationMeta),
+		modernCall(1, "brain_judge", `{"action":"supersede","id":"decision-alpha-1","to":"decision-alpha-2"}`, elicitationMeta),
 	)[0])
 	state := prompt["requestState"].(string)
 
-	args := `{"id":"decision-alpha-1","superseded_by":"decision-alpha-2"}`
+	args := `{"action":"supersede","id":"decision-alpha-1","to":"decision-alpha-2"}`
 	retry := modernRequest(2, "tools/call",
-		fmt.Sprintf(`"name":"brain_decision_status","arguments":%s,"inputResponses":{"%s":{"action":"decline"}},"requestState":%q`, args, confirmationKey, state),
+		fmt.Sprintf(`"name":"brain_judge","arguments":%s,"inputResponses":{"%s":{"action":"decline"}},"requestState":%q`, args, confirmationKey, state),
 		elicitationMeta)
 	result := resultOf(t, serveSession(t, server, retry)[0])
 	if result["isError"] != true {
@@ -403,9 +403,9 @@ func TestProtocolMRTRDeclineChangesNothing(t *testing.T) {
 
 func TestProtocolMRTRTamperedStateIsRefused(t *testing.T) {
 	backend := &fullFake{}
-	args := `{"id":"decision-alpha-1","superseded_by":"decision-alpha-2"}`
+	args := `{"action":"supersede","id":"decision-alpha-1","to":"decision-alpha-2"}`
 	retry := modernRequest(2, "tools/call",
-		fmt.Sprintf(`"name":"brain_decision_status","arguments":%s,"inputResponses":{"%s":{"action":"accept","content":{"confirm":true}}},"requestState":"forged.state"`, args, confirmationKey),
+		fmt.Sprintf(`"name":"brain_judge","arguments":%s,"inputResponses":{"%s":{"action":"accept","content":{"confirm":true}}},"requestState":"forged.state"`, args, confirmationKey),
 		elicitationMeta)
 	result := resultOf(t, session(t, backend, retry)[0])
 	if result["isError"] != true {
@@ -424,7 +424,7 @@ func TestProtocolMRTRWithoutElicitationRunsTheCall(t *testing.T) {
 	// the call keeps the pre-MRTR behaviour.
 	backend := &fullFake{}
 	result := resultOf(t, session(t, backend,
-		modernCall(1, "brain_decision_status", `{"id":"decision-alpha-1","superseded_by":"decision-alpha-2"}`, modernMeta),
+		modernCall(1, "brain_judge", `{"action":"supersede","id":"decision-alpha-1","to":"decision-alpha-2"}`, modernMeta),
 	)[0])
 	if result["isError"] != false {
 		t.Fatalf("isError = %v", result["isError"])
@@ -439,7 +439,7 @@ func TestProtocolMRTRWithoutElicitationRunsTheCall(t *testing.T) {
 
 func TestProtocolMRTRLegacyClientsAreNeverPrompted(t *testing.T) {
 	backend := &fullFake{}
-	result := toolCall(t, backend, "brain_decision_status", `{"id":"decision-alpha-1","superseded_by":"decision-alpha-2"}`)
+	result := toolCall(t, backend, "brain_judge", `{"action":"supersede","id":"decision-alpha-1","to":"decision-alpha-2"}`)
 	if result["isError"] != false {
 		t.Fatalf("isError = %v", result["isError"])
 	}

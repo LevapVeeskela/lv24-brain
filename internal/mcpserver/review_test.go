@@ -84,7 +84,7 @@ func TestMCPServerReviewToolNeverFixes(t *testing.T) {
 	}
 }
 
-func TestMCPServerReviewToolOnlyWithReviewBackend(t *testing.T) {
+func TestMCPServerReviewToolIsAlwaysListed(t *testing.T) {
 	names := func(backend Backend) string {
 		var list []string
 		for _, tool := range New(backend, "test").toolList() {
@@ -92,10 +92,13 @@ func TestMCPServerReviewToolOnlyWithReviewBackend(t *testing.T) {
 		}
 		return strings.Join(list, ",")
 	}
-	if strings.Contains(names(&fakeBackend{}), "brain_review") {
-		t.Fatal("review tool listed for a backend without review support")
+	if !strings.Contains(names(&fakeBackend{}), "brain_review") {
+		t.Fatal("brain_review is missing from the 15-tool surface")
 	}
-	if !strings.Contains(names(&reviewFake{}), "brain_review") {
-		t.Fatal("review tool missing for a review backend")
+	if strings.Contains(names(&fakeBackend{}), "brain_review_record") {
+		t.Fatal("retired brain_review_record is still listed")
+	}
+	if got := callTool(t, &fakeBackend{}, "brain_review", `{}`); got["isError"] != true {
+		t.Fatalf("review without a review backend accepted: %+v", got)
 	}
 }

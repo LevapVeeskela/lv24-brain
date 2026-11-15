@@ -24,7 +24,10 @@ func (f *recordFake) GetRecord(_ context.Context, projectID, id string) (RecordD
 	if id != "decision-alpha-1" {
 		return RecordDetail{}, fmt.Errorf("record %q: not found", id)
 	}
-	return RecordDetail{Kind: "decision", ID: id, ProjectID: projectID, Title: "Use fsstore", Status: "proposed", Context: "Need persistence"}, nil
+	return RecordDetail{
+		Kind: "decision", ID: id, ProjectID: projectID, Title: "Use fsstore", Status: "proposed", Context: "Need persistence",
+		Links: []RecordLink{{Field: "evidence", Ref: "note-alpha-1", ProjectID: projectID, ID: "note-alpha-1", State: "found", Kind: "note", Title: "cache"}},
+	}, nil
 }
 
 func (f *recordFake) SetDecisionStatus(_ context.Context, projectID, id, status string) (RecordSummary, error) {
@@ -46,12 +49,12 @@ func textOf(t *testing.T, got map[string]any) string {
 	return content[0].(map[string]any)["text"].(string)
 }
 
-func TestMCPServerRecordsListTool(t *testing.T) {
+func TestMCPServerRecordsListAction(t *testing.T) {
 	backend := &recordFake{}
 
-	got := callTool(t, backend, "brain_records", `{"project":"alpha","kinds":["decision"],"since_days":3,"status":"proposed","limit":5}`)
+	got := callTool(t, backend, "brain_record", `{"action":"list","project":"alpha","kinds":["decision"],"since_days":3,"status":"proposed","limit":5}`)
 	if got["isError"] == true {
-		t.Fatalf("brain_records error: %+v", got)
+		t.Fatalf("brain_record action=list error: %+v", got)
 	}
 	// Page size 5 plus one look-ahead row.
 	if backend.query.ProjectID != "alpha" || backend.query.Status != "proposed" || backend.query.Limit != 6 {
@@ -71,15 +74,15 @@ func TestMCPServerRecordsListTool(t *testing.T) {
 		t.Fatalf("structured records = %v", records)
 	}
 
-	if got = callTool(t, backend, "brain_records", `{"since_days":-1}`); got["isError"] != true {
+	if got = callTool(t, backend, "brain_record", `{"action":"list","since_days":-1}`); got["isError"] != true {
 		t.Fatalf("negative since_days accepted: %+v", got)
 	}
-	if got = callTool(t, backend, "brain_records", `{"status":"maybe"}`); got["isError"] != true {
+	if got = callTool(t, backend, "brain_record", `{"action":"list","status":"maybe"}`); got["isError"] != true {
 		t.Fatalf("unknown status accepted: %+v", got)
 	}
 }
 
-func TestMCPServerRecordShowTool(t *testing.T) {
+func TestMCPServerRecordGetAction(t *testing.T) {
 	backend := &recordFake{}
 
 	got := callTool(t, backend, "brain_record", `{"id":"decision-alpha-1","project":"alpha"}`)
@@ -102,12 +105,26 @@ func TestMCPServerRecordShowTool(t *testing.T) {
 	}
 }
 
-func TestMCPServerDecisionStatusTool(t *testing.T) {
+func TestMCPServerRecordLinksAction(t *testing.T) {
+	got := callTool(t, &recordFake{}, "brain_record", `{"action":"links","id":"decision-alpha-1","project":"alpha"}`)
+	if got["isError"] == true {
+		t.Fatalf("brain_record action=links error: %+v", got)
+	}
+	obj := got["structuredContent"].(map[string]any)
+	if len(obj["links"].([]any)) != 1 || obj["links"].([]any)[0].(map[string]any)["id"] != "note-alpha-1" {
+		t.Fatalf("links = %v", obj["links"])
+	}
+	if text := textOf(t, got); !strings.Contains(text, "link: note-alpha-1") {
+		t.Fatalf("text = %q", text)
+	}
+}
+
+func TestMCPServerDecisionLifecycleMovedToJudge(t *testing.T) {
 	backend := &recordFake{}
 
-	got := callTool(t, backend, "brain_decision_status", `{"id":"decision-alpha-1","status":"accepted","project":"alpha"}`)
+	got := callTool(t, backend, "brain_judge", `{"action":"accept","id":"decision-alpha-1","project":"alpha"}`)
 	if got["isError"] == true {
-		t.Fatalf("brain_decision_status error: %+v", got)
+		t.Fatalf("brain_judge accept error: %+v", got)
 	}
 	if len(backend.statusCalls) != 1 || backend.statusCalls[0] != "decision-alpha-1=accepted" {
 		t.Fatalf("status calls = %v", backend.statusCalls)
@@ -116,7 +133,7 @@ func TestMCPServerDecisionStatusTool(t *testing.T) {
 		t.Fatalf("text = %q", text)
 	}
 
-	got = callTool(t, backend, "brain_decision_status", `{"id":"decision-alpha-1","status":"accepted","superseded_by":"decision-alpha-2"}`)
+	got = callTool(t, backend, "brain_judge", `{"action":"supersede","id":"decision-alpha-1","to":"decision-alpha-2"}`)
 	if got["isError"] == true {
 		t.Fatalf("supersede error: %+v", got)
 	}
@@ -124,18 +141,20 @@ func TestMCPServerDecisionStatusTool(t *testing.T) {
 		t.Fatalf("supersede calls = %v", backend.supersedes)
 	}
 	if len(backend.statusCalls) != 1 {
-		t.Fatalf("superseded_by must ignore status, status calls = %v", backend.statusCalls)
+		t.Fatalf("supersede must not set a status directly, status calls = %v", backend.statusCalls)
 	}
 
-	if got = callTool(t, backend, "brain_decision_status", `{"id":"decision-alpha-1"}`); got["isError"] != true {
-		t.Fatalf("neither status nor superseded_by accepted: %+v", got)
+	got = callTool(t, backend, "brain_decision", `{"title":"Adopt Go","status":"accepted"}`)
+	if got["isError"] != true {
+		t.Fatalf("brain_decision accepted status: %+v", got)
 	}
-	if got = callTool(t, backend, "brain_decision_status", `{"id":"decision-alpha-1","status":"trashed"}`); got["isError"] != true {
-		t.Fatalf("unknown status accepted: %+v", got)
+	refusal := got["structuredContent"].(map[string]any)
+	if refusal["code"] != RefusalInvalidArguments || !strings.Contains(refusal["try_instead"].(string), "brain_judge") {
+		t.Fatalf("refusal = %v", refusal)
 	}
 }
 
-func TestMCPServerRecordToolsOnlyWithRecordBackend(t *testing.T) {
+func TestMCPServerRecordToolIsAlwaysListed(t *testing.T) {
 	names := func(backend Backend) string {
 		var list []string
 		for _, tool := range New(backend, "test").toolList() {
@@ -143,14 +162,12 @@ func TestMCPServerRecordToolsOnlyWithRecordBackend(t *testing.T) {
 		}
 		return strings.Join(list, ",")
 	}
-	if strings.Contains(names(&fakeBackend{}), "brain_records") {
-		t.Fatal("record tools listed for a backend without record support")
+	if !strings.Contains(names(&fakeBackend{}), "brain_record") {
+		t.Fatal("brain_record is missing for a backend without record support")
 	}
 	listed := names(&recordFake{})
-	for _, name := range []string{"brain_records", "brain_record", "brain_decision_status"} {
-		if !strings.Contains(listed, name) {
-			t.Fatalf("%s missing for a record backend", name)
-		}
+	if !strings.Contains(listed, "brain_record") {
+		t.Fatalf("brain_record missing for a record backend: %s", listed)
 	}
 	if strings.Contains(listed, "trash") || strings.Contains(listed, "restore") {
 		t.Fatal("destructive record operations must stay CLI-only")

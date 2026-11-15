@@ -57,7 +57,7 @@ func TestMCPServerCatchupTool(t *testing.T) {
 	}
 }
 
-func TestMCPServerCatchupToolOnlyWithCatchupBackend(t *testing.T) {
+func TestMCPServerCatchupToolIsAlwaysListed(t *testing.T) {
 	names := func(backend Backend) string {
 		var list []string
 		for _, tool := range New(backend, "test").toolList() {
@@ -65,10 +65,10 @@ func TestMCPServerCatchupToolOnlyWithCatchupBackend(t *testing.T) {
 		}
 		return strings.Join(list, ",")
 	}
-	if strings.Contains(names(&fakeBackend{}), "brain_catchup") {
-		t.Fatal("catchup tool listed for a backend without catchup support")
+	if !strings.Contains(names(&fakeBackend{}), "brain_catchup") {
+		t.Fatal("brain_catchup is missing from the 15-tool surface")
 	}
-	if !strings.Contains(names(&catchupFake{}), "brain_catchup") {
-		t.Fatal("catchup tool missing for a catchup backend")
+	if strings.Contains(names(&fakeBackend{}), "brain_journal") {
+		t.Fatal("retired brain_journal is still listed")
 	}
 }

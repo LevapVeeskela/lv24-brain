@@ -29,6 +29,9 @@ func runMCP(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	cfgPath := configFlag(fs)
 	listTools := fs.Bool("list-tools", false, "print the tool catalogue (name, title, annotations, schemas, limits) and exit without serving")
 	asJSON := fs.Bool("json", false, "with --list-tools, print the catalogue as JSON")
+	profileName := fs.String("profile", mcpserver.ProfileLV24, "tool profile to serve: lv24 (the 15-tool native surface)")
+	profileVersion := fs.String("profile-version", "", "profile revision to pin (this build serves 1.0)")
+	strict := fs.Bool("strict", false, "with a migration profile, refuse every approximate alias; no effect on lv24")
 	readOnly := fs.Bool("read-only", false, "expose read tools only: write tools are omitted and a call to one is refused with UNSUPPORTED")
 	projectsFlag := fs.String("projects", "", "comma-separated project ids or aliases this server may read and write (default: every registered project)")
 	allowWrite := fs.Bool("allow-write", false, "let write tools target any allowed project, not only the project of the working directory")
@@ -44,11 +47,16 @@ func runMCP(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "brain mcp: %v\n", err)
 		return 2
 	}
+	profile, err := mcpserver.ResolveProfile(*profileName, *profileVersion, *strict)
+	if err != nil {
+		fmt.Fprintf(stderr, "brain mcp: %v\n", err)
+		return 2
+	}
 	// --read-only wins over --allow-write: the narrower profile is the one the
 	// operator asked to be unable to widen by accident.
 	policy := mcpserver.Policy{ReadOnly: *readOnly, AllowWrite: *allowWrite && !*readOnly, Projects: entries}
 	if *listTools {
-		return printMCPTools(stdout, stderr, *asJSON, policy)
+		return printMCPTools(stdout, stderr, *asJSON, profile, policy)
 	}
 	if *asJSON {
 		fmt.Fprintln(stderr, "brain mcp: --json is only valid with --list-tools")
@@ -75,7 +83,8 @@ func runMCP(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	if !policy.ReadOnly && !policy.AllowWrite && policy.DefaultProject == "" {
 		fmt.Fprintln(stderr, "brain mcp: no project resolved from the working directory; write tools will refuse until the server is started with --allow-write")
 	}
-	server := mcpserver.NewWithPolicy(mcpBackend{app: useCase.App, quarantineAgent: cfg.Security.QuarantineAgent}, version.Version, policy)
+	backend := mcpBackend{app: useCase.App, quarantineAgent: cfg.Security.QuarantineAgent, promptsEnabled: cfg.Prompts.Enabled}
+	server := mcpserver.NewWithProfile(backend, version.Version, profile, policy)
 	if err := server.Serve(ctx, stdin, stdout); err != nil {
 		return reportError(stderr, "mcp", err)
 	}
@@ -171,9 +180,11 @@ type mcpCatalogue struct {
 		Name    string `json:"name"`
 		Version string `json:"version"`
 	} `json:"server"`
-	ProtocolVersions []string             `json:"protocol_versions"`
-	Policy           mcpserver.PolicyInfo `json:"policy"`
-	Tools            []mcpserver.ToolSpec `json:"tools"`
+	Profile          mcpserver.Profile      `json:"profile"`
+	ProtocolVersions []string               `json:"protocol_versions"`
+	Policy           mcpserver.PolicyInfo   `json:"policy"`
+	Tools            []mcpserver.ToolSpec   `json:"tools"`
+	Capabilities     mcpserver.Capabilities `json:"capabilities"`
 	// OmittedTools are the tools the effective policy hides, so the full
 	// contract stays visible when a profile is applied.
 	OmittedTools []string `json:"omitted_tools"`
@@ -182,28 +193,28 @@ type mcpCatalogue struct {
 // printMCPTools writes the tool contract without serving. It needs no config:
 // the catalogue is static, so an operator can diff it before deploying. The
 // policy is echoed as requested; the running server resolves aliases to ids.
-func printMCPTools(stdout, stderr io.Writer, asJSON bool, policy mcpserver.Policy) int {
-	tools, omitted := mcpserver.CatalogForPolicy(version.Version, policy)
+func printMCPTools(stdout, stderr io.Writer, asJSON bool, profile mcpserver.Profile, policy mcpserver.Policy) int {
+	tools, omitted := mcpserver.CatalogForPolicy(version.Version, profile, policy)
 	info := policy.Info()
 	if !asJSON {
 		for _, tool := range tools {
-			kind := "write"
-			if tool.Annotations.ReadOnlyHint {
-				kind = "read"
-			}
-			fmt.Fprintf(stdout, "%-22s %-5s %s\n", tool.Name, kind, tool.Title)
+			fmt.Fprintf(stdout, "%-18s %-11s %s\n", tool.Name, tool.Policy, tool.Title)
 		}
 		projects := "(all)"
 		if len(info.Projects) > 0 {
 			projects = strings.Join(info.Projects, ",")
 		}
+		fmt.Fprintf(stdout, "profile: %s %s\n", profile.Name, profile.Version)
 		fmt.Fprintf(stdout, "policy: read_only=%t allow_write=%t projects=%s\n", info.ReadOnly, info.AllowWrite, projects)
 		if len(omitted) > 0 {
 			fmt.Fprintf(stdout, "omitted: %s\n", strings.Join(omitted, " "))
 		}
 		return 0
 	}
-	catalogue := mcpCatalogue{ProtocolVersions: mcpserver.SupportedVersions(), Policy: info, Tools: tools, OmittedTools: omitted}
+	catalogue := mcpCatalogue{
+		Profile: profile, ProtocolVersions: mcpserver.SupportedVersions(), Policy: info, Tools: tools,
+		Capabilities: mcpserver.CapabilityReport(version.Version, profile, policy), OmittedTools: omitted,
+	}
 	if catalogue.OmittedTools == nil {
 		catalogue.OmittedTools = []string{}
 	}
@@ -223,6 +234,9 @@ type mcpBackend struct {
 	app *app.App
 	// quarantineAgent makes MCP writes unreviewed (security.quarantine_agent).
 	quarantineAgent bool
+	// promptsEnabled mirrors config.prompts.enabled; the prompt tool refuses
+	// every action while it is false.
+	promptsEnabled bool
 }
 
 // writeProvenance is the provenance of every record an agent writes through
@@ -243,7 +257,24 @@ func (b mcpBackend) Resolve(ctx context.Context, selector string) (mcpserver.Tar
 	if err != nil {
 		return mcpserver.Target{}, err
 	}
-	return mcpserver.Target{ID: resolved.Project.ID, Path: resolved.Path}, nil
+	return mcpserver.Target{ID: resolved.Project.ID, Path: resolved.Path, Source: resolveSource(resolved.Project, selector)}, nil
+}
+
+// resolveSource names how a selector matched: cwd, id, alias or path.
+func resolveSource(project domain.Project, selector string) string {
+	selector = strings.TrimSpace(selector)
+	if selector == "" {
+		return "cwd"
+	}
+	if strings.EqualFold(project.ID, selector) {
+		return "id"
+	}
+	for _, alias := range project.Aliases {
+		if strings.EqualFold(alias, selector) {
+			return "alias"
+		}
+	}
+	return "path"
 }
 
 func (b mcpBackend) Bootstrap(ctx context.Context, projectID string, budget int, includeUnreviewed bool) (string, error) {
@@ -266,6 +297,7 @@ func (b mcpBackend) Search(ctx context.Context, in mcpserver.SearchInput) ([]mcp
 		ProjectID:    in.ProjectID,
 		Limit:        in.Limit,
 		Kinds:        in.Kinds,
+		Scope:        in.Scope,
 		IncludeDumps: in.IncludeDumps,
 		Since:        since,
 	})
@@ -288,13 +320,23 @@ func (b mcpBackend) Search(ctx context.Context, in mcpserver.SearchInput) ([]mcp
 }
 
 func (b mcpBackend) Note(ctx context.Context, in mcpserver.NoteInput) (mcpserver.Record, error) {
+	var source *domain.SourceRef
+	if strings.TrimSpace(in.Source) != "" {
+		source = &domain.SourceRef{ExternalID: strings.TrimSpace(in.Source)}
+	}
 	result, err := b.app.Note(ctx, app.NoteInput{
-		ProjectID: in.ProjectID, Title: in.Title, Body: in.Body, Provenance: b.writeProvenance(),
+		ProjectID: in.ProjectID, Title: in.Title, Body: in.Body,
+		Subtype: in.Subtype, Scope: domain.RecordScope(in.Scope), Topic: in.TopicKey, Source: source,
+		Provenance: b.writeProvenance(),
 	})
 	if err != nil {
 		return mcpserver.Record{}, err
 	}
-	return mcpserver.Record{ID: result.Note.ID, ProjectID: in.ProjectID}, nil
+	return mcpserver.Record{
+		ID: result.Note.ID, ProjectID: in.ProjectID,
+		TopicKey: result.Note.Taxonomy.TopicKey,
+		Replaced: !result.Already && !result.Note.CreatedAt.Equal(result.Note.UpdatedAt),
+	}, nil
 }
 
 func (b mcpBackend) Decision(ctx context.Context, in mcpserver.DecisionInput) (mcpserver.Record, error) {
@@ -347,7 +389,7 @@ func (b mcpBackend) Handoff(ctx context.Context, in mcpserver.HandoffInput) (mcp
 	if err != nil {
 		return mcpserver.Record{}, err
 	}
-	return mcpserver.Record{ID: result.Handoff.ID, ProjectID: in.ProjectID}, nil
+	return mcpserver.Record{ID: result.Handoff.ID, ProjectID: in.ProjectID, GitContext: gitContext}, nil
 }
 
 func (b mcpBackend) Journal(ctx context.Context, query mcpserver.JournalQuery) ([]mcpserver.JournalEntry, error) {
@@ -379,21 +421,22 @@ func (b mcpBackend) Projects(ctx context.Context) ([]mcpserver.Project, error) {
 	if err != nil {
 		return nil, err
 	}
-	out := make([]mcpserver.Project, 0, len(projects))
-	for _, project := range projects {
-		paths := project.Paths
-		if paths == nil {
-			paths = []string{}
-		}
-		out = append(out, mcpserver.Project{
-			ID:      project.ID,
-			Name:    project.Name,
-			Kind:    string(project.Kind),
-			Paths:   paths,
-			RepoURL: project.RepoURL,
-		})
+	return mapAll(projects, toMCPProject), nil
+}
+
+// toMCPProject projects one registered project for the MCP tools.
+func toMCPProject(project domain.Project) mcpserver.Project {
+	paths := project.Paths
+	if paths == nil {
+		paths = []string{}
 	}
-	return out, nil
+	return mcpserver.Project{
+		ID:      project.ID,
+		Name:    project.Name,
+		Kind:    string(project.Kind),
+		Paths:   paths,
+		RepoURL: project.RepoURL,
+	}
 }
 
 // GetState implements mcpserver.StateBackend.
@@ -610,4 +653,104 @@ func toMCPRelation(view app.RelationView) mcpserver.RelationRow {
 		row.TargetTitle = view.Target.Title
 	}
 	return row
+}
+
+// RecordHistory implements mcpserver.RecordHistoryBackend.
+func (b mcpBackend) RecordHistory(ctx context.Context, projectID, id string) ([]mcpserver.RecordSummary, error) {
+	chain, err := b.app.SupersedeChain(ctx, projectID, id)
+	if err != nil {
+		return nil, err
+	}
+	return mapAll(chain, toRecordSummary), nil
+}
+
+// Timeline implements mcpserver.TimelineBackend.
+func (b mcpBackend) Timeline(ctx context.Context, projectID, id string, window int) (mcpserver.Timeline, error) {
+	result, err := b.app.Timeline(ctx, projectID, id, window)
+	if err != nil {
+		return mcpserver.Timeline{}, err
+	}
+	return mcpserver.Timeline{
+		Anchor:      toRecordSummary(result.Anchor),
+		Records:     mapAll(result.Records, toRecordSummary),
+		AnchorIndex: result.AnchorIndex,
+		Before:      result.Before,
+		After:       result.After,
+		Total:       result.Total,
+	}, nil
+}
+
+// DueReviews implements mcpserver.DueReviewBackend.
+func (b mcpBackend) DueReviews(ctx context.Context, projectID string) ([]mcpserver.DueReview, error) {
+	due, err := b.app.DueReviews(ctx, projectID)
+	if err != nil {
+		return nil, err
+	}
+	return mapAll(due, func(item app.DueReview) mcpserver.DueReview {
+		days := int(item.Overdue.Hours() / 24)
+		if days < 0 {
+			days = 0
+		}
+		return mcpserver.DueReview{
+			Kind: item.Kind, ID: item.ID, Title: item.Title,
+			ReviewAfter: item.ReviewAfter, OverdueDays: days, Source: item.Source,
+		}
+	}), nil
+}
+
+// Doctor implements mcpserver.DoctorBackend.
+func (b mcpBackend) Doctor(ctx context.Context) ([]mcpserver.DoctorCheck, error) {
+	report, err := b.app.Doctor(ctx, app.DoctorOptions{})
+	if err != nil {
+		return nil, err
+	}
+	return mapAll(report.Checks, func(check app.DoctorCheck) mcpserver.DoctorCheck {
+		return mcpserver.DoctorCheck{Name: check.Name, Status: check.Status, Message: check.Message, Code: check.Code}
+	}), nil
+}
+
+// RegisterProject implements mcpserver.ProjectBackend.
+func (b mcpBackend) RegisterProject(ctx context.Context, in mcpserver.ProjectInput) (mcpserver.Project, error) {
+	input := app.ProjectInput{ID: in.ID}
+	if len(in.Paths) > 0 {
+		input.Paths = &in.Paths
+	}
+	if len(in.Aliases) > 0 {
+		input.Aliases = &in.Aliases
+	}
+	project, err := b.app.SaveProject(ctx, input)
+	if err != nil {
+		return mcpserver.Project{}, err
+	}
+	return toMCPProject(project), nil
+}
+
+// PromptsEnabled implements mcpserver.PromptBackend.
+func (b mcpBackend) PromptsEnabled() bool { return b.promptsEnabled }
+
+// SavePrompt implements mcpserver.PromptBackend.
+func (b mcpBackend) SavePrompt(ctx context.Context, in mcpserver.PromptInput) (mcpserver.PromptHit, error) {
+	prompt, err := b.app.SavePrompt(ctx, app.PromptInput{
+		ProjectID: in.ProjectID, Text: in.Text, Session: in.Session,
+	})
+	if err != nil {
+		return mcpserver.PromptHit{}, err
+	}
+	return toMCPPrompt(prompt), nil
+}
+
+// ListPrompts implements mcpserver.PromptBackend.
+func (b mcpBackend) ListPrompts(ctx context.Context, query mcpserver.PromptQuery) ([]mcpserver.PromptHit, error) {
+	prompts, err := b.app.ListPrompts(ctx, app.PromptListOptions{ProjectID: query.ProjectID, Limit: query.Limit})
+	if err != nil {
+		return nil, err
+	}
+	return mapAll(prompts, toMCPPrompt), nil
+}
+
+func toMCPPrompt(prompt domain.Prompt) mcpserver.PromptHit {
+	return mcpserver.PromptHit{
+		ProjectID: prompt.ProjectID, At: prompt.At, Session: prompt.Session,
+		Text: prompt.Text, Path: prompt.Path,
+	}
 }

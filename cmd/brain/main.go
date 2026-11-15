@@ -265,7 +265,7 @@ Commands:
   connector  Run a read-only connector (see connector --help for providers)
   connection Manage local/git connections, credentials and provider descriptors
   agent      Run, inspect or stop the background connection agent
-  migrate    Import a legacy .brain data directory; --rollback reverts an import
+  migrate    Import a legacy .brain data directory or engram; --rollback reverts an import
   secret     Manage OS-backed secrets (set, list, remove)
   login      Authenticate against a server-mode brain
   logout     Revoke the server session and clear stored tokens (--all: every session)
@@ -2096,7 +2096,11 @@ GET /v1/connectors/runs/{id}/markdown. Values are never printed.
 
 func runMigrate(args []string, stdout, stderr io.Writer) int {
 	fs := newFlagSet("migrate", stderr)
-	from := fs.String("from", "", "legacy .brain data directory")
+	from := fs.String("from", "", "legacy .brain data directory, or engram with --db")
+	db := fs.String("db", "", "engram database or JSON export (requires --from engram)")
+	includePrompts := fs.Bool("include-prompts", false, "import engram prompts into the local-only prompt zone")
+	projectMap := fs.String("project-map", "", "JSON project remapping overrides for the engram importer")
+	asJSON := fs.Bool("json", false, "print the engram report as JSON")
 	dataDir := fs.String("data-dir", "", "target data directory")
 	dryRun := fs.Bool("dry-run", false, "report without writing")
 	rollback := fs.String("rollback", "", "revert a migration: <manifest.json> or latest")
@@ -2111,8 +2115,12 @@ func runMigrate(args []string, stdout, stderr io.Writer) int {
 	setFlags := map[string]bool{}
 	fs.Visit(func(f *flag.Flag) { setFlags[f.Name] = true })
 	if setFlags["rollback"] {
-		if setFlags["from"] {
-			fmt.Fprintln(stderr, "brain migrate: --rollback cannot be combined with --from")
+		if setFlags["from"] || setFlags["db"] || setFlags["include-prompts"] || setFlags["project-map"] || setFlags["json"] {
+			if setFlags["from"] {
+				fmt.Fprintln(stderr, "brain migrate: --rollback cannot be combined with --from")
+			} else {
+				fmt.Fprintln(stderr, "brain migrate: --rollback cannot be combined with an import source")
+			}
 			return 2
 		}
 		if strings.TrimSpace(*rollback) == "" {
@@ -2121,7 +2129,32 @@ func runMigrate(args []string, stdout, stderr io.Writer) int {
 		}
 		return runMigrateRollback(*rollback, *dataDir, *cfgPath, *dryRun, stdout, stderr)
 	}
-	if strings.TrimSpace(*from) == "" {
+	fromValue := strings.TrimSpace(*from)
+	engramSource := strings.EqualFold(fromValue, migrate.EngramSourceSystem)
+	if engramSource {
+		if strings.TrimSpace(*db) == "" {
+			fmt.Fprintln(stderr, "brain migrate: --from engram requires --db <engram.db|export.json>")
+			return 2
+		}
+		return runEngramMigrate(*db, *projectMap, *includePrompts, *asJSON, *dataDir, *cfgPath, *dryRun, stdout, stderr)
+	}
+	if setFlags["db"] {
+		fmt.Fprintln(stderr, "brain migrate: --db requires --from engram")
+		return 2
+	}
+	if setFlags["include-prompts"] {
+		fmt.Fprintln(stderr, "brain migrate: --include-prompts requires --from engram")
+		return 2
+	}
+	if setFlags["project-map"] {
+		fmt.Fprintln(stderr, "brain migrate: --project-map requires --from engram")
+		return 2
+	}
+	if setFlags["json"] {
+		fmt.Fprintln(stderr, "brain migrate: --json is only supported by the engram importer (--from engram)")
+		return 2
+	}
+	if fromValue == "" {
 		fmt.Fprintln(stderr, "brain migrate: --from is required")
 		return 2
 	}
@@ -2131,7 +2164,7 @@ func runMigrate(args []string, stdout, stderr io.Writer) int {
 		return reportError(stderr, "migrate", err)
 	}
 	opts := migrate.Options{
-		SourceDir: *from,
+		SourceDir: fromValue,
 		TargetDir: target,
 		DryRun:    *dryRun,
 	}
@@ -2158,6 +2191,76 @@ func runMigrate(args []string, stdout, stderr io.Writer) int {
 				fmt.Fprintf(stderr, "brain migrate: %v\n", manifestErr)
 			}
 		} else {
+			fmt.Fprintf(stdout, "manifest  %s\n", manifestPath)
+		}
+	}
+	if runErr != nil {
+		return reportError(stderr, "migrate", runErr)
+	}
+	return 0
+}
+
+// runEngramMigrate imports an engram SQLite database or JSON export. The source
+// is read-only; the manifest makes the applied import reversible.
+func runEngramMigrate(dbPath, projectMapPath string, includePrompts, asJSON bool, dataDir, cfgPath string, dryRun bool, stdout, stderr io.Writer) int {
+	target, configPath, err := resolveMigrateTarget(dataDir, cfgPath)
+	if err != nil {
+		return reportError(stderr, "migrate", err)
+	}
+	projectMap, err := migrate.LoadProjectMap(projectMapPath)
+	if err != nil {
+		return reportError(stderr, "migrate", err)
+	}
+	promptsEnabled := false
+	if includePrompts {
+		cfg, loadErr := config.Load(configPath)
+		if loadErr != nil {
+			if !config.IsNotExist(loadErr) {
+				return reportError(stderr, "migrate", loadErr)
+			}
+		} else {
+			promptsEnabled = cfg.Prompts.Enabled
+		}
+		if !promptsEnabled {
+			return reportError(stderr, "migrate", fmt.Errorf("prompts.enabled is false in %s; enable the prompt zone or omit --include-prompts", configPath))
+		}
+	}
+	opts := migrate.EngramOptions{
+		SourcePath:     dbPath,
+		TargetDir:      target,
+		DryRun:         dryRun,
+		IncludePrompts: includePrompts,
+		PromptsEnabled: promptsEnabled,
+		ProjectMap:     projectMap,
+	}
+	var backup *migrate.Backup
+	if !dryRun {
+		backup, err = migrate.BeginImportBackup(target, dbPath, configPath, time.Now())
+		if err != nil {
+			return reportError(stderr, "migrate", err)
+		}
+	}
+	result, runErr := migrate.RunEngram(context.Background(), opts)
+	if asJSON {
+		if encodeErr := json.NewEncoder(stdout).Encode(result); encodeErr != nil && runErr == nil {
+			runErr = fmt.Errorf("write JSON report: %w", encodeErr)
+		}
+	} else {
+		printEngramMigrateResult(stdout, result)
+	}
+	if runErr == nil && !dryRun {
+		runErr = finishMigratedTargets(result, configPath)
+	}
+	if backup != nil {
+		manifestPath, manifestErr := backup.Finish(result)
+		if manifestErr != nil {
+			manifestErr = fmt.Errorf("write rollback manifest: %w", manifestErr)
+			if runErr == nil {
+				runErr = manifestErr
+			} else {
+				fmt.Fprintf(stderr, "brain migrate: %v\n", manifestErr)
+			}
+		} else if !asJSON {
 			fmt.Fprintf(stdout, "manifest  %s\n", manifestPath)
 		}
 	}
@@ -2416,6 +2519,189 @@ func printMigrateResult(w io.Writer, result migrate.Result) {
 			detail += ": " + file.Error
 		}
 		fmt.Fprintf(w, "%s: %s\n", file.Status, detail)
+	}
+}
+
+// printEngramMigrateResult prints the engram import report. It lists every
+// mapping decision, the collapse and quarantine sets, relation/prompt counts and
+// the target-tree hash that proves a dry run wrote nothing.
+func printEngramMigrateResult(w io.Writer, result migrate.Result) {
+	fmt.Fprintf(w, "source      %s\n", result.SourceSystem)
+	fmt.Fprintf(w, "db          %s\n", result.SourceDir)
+	fmt.Fprintf(w, "target      %s\n", result.TargetDir)
+	if result.DryRun {
+		fmt.Fprintln(w, "dry run     nothing was written")
+	}
+	fmt.Fprintf(w, "rows        %d\n", result.Scanned)
+	fmt.Fprintf(w, "imported    %d\n", result.Imported)
+	fmt.Fprintf(w, "collapsed   %d\n", result.Collapsed)
+	fmt.Fprintf(w, "quarantined %d records (%d rows)\n", result.Quarantined, result.QuarantinedRows)
+	fmt.Fprintf(w, "skipped     %d\n", result.Skipped)
+	fmt.Fprintf(w, "failed      %d\n", result.Failed)
+	fmt.Fprintf(w, "created     %d (files)\n", result.Created)
+	fmt.Fprintf(w, "unchanged   %d (files)\n", result.Unchanged)
+	fmt.Fprintf(w, "conflicts   %d (files)\n", result.Conflicts)
+	fmt.Fprintf(w, "relations   %d (skipped %d)\n", result.Relations, result.RelationsSkipped)
+	if result.Prompts > 0 || result.PromptRows > 0 {
+		if result.PromptsOptIn {
+			fmt.Fprintf(w, "prompts     %d of %d (skipped %d)\n", result.Prompts, result.PromptRows, result.PromptsSkipped)
+		} else {
+			fmt.Fprintf(w, "prompts     0 of %d (disabled; pass --include-prompts)\n", result.PromptRows)
+		}
+	}
+	fmt.Fprintf(w, "sessions    %d (provenance only)\n", result.Sessions)
+	fmt.Fprintf(w, "redacted    %d\n", result.Redacted)
+	fmt.Fprintf(w, "tree before %s\n", result.TreeHashBefore)
+	fmt.Fprintf(w, "tree after  %s\n", result.TreeHashAfter)
+	if result.DryRun && result.TreeHashBefore == result.TreeHashAfter {
+		fmt.Fprintln(w, "dry-run hash unchanged: no file was written")
+	}
+
+	printEngramFiles(w, result.Files)
+	printProjectMapping(w, result.ProjectMapping)
+	printCollapse(w, result.Collapse)
+	printQuarantine(w, result.QuarantineRows)
+	printSkipped(w, result.SkippedRows)
+	printEngramDuplicates(w, result.Duplicates)
+	if len(result.Warnings) > 0 {
+		fmt.Fprintln(w, "warnings:")
+		for _, warning := range result.Warnings {
+			fmt.Fprintf(w, "  ! %s\n", warning)
+		}
+	}
+	for _, file := range result.Files {
+		if file.Status != migrate.StatusConflict && file.Status != migrate.StatusFailed {
+			continue
+		}
+		detail := file.SourcePath
+		if file.TargetPath != "" {
+			detail += " -> " + file.TargetPath
+		}
+		if file.Error != "" {
+			detail += ": " + file.Error
+		}
+		fmt.Fprintf(w, "%s: %s\n", file.Status, detail)
+	}
+}
+
+func printEngramFiles(w io.Writer, files []migrate.FileResult) {
+	if len(files) == 0 {
+		fmt.Fprintln(w, "projected files: none")
+		return
+	}
+	type counts struct {
+		created, unchanged, conflict int
+	}
+	groups := map[string]*counts{}
+	keys := []string{}
+	for _, file := range files {
+		key := file.ProjectID + "\x00" + file.Kind
+		group, ok := groups[key]
+		if !ok {
+			group = &counts{}
+			groups[key] = group
+			keys = append(keys, key)
+		}
+		switch file.Status {
+		case migrate.StatusCreated:
+			group.created++
+		case migrate.StatusUnchanged:
+			group.unchanged++
+		case migrate.StatusConflict:
+			group.conflict++
+		}
+	}
+	sort.Strings(keys)
+	fmt.Fprintln(w, "projected files by project/kind:")
+	for _, key := range keys {
+		parts := strings.SplitN(key, "\x00", 2)
+		group := groups[key]
+		fmt.Fprintf(w, "  %-22s %-9s created=%d unchanged=%d conflicts=%d\n",
+			parts[0], parts[1], group.created, group.unchanged, group.conflict)
+	}
+}
+
+func printProjectMapping(w io.Writer, entries []migrate.ProjectMapping) {
+	if len(entries) == 0 {
+		return
+	}
+	fmt.Fprintln(w, "project mapping:")
+	for _, entry := range entries {
+		source := entry.Source
+		if source == "" {
+			source = "<empty>"
+		}
+		if entry.Directory != "" {
+			source += " (" + entry.Directory + ")"
+		}
+		target := entry.Target
+		if target == "" {
+			target = "-"
+		}
+		fmt.Fprintf(w, "  %-40s -> %-20s %-11s %-28s rows=%d\n",
+			source, target, entry.Action, entry.Reason, entry.Rows)
+	}
+}
+
+func printCollapse(w io.Writer, groups []migrate.CollapseGroup) {
+	if len(groups) == 0 {
+		return
+	}
+	fmt.Fprintf(w, "collapse (%d groups):\n", len(groups))
+	const limit = 25
+	for index, group := range groups {
+		if index == limit {
+			fmt.Fprintf(w, "  ... %d more\n", len(groups)-limit)
+			break
+		}
+		fmt.Fprintf(w, "  %-18s %-45s rows=%d kept=%s (%s)\n",
+			group.Project, group.Title, group.Rows, group.Kept, group.Reason)
+	}
+}
+
+func printQuarantine(w io.Writer, rows []migrate.QuarantineRecord) {
+	if len(rows) == 0 {
+		return
+	}
+	fmt.Fprintf(w, "quarantined (%d records in %s):\n", len(rows), migrate.QuarantineProject)
+	const limit = 25
+	for index, row := range rows {
+		if index == limit {
+			fmt.Fprintf(w, "  ... %d more\n", len(rows)-limit)
+			break
+		}
+		fmt.Fprintf(w, "  %-30s %-12s %s\n", row.SourceID, row.Type, row.Title)
+	}
+}
+
+func printSkipped(w io.Writer, rows []migrate.QuarantineRecord) {
+	if len(rows) == 0 {
+		return
+	}
+	fmt.Fprintf(w, "skipped (%d rows):\n", len(rows))
+	const limit = 25
+	for index, row := range rows {
+		if index == limit {
+			fmt.Fprintf(w, "  ... %d more\n", len(rows)-limit)
+			break
+		}
+		fmt.Fprintf(w, "  %-30s %-12s %s (%s)\n", row.SourceID, row.Type, row.Title, row.Reason)
+	}
+}
+
+func printEngramDuplicates(w io.Writer, rows []migrate.DuplicateRecord) {
+	if len(rows) == 0 {
+		return
+	}
+	fmt.Fprintf(w, "duplicates (report-only, %d):\n", len(rows))
+	const limit = 25
+	for index, row := range rows {
+		if index == limit {
+			fmt.Fprintf(w, "  ... %d more\n", len(rows)-limit)
+			break
+		}
+		fmt.Fprintf(w, "  %-12s %-8s %-18s %s ~ %s (%d%%)\n",
+			row.Scope, row.Kind, row.Project, row.ImportedID, row.OtherID, int(row.Similarity*100))
 	}
 }
 

@@ -25,10 +25,14 @@ type fakeBackend struct {
 
 func (f *fakeBackend) Resolve(_ context.Context, selector string) (Target, error) {
 	switch selector {
-	case "", "alpha", "Alpha-alias":
-		return Target{ID: "alpha", Path: "C:/work/alpha"}, nil
+	case "":
+		return Target{ID: "alpha", Path: "C:/work/alpha", Source: "cwd"}, nil
+	case "alpha":
+		return Target{ID: "alpha", Path: "C:/work/alpha", Source: "id"}, nil
+	case "Alpha-alias":
+		return Target{ID: "alpha", Path: "C:/work/alpha", Source: "alias"}, nil
 	case "beta":
-		return Target{ID: "beta"}, nil
+		return Target{ID: "beta", Source: "id"}, nil
 	default:
 		return Target{}, fmt.Errorf("%q is not a registered project id or alias", selector)
 	}
@@ -221,7 +225,11 @@ func TestMCPServerPing(t *testing.T) {
 func TestMCPServerToolsListSchemas(t *testing.T) {
 	responses := session(t, &fakeBackend{}, `{"jsonrpc":"2.0","id":1,"method":"tools/list"}`)
 	tools := responses[0]["result"].(map[string]any)["tools"].([]any)
-	want := []string{"brain_open", "brain_context", "brain_search", "brain_note", "brain_decision", "brain_attempt", "brain_handoff", "brain_journal", "brain_projects"}
+	want := []string{
+		"brain_open", "brain_context", "brain_search", "brain_record", "brain_note",
+		"brain_decision", "brain_attempt", "brain_handoff", "brain_state", "brain_catchup",
+		"brain_review", "brain_judge", "brain_projects", "brain_prompt", "brain_capabilities",
+	}
 	if len(tools) != len(want) {
 		t.Fatalf("tools = %d, want %d", len(tools), len(want))
 	}
@@ -342,7 +350,7 @@ func TestMCPServerToolsCallNote(t *testing.T) {
 func TestMCPServerToolsCallDecision(t *testing.T) {
 	backend := &fakeBackend{}
 	result := toolCall(t, backend, "brain_decision",
-		`{"title":"Adopt Go","context":"speed","alternatives":["Rust","Node"],"consequences":["one binary"],"status":"accepted"}`)
+		`{"title":"Adopt Go","context":"speed","alternatives":["Rust","Node"],"consequences":["one binary"]}`)
 	if result["isError"] != false {
 		t.Fatalf("isError = %v", result["isError"])
 	}
@@ -350,7 +358,7 @@ func TestMCPServerToolsCallDecision(t *testing.T) {
 		t.Fatalf("structured = %v", obj)
 	}
 	got := backend.decisions[0]
-	if got.Title != "Adopt Go" || got.Status != "accepted" || len(got.Alternatives) != 2 || got.Consequences[0] != "one binary" || got.ProjectID != "alpha" {
+	if got.Title != "Adopt Go" || got.Status != "" || len(got.Alternatives) != 2 || got.Consequences[0] != "one binary" || got.ProjectID != "alpha" {
 		t.Fatalf("decision input = %+v", got)
 	}
 }
@@ -385,7 +393,7 @@ func TestMCPServerToolsCallHandoff(t *testing.T) {
 
 func TestMCPServerToolsCallJournal(t *testing.T) {
 	backend := &fakeBackend{}
-	result := toolCall(t, backend, "brain_journal", `{"project":"alpha"}`)
+	result := toolCall(t, backend, "brain_catchup", `{"mode":"journal","project":"alpha"}`)
 	if result["isError"] != false {
 		t.Fatalf("isError = %v", result["isError"])
 	}
@@ -420,7 +428,7 @@ func TestMCPServerToolFailuresAreReportedAsIsError(t *testing.T) {
 		{"unknown field", `{"text":"x","colour":"red"}`, "unknown field"},
 		{"wrong type", `{"text":5}`, "invalid arguments"},
 		{"unregistered project", `{"text":"x","project":"ghost"}`, "not a registered project"},
-		{"bad status", `{"title":"t","status":"maybe"}`, "status must be one of"},
+		{"bad status", `{"title":"t","status":"maybe"}`, "no longer accepts status"},
 		{"negative limit", `{"query":"q","limit":-1}`, "limit must not be negative"},
 	}
 	for _, tc := range cases {

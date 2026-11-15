@@ -127,11 +127,8 @@ type ContextBackend interface {
 	Context(ctx context.Context, in ContextInput) (TaskContext, error)
 }
 
-func (s *Server) contextTools() []tool {
-	if _, ok := s.backend.(ContextBackend); !ok && !s.catalog {
-		return nil
-	}
-	return []tool{{
+func (s *Server) contextTool() tool {
+	return tool{
 		Name:        "brain_context",
 		Annotations: readOnlyAnnotations("Task context"),
 		Description: "Load the context relevant to one task in a single call: project state, review findings, the latest handoff, " +
@@ -170,7 +167,7 @@ func (s *Server) contextTools() []tool {
 			"explain":           arrayProp("Per-layer budget table; present only with explain=true.", stringProp("One budget line.")),
 		}, "project_id", "summary"),
 		run: s.taskContext,
-	}}
+	}
 }
 
 func (s *Server) taskContext(ctx context.Context, raw json.RawMessage) (toolResult, error) {
@@ -204,7 +201,11 @@ func (s *Server) taskContext(ctx context.Context, raw json.RawMessage) (toolResu
 	if err != nil {
 		return toolResult{}, err
 	}
-	result, err := s.backend.(ContextBackend).Context(ctx, ContextInput{
+	backend, ok := s.backend.(ContextBackend)
+	if !ok {
+		return toolResult{}, unsupportedBackend("brain_context", "brain_open and brain_search")
+	}
+	result, err := backend.Context(ctx, ContextInput{
 		ProjectID:         target.ID,
 		Query:             query,
 		Budget:            args.Budget,

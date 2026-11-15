@@ -83,6 +83,42 @@ func BeginBackup(opts Options, configPath string, now time.Time) (*Backup, error
 	if err != nil {
 		return nil, err
 	}
+	return beginBackup(target, source, configPath, now)
+}
+
+// BeginImportBackup is BeginBackup for an importer whose source is a single
+// file (an engram database or export) instead of a data directory.
+func BeginImportBackup(targetDir, sourcePath, configPath string, now time.Time) (*Backup, error) {
+	if strings.TrimSpace(targetDir) == "" {
+		return nil, fmt.Errorf("migrate: target dir is required")
+	}
+	if strings.TrimSpace(sourcePath) == "" {
+		return nil, fmt.Errorf("migrate: source path is required for the migration backup")
+	}
+	target, err := filepath.Abs(strings.TrimSpace(targetDir))
+	if err != nil {
+		return nil, fmt.Errorf("migrate: resolve target dir: %w", err)
+	}
+	source, err := filepath.Abs(strings.TrimSpace(sourcePath))
+	if err != nil {
+		return nil, fmt.Errorf("migrate: resolve source: %w", err)
+	}
+	if info, err := os.Stat(source); err != nil {
+		return nil, fmt.Errorf("migrate: source: %w", err)
+	} else if !info.Mode().IsRegular() {
+		return nil, fmt.Errorf("migrate: source %s is not a regular file", source)
+	}
+	if targetInfo, err := os.Stat(target); err == nil {
+		if !targetInfo.IsDir() {
+			return nil, fmt.Errorf("migrate: target %s is not a directory", target)
+		}
+	} else if !os.IsNotExist(err) {
+		return nil, fmt.Errorf("migrate: target dir: %w", err)
+	}
+	return beginBackup(target, source, configPath, now)
+}
+
+func beginBackup(target, source, configPath string, now time.Time) (*Backup, error) {
 	if strings.TrimSpace(configPath) == "" {
 		return nil, fmt.Errorf("migrate: config path is required for the migration backup")
 	}

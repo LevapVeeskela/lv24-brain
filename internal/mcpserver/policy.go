@@ -105,11 +105,11 @@ func (p Policy) readProject() (string, error) {
 
 // allowsWrite reports whether a write may target the project.
 func (p Policy) allowsWrite(projectID string) bool {
-	if !p.RestrictWrites {
-		return true
-	}
 	if p.ReadOnly {
 		return false
+	}
+	if !p.RestrictWrites {
+		return true
 	}
 	if p.AllowWrite {
 		return true

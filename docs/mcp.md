@@ -6,8 +6,8 @@ handshake clients both work: **`2026-07-28`** (stateless, per-request metadata)
 and **`2025-06-18`** (handshake). This page is the contract for hosts, for
 `skills` and for anyone pinning our tool definitions.
 
-The server exposes 17 tools and no resources or prompts. Stdout carries protocol
-messages only; diagnostics go to stderr.
+The default profile is `lv24`: **15 tools**, no resources and no prompts. Stdout
+carries protocol messages only; diagnostics go to stderr.
 
 ## 1. Revisions
 
@@ -46,7 +46,7 @@ even when the probe itself declares no revision:
   "supportedVersions":["2026-07-28","2025-06-18","2025-03-26","2024-11-05"],
   "capabilities":{"tools":{"listChanged":false}},
   "instructions":"Company Brain is the curated memory of this project. ...",
-  "_meta":{"io.modelcontextprotocol/serverInfo":{"name":"lv24-brain","version":"0.15.0"}},
+  "_meta":{"io.modelcontextprotocol/serverInfo":{"name":"lv24-brain","version":"0.17.0"}},
   "ttlMs":3600000,
   "cacheScope":"public"
 }}
@@ -54,13 +54,12 @@ even when the probe itself declares no revision:
 
 ## 3. Cache hints
 
-`tools/list` and `server/discover` are deterministic and do not vary per
-connection, so their results carry `ttlMs` (300000 for the tool list, 3600000
-for discovery). `server/discover` is `cacheScope: "public"`: every profile
-advertises the same revisions and capabilities. `tools/list` is `public` for a
-writable server and `private` under `--read-only`, because a read-only profile
-lists ten tools where a writable one lists seventeen (§8). Tool results are
-never cached: each reflects current state.
+`tools/list` and `server/discover` carry `ttlMs` (300000 for the tool list,
+3600000 for discovery). `server/discover` is `cacheScope: "public"`: every
+profile advertises the same revisions and capabilities. `tools/list` is
+`public` for a writable server and `private` under `--read-only`, because a
+read-only profile lists eight tools where a writable one lists fifteen (§9).
+Tool results are never cached: each reflects current state.
 
 ## 4. Multi Round-Trip Requests
 
@@ -69,13 +68,14 @@ confirm a curation change, the server answers with `resultType:
 "input_required"` and an elicitation request; the client retries the same call
 with a new JSON-RPC id, the `inputResponses`, and the echoed `requestState`.
 
-The only confirmation today is `brain_decision_status` with `superseded_by`
-(marking a decision superseded changes what the project treats as current):
+Two actions ask for confirmation: `brain_judge(action=judge)`, because the
+verdict replaces any existing relation between the pair, and
+`brain_judge(action=supersede)`, because it changes which decision is current:
 
 ```json
 {"jsonrpc":"2.0","id":7,"method":"tools/call","params":{
-  "name":"brain_decision_status",
-  "arguments":{"id":"dec-2026-11-10-sqlite","superseded_by":"dec-2026-11-14-ulid"},
+  "name":"brain_judge",
+  "arguments":{"action":"supersede","id":"dec-2026-11-10-sqlite","to":"dec-2026-11-14-ulid"},
   "_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{"elicitation":{}}}}}}
 ```
 
@@ -118,74 +118,121 @@ The envelope is closed: exactly five keys.
 | Code | Meaning | Retryable |
 |---|---|---|
 | `INVALID_ARGUMENTS` | Unknown field, missing required value, bad cursor | no |
-| `NOT_FOUND` | Unknown project, record or decision | no |
-| `CONFLICT` | The write collides with existing data | yes, after re-reading |
-| `UNSUPPORTED` | The mode or the call window does not serve this | no |
+| `NOT_FOUND` | Unknown project, record, decision or retired tool | no |
+| `CONFLICT` | The write collides with existing data or an expected revision moved | yes, after re-reading |
+| `DUPLICATE` | The normalized text already exists in the project and kind | no |
+| `UNSUPPORTED` | The mode, profile or call window does not serve this | no |
 | `DECLINED` | The user refused to confirm; nothing changed | no — do not retry blindly |
 | `FAILED` | Unexpected failure | no |
 
-`current_revision` is empty in local mode, where records have no revision;
-it is populated by backends that report one. `outputSchema` describes successful
+`current_revision` is empty in local mode unless a state write reports one;
+`brain_state` carries the revision it read. `outputSchema` describes successful
 results only: a refusal is the envelope above and is not validated against it.
 
-## 6. Pagination
+An action this release accepts but cannot serve is always `UNSUPPORTED` with a
+CLI `try_instead`, never a silent no-op. The gaps are:
 
-The list-like tools take `limit` (page size) and `cursor`, and return `page`,
+| Tool | Action | Try instead |
+|---|---|---|
+| `brain_record` | `list due_review=true` | `brain_review(action=due)` |
+| `brain_search` | `include_prompts=true` | `brain_prompt(action=search)` |
+| `brain_prompt` | `discard` | edit `projects/<id>/prompts/<date>.md` by hand |
+| `brain_projects` | `merge` | `brain project set <id> --alias <old-id>` or `brain import --map-project` |
+| `brain_judge` | `pin`, `unpin` | `brain note "<why this record matters>"` (pinning lands in 0.18) |
+| `brain_judge` | `consolidate` | `brain record supersede <old-id> --by <new-id>` |
+
+`brain_capabilities` returns the same list, so a host can discover a gap
+without calling it.
+
+## 6. The 15 tools
+
+Each tool has one intent; a write action never hides inside a tool annotated
+read-only. `action` defaults to the historical read behaviour.
+
+| Tool | Policy | Actions | Intent |
+|---|---|---|---|
+| `brain_open` | read | – (`include` adds `state`, `handoff`, `recent`, `counts`) | session-start brief |
+| `brain_context` | read | – | task-shaped context pack |
+| `brain_search` | read | – | full-text search over records |
+| `brain_record` | read | `get` (default), `list`, `relations`, `history`, `links` | one record, a listing, relations, supersede chain, links |
+| `brain_note` | append | `record` (default), `suggest_topic` | append or evolve a note (`topic_key`, `subtype`, `scope`, `source`) |
+| `brain_decision` | append | – | record a decision (lifecycle is `brain_judge`) |
+| `brain_attempt` | append | – | record an attempt and its reason |
+| `brain_handoff` | append | – (`sections` template) | close a session; git context is captured |
+| `brain_state` | destructive | `get` (default), `set` | read or replace project state (`expected_revision`) |
+| `brain_catchup` | read | `changes` (default), `journal`, `timeline` | what changed, the journal, one record in context |
+| `brain_review` | read | `findings` (default), `due`, `doctor` | stale knowledge, the review queue, engine checks |
+| `brain_judge` | destructive | `judge` (default), `list`, `judge_many`, `compare`, `review`, `accept`, `reject`, `supersede`, `pin`, `unpin`, `consolidate` | change the status of existing knowledge |
+| `brain_projects` | read | `list` (default), `current`, `register`, `merge` | project registry; `current` reports the resolution source |
+| `brain_prompt` | destructive | `save`, `search`, `discard` | opt-in local-only prompt zone |
+| `brain_capabilities` | read | – | profile, engine, tools, features, limits, gaps, refusal codes, endpoints |
+
+The write postures are exact: **8 read, 4 append-only, 3 destructive**
+(`brain_state`, `brain_judge`, `brain_prompt`). `brain_projects` is read-only:
+`register` is gated by the write scope and `merge` is refused; on a read-only
+server every write action of a mixed tool is refused before the backend.
+`x-lv24-read-actions` names the actions of a mixed tool that never mutate, so a
+host does not have to infer it from the four hints.
+
+## 7. Pagination
+
+The list-like actions take `limit` (page size) and `cursor`, and return `page`,
 `page_size`, `has_more` and `next_cursor` next to their items. Ordering is
 stable, so a walk over the pages neither repeats nor skips a row.
 
-| Tool | Default page | Max page | Largest offset served |
+| Action | Default page | Max page | Largest offset served |
 |---|---|---|---|
 | `brain_search` | 20 | 100 | 200 (index hit cap) |
-| `brain_records` | 50 | 200 | unbounded |
-| `brain_journal` | 20 | 500 | 1000 (journal read cap) |
+| `brain_record(action=list)` | 50 | 200 | unbounded |
+| `brain_catchup(mode=journal)` | 20 | 500 | 1000 (journal read cap) |
+| `brain_record(action=relations)` / `brain_judge(action=list)` | 50 | 200 | unbounded |
 
-- Cursors are opaque and bound to the tool and to the query that issued them
+- Cursors are opaque and bound to the action and to the query that issued them
   (project, kinds, since, status, query text). A cursor from another query is
   refused with `INVALID_ARGUMENTS`, so a caller cannot silently mix two result
-  sets.
+  sets. Cursors issued before 0.17 for the journal still decode.
 - A cursor past the served offset is refused with `UNSUPPORTED` and
   `try_instead: narrow the query ...`. Nothing is dropped silently.
 - `next_cursor` is present only when `has_more` is true. The text content of the
   result repeats it as `more: pass cursor="..." for page N`.
 
-`brain_record` returns its links and backlinks inline rather than as a page: both
-are bounded by the record's own reference count, which is a handful of lines in
-one Markdown file, so a cursor would add a page turn without bounding anything.
+`brain_record(action=get|links)` and `brain_catchup(mode=timeline)` return
+bounded content inline rather than as a page: a record has a handful of links,
+and a timeline has at most five neighbours per side.
 
-## 7. Tool annotations
+## 8. Tool annotations
 
-Every tool in `tools/list` carries `title`, `annotations` and `outputSchema`.
-The four hints are always present (MCP defaults would otherwise apply):
+Every tool in `tools/list` carries `title`, `annotations`, `outputSchema`, and
+`x-lv24-read-actions` when it mixes read and write actions. The four hints are
+always present (MCP defaults would otherwise apply):
 
 | Group | Tools | readOnly | destructive | idempotent | openWorld |
 |---|---|---|---|---|---|
-| Read | `brain_open`, `brain_context`, `brain_search`, `brain_journal`, `brain_projects`, `brain_state_get`, `brain_catchup`, `brain_review`, `brain_records`, `brain_record` | true | false | true | false |
+| Read | `brain_open`, `brain_context`, `brain_search`, `brain_record`, `brain_catchup`, `brain_review`, `brain_projects`, `brain_capabilities` | true | false | true | false |
 | Append | `brain_note`, `brain_decision`, `brain_attempt`, `brain_handoff` | false | false | false | false |
-| Mutate | `brain_state_set`, `brain_decision_status`, `brain_review_record` | false | true | true | false |
+| Destructive | `brain_state`, `brain_judge` | false | true | true | false |
+| Destructive | `brain_prompt` | false | true | false | false |
 
-`openWorldHint` is false everywhere: no tool reaches the network. `idempotentHint`
-is false for the append tools because a repeated call creates a second record —
-use `brain_record` to check before retrying. Hosts must still treat annotations
-as untrusted unless they trust this server, and pin the definitions they
-approved.
+`openWorldHint` is false everywhere: no tool reaches the network.
+`idempotentHint` is false for the append tools because a repeated call creates a
+second record — use `brain_record` to check before retrying. `brain_prompt` is
+not idempotent because `save` appends and `discard` removes. Hosts must still
+treat annotations as untrusted unless they trust this server, and pin the
+definitions they approved.
 
-A read-only server (`--read-only`, see §8) omits the Append and Mutate rows
+A read-only server (`--read-only`, see §9) omits the Append and Destructive rows
 entirely, so `tools/list` differs from a writable server. That is why the tool
-list is `cacheScope: private` for a read-only profile (`public` otherwise):
-a cache must not serve one profile's list to another.
+list is `cacheScope: private` for a read-only profile (`public` otherwise): a
+cache must not serve one profile's list to another.
 
-`brain_review_record` is the temporary 0.15 quarantine tool
-(`id`/`all`/`trust`); 0.17 merges it into `brain_judge`. Agent writes carry
-`origin: agent`; with `security.quarantine_agent: true` they are unreviewed and
-stay out of `brain_open`/`brain_context` until a review, which the tool performs
-behind the same write path as the other mutating tools.
+Agent writes carry `origin: agent`; with `security.quarantine_agent: true` they
+are unreviewed and stay out of `brain_open`/`brain_context` until
+`brain_judge(action=review)` clears them.
 
-## 8. Least-privilege profiles
+## 9. Least-privilege profiles
 
-A stdio server sees every caller as the same OS user, so the profile is chosen
-when the process starts. Three flags narrow it; `--read-only` wins over
-`--allow-write`.
+A stdio server sees every caller as the same OS user, so the policy is chosen
+when the process starts. `--read-only` wins over `--allow-write`.
 
 | Flags | Read scope | Write scope |
 |---|---|---|
@@ -212,15 +259,17 @@ Rules:
   it may use. `brain_projects` is filtered to the same set, and a workspace-root
   `brain_open` (which would list every project) is refused: the agent must name
   one.
-- An unscoped `brain_search` or `brain_journal` is bound to the single allowed
-  project. With two or more allowed projects the call needs an explicit
-  `project`, because one cursor cannot describe a result stream that spans
-  several projects. Without `--projects` an unscoped search still covers every
-  registered project.
+- An unscoped `brain_search` or `brain_catchup(mode=journal)` is bound to the
+  single allowed project. With two or more allowed projects the call needs an
+  explicit `project`, because one cursor cannot describe a result stream that
+  spans several projects. Without `--projects` an unscoped search still covers
+  every registered project.
 - `--read-only` removes `brain_note`, `brain_decision`, `brain_attempt`,
-  `brain_handoff`, `brain_state_set`, `brain_decision_status` and
-  `brain_review_record` from `tools/list`. A call to one is refused before the
-  store is touched: it never runs even if a host still sends it.
+  `brain_handoff`, `brain_state`, `brain_judge` and `brain_prompt` from
+  `tools/list`; exactly the eight read tools remain. A call to a omitted tool is
+  refused before the store is touched, and the read action of a writable-only
+  tool (for example `brain_judge(action=list)`) is not served either: use
+  `brain_record(action=relations)`.
 
 Refusal shapes (the §5 envelope):
 
@@ -247,62 +296,67 @@ Recommended profiles:
 The child-environment policy for MCP servers used as *sources* (`brain
 connection` with `transport: stdio`) is in `docs/security.md`.
 
-## 9. Inspecting the contract without serving
+## 10. Profiles and inspecting the contract
+
+`brain mcp --profile=lv24` is the default and, in this release, the only
+profile. `--profile-version=1` pins the major revision; an unknown profile or
+version fails at startup with a plain error instead of serving another
+vocabulary. `--strict` is reserved for migration profiles and has no effect on
+`lv24`.
 
 ```sh
-brain mcp --list-tools --json                   # name, title, description, annotations, schemas, limits, policy
-brain mcp --list-tools                          # one line per tool: name, read|write, title; then the policy
-brain mcp --list-tools --json --read-only       # the list a read-only server would expose
+brain mcp --list-tools --json                   # profile, policy, 15 tools, capabilities
+brain mcp --list-tools                          # one line per tool: name, policy, title; then the profile and policy
+brain mcp --list-tools --json --read-only       # the 8 tools a read-only server would expose
 ```
+
+The JSON document keeps the 0.16 keys (`server`, `protocol_versions`, `policy`,
+`tools`, `omitted_tools`) and adds:
+
+- `profile`: `{name, version, strict}`.
+- `tools[*].policy`: `read`, `append` or `destructive`.
+- `tools[*].x-lv24-read-actions`: the actions of a mixed tool that never mutate.
+- `capabilities`: the same payload `brain_capabilities` returns.
 
 The listing needs no `brain.yaml`, no data directory and no backend, so it can be
 diffed in CI, hashed for review, or compared across releases. The same set is
-served by `tools/list`, which is deterministic and cacheable. The `policy`
-object reports `read_only`, `allow_write`, `projects` and `all_projects`;
-`omitted_tools` names the tools the profile hides, so the full contract stays
-visible when a profile is applied.
+what the running server reports.
 
-## 10. Running the harness
+## 11. Migration from 0.16
 
-The protocol tests speak raw newline-delimited JSON-RPC over a pipe; they use no
-external SDK, so they check the wire shape rather than a library's view of it.
+The default profile lists 15 names instead of 19. Seven names were retired;
+calling one returns `NOT_FOUND` with the replacement in `try_instead`:
 
-```sh
-go test ./internal/mcpserver -run 'TestProtocol|TestContract' -v
-go test ./cmd/brain -run TestMCP -v
-```
+| 0.16 name | 0.17 call |
+|---|---|
+| `brain_state_get` | `brain_state(action=get)` |
+| `brain_state_set` | `brain_state(action=set)` |
+| `brain_journal` | `brain_catchup(mode=journal)` (old `limit`/`cursor` still work) |
+| `brain_records` | `brain_record(action=list)` (filters and output unchanged) |
+| `brain_relations` | `brain_record(action=relations)`; pending view also `brain_judge(action=list)` |
+| `brain_review_record` | `brain_judge(action=review)`; `all=true` becomes `ids:["*"]` |
+| `brain_decision_status` | `brain_judge(action=accept\|reject\|supersede)`; `superseded_by` becomes `to` |
 
-They cover: `server/discover` → `tools/list` → `tools/call` without initialize;
-`initialize` → `tools/list` → `tools/call` with the legacy shape; an unsupported
-version; a three-page walk without duplicates or omissions; the refusal
-envelope; annotations and output schemas on all 17 tools; the MRTR confirm /
-decline / forged-state paths; and the least-privilege profile: a read-only
-`tools/list`, the refusal of a hidden write tool, an allowlist on reads and
-writes, and the working-directory write scope.
+Two argument changes are refused rather than silently ignored:
 
-Manual probe against a real instance:
+- `brain_decision(status=…)` returns `INVALID_ARGUMENTS` with
+  `try_instead: brain_judge(action=accept|reject|supersede)`. Recording an
+  accepted decision through the append tool would leave it `proposed`.
+- `brain_records` and the other retired names are no longer valid tool names.
 
-```sh
-printf '%s\n' \
-  '{"jsonrpc":"2.0","id":1,"method":"server/discover","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}}}' \
-  '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}}}' \
-  '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"brain_open","arguments":{},"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}}}' \
-| brain mcp --config ~/brain/brain.yaml
-```
+A host that has not been updated can keep the old names only by pinning the old
+engine; this build serves the `lv24` profile exclusively.
 
-## 11. Not implemented, and why
+## 12. Not implemented, and why
 
-Deliberate gaps, so a host is not surprised:
-
-- **Resources and prompts.** Tools only. A `memory://` resource surface is
-  planned; until then the same data is available through the tools above.
-- **`subscriptions/listen` and list-changed notifications.** The tool set is
-  fixed when the process starts, so `listChanged` is false and no stream is
-  opened. Changing the profile requires a restart.
-- **Tasks extension, sampling, roots, logging.** Not needed for a local memory
-  server; sampling and roots are deprecated in 2026-07-28.
-- **Streamable HTTP transport.** `brain mcp` is stdio only. The team deployment
-  uses the REST API, not MCP over HTTP.
-- **Per-call approval of writes.** A profile is set per process, not per call.
-  Use `--read-only` for an agent that must not write, and the quarantine flow
-  (`brain_review_record`) for agent writes that need review.
+- **Resources and prompts** are not advertised. The 15 tools are the contract;
+  `memory://` resources and the two workflow prompts are planned for a later
+  release together with the cache and allowlist work they need.
+- **`brain_code` and `brain_graph`** do not exist; no code graph or knowledge
+  graph is served. `brain_capabilities` reports both as false rather than
+  returning empty collections.
+- **Pin, unpin, consolidation and prompt discard** are refused with guidance
+  (§5); the underlying app methods land later.
+- **In-place record edit, MCP delete and hard delete** stay CLI-only. The
+  Markdown truth is append-only: evolution is `brain_note(topic_key=…)`,
+  lifecycle is `brain_judge`, and removal is `brain record trash` (reversible).

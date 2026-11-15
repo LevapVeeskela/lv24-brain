@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 )
 
 type stateFake struct {
@@ -52,32 +53,59 @@ func callTool(t *testing.T, backend Backend, name, args string) map[string]any {
 	return response.Result
 }
 
-func TestMCPServerStateTools(t *testing.T) {
+func TestMCPServerStateTool(t *testing.T) {
 	backend := &stateFake{state: State{Goal: "old goal", OpenQuestions: []string{"q1"}}}
 
-	got := callTool(t, backend, "brain_state_get", `{"project":"alpha"}`)
+	got := callTool(t, backend, "brain_state", `{"project":"alpha"}`)
 	if got["isError"] == true || got["structuredContent"].(map[string]any)["goal"] != "old goal" {
-		t.Fatalf("state_get = %+v", got)
+		t.Fatalf("state get = %+v", got)
+	}
+	obj := got["structuredContent"].(map[string]any)
+	if obj["revision"] == "" || obj["revision"] == nil {
+		t.Fatalf("state get has no revision: %v", obj)
 	}
 
-	got = callTool(t, backend, "brain_state_set", `{"next":"ship it","open_questions":[]}`)
+	got = callTool(t, backend, "brain_state", `{"action":"set","next":"ship it","open_questions":[]}`)
 	if got["isError"] == true {
-		t.Fatalf("state_set error: %+v", got)
+		t.Fatalf("state set error: %+v", got)
 	}
 	if backend.last.ProjectID != "alpha" || backend.last.Goal != nil || backend.last.NextAction == nil ||
 		*backend.last.NextAction != "ship it" || backend.last.OpenQuestions == nil || len(*backend.last.OpenQuestions) != 0 {
-		t.Fatalf("state_set input = %+v", backend.last)
+		t.Fatalf("state set input = %+v", backend.last)
 	}
 
-	if got = callTool(t, backend, "brain_state_set", `{}`); got["isError"] != true {
-		t.Fatalf("empty state_set accepted: %+v", got)
+	if got = callTool(t, backend, "brain_state", `{"action":"set"}`); got["isError"] != true {
+		t.Fatalf("empty state set accepted: %+v", got)
 	}
-	if got = callTool(t, backend, "brain_state_set", `{"goal":"x","project":"nope"}`); got["isError"] != true {
+	if got = callTool(t, backend, "brain_state", `{"action":"set","goal":"x","project":"nope"}`); got["isError"] != true {
 		t.Fatalf("unknown project accepted: %+v", got)
+	}
+	if got = callTool(t, backend, "brain_state", `{"action":"get","goal":"x"}`); got["isError"] != true {
+		t.Fatalf("action=get accepted a set field: %+v", got)
 	}
 }
 
-func TestMCPServerStateToolsOnlyWithStateBackend(t *testing.T) {
+func TestMCPServerStateExpectedRevision(t *testing.T) {
+	backend := &stateFake{state: State{
+		Goal: "old goal", UpdatedAt: time.Date(2026, 11, 15, 8, 0, 0, 0, time.UTC),
+	}}
+	stale := callTool(t, backend, "brain_state",
+		`{"action":"set","next":"ship it","expected_revision":"2026-11-14T00:00:00Z"}`)
+	if stale["isError"] != true {
+		t.Fatalf("stale revision accepted: %+v", stale)
+	}
+	refusal := stale["structuredContent"].(map[string]any)
+	if refusal["code"] != RefusalConflict || refusal["current_revision"] != "2026-11-15T08:00:00Z" {
+		t.Fatalf("refusal = %v", refusal)
+	}
+	fresh := callTool(t, backend, "brain_state",
+		`{"action":"set","next":"ship it","expected_revision":"2026-11-15T08:00:00Z"}`)
+	if fresh["isError"] == true {
+		t.Fatalf("matching revision refused: %+v", fresh)
+	}
+}
+
+func TestMCPServerStateToolIsAlwaysListed(t *testing.T) {
 	names := func(backend Backend) string {
 		var list []string
 		for _, tool := range New(backend, "test").toolList() {
@@ -85,10 +113,10 @@ func TestMCPServerStateToolsOnlyWithStateBackend(t *testing.T) {
 		}
 		return strings.Join(list, ",")
 	}
-	if strings.Contains(names(&fakeBackend{}), "brain_state") {
-		t.Fatal("state tools listed for a backend without state support")
+	if !strings.Contains(names(&fakeBackend{}), "brain_state") {
+		t.Fatal("brain_state is missing from the 15-tool surface")
 	}
-	if !strings.Contains(names(&stateFake{}), "brain_state_set") {
-		t.Fatal("state tools missing for a state backend")
+	if strings.Contains(names(&fakeBackend{}), "brain_state_get") || strings.Contains(names(&fakeBackend{}), "brain_state_set") {
+		t.Fatal("retired state names are still listed")
 	}
 }

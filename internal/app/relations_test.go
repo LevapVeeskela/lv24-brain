@@ -330,19 +330,40 @@ func TestPendingRelationFinding(t *testing.T) {
 	fixture := newRelationFixture(t)
 	first := fixture.note(t, "Cache design", "use one sqlite index for the search cache with bm25 ranking")
 	second := fixture.note(t, "Cache design", "use one sqlite index for the search cache with bm25 ranking and recency")
-	*fixture.clock = fixture.clock.Add(3 * 24 * time.Hour)
-	findings, err := fixture.app.Findings(context.Background(), "p")
-	if err != nil {
-		t.Fatalf("Findings: %v", err)
+	// The daily notes file's updated_at is stamped by the store with its own
+	// clock (the real one), and a read exposes that stamp as every note's
+	// UpdatedAt. Anchor the fixture clock to the stamp actually stored, so the
+	// asserted age does not depend on the time of day the test runs.
+	since := fixture.record(t, second).Summary().UpdatedAt
+	if since.IsZero() {
+		t.Fatal("source record has no UpdatedAt")
 	}
-	var pending []app.Finding
-	for _, finding := range findings {
-		if finding.Kind == app.FindingPendingRelations {
-			pending = append(pending, finding)
+	pendingFindings := func() []app.Finding {
+		t.Helper()
+		findings, err := fixture.app.Findings(context.Background(), "p")
+		if err != nil {
+			t.Fatalf("Findings: %v", err)
 		}
+		var pending []app.Finding
+		for _, finding := range findings {
+			if finding.Kind == app.FindingPendingRelations {
+				pending = append(pending, finding)
+			}
+		}
+		return pending
 	}
+	// The same relation is fresh right after the write that proposed it.
+	*fixture.clock = since
+	pending := pendingFindings()
+	if len(pending) != 1 || !strings.Contains(pending[0].Message, "just now") {
+		t.Fatalf("fresh pending findings = %+v", pending)
+	}
+	// Three days and an hour later it must report three full days, not two:
+	// a sub-day rounding error or a two-day boundary regression fails here.
+	*fixture.clock = since.Add(3*24*time.Hour + time.Hour)
+	pending = pendingFindings()
 	if len(pending) != 1 {
-		t.Fatalf("pending findings = %+v", findings)
+		t.Fatalf("pending findings = %+v", pending)
 	}
 	if pending[0].Severity != app.SeverityWarn {
 		t.Fatalf("severity = %q", pending[0].Severity)
@@ -355,14 +376,8 @@ func TestPendingRelationFinding(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("judge: %v", err)
 	}
-	findings, err = fixture.app.Findings(context.Background(), "p")
-	if err != nil {
-		t.Fatalf("Findings after judge: %v", err)
-	}
-	for _, finding := range findings {
-		if finding.Kind == app.FindingPendingRelations {
-			t.Fatalf("judged relation still reported: %+v", finding)
-		}
+	if pending = pendingFindings(); len(pending) != 0 {
+		t.Fatalf("judged relation still reported: %+v", pending)
 	}
 }
 

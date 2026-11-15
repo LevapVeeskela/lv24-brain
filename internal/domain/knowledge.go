@@ -5,21 +5,29 @@ import (
 	"math"
 	"strings"
 	"time"
+	"unicode"
 	"unicode/utf8"
 )
+
+// maxSourceSessionLength bounds the provenance session id imported from an
+// external memory store. A session id is a label, not a record reference.
+const maxSourceSessionLength = 256
 
 // SourceRef records where a curated record came from. It is optional: legacy
 // and hand-written records have no source. A promoted proposal references its
 // proposal id (and usually the raw item that produced it).
 type SourceRef struct {
-	ProjectID    string    `json:"projectId,omitempty"`
-	ConnectionID string    `json:"connectionId,omitempty"`
-	ItemKey      string    `json:"itemKey,omitempty"`
-	ExternalID   string    `json:"externalId,omitempty"`
-	URL          string    `json:"url,omitempty"`
-	ObservedAt   time.Time `json:"observedAt,omitzero"`
-	ProposalID   string    `json:"proposalId,omitempty"`
-	Confidence   float64   `json:"confidence,omitempty"`
+	ProjectID    string `json:"projectId,omitempty"`
+	ConnectionID string `json:"connectionId,omitempty"`
+	ItemKey      string `json:"itemKey,omitempty"`
+	ExternalID   string `json:"externalId,omitempty"`
+	URL          string `json:"url,omitempty"`
+	// Session is the source session an imported record came from. It is
+	// provenance only: the session itself is never stored as a record.
+	Session    string    `json:"session,omitempty"`
+	ObservedAt time.Time `json:"observedAt,omitzero"`
+	ProposalID string    `json:"proposalId,omitempty"`
+	Confidence float64   `json:"confidence,omitempty"`
 }
 
 // Validate checks the source fields that are present. A source must identify
@@ -55,6 +63,15 @@ func (s SourceRef) Validate() error {
 	if s.URL != "" {
 		if err := ValidateSourceURL("source.url", s.URL); err != nil {
 			return err
+		}
+	}
+	if s.Session != "" {
+		if s.Session != strings.TrimSpace(s.Session) {
+			return NewValidationError("source.session", "must not contain surrounding whitespace")
+		}
+		if len(s.Session) > maxSourceSessionLength || !utf8.ValidString(s.Session) ||
+			strings.IndexFunc(s.Session, unicode.IsControl) >= 0 {
+			return NewValidationError("source.session", "must be valid UTF-8 without control characters and at most 256 bytes")
 		}
 	}
 	if s.ProposalID != "" {
