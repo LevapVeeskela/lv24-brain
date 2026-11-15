@@ -172,6 +172,43 @@ func TestLegacySharedMarkerStaysShared(t *testing.T) {
 	}
 }
 
+// TestSharedPolicyUpgradesLegacyMarker: applying shared to a legacy marker
+// rewrites it to the canonical content (which keeps checkpoints local) and
+// leaves a canonical marker alone, so an ordinary run costs one read.
+func TestSharedPolicyUpgradesLegacyMarker(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+	dir, err := store.connectionDir("gh-acme")
+	if err != nil {
+		t.Fatalf("connectionDir: %v", err)
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	path := filepath.Join(dir, connectionIgnoreFile)
+	legacy := "# lv24-brain: shared connection; only lock and temporary files are ignored.\n*.lock\n.tmp-*\n"
+	if err := os.WriteFile(path, []byte(legacy), 0o644); err != nil {
+		t.Fatalf("write legacy marker: %v", err)
+	}
+	if err := store.Items().SetPublishPolicy(ctx, "gh-acme", domain.PublishShared); err != nil {
+		t.Fatalf("SetPublishPolicy: %v", err)
+	}
+	if got := readRawZoneFile(t, path); got != sharedIgnore {
+		t.Fatalf("marker = %q, want the canonical shared marker", got)
+	}
+	old := time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC)
+	if err := os.Chtimes(path, old, old); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Items().SetPublishPolicy(ctx, "gh-acme", domain.PublishShared); err != nil {
+		t.Fatalf("second SetPublishPolicy: %v", err)
+	}
+	info, err := os.Stat(path)
+	if err != nil || !info.ModTime().Equal(old) {
+		t.Fatalf("canonical marker was rewritten: %v %v", info.ModTime(), err)
+	}
+}
+
 func readRawZoneFile(t *testing.T, path string) string {
 	t.Helper()
 	raw, err := os.ReadFile(path)

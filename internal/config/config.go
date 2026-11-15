@@ -32,17 +32,26 @@ var engineVersionPattern = regexp.MustCompile(`^[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A
 
 // BrainConfig is the contents of brain.yaml.
 type BrainConfig struct {
-	Mode             string `yaml:"mode"`
-	DataDir          string `yaml:"data_dir,omitempty"`
-	ServerURL        string `yaml:"server_url,omitempty"`
-	User             string `yaml:"user,omitempty"`
-	SchemaVersion    int    `yaml:"schema_version"`
-	MinEngineVersion string `yaml:"min_engine_version,omitempty"`
-	UpdateChannel    string `yaml:"update_channel"`
+	Mode             string         `yaml:"mode"`
+	DataDir          string         `yaml:"data_dir,omitempty"`
+	ServerURL        string         `yaml:"server_url,omitempty"`
+	User             string         `yaml:"user,omitempty"`
+	SchemaVersion    int            `yaml:"schema_version"`
+	MinEngineVersion string         `yaml:"min_engine_version,omitempty"`
+	UpdateChannel    string         `yaml:"update_channel"`
+	Security         SecurityConfig `yaml:"security,omitempty"`
 	// RetiredPaths lists retired checkouts of this workspace. The engine ships
 	// no defaults: selection redirects to ReplacedBy and registration is
 	// refused, but nothing on disk is touched.
 	RetiredPaths []RetiredPath `yaml:"retired_paths,omitempty"`
+}
+
+// SecurityConfig controls how untrusted writes are treated.
+type SecurityConfig struct {
+	// QuarantineAgent makes agent writes through MCP unreviewed, so their text
+	// stays out of context until `brain record review` or brain_review_record
+	// clears it. The default is false: an agent write is reviewed immediately.
+	QuarantineAgent bool `yaml:"quarantine_agent,omitempty"`
 }
 
 // RetiredPath is a checkout path that was retired in favor of another project.

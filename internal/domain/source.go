@@ -346,7 +346,11 @@ type Connection struct {
 	// Schedule is "", "manual", "@hourly", "@daily" or "@every <duration>"
 	// (minimum 1m). Empty and "manual" mean run only on request.
 	Schedule string `json:"schedule,omitempty"`
-	// Publish overrides SourceDescriptor.DefaultPublish when non-empty.
+	// Publish is the explicit publish policy of this connection's raw zone
+	// (items and checkpoints). When empty, the raw zone keeps the policy git
+	// already tracks (grandfathered) or defaults to local-only; see
+	// ResolveRawZonePolicy. SourceDescriptor.DefaultPublish is never used to
+	// publish raw payloads.
 	Publish PublishPolicy `json:"publish,omitempty"`
 	// Settings are non-secret provider settings keyed by ConfigField.Key.
 	Settings map[string]string `json:"settings,omitempty"`
@@ -394,18 +398,30 @@ func (c Connection) EffectivePublish(d SourceDescriptor) PublishPolicy {
 	return d.DefaultPublish
 }
 
-// RawZonePublish returns the publish policy of the connection's raw zone
-// (items and checkpoints). Raw payloads are machine-local unless the connection
-// explicitly opts in with `publish: shared`: a provider default alone never
-// publishes what a host happened to read, because those files carry
-// host-specific time even at an otherwise identical path. EffectivePublish
-// answers the wider question ("may data derived from this source be shared?")
-// and keeps its descriptor fallback.
-func (c Connection) RawZonePublish() PublishPolicy {
-	if c.Publish == PublishShared {
-		return PublishShared
+// RawZoneResolution is the effective publish policy of one connection's raw
+// zone and why it was chosen.
+type RawZoneResolution struct {
+	Policy PublishPolicy
+	// Explicit is true when Connection.Publish chose the policy.
+	Explicit bool
+	// Grandfathered is true when no policy is set but git already tracks the
+	// raw zone: the connection keeps publishing exactly as before the upgrade.
+	Grandfathered bool
+}
+
+// ResolveRawZonePolicy decides the raw-zone publish policy. An explicit
+// connection setting always wins. Without one, a raw zone that the shared tree
+// already tracks stays shared (grandfathered), so an upgrade never untracks
+// published data; a zone with nothing tracked is machine-local by default. An
+// unknown setting counts as unset.
+func ResolveRawZonePolicy(setting PublishPolicy, tracked bool) RawZoneResolution {
+	if setting.Valid() {
+		return RawZoneResolution{Policy: setting, Explicit: true}
 	}
-	return PublishLocalOnly
+	if tracked {
+		return RawZoneResolution{Policy: PublishShared, Grandfathered: true}
+	}
+	return RawZoneResolution{Policy: PublishLocalOnly}
 }
 
 // Identity is the canonical provider|endpoint|account triple. Two

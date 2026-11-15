@@ -19,7 +19,8 @@ type ToolSpec struct {
 // as serverInfo.version.
 func Catalog(version string) []ToolSpec {
 	s := &Server{version: version, catalog: true}
-	s.tools = s.toolList()
+	s.allTools = s.toolList()
+	s.tools = s.allTools
 	specs := make([]ToolSpec, 0, len(s.tools))
 	for _, t := range s.tools {
 		specs = append(specs, ToolSpec{
@@ -33,4 +34,20 @@ func Catalog(version string) []ToolSpec {
 		})
 	}
 	return specs
+}
+
+// CatalogForPolicy splits the catalogue into the tools a server with this
+// policy exposes and the names it omits. It is what `brain mcp --list-tools`
+// prints, so a host can see exactly which tools a profile offers.
+func CatalogForPolicy(version string, policy Policy) (visible []ToolSpec, omitted []string) {
+	specs := Catalog(version)
+	visible = make([]ToolSpec, 0, len(specs))
+	for _, spec := range specs {
+		if policy.ToolListed(spec) {
+			visible = append(visible, spec)
+			continue
+		}
+		omitted = append(omitted, spec.Name)
+	}
+	return visible, omitted
 }

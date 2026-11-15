@@ -34,7 +34,7 @@ func (f *fakeBackend) Resolve(_ context.Context, selector string) (Target, error
 	}
 }
 
-func (f *fakeBackend) Bootstrap(_ context.Context, projectID string, budget int) (string, error) {
+func (f *fakeBackend) Bootstrap(_ context.Context, projectID string, budget int, _ bool) (string, error) {
 	f.budget = budget
 	return "# " + projectID + " — bootstrap\nstate: ok", nil
 }

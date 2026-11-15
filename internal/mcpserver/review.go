@@ -65,7 +65,7 @@ func (s *Server) review(ctx context.Context, raw json.RawMessage) (toolResult, e
 	if err := decodeArgs(raw, &args); err != nil {
 		return toolResult{}, err
 	}
-	target, err := s.backend.Resolve(ctx, strings.TrimSpace(args.Project))
+	target, err := s.resolveTarget(ctx, strings.TrimSpace(args.Project))
 	if err != nil {
 		return toolResult{}, err
 	}

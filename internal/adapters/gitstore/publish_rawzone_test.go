@@ -41,3 +41,37 @@ func TestPrepareConnectionPublishUntracksCheckpointsOnly(t *testing.T) {
 		t.Fatalf("checkpoint file changed: %q", got)
 	}
 }
+
+// TestRawZoneTrackedListsOnlyItemsAndCheckpoints: the grandfather check must
+// see published raw files and ignore the rest of a connection directory.
+func TestRawZoneTrackedListsOnlyItemsAndCheckpoints(t *testing.T) {
+	requireGit(t)
+	repo := initRepo(t, t.TempDir(), false)
+	writeFile(t, repo.dir, "connectors/work/items/old.md", "item")
+	writeFile(t, repo.dir, "connectors/work/checkpoints/inbox-abc.json", `{"stream":"inbox"}`)
+	writeFile(t, repo.dir, "connectors/work/settings.json", "{}")
+	writeFile(t, repo.dir, "connectors/other/items/old.md", "other")
+	repo.run("add", ".")
+	repo.run("commit", "-qm", "seed")
+	provider := newTestProvider(t, repo.dir)
+	ctx := context.Background()
+
+	paths, err := provider.TrackedRawZonePaths(ctx, "work")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(paths) != 2 {
+		t.Fatalf("tracked raw paths = %v", paths)
+	}
+	for _, path := range paths {
+		if strings.Contains(path, "settings.json") {
+			t.Fatalf("non-raw file reported: %v", paths)
+		}
+	}
+	for connectionID, want := range map[string]bool{"work": true, "other": true, "fresh": false} {
+		tracked, err := provider.RawZoneTracked(ctx, connectionID)
+		if err != nil || tracked != want {
+			t.Fatalf("RawZoneTracked(%q) = %t, %v; want %t", connectionID, tracked, err, want)
+		}
+	}
+}

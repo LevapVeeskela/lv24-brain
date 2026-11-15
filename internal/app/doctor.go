@@ -43,10 +43,11 @@ func (a *App) Doctor(ctx context.Context, opts DoctorOptions) (DoctorReport, err
 	checks = append(checks, a.doctorRecords(ctx))
 	checks = append(checks, a.doctorJournal(ctx))
 	checks = append(checks, a.doctorIDs(ctx))
+	checks = append(checks, a.doctorQuarantine(ctx))
 	checks = append(checks, a.doctorDuplicates(ctx))
 	checks = append(checks, a.doctorGit(ctx))
 	checks = append(checks, a.doctorMergeDrivers(ctx, opts.Fix))
-	checks = append(checks, a.doctorRawZone(ctx))
+	checks = append(checks, a.doctorRawZone(ctx)...)
 	checks = append(checks, a.doctorRetiredPaths(ctx))
 	return DoctorReport{Checks: checks}, nil
 }
@@ -158,6 +159,50 @@ func (a *App) doctorIDs(ctx context.Context) DoctorCheck {
 		return DoctorCheck{Name: "ids", Status: doctorOK, Message: fmt.Sprintf("%d record ids are unique", len(seen))}
 	}
 	return DoctorCheck{Name: "ids", Status: doctorWarn, Code: "duplicate-id", Message: fmt.Sprintf("%d duplicate record ids: %s", len(duplicates), strings.Join(duplicates[:min(len(duplicates), maxListedProblems)], "; "))}
+}
+
+// doctorQuarantine reports unreviewed records. They are excluded from
+// context, so a growing queue is a sign that agent or connector text is
+// waiting for review. Report only: reviewing is an explicit owner action.
+func (a *App) doctorQuarantine(ctx context.Context) DoctorCheck {
+	if a.deps.Store == nil || a.cfg.Mode == config.ModeServer {
+		return DoctorCheck{Name: "quarantine", Status: doctorOK, Message: "not checked in this mode"}
+	}
+	projects, err := a.deps.Store.ListProjects(ctx)
+	if err != nil {
+		return DoctorCheck{Name: "quarantine", Status: doctorFail, Message: err.Error()}
+	}
+	total := 0
+	ids := make([]string, 0)
+	for _, project := range projects {
+		records, err := a.projectRecords(ctx, project.ID)
+		if err != nil {
+			return DoctorCheck{Name: "quarantine", Status: doctorFail, Message: project.ID + ": " + err.Error()}
+		}
+		for _, record := range records {
+			if !record.Quarantined() {
+				continue
+			}
+			total++
+			if len(ids) < maxListedProblems {
+				ids = append(ids, record.Summary().ID)
+			}
+		}
+	}
+	if total == 0 {
+		return DoctorCheck{Name: "quarantine", Status: doctorOK, Message: "no quarantined records"}
+	}
+	more := ""
+	if total > len(ids) {
+		more = fmt.Sprintf(", … %d more", total-len(ids))
+	}
+	return DoctorCheck{
+		Name:   "quarantine",
+		Status: doctorWarn,
+		Code:   "quarantined",
+		Message: fmt.Sprintf("%d quarantined records are excluded from context (unreviewed or unknown origin): %s%s; inspect with `brain review` and clear with `brain record review --all` (an unknown origin needs a hand edit)",
+			total, strings.Join(ids, ", "), more),
+	}
 }
 
 // doctorLocks reports lock files no writer will respect: their owner is dead
@@ -389,73 +434,138 @@ func (a *App) doctorMergeDrivers(ctx context.Context, fix bool) DoctorCheck {
 	}
 }
 
-// doctorRawZone reports machine-local raw-zone files that the shared tree
-// tracks: checkpoints (never shared) and items of a connection that is not
-// explicitly shared. Items and checkpoints carry host-specific bytes
-// (observation time, cursors), so a tracked machine-local file is a finding, not
-// something doctor repairs: untracking is the owner's decision
-// (`git rm --cached -r`) and no data is deleted here.
-func (a *App) doctorRawZone(ctx context.Context) DoctorCheck {
+// doctorRawZone reports raw-zone files in the shared tree. Three states matter:
+//
+//   - an explicit local-only connection with tracked files: they must be
+//     untracked (the owner's decision, `git rm --cached -r`; files and history
+//     are kept), as must checkpoints of an explicitly shared connection;
+//   - a connection without an explicit publish policy whose raw zone git
+//     tracks: it keeps publishing (grandfathered), so doctor recommends an
+//     explicit `publish` value instead of changing anything;
+//   - a new local-only connection: nothing is tracked and there is no finding.
+//
+// It reports only; nothing is untracked or deleted here.
+func (a *App) doctorRawZone(ctx context.Context) []DoctorCheck {
 	if a.cfg.Mode != config.ModeGit || a.deps.Sync == nil {
-		return DoctorCheck{Name: "raw-zone", Status: doctorOK, Message: "not used in this mode"}
+		return []DoctorCheck{{Name: "raw-zone", Status: doctorOK, Message: "not used in this mode"}}
 	}
 	lister, ok := a.deps.Sync.(ports.GitPathLister)
 	if !ok {
-		return DoctorCheck{Name: "raw-zone", Status: doctorOK, Message: "not checked for this sync provider"}
+		return []DoctorCheck{{Name: "raw-zone", Status: doctorOK, Message: "not checked for this sync provider"}}
 	}
 	paths, err := lister.TrackedPaths(ctx, "connectors")
 	if err != nil {
-		return DoctorCheck{Name: "raw-zone", Status: doctorWarn, Message: "cannot list tracked raw-zone files: " + err.Error()}
+		return []DoctorCheck{{Name: "raw-zone", Status: doctorWarn, Message: "cannot list tracked raw-zone files: " + err.Error()}}
 	}
-	tracked := make([]string, 0, len(paths))
-	var connections []string
-	seen := map[string]struct{}{}
+	audit, err := a.auditRawZone(ctx, paths)
+	if err != nil {
+		return []DoctorCheck{{Name: "raw-zone", Status: doctorWarn, Message: err.Error()}}
+	}
+	var leftovers, grandfathered []rawZoneAudit
+	for _, entry := range audit {
+		switch {
+		case entry.policy == "":
+			grandfathered = append(grandfathered, entry)
+		case entry.policy == domain.PublishShared && entry.checkpoints == 0:
+			// Explicitly shared items are the documented state.
+		default:
+			leftovers = append(leftovers, entry)
+		}
+	}
+	return []DoctorCheck{rawZoneLeftoversCheck(leftovers), rawZoneGrandfatheredCheck(grandfathered)}
+}
+
+// rawZoneAudit files of one connection that git tracks, with the explicit
+// publish policy from the catalogue (empty when unset or unknown).
+type rawZoneAudit struct {
+	connection  string
+	files       int
+	checkpoints int
+	policy      domain.PublishPolicy
+}
+
+// auditRawZone groups tracked raw-zone paths by connection and resolves the
+// explicit publish setting of each.
+func (a *App) auditRawZone(ctx context.Context, paths []string) ([]rawZoneAudit, error) {
+	entries := make([]rawZoneAudit, 0, len(paths))
+	index := map[string]int{}
 	for _, path := range paths {
 		connectionID, kind, ok := rawZonePath(path)
 		if !ok {
 			continue
 		}
-		local, localErr := a.rawZoneFileIsMachineLocal(ctx, connectionID, kind)
-		if localErr != nil {
-			return DoctorCheck{Name: "raw-zone", Status: doctorWarn, Message: localErr.Error()}
+		position, seen := index[connectionID]
+		if !seen {
+			policy, err := a.explicitPublishPolicy(ctx, connectionID)
+			if err != nil {
+				return nil, err
+			}
+			position = len(entries)
+			index[connectionID] = position
+			entries = append(entries, rawZoneAudit{connection: connectionID, policy: policy})
 		}
-		if !local {
-			continue
-		}
-		tracked = append(tracked, path)
-		if _, ok := seen[connectionID]; !ok {
-			seen[connectionID] = struct{}{}
-			connections = append(connections, connectionID)
+		if kind == "items" {
+			entries[position].files++
+		} else {
+			entries[position].files++
+			entries[position].checkpoints++
 		}
 	}
-	if len(tracked) == 0 {
-		return DoctorCheck{Name: "raw-zone", Status: doctorOK, Message: "raw items and checkpoints stay machine-local"}
-	}
-	listed := strings.Join(tracked[:min(len(tracked), maxListedProblems)], "; ")
-	return DoctorCheck{
-		Name:    "raw-zone",
-		Status:  doctorWarn,
-		Code:    "raw-zone-tracked",
-		Message: fmt.Sprintf("%d machine-local raw-zone files of %s are tracked by git (%s); checkpoints are never shared and items stay local unless a connection sets publish: shared: untrack them with git rm --cached -r connectors/<id>", len(tracked), strings.Join(connections, ", "), listed),
-	}
+	return entries, nil
 }
 
-// rawZoneFileIsMachineLocal reports whether a tracked raw-zone file should not
-// be in the shared tree. A checkpoint always is machine-local; an item is
-// unless its connection explicitly sets `publish: shared` in the catalogue. A
-// provider default is not an opt-in, and an unknown connection counts as local.
-func (a *App) rawZoneFileIsMachineLocal(ctx context.Context, connectionID, kind string) (bool, error) {
-	if kind != "items" || a.deps.Connections == nil {
-		return true, nil
+// explicitPublishPolicy returns the publish setting the catalogue records for a
+// connection. An unknown connection has none, so its zone counts as unset.
+func (a *App) explicitPublishPolicy(ctx context.Context, connectionID string) (domain.PublishPolicy, error) {
+	if a.deps.Connections == nil {
+		return "", nil
 	}
 	connection, err := a.deps.Connections.Get(ctx, connectionID)
 	if errors.Is(err, domain.ErrNotFound) {
-		return true, nil
+		return "", nil
 	}
 	if err != nil {
-		return false, fmt.Errorf("read connection %s: %w", connectionID, err)
+		return "", fmt.Errorf("read connection %s: %w", connectionID, err)
 	}
-	return connection.Publish != domain.PublishShared, nil
+	if !connection.Publish.Valid() {
+		return "", nil
+	}
+	return connection.Publish, nil
+}
+
+func rawZoneLeftoversCheck(entries []rawZoneAudit) DoctorCheck {
+	if len(entries) == 0 {
+		return DoctorCheck{Name: "raw-zone", Status: doctorOK, Message: "no tracked raw files of local-only connections"}
+	}
+	return DoctorCheck{
+		Name:   "raw-zone",
+		Status: doctorWarn,
+		Code:   "raw-zone-tracked",
+		Message: fmt.Sprintf("raw items or checkpoints are tracked by git although the connection does not publish them (%s; explicit local-only, or checkpoints of a shared connection): untrack them with git rm --cached -r connectors/<id>; the files and the git history are kept",
+			rawZoneConnectionList(entries)),
+	}
+}
+
+func rawZoneGrandfatheredCheck(entries []rawZoneAudit) DoctorCheck {
+	if len(entries) == 0 {
+		return DoctorCheck{Name: "raw-zone-policy", Status: doctorOK, Message: "every published raw zone has an explicit publish policy"}
+	}
+	return DoctorCheck{
+		Name:   "raw-zone-policy",
+		Status: doctorWarn,
+		Code:   "raw-zone-grandfathered",
+		Message: fmt.Sprintf("the raw zone is tracked by git but no publish policy is set (%s): it keeps publishing unchanged (compatibility mode); choose with brain connection publish <id> shared|local-only",
+			rawZoneConnectionList(entries)),
+	}
+}
+
+// rawZoneConnectionList renders "<id> (<n> files)" pairs in tracking order.
+func rawZoneConnectionList(entries []rawZoneAudit) string {
+	parts := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		parts = append(parts, fmt.Sprintf("%s (%d files)", entry.connection, entry.files))
+	}
+	return strings.Join(parts, ", ")
 }
 
 // rawZonePath reports whether path is connectors/<id>/items/... or

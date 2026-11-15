@@ -95,6 +95,29 @@ type RecordBackend interface {
 	Supersede(ctx context.Context, projectID, oldID, newID string) (RecordSummary, error)
 }
 
+// ReviewRecordInput is one brain_review_record request.
+type ReviewRecordInput struct {
+	ProjectID string
+	// ID reviews one record; empty with All reviews every unreviewed record.
+	ID string
+	// All reviews every record that is not reviewed yet.
+	All bool
+	// Trust optionally replaces the trust level; empty keeps it.
+	Trust string
+}
+
+// ReviewRecordResult is the structured result of brain_review_record.
+type ReviewRecordResult struct {
+	ProjectID string          `json:"project_id"`
+	Reviewed  []RecordSummary `json:"reviewed"`
+}
+
+// ReviewRecordBackend is implemented by backends that can clear a record's
+// quarantine. brain_review_record is listed only for such backends.
+type ReviewRecordBackend interface {
+	ReviewRecord(ctx context.Context, in ReviewRecordInput) (ReviewRecordResult, error)
+}
+
 // RecordList is the structured result of brain_records.
 type RecordList struct {
 	ProjectID string          `json:"project_id"`
@@ -108,7 +131,7 @@ func (s *Server) recordTools() []tool {
 		return nil
 	}
 	project := stringProp("Project id, alias or checkout path. Omit to use the project of the working directory.")
-	return []tool{
+	tools := []tool{
 		{
 			Name:        "brain_records",
 			Annotations: readOnlyAnnotations("List records"),
@@ -176,6 +199,33 @@ func (s *Server) recordTools() []tool {
 			run:          s.decisionStatus,
 		},
 	}
+	if _, ok := s.backend.(ReviewRecordBackend); ok || s.catalog {
+		tools = append(tools, s.reviewRecordTool(project))
+	}
+	return tools
+}
+
+// reviewRecordTool is the 0.15 quarantine review tool. It is temporary: 0.17
+// merges it into brain_judge together with the other curation verbs.
+func (s *Server) reviewRecordTool(project map[string]any) tool {
+	return tool{
+		Name:        "brain_review_record",
+		Annotations: mutatingAnnotations("Review a quarantined record"),
+		Description: "Mark a quarantined record reviewed so its text may enter context, optionally setting its trust level. " +
+			"Quarantined records are unreviewed agent, connector or import writes and records with an unknown origin. " +
+			"Pass id for one record or all for every unreviewed record of the project. Temporary tool: 0.17 merges it into brain_judge.",
+		InputSchema: objectSchema(nil, map[string]any{
+			"id":      stringProp("Record id to review. Omit with all=true."),
+			"all":     boolProp("Review every unreviewed record of the project."),
+			"trust":   enumProp("Optional trust level of the reviewed records; omit to keep the stored one.", trustLevels),
+			"project": project,
+		}),
+		OutputSchema: outputObject(map[string]any{
+			"project_id": stringProp("Project the records belong to."),
+			"reviewed":   arrayProp("Records that are reviewed now.", recordSummarySchema()),
+		}, "project_id", "reviewed"),
+		run: s.reviewRecord,
+	}
 }
 
 // recordSummarySchema is the structured output of one decision summary.
@@ -239,7 +289,7 @@ func (s *Server) recordsList(ctx context.Context, raw json.RawMessage) (toolResu
 			return toolResult{}, err
 		}
 	}
-	target, err := s.backend.Resolve(ctx, strings.TrimSpace(args.Project))
+	target, err := s.resolveTarget(ctx, strings.TrimSpace(args.Project))
 	if err != nil {
 		return toolResult{}, err
 	}
@@ -287,7 +337,7 @@ func (s *Server) recordShow(ctx context.Context, raw json.RawMessage) (toolResul
 	if err != nil {
 		return toolResult{}, err
 	}
-	target, err := s.backend.Resolve(ctx, strings.TrimSpace(args.Project))
+	target, err := s.resolveTarget(ctx, strings.TrimSpace(args.Project))
 	if err != nil {
 		return toolResult{}, err
 	}
@@ -318,7 +368,7 @@ func (s *Server) decisionStatus(ctx context.Context, raw json.RawMessage) (toolR
 			return toolResult{}, err
 		}
 	}
-	target, err := s.backend.Resolve(ctx, strings.TrimSpace(args.Project))
+	target, err := s.writeTarget(ctx, strings.TrimSpace(args.Project))
 	if err != nil {
 		return toolResult{}, err
 	}
@@ -333,6 +383,61 @@ func (s *Server) decisionStatus(ctx context.Context, raw json.RawMessage) (toolR
 		return toolResult{}, err
 	}
 	return toolResult{Text: fmt.Sprintf("decision %s: %s", decision.ID, decision.Status), Structured: decision}, nil
+}
+
+// trustLevels are the trust values a record may carry.
+var trustLevels = []string{"verified", "stated", "inferred"}
+
+func (s *Server) reviewRecord(ctx context.Context, raw json.RawMessage) (toolResult, error) {
+	var args struct {
+		ID      string `json:"id"`
+		All     bool   `json:"all"`
+		Trust   string `json:"trust"`
+		Project string `json:"project"`
+	}
+	if err := decodeArgs(raw, &args); err != nil {
+		return toolResult{}, err
+	}
+	id := strings.TrimSpace(args.ID)
+	switch {
+	case id == "" && !args.All:
+		return toolResult{}, refusalInvalid("pass id, or all=true to review every unreviewed record")
+	case id != "" && args.All:
+		return toolResult{}, refusalInvalid("pass either id or all=true, not both")
+	}
+	trust := strings.TrimSpace(args.Trust)
+	if trust != "" && !slices.Contains(trustLevels, trust) {
+		return toolResult{}, refusalInvalidf("unknown trust %q (%s)", trust, strings.Join(trustLevels, ", "))
+	}
+	target, err := s.writeTarget(ctx, strings.TrimSpace(args.Project))
+	if err != nil {
+		return toolResult{}, err
+	}
+	result, err := s.backend.(ReviewRecordBackend).ReviewRecord(ctx, ReviewRecordInput{
+		ProjectID: target.ID,
+		ID:        id,
+		All:       args.All,
+		Trust:     trust,
+	})
+	if err != nil {
+		return toolResult{}, err
+	}
+	if result.Reviewed == nil {
+		result.Reviewed = []RecordSummary{}
+	}
+	if result.ProjectID == "" {
+		result.ProjectID = target.ID
+	}
+	text := "no unreviewed records"
+	if len(result.Reviewed) > 0 {
+		lines := make([]string, 0, len(result.Reviewed)+1)
+		lines = append(lines, fmt.Sprintf("%d reviewed", len(result.Reviewed)))
+		for _, record := range result.Reviewed {
+			lines = append(lines, summaryLine(record))
+		}
+		text = strings.Join(lines, "\n")
+	}
+	return toolResult{Text: text, Structured: result}, nil
 }
 
 // checkDecisionStatus rejects a status outside the decision lifecycle; the

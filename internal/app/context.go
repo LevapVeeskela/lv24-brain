@@ -65,6 +65,10 @@ type ContextOptions struct {
 	// Raw requests raw-zone excerpts from explicitly granted connections when
 	// the curated context is thin. Grants are default-deny (context-allow.json).
 	Raw bool
+	// IncludeUnreviewed includes quarantined records (unreviewed agent,
+	// connector or import writes, or an unknown origin). They are excluded
+	// from trusted context by default.
+	IncludeUnreviewed bool
 }
 
 // ContextRecord is one record relevant to the task.
@@ -76,6 +80,9 @@ type ContextRecord struct {
 	Detail    string // first line of the context, reason or body
 	CreatedAt time.Time
 	Score     float64
+	// Quarantined marks a record that is shown only because the caller asked
+	// for unreviewed records. Its text is not trusted.
+	Quarantined bool
 }
 
 // ContextExcerpt is one raw-zone item body allowed by context-allow.json.
@@ -114,9 +121,14 @@ type ContextResult struct {
 	// PendingProposals counts pending candidates; nil when the proposal store
 	// is unavailable. Context never includes proposal bodies.
 	PendingProposals *int
+	// Quarantined lists the ids of records excluded from trusted context.
+	Quarantined []string
 	// RawExcerpts are granted raw-zone excerpts, ordered by search relevance.
 	// Empty unless Raw was requested, grants match and curated context is thin.
 	RawExcerpts []ContextExcerpt
+	// IncludeUnreviewed reports that quarantined records were included in the
+	// summary at the caller's request.
+	IncludeUnreviewed bool
 	// Skipped names the parts that are unavailable in this mode, with why.
 	Skipped []string
 	Summary string
@@ -155,19 +167,28 @@ func (a *App) Context(ctx context.Context, opts ContextOptions) (ContextResult, 
 	if err != nil {
 		return ContextResult{}, err
 	}
-	handoff, err := a.latestHandoff(ctx, project.ID, since)
+	handoffs, err := a.listHandoffs(ctx, project.ID)
 	if err != nil {
 		return ContextResult{}, err
 	}
+	quarantined := append([]string{}, catalog.quarantined...)
+	for _, handoff := range handoffs {
+		if handoff.Quarantined() {
+			quarantined = append(quarantined, handoff.ID)
+		}
+	}
+	sort.Strings(quarantined)
+	handoff := latestHandoff(handoffs, since, opts.IncludeUnreviewed)
 
 	result := ContextResult{
 		Project: project, Mode: a.cfg.Mode, Query: query, Since: since,
-		Budget: opts.Budget, State: state, Handoff: handoff,
+		Budget: opts.Budget, State: state, Handoff: handoff, Quarantined: quarantined,
+		IncludeUnreviewed: opts.IncludeUnreviewed,
 	}
 	if result.Budget <= 0 {
 		result.Budget = DefaultBootstrapBudget
 	}
-	ranking := contextRanking{catalog: catalog, since: since, now: now}
+	ranking := contextRanking{catalog: catalog, since: since, now: now, includeUnreviewed: opts.IncludeUnreviewed}
 
 	hits, err := a.contextSearch(ctx, query, project.ID, kinds, since)
 	if err != nil {
@@ -235,15 +256,15 @@ func (a *App) contextSearch(ctx context.Context, query, projectID string, kinds 
 	return a.SearchWith(ctx, SearchOptions{Text: query, ProjectID: projectID, Limit: contextSearchLimit, Kinds: kinds, Since: since})
 }
 
-// latestHandoff returns the newest handoff not older than since.
-func (a *App) latestHandoff(ctx context.Context, projectID string, since time.Time) (*domain.Handoff, error) {
-	handoffs, err := a.listHandoffs(ctx, projectID)
-	if err != nil {
-		return nil, err
-	}
+// latestHandoff returns the newest handoff not older than since. Quarantined
+// handoffs are skipped unless includeUnreviewed is set.
+func latestHandoff(handoffs []domain.Handoff, since time.Time, includeUnreviewed bool) *domain.Handoff {
 	var latest *domain.Handoff
 	for i := range handoffs {
 		handoff := handoffs[i]
+		if !includeUnreviewed && handoff.Quarantined() {
+			continue
+		}
 		if !since.IsZero() && handoff.CreatedAt.Before(since) {
 			continue
 		}
@@ -251,15 +272,16 @@ func (a *App) latestHandoff(ctx context.Context, projectID string, since time.Ti
 			latest = &handoff
 		}
 	}
-	return latest, nil
+	return latest
 }
 
 // contextCatalog maps record ids to their details. A kind whose store cannot
 // list records is absent from listed, so hits of that kind are kept as the
 // index returned them.
 type contextCatalog struct {
-	records map[string]ContextRecord
-	listed  map[string]bool
+	records     map[string]ContextRecord
+	listed      map[string]bool
+	quarantined []string
 }
 
 func (a *App) contextCatalog(ctx context.Context, projectID string) (contextCatalog, error) {
@@ -274,6 +296,10 @@ func (a *App) contextCatalog(ctx context.Context, projectID string) (contextCata
 			catalog.records[decision.ID] = ContextRecord{
 				ID: decision.ID, Kind: ContextKindDecision, Title: decision.Title, Status: string(decision.Status),
 				Detail: SummarizeLine(decision.Context, promptLineRunes), CreatedAt: decision.CreatedAt,
+				Quarantined: decision.Quarantined(),
+			}
+			if decision.Quarantined() {
+				catalog.quarantined = append(catalog.quarantined, decision.ID)
 			}
 		}
 	}
@@ -287,6 +313,10 @@ func (a *App) contextCatalog(ctx context.Context, projectID string) (contextCata
 			catalog.records[attempt.ID] = ContextRecord{
 				ID: attempt.ID, Kind: ContextKindAttempt, Title: attempt.Title,
 				Detail: attemptDetail(attempt), CreatedAt: attempt.CreatedAt,
+				Quarantined: attempt.Quarantined(),
+			}
+			if attempt.Quarantined() {
+				catalog.quarantined = append(catalog.quarantined, attempt.ID)
 			}
 		}
 	}
@@ -300,6 +330,10 @@ func (a *App) contextCatalog(ctx context.Context, projectID string) (contextCata
 			catalog.records[note.ID] = ContextRecord{
 				ID: note.ID, Kind: ContextKindNote, Title: valueOr(note.Title, SummarizeLine(note.Body, 80)),
 				Detail: SummarizeLine(note.Body, promptLineRunes), CreatedAt: note.CreatedAt,
+				Quarantined: note.Quarantined(),
+			}
+			if note.Quarantined() {
+				catalog.quarantined = append(catalog.quarantined, note.ID)
 			}
 		}
 	}
@@ -328,13 +362,15 @@ func (c contextCatalog) lookup(hit ports.Hit) (ContextRecord, bool) {
 }
 
 type contextRanking struct {
-	catalog contextCatalog
-	since   time.Time
-	now     time.Time
+	catalog           contextCatalog
+	since             time.Time
+	now               time.Time
+	includeUnreviewed bool
 }
 
 // candidates resolves hits to records in search order, dropping unknown
-// records, records older than since, ids in exclude and duplicate ids.
+// records, records older than since, quarantined records the caller did not
+// ask for, ids in exclude and duplicate ids.
 func (r contextRanking) candidates(hits []ports.Hit, exclude map[string]bool) []ContextRecord {
 	seen := map[string]bool{}
 	out := make([]ContextRecord, 0, len(hits))
@@ -345,6 +381,9 @@ func (r contextRanking) candidates(hits []ports.Hit, exclude map[string]bool) []
 		seen[hit.ID] = true
 		record, ok := r.catalog.lookup(hit)
 		if !ok {
+			continue
+		}
+		if record.Quarantined && !r.includeUnreviewed {
 			continue
 		}
 		if !r.since.IsZero() && !record.CreatedAt.IsZero() && record.CreatedAt.Before(r.since) {
@@ -453,6 +492,9 @@ func renderContext(result ContextResult, revision string, now time.Time) string 
 	if result.PendingProposals != nil {
 		fmt.Fprintf(&out, "pending_proposals: %d\n", *result.PendingProposals)
 	}
+	if line := quarantineLine(result.Quarantined, result.IncludeUnreviewed); line != "" {
+		out.WriteString(line + "\n")
+	}
 	for _, skipped := range result.Skipped {
 		fmt.Fprintf(&out, "skipped: %s\n", SummarizeLine(skipped, promptLineRunes))
 	}
@@ -515,6 +557,9 @@ func writeContextRecords(out *strings.Builder, records []ContextRecord, empty st
 		label := record.Kind
 		if record.Status != "" {
 			label += "/" + record.Status
+		}
+		if record.Quarantined {
+			label += "/quarantined"
 		}
 		fmt.Fprintf(out, "- [%s] %s (%s, %s)\n", label, SummarizeLine(record.Title, promptLineRunes), formatDate(record.CreatedAt), record.ID)
 		if record.Detail != "" && record.Detail != SummarizeLine(record.Title, promptLineRunes) {

@@ -236,13 +236,14 @@ func parseNotesBody(body string, defaultDate time.Time) ([]domain.Note, error) {
 			}
 			used[id] = struct{}{}
 			notes = append(notes, domain.Note{
-				ID:        id,
-				Title:     title,
-				Body:      strings.TrimRight(strings.Join(lines[start:i], "\n"), "\n"),
-				Tags:      nonNilStrings(metadata.Tags),
-				Permalink: metadata.Permalink,
-				Source:    metadata.Source,
-				CreatedAt: metadata.CreatedAt.UTC(),
+				ID:         id,
+				Title:      title,
+				Body:       strings.TrimRight(strings.Join(lines[start:i], "\n"), "\n"),
+				Tags:       nonNilStrings(metadata.Tags),
+				Permalink:  metadata.Permalink,
+				Source:     metadata.Source,
+				Provenance: provenanceFromFrontmatter(metadata.provenanceFrontmatter),
+				CreatedAt:  metadata.CreatedAt.UTC(),
 			})
 			continue
 		}
@@ -270,10 +271,13 @@ func parseNotesBody(body string, defaultDate time.Time) ([]domain.Note, error) {
 				createdAt = time.Date(defaultDate.Year(), defaultDate.Month(), defaultDate.Day(), 0, 0, 0, 0, time.UTC)
 			}
 			notes = append(notes, domain.Note{
-				ID:        id,
-				Title:     title,
-				Body:      strings.TrimRight(strings.Join(lines[start:i], "\n"), "\n"),
-				CreatedAt: createdAt,
+				ID:    id,
+				Title: title,
+				Body:  strings.TrimRight(strings.Join(lines[start:i], "\n"), "\n"),
+				// A hand-written section has no provenance marker: it is the
+				// owner's own text, reviewed by definition.
+				Provenance: domain.Provenance{Reviewed: true},
+				CreatedAt:  createdAt,
 			})
 			continue
 		}
@@ -353,6 +357,7 @@ func readDecisionFile(path string) (domain.Decision, error) {
 		Paths:        paths,
 		Permalink:    frontmatter.Permalink,
 		Source:       source,
+		Provenance:   provenanceFromFrontmatter(frontmatter.provenanceFrontmatter),
 		CreatedAt:    frontmatter.CreatedAt.UTC(),
 		UpdatedAt:    frontmatter.UpdatedAt.UTC(),
 	}, nil
@@ -391,6 +396,7 @@ func readAttemptFile(path string) (domain.Attempt, error) {
 		Reason:     reason,
 		Permalink:  frontmatter.Permalink,
 		Source:     source,
+		Provenance: provenanceFromFrontmatter(frontmatter.provenanceFrontmatter),
 		CreatedAt:  frontmatter.CreatedAt.UTC(),
 		UpdatedAt:  frontmatter.UpdatedAt.UTC(),
 	}, nil
@@ -417,6 +423,7 @@ func readHandoffFile(path string) (domain.Handoff, error) {
 		GitContext: gitContext,
 		NextAction: nextAction,
 		Permalink:  frontmatter.Permalink,
+		Provenance: provenanceFromFrontmatter(frontmatter.provenanceFrontmatter),
 		CreatedAt:  frontmatter.CreatedAt.UTC(),
 	}, nil
 }

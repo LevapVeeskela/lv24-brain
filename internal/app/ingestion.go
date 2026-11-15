@@ -78,6 +78,11 @@ type Ingestion struct {
 	// PreparePublish runs on every run before item writes. A local git runtime
 	// uses it to untrack committed data when a connection becomes local-only.
 	PreparePublish func(ctx context.Context, connectionID string, policy domain.PublishPolicy) error
+	// RawZoneTracked reports whether the shared tree already publishes the
+	// connection's items or checkpoints. A git runtime wires it so a zone that an
+	// earlier engine published is grandfathered as shared instead of being
+	// silently untracked; nil means "nothing is tracked" (local mode).
+	RawZoneTracked func(ctx context.Context, connectionID string) (bool, error)
 	// DisallowLocalOnlyItems makes the host refuse to persist items whose
 	// effective raw-zone policy is local-only. Server mode sets it because its
 	// only item store is shared; local and git mode leave it false, so a
@@ -126,6 +131,10 @@ type RunConnectionResult struct {
 	Busy bool `json:"busy,omitempty"`
 	// Publish is the effective publish policy applied before the first write.
 	Publish domain.PublishPolicy `json:"publish,omitempty"`
+	// PublishNotice explains a grandfather decision (the raw zone is already
+	// tracked by git and no explicit policy is set) or a git index that could not
+	// be read. It is advisory and changes nothing by itself.
+	PublishNotice string `json:"publishNotice,omitempty"`
 	// PublishChanged reports a policy different from the one recorded by
 	// the item store; on a shared -> local-only switch the caller must untrack
 	// connectors/<id> from git (git rm --cached -r).
@@ -289,17 +298,19 @@ func isContextError(err error) bool {
 }
 
 func (r *ingestRun) applyPublishPolicy(ctx context.Context) error {
-	// A machine-local raw zone (local and git mode) publishes nothing unless the
-	// connection explicitly opts in: the provider descriptor default never
-	// publishes it (see domain.Connection.RawZonePublish). A host that refuses
-	// local-only items has no machine-local zone at all (server mode), so it
-	// keeps the documented sensitivity policy: the descriptor default decides
-	// whether its items may be stored.
-	policy := r.connection.RawZonePublish()
-	if r.host.DisallowLocalOnlyItems {
-		policy = r.connection.EffectivePublish(r.descriptor)
+	resolution, notice := r.resolvePublishPolicy(ctx)
+	r.result.Publish = resolution.Policy
+	if notice != "" {
+		r.result.PublishNotice = notice
 	}
-	r.result.Publish = policy
+	if resolution.Grandfathered {
+		// Compatibility first: the raw zone was already published by an earlier
+		// engine and the owner has not chosen a policy. Keep the files, the
+		// marker and the git index untouched and only recommend a choice; the
+		// next explicit `publish` setting takes over.
+		return nil
+	}
+	policy := resolution.Policy
 	if setter, ok := r.host.Items.(publishPolicyStore); ok {
 		if reader, ok := r.host.Items.(publishPolicyReader); ok {
 			current, err := reader.PublishPolicy(ctx, r.connection.ID)
@@ -309,9 +320,12 @@ func (r *ingestRun) applyPublishPolicy(ctx context.Context) error {
 			if current != policy {
 				r.result.PublishChanged = true
 				r.result.PreviousPublish = current
-				if err := setter.SetPublishPolicy(ctx, r.connection.ID, policy); err != nil {
-					return fmt.Errorf("set publish policy: %w", err)
-				}
+			}
+			// Applying an unchanged policy is cheap and idempotent; it also
+			// upgrades an older marker that did not ignore checkpoints/ without
+			// touching any tracked item.
+			if err := setter.SetPublishPolicy(ctx, r.connection.ID, policy); err != nil {
+				return fmt.Errorf("set publish policy: %w", err)
 			}
 		} else if err := setter.SetPublishPolicy(ctx, r.connection.ID, policy); err != nil {
 			return fmt.Errorf("set publish policy: %w", err)
@@ -325,6 +339,36 @@ func (r *ingestRun) applyPublishPolicy(ctx context.Context) error {
 		}
 	}
 	return nil
+}
+
+// resolvePublishPolicy decides the raw-zone policy for this run and returns an
+// optional notice for the run result. An explicit connection setting wins; a
+// host without a machine-local raw zone (server mode) keeps the descriptor
+// sensitivity policy; otherwise a zone git already tracks is grandfathered as
+// shared and a zone with nothing tracked is machine-local.
+func (r *ingestRun) resolvePublishPolicy(ctx context.Context) (domain.RawZoneResolution, string) {
+	if r.host.DisallowLocalOnlyItems {
+		// The server's only item store is the shared raw zone, so "local-only"
+		// there means "must not be stored at all" and the descriptor decides.
+		return domain.RawZoneResolution{Policy: r.connection.EffectivePublish(r.descriptor), Explicit: true}, ""
+	}
+	tracked := false
+	if r.host.RawZoneTracked != nil {
+		found, err := r.host.RawZoneTracked(ctx, r.connection.ID)
+		if err != nil {
+			// Never guess local-only when the index cannot be read: that would
+			// untrack a published zone on a transient git failure.
+			message, _ := RedactIngest(err.Error())
+			return domain.RawZoneResolution{Policy: domain.PublishShared, Grandfathered: true},
+				fmt.Sprintf("cannot read the git index for %s (%s): the raw zone stays as it is; run brain connection publish %s shared|local-only to choose", r.connection.ID, message, r.connection.ID)
+		}
+		tracked = found
+	}
+	resolution := domain.ResolveRawZonePolicy(r.connection.Publish, tracked)
+	if resolution.Grandfathered {
+		return resolution, fmt.Sprintf("raw zone of %s is already tracked by git and no publish policy is set: keeping it shared (grandfathered); run brain connection publish %s shared|local-only to choose", r.connection.ID, r.connection.ID)
+	}
+	return resolution, ""
 }
 
 // initialSince returns the run's lower bound: the caller's Since, or the

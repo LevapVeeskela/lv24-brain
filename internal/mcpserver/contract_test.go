@@ -62,8 +62,8 @@ func TestContractReadOnlyHintsMatchTheTools(t *testing.T) {
 
 func TestContractCatalogueCoversEveryTool(t *testing.T) {
 	specs := Catalog("test-version")
-	if len(specs) != 16 {
-		t.Fatalf("catalogue = %d tools, want 16", len(specs))
+	if len(specs) != 17 {
+		t.Fatalf("catalogue = %d tools, want 17", len(specs))
 	}
 	seen := map[string]bool{}
 	for _, spec := range specs {

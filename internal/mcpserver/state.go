@@ -95,7 +95,7 @@ func (s *Server) stateGet(ctx context.Context, raw json.RawMessage) (toolResult,
 	if err := decodeArgs(raw, &args); err != nil {
 		return toolResult{}, err
 	}
-	target, err := s.backend.Resolve(ctx, strings.TrimSpace(args.Project))
+	target, err := s.resolveTarget(ctx, strings.TrimSpace(args.Project))
 	if err != nil {
 		return toolResult{}, err
 	}
@@ -130,7 +130,7 @@ func (s *Server) stateSet(ctx context.Context, raw json.RawMessage) (toolResult,
 	if in.Goal == nil && in.NextAction == nil && in.Active == nil && in.Blocked == nil && in.OpenQuestions == nil && in.FreshUntil == nil {
 		return toolResult{}, refusalInvalid("nothing to change; pass at least one field")
 	}
-	target, err := s.backend.Resolve(ctx, strings.TrimSpace(args.Project))
+	target, err := s.writeTarget(ctx, strings.TrimSpace(args.Project))
 	if err != nil {
 		return toolResult{}, err
 	}

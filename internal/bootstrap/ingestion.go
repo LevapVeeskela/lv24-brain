@@ -72,6 +72,7 @@ func BuildIngestion(cfg config.BrainConfig, opts Options) (*IngestionRuntime, er
 			return nil, err
 		}
 		host.PreparePublish = provider.PrepareConnectionPublish
+		host.RawZoneTracked = provider.RawZoneTracked
 	}
 	return &IngestionRuntime{Ingestion: host, runtime: runtime}, nil
 }

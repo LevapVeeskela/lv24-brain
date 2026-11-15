@@ -22,6 +22,7 @@ func runCatchup(args []string, stdout, stderr io.Writer) int {
 	fs := newFlagSet("catchup", stderr)
 	since := fs.Duration("since", 0, "look back this far instead of to the latest handoff, e.g. 24h")
 	limit := fs.Int("limit", catchupDefaultLimit, "maximum items per list")
+	includeUnreviewed := fs.Bool("include-unreviewed", false, "include quarantined records (unreviewed agent, connector or import writes)")
 	asJSON := fs.Bool("json", false, "print JSON")
 	cfgPath := configFlag(fs)
 	positional, err := parseInterspersed(fs, args)
@@ -38,7 +39,11 @@ func runCatchup(args []string, stdout, stderr io.Writer) int {
 		return code
 	}
 	defer func() { _ = runtime.Close() }()
-	opts := app.CatchupOptions{ProjectID: target.Project.ID, Limit: *limit}
+	opts := app.CatchupOptions{
+		ProjectID:         target.Project.ID,
+		Limit:             *limit,
+		IncludeUnreviewed: *includeUnreviewed,
+	}
 	if *since > 0 {
 		opts.Since = time.Now().Add(-*since)
 	}
@@ -54,13 +59,21 @@ func runCatchup(args []string, stdout, stderr io.Writer) int {
 }
 
 // printCatchup renders the human catchup report, or the "nothing new" line
-// when the window holds no changes.
+// when the window holds no changes. Quarantined ids are always reported, even
+// when their records were excluded.
 func printCatchup(w io.Writer, result app.CatchupResult) {
+	quarantine := app.QuarantineLine(result.Quarantined, result.IncludeUnreviewed)
 	if result.Empty() {
 		fmt.Fprintf(w, "catchup %s: nothing new since %s (%s)\n", result.Project.ID, formatCatchupTime(result.Since), result.SinceSource)
+		if quarantine != "" {
+			fmt.Fprintln(w, quarantine)
+		}
 		return
 	}
 	fmt.Fprintf(w, "catchup %s since %s (%s)\n", result.Project.ID, formatCatchupTime(result.Since), catchupSourceLabel(result))
+	if quarantine != "" {
+		fmt.Fprintln(w, quarantine)
+	}
 	if result.StateChanged {
 		fmt.Fprintf(w, "state changed: goal=%s next=%s\n", valueOr(result.State.Goal, "not set"), valueOr(result.State.NextAction, "not set"))
 	}
@@ -175,10 +188,15 @@ type jsonCatchup struct {
 	Decisions    []jsonDecision `json:"decisions"`
 	Attempts     []jsonAttempt  `json:"attempts"`
 	Handoffs     []jsonHandoff  `json:"handoffs"`
+	Quarantined  []string       `json:"quarantined"`
 	Journal      jsonJournal    `json:"journal"`
 }
 
 func toJSONCatchup(result app.CatchupResult) jsonCatchup {
+	quarantined := result.Quarantined
+	if quarantined == nil {
+		quarantined = []string{}
+	}
 	out := jsonCatchup{
 		Project:      result.Project.ID,
 		Since:        jsonTime(result.Since),
@@ -189,6 +207,7 @@ func toJSONCatchup(result app.CatchupResult) jsonCatchup {
 		Decisions:    mapAll(result.Decisions, toJSONDecision),
 		Attempts:     mapAll(result.Attempts, toJSONAttempt),
 		Handoffs:     mapAll(result.Handoffs, toJSONHandoff),
+		Quarantined:  quarantined,
 		Journal:      toJSONJournal(result.Journal),
 	}
 	if result.Baseline != nil {

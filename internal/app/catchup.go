@@ -21,6 +21,9 @@ type CatchupOptions struct {
 	Since time.Time
 	// Limit bounds each list; <= 0 uses 20.
 	Limit int
+	// IncludeUnreviewed includes quarantined records that are excluded from
+	// trusted context by default.
+	IncludeUnreviewed bool
 }
 
 // CatchupResult is everything that happened in a project after a baseline:
@@ -32,13 +35,19 @@ type CatchupResult struct {
 	// SinceSource is "handoff", "explicit" or "default".
 	SinceSource string
 	// Baseline is the handoff the window starts at, when SinceSource is
-	// "handoff".
+	// "handoff". A quarantined handoff is not used as a baseline unless
+	// IncludeUnreviewed was set.
 	Baseline     *domain.Handoff
 	Notes        []domain.Note
 	Decisions    []domain.Decision
 	Attempts     []domain.Attempt
 	Handoffs     []domain.Handoff
 	StateChanged bool
+	// Quarantined lists the ids of records left out of the report.
+	Quarantined []string
+	// IncludeUnreviewed reports that quarantined records were included at the
+	// caller's request.
+	IncludeUnreviewed bool
 	// Journal holds commits and other activity lines, newest first.
 	Journal []ports.JournalEntry
 }
@@ -64,7 +73,7 @@ func (a *App) Catchup(ctx context.Context, opts CatchupOptions) (CatchupResult, 
 	if limit <= 0 {
 		limit = 20
 	}
-	result := CatchupResult{Project: project}
+	result := CatchupResult{Project: project, IncludeUnreviewed: opts.IncludeUnreviewed}
 	if state, err := a.deps.Store.GetState(ctx, project.ID); err == nil {
 		result.State = state
 	} else if !errors.Is(err, domain.ErrNotFound) {
@@ -76,6 +85,30 @@ func (a *App) Catchup(ctx context.Context, opts CatchupOptions) (CatchupResult, 
 		return CatchupResult{}, err
 	}
 	sort.Slice(handoffs, func(i, j int) bool { return handoffs[i].CreatedAt.After(handoffs[j].CreatedAt) })
+	notes, err := a.listNotes(ctx, project.ID)
+	if err != nil {
+		return CatchupResult{}, err
+	}
+	decisions, err := a.listDecisions(ctx, project.ID)
+	if err != nil {
+		return CatchupResult{}, err
+	}
+	attempts, err := a.listAttempts(ctx, project.ID)
+	if err != nil {
+		return CatchupResult{}, err
+	}
+	result.Quarantined = quarantinedIDs(notes, decisions, attempts, handoffs)
+	quarantinedSet := make(map[string]bool, len(result.Quarantined))
+	for _, id := range result.Quarantined {
+		quarantinedSet[id] = true
+	}
+	if !opts.IncludeUnreviewed {
+		notes = trustedNotes(notes)
+		decisions = trustedDecisions(decisions)
+		attempts = trustedAttempts(attempts)
+		handoffs = trustedHandoffs(handoffs)
+	}
+
 	switch {
 	case !opts.Since.IsZero():
 		result.Since, result.SinceSource = opts.Since.UTC(), "explicit"
@@ -87,27 +120,15 @@ func (a *App) Catchup(ctx context.Context, opts CatchupOptions) (CatchupResult, 
 	}
 	after := func(t time.Time) bool { return t.After(result.Since) }
 
-	notes, err := a.listNotes(ctx, project.ID)
-	if err != nil {
-		return CatchupResult{}, err
-	}
 	for _, note := range notes {
 		if after(note.CreatedAt) {
 			result.Notes = append(result.Notes, note)
 		}
 	}
-	decisions, err := a.listDecisions(ctx, project.ID)
-	if err != nil {
-		return CatchupResult{}, err
-	}
 	for _, decision := range decisions {
 		if after(decision.CreatedAt) || after(decision.UpdatedAt) {
 			result.Decisions = append(result.Decisions, decision)
 		}
-	}
-	attempts, err := a.listAttempts(ctx, project.ID)
-	if err != nil {
-		return CatchupResult{}, err
 	}
 	for _, attempt := range attempts {
 		if after(attempt.CreatedAt) {
@@ -127,10 +148,14 @@ func (a *App) Catchup(ctx context.Context, opts CatchupOptions) (CatchupResult, 
 			return CatchupResult{}, err
 		}
 		// Record events are already listed above; keep commits and other
-		// activity (state changes, connector syncs).
+		// activity (state changes, connector syncs). An event that names a
+		// quarantined record is dropped with the record.
 		for _, entry := range entries {
 			switch entry.Event {
 			case JournalNote, JournalDecision, JournalAttempt, JournalHandoff:
+				continue
+			}
+			if !opts.IncludeUnreviewed && quarantinedSet[entry.ID] {
 				continue
 			}
 			result.Journal = append(result.Journal, entry)

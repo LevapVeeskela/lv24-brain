@@ -23,6 +23,7 @@ func runContext(args []string, stdout, stderr io.Writer) int {
 	fs.Var(&kinds, "kind", "keep only this record kind: decision, attempt or note (repeatable)")
 	since := fs.String("since", "", "drop records older than a window (24h, 7d, 2w) or a date (2026-11-01)")
 	raw := fs.Bool("raw", false, "include granted raw-zone excerpts when curated context is thin")
+	includeUnreviewed := fs.Bool("include-unreviewed", false, "include quarantined records (unreviewed agent, connector or import writes)")
 	asJSON := fs.Bool("json", false, "print JSON")
 	cfgPath := configFlag(fs)
 	positional, err := parseInterspersed(fs, args)
@@ -58,12 +59,13 @@ func runContext(args []string, stdout, stderr io.Writer) int {
 		return reportError(stderr, "context", err)
 	}
 	result, err := runtime.App.Context(ctx, app.ContextOptions{
-		ProjectID: target.Project.ID,
-		Query:     query,
-		Budget:    *budget,
-		Kinds:     kinds,
-		Since:     *since,
-		Raw:       *raw,
+		ProjectID:         target.Project.ID,
+		Query:             query,
+		Budget:            *budget,
+		Kinds:             kinds,
+		Since:             *since,
+		Raw:               *raw,
+		IncludeUnreviewed: *includeUnreviewed,
 	})
 	if err != nil {
 		return reportError(stderr, "context", err)
@@ -78,12 +80,13 @@ func runContext(args []string, stdout, stderr io.Writer) int {
 // Context implements mcpserver.ContextBackend.
 func (b mcpBackend) Context(ctx context.Context, in mcpserver.ContextInput) (mcpserver.TaskContext, error) {
 	result, err := b.app.Context(ctx, app.ContextOptions{
-		ProjectID: in.ProjectID,
-		Query:     in.Query,
-		Budget:    in.Budget,
-		Kinds:     in.Kinds,
-		Since:     in.Since,
-		Raw:       in.Raw,
+		ProjectID:         in.ProjectID,
+		Query:             in.Query,
+		Budget:            in.Budget,
+		Kinds:             in.Kinds,
+		Since:             in.Since,
+		Raw:               in.Raw,
+		IncludeUnreviewed: in.IncludeUnreviewed,
 	})
 	if err != nil {
 		return mcpserver.TaskContext{}, err
@@ -112,6 +115,7 @@ func toMCPContext(result app.ContextResult) mcpserver.TaskContext {
 		}),
 		RawExcerpts: mapAll(result.RawExcerpts, toMCPContextExcerpt),
 		Skipped:     result.Skipped,
+		Quarantined: result.Quarantined,
 		Summary:     result.Summary,
 	}
 	if result.Handoff != nil {

@@ -23,7 +23,48 @@ type noteFileFrontmatter struct {
 	Date                 string `yaml:"date,omitempty"`
 }
 
+// provenanceFrontmatter is the on-disk form of domain.Provenance, shared by
+// record frontmatter and note markers. A nil Reviewed means the key was
+// absent: the record predates provenance and is reviewed by default. Only an
+// unreviewed record writes reviewed: false, and only a non-default trust level
+// writes trust.
+type provenanceFrontmatter struct {
+	Origin   string `yaml:"origin,omitempty" json:"origin,omitempty"`
+	Reviewed *bool  `yaml:"reviewed,omitempty" json:"reviewed,omitempty"`
+	Trust    string `yaml:"trust,omitempty" json:"trust,omitempty"`
+}
+
+func provenanceToFrontmatter(provenance domain.Provenance) provenanceFrontmatter {
+	provenance = provenance.Normalized()
+	out := provenanceFrontmatter{Origin: string(provenance.Origin)}
+	if provenance.Trust != domain.TrustVerified {
+		out.Trust = string(provenance.Trust)
+	}
+	if !provenance.Reviewed {
+		reviewed := false
+		out.Reviewed = &reviewed
+	}
+	return out
+}
+
+func provenanceFromFrontmatter(provenance provenanceFrontmatter) domain.Provenance {
+	reviewed := true
+	if provenance.Reviewed != nil {
+		reviewed = *provenance.Reviewed
+	}
+	origin := domain.Origin(provenance.Origin)
+	if origin == "" {
+		origin = domain.OriginHuman
+	}
+	trust := domain.Trust(provenance.Trust)
+	if trust == "" {
+		trust = domain.TrustVerified
+	}
+	return domain.Provenance{Origin: origin, Reviewed: reviewed, Trust: trust}
+}
+
 type noteMetadata struct {
+	provenanceFrontmatter
 	ID        string            `json:"id"`
 	Title     string            `json:"title"`
 	Tags      []string          `json:"tags,omitempty"`
@@ -33,20 +74,22 @@ type noteMetadata struct {
 }
 
 type decisionFrontmatter struct {
-	markdown.Frontmatter `yaml:",inline"`
-	ID                   string                `yaml:"id,omitempty"`
-	Title                string                `yaml:"title,omitempty"`
-	Status               domain.DecisionStatus `yaml:"status,omitempty"`
-	Source               *sourceRefFrontmatter `yaml:"source,omitempty"`
-	CreatedAt            time.Time             `yaml:"created_at,omitempty"`
+	markdown.Frontmatter  `yaml:",inline"`
+	provenanceFrontmatter `yaml:",inline"`
+	ID                    string                `yaml:"id,omitempty"`
+	Title                 string                `yaml:"title,omitempty"`
+	Status                domain.DecisionStatus `yaml:"status,omitempty"`
+	Source                *sourceRefFrontmatter `yaml:"source,omitempty"`
+	CreatedAt             time.Time             `yaml:"created_at,omitempty"`
 }
 
 type attemptFrontmatter struct {
-	markdown.Frontmatter `yaml:",inline"`
-	ID                   string                `yaml:"id,omitempty"`
-	Title                string                `yaml:"title,omitempty"`
-	Source               *sourceRefFrontmatter `yaml:"source,omitempty"`
-	CreatedAt            time.Time             `yaml:"created_at,omitempty"`
+	markdown.Frontmatter  `yaml:",inline"`
+	provenanceFrontmatter `yaml:",inline"`
+	ID                    string                `yaml:"id,omitempty"`
+	Title                 string                `yaml:"title,omitempty"`
+	Source                *sourceRefFrontmatter `yaml:"source,omitempty"`
+	CreatedAt             time.Time             `yaml:"created_at,omitempty"`
 }
 
 // sourceRefFrontmatter is the on-disk form of domain.SourceRef. Times are
@@ -115,9 +158,10 @@ func validateRecordSourceRef(source *domain.SourceRef, projectID string) error {
 }
 
 type handoffFrontmatter struct {
-	markdown.Frontmatter `yaml:",inline"`
-	ID                   string    `yaml:"id,omitempty"`
-	CreatedAt            time.Time `yaml:"created_at,omitempty"`
+	markdown.Frontmatter  `yaml:",inline"`
+	provenanceFrontmatter `yaml:",inline"`
+	ID                    string    `yaml:"id,omitempty"`
+	CreatedAt             time.Time `yaml:"created_at,omitempty"`
 }
 
 // AppendNote appends one note section to projects/<id>/notes/YYYY-MM-DD.md.
@@ -243,12 +287,13 @@ func appendNoteLocked(path string, note domain.Note, date string, createdAt, upd
 	}
 
 	entry := renderNoteEntry(noteMetadata{
-		ID:        id,
-		Title:     note.Title,
-		Tags:      nonNilStrings(note.Tags),
-		Permalink: note.Permalink,
-		Source:    note.Source,
-		CreatedAt: createdAt,
+		provenanceFrontmatter: provenanceToFrontmatter(note.Provenance),
+		ID:                    id,
+		Title:                 note.Title,
+		Tags:                  nonNilStrings(note.Tags),
+		Permalink:             note.Permalink,
+		Source:                note.Source,
+		CreatedAt:             createdAt,
 	}, note.Body)
 	if body != "" && !strings.HasSuffix(body, "\n\n") {
 		body = strings.TrimRight(body, "\n") + "\n\n"
@@ -309,11 +354,12 @@ func (s *Store) AppendDecision(ctx context.Context, decision domain.Decision) (d
 					SchemaVersion: SchemaVersion,
 					Permalink:     decision.Permalink,
 				},
-				ID:        id,
-				Title:     decision.Title,
-				Status:    decision.Status,
-				Source:    sourceRefToFrontmatter(decision.Source),
-				CreatedAt: createdAt,
+				provenanceFrontmatter: provenanceToFrontmatter(decision.Provenance),
+				ID:                    id,
+				Title:                 decision.Title,
+				Status:                decision.Status,
+				Source:                sourceRefToFrontmatter(decision.Source),
+				CreatedAt:             createdAt,
 			}
 			raw, err := markdown.Render(frontmatter, renderDecisionBody(decision))
 			if err != nil {
@@ -364,10 +410,11 @@ func (s *Store) AppendAttempt(ctx context.Context, attempt domain.Attempt) (doma
 					SchemaVersion: SchemaVersion,
 					Permalink:     attempt.Permalink,
 				},
-				ID:        id,
-				Title:     attempt.Title,
-				Source:    sourceRefToFrontmatter(attempt.Source),
-				CreatedAt: createdAt,
+				provenanceFrontmatter: provenanceToFrontmatter(attempt.Provenance),
+				ID:                    id,
+				Title:                 attempt.Title,
+				Source:                sourceRefToFrontmatter(attempt.Source),
+				CreatedAt:             createdAt,
 			}
 			raw, err := markdown.Render(frontmatter, renderAttemptBody(attempt))
 			if err != nil {
@@ -417,8 +464,9 @@ func (s *Store) AppendHandoff(ctx context.Context, handoff domain.Handoff) (doma
 					SchemaVersion: SchemaVersion,
 					Permalink:     handoff.Permalink,
 				},
-				ID:        id,
-				CreatedAt: createdAt,
+				provenanceFrontmatter: provenanceToFrontmatter(handoff.Provenance),
+				ID:                    id,
+				CreatedAt:             createdAt,
 			}
 			raw, err := markdown.Render(frontmatter, renderHandoffBody(handoff))
 			if err != nil {

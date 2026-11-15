@@ -107,7 +107,11 @@ func TestPreparePublishRunsAfterPolicyAndBeforePayloadEveryRun(t *testing.T) {
 	if _, err := application.RunConnection(context.Background(), RunConnectionOptions{ConnectionID: connection.ID}); err != nil {
 		t.Fatal(err)
 	}
-	if got := strings.Join(events, ","); got != "prepare" {
+	// The policy is applied idempotently on every run: an unchanged local-only
+	// marker is rewritten only when its content differs (an older engine's
+	// marker did not ignore checkpoints/), so the hook still runs after the
+	// policy step and before payload writes.
+	if got := strings.Join(events, ","); got != "policy,prepare" {
 		t.Fatalf("unchanged policy hook events = %s", got)
 	}
 }

@@ -153,10 +153,10 @@ only when non-empty, so existing raw items do not re-upsert.
 
 ```text
 brain init       create an instance and write brain.yaml
-brain open       [path|id] bootstrap pack + ## Git + ## Graphs (--brief: state only)
+brain open       [path|id] bootstrap pack + ## Git + ## Graphs (--brief: state only; --include-unreviewed adds quarantined records)
 brain project    list, show, or set registry projects
 brain bootstrap  build bounded agent context
-brain context    [task] context for one task (--raw appends granted raw excerpts; local/git only)
+brain context    [task] context for one task (--raw appends granted raw excerpts; --include-unreviewed adds quarantined records; local/git only)
 brain note       append a dated note
 brain decision   append a decision
 brain attempt    append an attempt
@@ -165,8 +165,8 @@ brain status     show mode, paths, schema, engine version
 brain review     state age, questions, evidence, attempts + findings (stale/contradictory knowledge, pending proposals); --fix applies heuristic state fixes (see below)
 brain digest     cross-project morning summary; --source <conn> previews proposals from stored raw items (--write persists)
 brain promote    promote or dismiss one proposal; the only path into curated records
-brain catchup    what changed since the latest handoff
-brain record     list|show records; status|supersede decisions; trash|restore|trash-list (local/git)
+brain catchup    what changed since the latest handoff (--include-unreviewed adds quarantined records)
+brain record     list|show records; status|supersede decisions; review provenance; trash|restore|trash-list (local/git)
 brain session    start|end handlers for agent session hooks
 brain state      get|set the project state
 brain sync       commit, rebase, optional push, or --status (local/git only)
@@ -357,11 +357,47 @@ adds a review step between them:
   below). Proposals are not indexed in FTS5, so `brain search` stays
   curated-only.
 
+## Provenance and quarantine (0.15)
+
+Notes, decisions, attempts and handoffs embed a `domain.Provenance`: `Origin`,
+`Reviewed` and `Trust`. The zero value is backward compatible (human, reviewed,
+verified), so a record built without provenance behaves exactly like data written
+before 0.15.
+
+- **Storage.** Decisions, attempts and handoffs carry `origin`, `reviewed` and
+  `trust` in their YAML frontmatter; a note carries them in its per-entry
+  `<!-- brain:note {…} -->` marker, because one daily file mixes entries from
+  different channels. The writer omits `reviewed` unless it is false and omits
+  `trust` unless it is not verified; the reader fills the defaults. State has no
+  provenance fields yet.
+- **Validation.** `Origin` and `Trust` are closed enums on write. Reads keep an
+  unknown value so `brain record show` and review can report it, but
+  `Provenance.Quarantined` treats it as untrusted.
+- **Write channels.** The CLI use cases default to human/reviewed/verified. The
+  MCP adapter passes `agent` and reviews immediately unless
+  `security.quarantine_agent` is set. The automatic session-end capture
+  (`brain session end`, all hooks) passes `agent`, `trust: stated`, and the
+  same review policy: the handoff is visible by default and quarantined when
+  the config asks for it. Promotion passes `connector/reviewed/stated`.
+  `NoteInput`, `DecisionInput`, `AttemptInput` and `HandoffInput` expose
+  `Provenance` for the importer.
+- **Read paths.** `Bootstrap`, `Context` and `Catchup` drop quarantined records
+  (latest handoff and catchup baseline included) and report only ids via
+  `quarantined: N (…)` / `Quarantined`. `--include-unreviewed` and MCP
+  `include_unreviewed` opt in and label the records. `Findings` adds the
+  `quarantined` finding; `Doctor` reports the queue.
+- **Review.** `ports.RecordReviewer` lets `fsstore` mark one record reviewed
+  without touching its body or timestamps. `brain record review <id>|--all`
+  and the temporary MCP tool `brain_review_record` use it; the journal records
+  a `review` event.
+
 ## Context and raw excerpts (Phase 4.2)
 
 `brain context` is curated-first: state, review findings, the latest handoff,
-the best-matching records and failed attempts. `--raw` is off by default and
-does not change that output; it may append a bounded set of stored raw items.
+the best-matching records and failed attempts. Quarantined records are excluded
+(see [Provenance and quarantine](#provenance-and-quarantine-015)). `--raw` is off
+by default and does not change that output; it may append a bounded set of stored
+raw items.
 
 - **Grant file.** `<data-dir>/context-allow.json` sits next to `brain.yaml`.
   The file is optional and contains no secrets; like
@@ -581,20 +617,27 @@ per stream at `connectors/<id>/checkpoints/<stream>.json`, and tombstones
 checkpoints; a run then updates the per-item index (`item:<conn>/<id>`, kind
 `item`, excluded from default search) and persists the run record.
 
-The raw zone stays on the machine that wrote it unless the connection
-explicitly sets `publish: shared`: a provider default alone never publishes it.
-A per-connection `connectors/<id>/.gitignore` marker carries the policy.
-Local-only (the default, and the policy of a directory without a marker)
-ignores the whole directory. Shared commits items and still ignores
+The raw zone is machine-local unless the connection says otherwise. The
+effective policy is decided once per run: an explicit `publish: shared` or
+`publish: local-only` on the connection always wins. Without one, a raw zone
+that git already tracks keeps publishing exactly as before (grandfathered, so an
+upgrade never untracks 2k files behind the owner's back) and a connection with
+nothing tracked defaults to local-only. `brain connection publish <id>
+shared|local-only` records the choice; local-only untracks `connectors/<id>`
+(`git rm --cached -r`) and shared keeps items tracked. Files stay on disk and git
+history is never rewritten.
+
+A per-connection `connectors/<id>/.gitignore` marker carries the policy:
+local-only ignores the whole directory; shared commits items and still ignores
 `checkpoints/`, lock and temporary files, because a cursor belongs to the host
-that read the stream. A shared item file omits `observed_at` (the host clock),
-so two machines that read the same item write byte-identical files at the same
-path instead of conflicting on every sync; switching a connection to shared
-rewrites its stored items without that field. On a shared-to-local-only switch
-the caller untracks `connectors/<id>` (`git rm --cached -r`) before private
-payload writes, and a shared run untracks `connectors/<id>/checkpoints/`;
-neither erases prior git history. `brain doctor` warns when raw items or
-checkpoints are still tracked. Mail connections default to `local-only`; mail
+that read the stream. A shared item file omits `observed_at` (the host clock), so
+two machines that read the same item write byte-identical files at the same path
+instead of conflicting on every sync; switching a connection to shared rewrites
+its stored local-only items without that field. A run with an unreadable git
+index keeps the zone unchanged rather than guessing local-only. `brain doctor`
+reports tracked files of an explicitly local-only connection (`raw-zone`, untrack
+them) and a tracked zone without an explicit policy (`raw-zone-policy`, choose
+with `brain connection publish`). Mail connections default to `local-only`; mail
 addresses are hashed to `[email:<12 hex>]` (exposure reduction, not
 anonymization). Sources never infer deletes from absence.
 
@@ -685,6 +728,9 @@ left untouched and the command exits non-zero.
 | Raw-zone deletes are not inferred | sources report tombstones only; `Deletes` is false without authoritative tombstones |
 | Curation is local and rule-based | `brain digest --source` and `brain promote` run in local/git mode only, read stored items, and write machine-local git-ignored proposals; server mode, the local API and the desktop app have no proposal surface, and there is no scheduled digest or proposal merge/trash |
 | Raw context excerpts are local/git only | `brain context --raw` and every raw search path read `context-allow.json`; excerpts exist only in local/git mode, and server search never returns raw items to viewers or members |
+| `state.md` has no provenance | state is always trusted context; only records carry `origin/reviewed/trust`, so `brain_state_set` text is not quarantined (planned with the 0.16 state model) |
+| `record review` is local/git only | server mode has no provenance-edit route yet; quarantined server records can only be changed through the ordinary update routes |
+| No code graph or semantic index yet | code symbols/impact (0.18) and optional embeddings are not part of 0.15; search stays lexical |
 | CLI index is local-only | `brain search` in server mode uses `GET /v1/search`; no local index is built |
 | No server-side Markdown import/export | migrate into Markdown first; server records go through the API |
 | Server auto-update not implemented | upgrade by pulling a new image; `BRAIN_SERVER_AUTO_UPDATE` is reserved |

@@ -39,6 +39,12 @@ curated context is thin and only in local/git mode; without a matching grant in
 `<data-dir>/context-allow.json` it adds nothing. See
 [Raw context excerpts](#raw-context-excerpts-phase-42).
 
+Records written by an agent or a connector can be quarantined until you review
+them: `brain context` and `brain open` leave them out and print
+`quarantined: N (ids)`. Review one with `brain record review <id>`, or the queue
+with `brain record review --all`. To inspect without clearing, add
+`--include-unreviewed`. See [Provenance and quarantine](#provenance-and-quarantine-015).
+
 | Mode | Storage | Sync | Best for |
 |---|---|---|---|
 | `local` | Markdown on this machine | none | one person |
@@ -260,12 +266,14 @@ redaction (`[redacted]`), mail address hashing (`[email:<12 hex>]`, exposure
 reduction, not anonymization), body cap (512 KiB with truncation marker),
 per-stream checkpoints (`connectors/<id>/checkpoints/*.json`), tombstones for
 reported deletes, index update, and a run record. Raw items and checkpoints
-stay machine-local unless the connection sets `publish: shared`
-(`brain connection add ... --publish shared`, or `"publish": "shared"` in
-`connectors/connections.json`): shared items are committed without the host
-`observed_at`, checkpoints are never committed, and `brain doctor` warns about
-raw files that are tracked anyway. Sources do not infer
-deletes from absence (`Deletes` is false without authoritative tombstones).
+stay machine-local unless the connection sets `publish: shared`; a zone that git
+already tracks keeps publishing unchanged (grandfathered) until you choose.
+`brain connection publish <id> local-only|shared` records the choice and applies
+it immediately: local-only untracks `connectors/<id>` (files and git history are
+kept), shared publishes items without the host `observed_at` and keeps
+checkpoints local. `brain doctor` reports both `raw-zone` (explicitly local-only
+but tracked) and `raw-zone-policy` (tracked but no policy chosen). Sources do not
+infer deletes from absence (`Deletes` is false without authoritative tombstones).
 
 The legacy `brain connector run --name ...` snapshot path uses
 `--since <RFC3339>` to limit items by update time and `--limit <n>` to cap each
@@ -327,6 +335,35 @@ curated records.
 
 Not in 4.1: scheduled digest, proposal merge/trash, and server/desktop proposal
 surfaces. Raw context excerpts arrived in Phase 4.2 and are local/git only.
+
+### Provenance and quarantine (0.15)
+
+Promoted records are `origin: connector`, reviewed, `trust: stated`. Agent writes
+over MCP and the automatic session-end handoff/captured decisions are
+`origin: agent, trust: stated`; they are reviewed by default, or unreviewed when
+`brain.yaml` contains:
+
+```yaml
+security:
+  quarantine_agent: true
+```
+
+Unreviewed agent, connector and import records never enter `brain context`,
+`brain open`, `brain catchup` or MCP `brain_context`/`brain_open`. Those commands
+print only `quarantined: N (id, …)`, and `brain review` adds a `quarantined`
+finding. Clear the queue after reading the records:
+
+```sh
+brain record review <id>                            # one record
+brain record review --all --trust stated            # every unreviewed record
+brain context "task" --include-unreviewed           # inspect without clearing
+brain catchup --include-unreviewed                  # include the quarantine in the delta
+```
+
+`brain doctor` reports the queue size. Old records without provenance keys are
+human, reviewed and verified, so nothing changes until an agent or connector
+writes a record. Server mode has no provenance-edit route yet, so `brain record
+review` is local/git only.
 
 ### Raw context excerpts (Phase 4.2)
 

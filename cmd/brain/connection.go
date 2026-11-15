@@ -10,6 +10,8 @@ import (
 	"time"
 
 	"github.com/levapveeskela/lv24-brain/internal/adapters/connectionlock"
+	"github.com/levapveeskela/lv24-brain/internal/adapters/fsstore"
+	"github.com/levapveeskela/lv24-brain/internal/adapters/gitstore"
 	"github.com/levapveeskela/lv24-brain/internal/app"
 	"github.com/levapveeskela/lv24-brain/internal/bootstrap"
 	"github.com/levapveeskela/lv24-brain/internal/config"
@@ -26,6 +28,7 @@ func printConnectionUsage(w io.Writer) {
   brain connection add <provider> --id <id> [--account a] [--base-url u]
       [--project p]... [--schedule s] [--publish local-only|shared]
       [--setting key=value]... [--json]
+  brain connection publish <id> local-only|shared [--json]
   brain connection secret set <id> <field>
   brain connection remove <id> --yes [--json]
   brain connection migrate [--copy-legacy-secrets] [--json]
@@ -36,6 +39,10 @@ func printConnectionUsage(w io.Writer) {
 All commands accept --config <path> and require local or git mode.
 Use providers to inspect required settings. Secret fields must be set from
 stdin with connection secret set; never put them in --setting.
+publish records the explicit raw-zone policy: local-only untracks
+connectors/<id> from git (files and history kept), shared publishes items and
+keeps checkpoints local. A connection without an explicit policy keeps the
+policy git already tracks, or stays local-only when nothing is tracked.
 Remove keeps items, checkpoints and credentials. Migration copies legacy
 credentials only with --copy-legacy-secrets; it never deletes legacy data.
 `)
@@ -85,13 +92,15 @@ func runConnection(args []string, stdin io.Reader, stdout, stderr io.Writer) int
 		fs.BoolVar(&remove, "remove", false, "remove the stored OAuth session for this connection")
 	case "list", "providers":
 		fs.BoolVar(&asJSON, "json", false, "print JSON")
+	case "publish":
+		fs.BoolVar(&asJSON, "json", false, "print JSON")
 	case "add":
 		fs.BoolVar(&asJSON, "json", false, "print JSON")
 		fs.StringVar(&id, "id", "", "unique connection id (lowercase letters, digits and hyphens; required)")
 		fs.StringVar(&account, "account", "", "account label")
 		fs.StringVar(&baseURL, "base-url", "", "provider endpoint URL without credentials")
 		fs.StringVar(&schedule, "schedule", "", "manual, @hourly, @daily or @every <duration> (minimum 1m)")
-		fs.StringVar(&publish, "publish", "", "local-only or shared (default: provider policy)")
+		fs.StringVar(&publish, "publish", "", "explicit raw-zone policy: local-only or shared (default: keep the policy git tracks, else local-only)")
 		fs.Func("project", "brain project id (repeatable)", func(value string) error { projects = append(projects, value); return nil })
 		fs.Func("setting", "non-secret provider setting key=value (repeatable)", func(value string) error { settings = append(settings, value); return nil })
 	case "remove":
@@ -114,6 +123,8 @@ func runConnection(args []string, stdin io.Reader, stdout, stderr io.Writer) int
 	switch command {
 	case "add", "remove", "run", "auth":
 		wantArgs = 1
+	case "publish":
+		wantArgs = 2
 	case "secret set":
 		wantArgs = 2
 	}
@@ -174,6 +185,8 @@ func runConnection(args []string, stdin io.Reader, stdout, stderr io.Writer) int
 		return connectionSecretSet(ctx, runtime, positional[0], positional[1], stdin, stdout, stderr)
 	case "remove":
 		return connectionRemove(ctx, runtime, positional[0], cfg.DataDir, *cfgPath, yes, asJSON, stdout, stderr)
+	case "publish":
+		return connectionPublish(ctx, runtime, cfg, positional[0], positional[1], asJSON, stdout, stderr)
 	case "migrate":
 		return connectionMigrate(ctx, runtime, copySecrets, asJSON, stdout, stderr)
 	}
@@ -202,6 +215,9 @@ func runConfiguredConnection(ctx context.Context, cfg config.BrainConfig, id str
 		fmt.Fprintln(stdout, "connection busy")
 	} else {
 		printConnectorRun(stdout, result.Run)
+		if result.PublishNotice != "" {
+			fmt.Fprintln(stdout, result.PublishNotice)
+		}
 	}
 	if result.Busy || result.Run.Status != domain.ConnectorSuccess {
 		return 1
@@ -341,6 +357,95 @@ func connectionRemove(ctx context.Context, runtime *bootstrap.ConnectionRuntime,
 		}{connectionID, true, purge})
 	}
 	fmt.Fprintf(stdout, "Removed connection %s; items retained.\n%s\n", connectionID, purge)
+	return 0
+}
+
+// connectionPublish records the explicit raw-zone policy of one connection and
+// applies it immediately: the marker for future writes, and the git index for
+// already published files. local-only untracks connectors/<id>; shared keeps
+// items tracked and untracks checkpoints. Files stay on disk either way and git
+// history is never rewritten. Running it again is harmless.
+func connectionPublish(ctx context.Context, runtime *bootstrap.ConnectionRuntime, cfg config.BrainConfig, connectionID, policyRaw string, asJSON bool, stdout, stderr io.Writer) int {
+	policy := domain.PublishPolicy(strings.TrimSpace(policyRaw))
+	if !policy.Valid() {
+		return connectionValidationError(stderr, "publish", fmt.Errorf("policy must be %q or %q", domain.PublishLocalOnly, domain.PublishShared))
+	}
+	locker, err := connectionlock.New(cfg.DataDir)
+	if err != nil {
+		return reportError(stderr, "connection publish", err)
+	}
+	release, err := locker.TryLock(ctx, connectionID)
+	if errors.Is(err, domain.ErrConflict) {
+		fmt.Fprintln(stderr, "connection publish: connection busy; wait for the active run to finish")
+		return 1
+	}
+	if err != nil {
+		return reportError(stderr, "connection publish", err)
+	}
+	defer func() { _ = release() }()
+	if _, err := runtime.Connections.Get(ctx, connectionID); err != nil {
+		return reportError(stderr, "connection publish", err)
+	}
+	store, err := fsstore.New(cfg.DataDir)
+	if err != nil {
+		return reportError(stderr, "connection publish", err)
+	}
+	var provider *gitstore.Provider
+	trackedBefore, trackedAfter := 0, 0
+	if cfg.Mode == config.ModeGit {
+		provider, err = gitstore.Open(cfg.DataDir, gitstore.Options{})
+		if err != nil {
+			return reportError(stderr, "connection publish", err)
+		}
+		paths, err := provider.TrackedRawZonePaths(ctx, connectionID)
+		if err != nil {
+			return reportError(stderr, "connection publish", err)
+		}
+		trackedBefore = len(paths)
+	}
+	// The catalogue records the owner's choice first: even when a later step
+	// fails, the next run converges on it.
+	if _, err := runtime.Connections.Patch(ctx, connectionID, func(connection *domain.Connection) error {
+		connection.Publish = policy
+		return nil
+	}); err != nil {
+		return reportError(stderr, "connection publish", err)
+	}
+	if err := store.Items().SetPublishPolicy(ctx, connectionID, policy); err != nil {
+		return reportError(stderr, "connection publish", err)
+	}
+	if provider != nil {
+		if err := provider.PrepareConnectionPublish(ctx, connectionID, policy); err != nil {
+			return reportError(stderr, "connection publish", err)
+		}
+		paths, err := provider.TrackedRawZonePaths(ctx, connectionID)
+		if err != nil {
+			return reportError(stderr, "connection publish", err)
+		}
+		trackedAfter = len(paths)
+	}
+	if asJSON {
+		return writeJSONReport(stdout, stderr, "connection publish", struct {
+			ID            string               `json:"id"`
+			Publish       domain.PublishPolicy `json:"publish"`
+			TrackedBefore int                  `json:"trackedBefore"`
+			TrackedAfter  int                  `json:"trackedAfter"`
+		}{connectionID, policy, trackedBefore, trackedAfter})
+	}
+	fmt.Fprintf(stdout, "%s publish=%s\n", connectionID, policy)
+	if cfg.Mode != config.ModeGit {
+		fmt.Fprintln(stdout, "local mode: no git index to update")
+		return 0
+	}
+	fmt.Fprintf(stdout, "raw-zone files tracked by git: %d -> %d\n", trackedBefore, trackedAfter)
+	switch {
+	case trackedBefore > trackedAfter:
+		fmt.Fprintln(stdout, "Untracked files stay on disk and git history is not rewritten.")
+	case policy == domain.PublishShared:
+		fmt.Fprintln(stdout, "Items stay published; checkpoints stay local.")
+	default:
+		fmt.Fprintln(stdout, "Nothing was tracked.")
+	}
 	return 0
 }
 

@@ -476,6 +476,7 @@ func runOpen(args []string, stdout, stderr io.Writer) int {
 	project := fs.String("project", "", "project id or alias")
 	budget := fs.Int("budget", app.DefaultBootstrapBudget, "summary size budget in runes")
 	brief := fs.Bool("brief", false, "print only the project and state fields")
+	includeUnreviewed := fs.Bool("include-unreviewed", false, "include quarantined records (unreviewed agent, connector or import writes)")
 	asJSON := fs.Bool("json", false, "print JSON")
 	cfgPath := configFlag(fs)
 	positional, err := parseInterspersed(fs, args)
@@ -527,7 +528,9 @@ func runOpen(args []string, stdout, stderr io.Writer) int {
 		printOpenResult(stdout, result)
 		return 0
 	}
-	result, err := useCase.App.Bootstrap(ctx, app.BootstrapOptions{ProjectID: target.Project.ID, Budget: *budget})
+	result, err := useCase.App.Bootstrap(ctx, app.BootstrapOptions{
+		ProjectID: target.Project.ID, Budget: *budget, IncludeUnreviewed: *includeUnreviewed,
+	})
 	if err != nil {
 		return reportError(stderr, "open", err)
 	}
@@ -539,6 +542,13 @@ func runOpen(args []string, stdout, stderr io.Writer) int {
 		decisions, attempts, handoffs, err := useCase.App.RecentRecords(ctx, target.Project.ID, 5)
 		if err != nil {
 			return reportError(stderr, "open", err)
+		}
+		if !*includeUnreviewed {
+			// Open is a trusted-context surface: the JSON listing follows the
+			// same quarantine rule as the summary.
+			decisions = withoutQuarantined(decisions)
+			attempts = withoutQuarantined(attempts)
+			handoffs = withoutQuarantined(handoffs)
 		}
 		summary, graphs := gitAndGraphsFor(ctx, target)
 		return writeJSONReport(stdout, stderr, "open", jsonOpen{
@@ -928,6 +938,7 @@ func runBootstrap(args []string, stdout, stderr io.Writer) int {
 	fs := newFlagSet("bootstrap", stderr)
 	project := fs.String("project", "", "project id or alias")
 	budget := fs.Int("budget", app.DefaultBootstrapBudget, "summary size budget in runes")
+	includeUnreviewed := fs.Bool("include-unreviewed", false, "include quarantined records (unreviewed agent, connector or import writes)")
 	asJSON := fs.Bool("json", false, "print JSON")
 	cfgPath := configFlag(fs)
 	positional, err := parseInterspersed(fs, args)
@@ -956,17 +967,19 @@ func runBootstrap(args []string, stdout, stderr io.Writer) int {
 		return reportError(stderr, "bootstrap", err)
 	}
 	result, err := useCase.App.Bootstrap(context.Background(), app.BootstrapOptions{
-		ProjectID: target.Project.ID,
-		Budget:    *budget,
+		ProjectID:         target.Project.ID,
+		Budget:            *budget,
+		IncludeUnreviewed: *includeUnreviewed,
 	})
 	if err != nil {
 		return reportError(stderr, "bootstrap", err)
 	}
 	if *asJSON {
 		return writeJSONReport(stdout, stderr, "bootstrap", jsonBootstrap{
-			ProjectID: result.ProjectID,
-			Summary:   result.Summary,
-			Budget:    effectiveBudget(*budget),
+			ProjectID:   result.ProjectID,
+			Summary:     result.Summary,
+			Budget:      effectiveBudget(*budget),
+			Quarantined: result.Quarantined,
 		})
 	}
 	printSummary(stdout, result.Summary)
@@ -978,6 +991,18 @@ func printSummary(w io.Writer, summary string) {
 	if !strings.HasSuffix(summary, "\n") {
 		fmt.Fprintln(w)
 	}
+}
+
+// withoutQuarantined drops records that must not appear in trusted context.
+// The generic constraint matches the promoted Provenance method.
+func withoutQuarantined[T interface{ Quarantined() bool }](values []T) []T {
+	out := make([]T, 0, len(values))
+	for _, value := range values {
+		if !value.Quarantined() {
+			out = append(out, value)
+		}
+	}
+	return out
 }
 
 func runNote(args []string, stdout, stderr io.Writer) int {

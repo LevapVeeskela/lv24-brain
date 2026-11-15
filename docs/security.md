@@ -101,13 +101,16 @@ matching `.gitignore` into the data directory.
   `connectors/<id>/checkpoints/*.json`, and tombstones for reported deletes;
   ingest redacts secrets to `[redacted]` and hashes mail addresses to
   `[email:<12 hex>]` (exposure reduction, not anonymization). The raw zone is
-  machine-local by default (since 0.15): only a connection with an explicit
-  `publish: shared` commits items, an item file in that mode omits the host
-  `observed_at`, checkpoints are never committed, and `brain doctor` reports
-  raw files that the shared tree tracks instead of deleting them. Switching a
-  connection to `local-only` untracks `connectors/<id>` from git before
-  private payload writes (`git rm --cached -r`); it does not erase prior git
-  history, and mail defaults to `local-only`. Server mode runs the same
+  machine-local unless the connection is shared (since 0.15): an explicit
+  `publish: shared` commits items, a zone that git already tracks keeps
+  publishing unchanged until the owner chooses (grandfathered on upgrade), and a
+  new zone publishes nothing. An item file in shared mode omits the host
+  `observed_at`; checkpoints are never committed. `brain doctor` reports tracked
+  raw files instead of deleting them: `raw-zone` for an explicitly local-only
+  connection (untrack with `git rm --cached -r`), `raw-zone-policy` for a tracked
+  zone with no explicit policy (choose with `brain connection publish <id>
+  shared|local-only`). Untracking never erases prior git history, and mail
+  defaults to `local-only`. Server mode runs the same
   native item-level path through `POST /v1/connectors/run` (admin only): with
   PostgreSQL it persists raw items, checkpoints and the run record (schema 9);
   the in-memory development store has no raw zone and rejects connector runs
@@ -167,6 +170,65 @@ local/git only.
   wire contract are unchanged. The local API and desktop surfaces gain no
   proposal endpoints.
 
+## Provenance and quarantine (0.15)
+
+Curated records carry who wrote them and whether a person reviewed them, so
+external text cannot become "truth" in an agent's context on its own.
+
+- Every note, decision, attempt and handoff has three optional frontmatter keys:
+  `origin` (`human`, `agent`, `connector`, `import`), `reviewed` (boolean) and
+  `trust` (`verified`, `stated`, `inferred`). A missing key is the old
+  behavior: empty origin is human, an absent `reviewed` is reviewed, and an
+  empty `trust` is verified. Files written before 0.15 therefore keep working
+  unchanged and are treated as owner-authored, reviewed and verified.
+- Only values that differ from the defaults are written: `reviewed` appears
+  only as `false`, and `trust` only when it is not `verified`. `origin` is
+  always written so a record cannot silently lose its channel. A human origin
+  is reviewed by definition (the CLI action is the review); only an agent,
+  connector or import write can be unreviewed. Unknown values are a validation
+  error on write. On read they are preserved, but an unknown origin makes the
+  record a quarantine candidate and an unknown trust is treated as `inferred`.
+- Write channels set the fields: the CLI writes
+  `origin: human, reviewed: true, trust: verified`; MCP tools write
+  `origin: agent` with `reviewed: true`; `brain promote` writes
+  `origin: connector, reviewed: true, trust: stated` because promotion is the
+  review; an importer writes `origin: import` and may set `reviewed: false`.
+- The automatic session-end capture (`brain session end`, including the
+  Claude/Codex/OpenCode hooks) is an agent write too: the handoff and any
+  decision captured from the final message are `origin: agent, trust: stated`.
+  They are reviewed by default so the next `brain open` still shows the latest
+  handoff; `security.quarantine_agent: true` makes them unreviewed instead.
+- Set `security.quarantine_agent: true` in `brain.yaml` to make every MCP write
+  and session-end capture unreviewed. The default keeps agent writes reviewed,
+  so existing agents do not lose context; enable it when the agent may read
+  hostile repository or connector content.
+- Quarantined records are excluded from `brain context`, `brain open`
+  (bootstrap), `brain session start`, `brain catchup` and MCP `brain_context` /
+  `brain_open`. The output adds only `quarantined: N (id, …)`; bodies never
+  appear. Pass `--include-unreviewed` (CLI) or `include_unreviewed: true` (MCP
+  context/open) to inspect them; the included records are labelled
+  `quarantined`.
+- `brain review` reports a `quarantined` finding with the ids, and
+  `brain doctor` reports the queue size. Clear one record with
+  `brain record review <id>` or the whole queue with
+  `brain record review --all`, optionally with `--trust verified|stated|inferred`.
+  MCP exposes the same action as the temporary `brain_review_record` tool
+  (id/all/trust); 0.17 merges it into `brain_judge`. Review is idempotent and
+  never edits a body.
+- This is the poisoning boundary: a malicious issue, PR, mail message or
+  injected agent message can be stored, searched and reviewed, but it cannot
+  become auto-injected context until a person (or an explicitly trusted
+  workflow) marks it reviewed.
+
+Known gaps in 0.15:
+
+- `state.md` has no provenance fields yet. MCP `brain_state_set` and the CLI
+  still write state directly into the session context; state provenance is a
+  later package.
+- `brain record review` (and the temporary `brain_review_record` tool's
+  backend) is local/git only. Server mode has no provenance-edit route yet; a
+  server review endpoint is a later package.
+
 ## Raw context excerpts (Phase 4.2)
 
 Raw connector text stays default-deny. It can enter `brain context` only in
@@ -213,6 +275,66 @@ small cited excerpt.
   and an explicit `kind=item`/`kind=dump` request is refused with 403 and
   `search.raw.denied` in the audit trail. Only a global admin can request raw
   items there.
+
+## MCP least privilege (0.15)
+
+`brain mcp` serves one OS user, so the process is the trust boundary. It starts
+with a narrow default and three flags to narrow it further; the full matrix and
+refusal shapes are in `docs/mcp.md` §8.
+
+- **Writes are scoped to the working directory.** Without `--allow-write`, a
+  write tool may only target the project `brain open` picks in the checkout the
+  server was started in. An agent working in one repository therefore cannot
+  add records to another project, even by naming it, unless the operator started
+  the server with `--allow-write`. If the working directory is not a project,
+  writes are refused until `--allow-write` is passed. Reads are unaffected.
+- **`--projects=a,b`** allowlists project ids or aliases for reads *and* writes.
+  It is resolved once at startup; an unlisted project is refused with
+  `INVALID_ARGUMENTS` naming the allowed set, `brain_projects` is filtered, and
+  a workspace-root `brain_open` (which would list every project) is refused. An
+  unscoped search or journal is bound to the single allowed project; with two or
+  more the caller must name one.
+- **`--read-only`** removes every write tool from `tools/list`. A call to a
+  hidden tool returns `UNSUPPORTED` with `try_instead: brain_search or
+  brain_context` and never reaches the store. This is the profile for an agent
+  that reads hostile repository, issue or mail content: prompt injection can
+  still influence what the agent says, but not what it writes into the shared
+  brain.
+- `--read-only` wins over `--allow-write`. `brain mcp --list-tools --json`
+  reports the effective policy and the hidden tools, so the profile a host
+  approved can be diffed.
+- The tool list is `cacheScope: private` under `--read-only`; a shared cache must
+  not hand a writable profile's tool list to a read-only client.
+
+### Child environment of stdio MCP sources
+
+An MCP server used as an ingestion *source* (`brain connection` with
+`transport: stdio`) is a third-party executable. It no longer inherits the
+brain's environment:
+
+- The child receives only `PATH`, `HOME`/`USERPROFILE`, `TMP`/`TEMP`/`TMPDIR`,
+  `SystemRoot`, `ComSpec`, `PATHEXT`, `APPDATA`, `LOCALAPPDATA`, `LANG` and
+  `LC_*`. These carry locations and locale, not credentials.
+- `BRAIN_TOKEN`, `BRAIN_DATABASE_URL`, `BRAIN_SECRET_*`, `DATABASE_URL`,
+  `GITHUB_TOKEN`, `GITLAB_TOKEN`, `AWS_*`, `OPENAI_API_KEY`,
+  `ANTHROPIC_API_KEY` and every `*_SECRET*` name are never inherited, even if a
+  future allowlist would admit them.
+- Extra variables are opt-in per connection and stored in the local credential
+  store next to `command` and `args`, so a synced `connections.json` cannot add
+  an environment on another machine:
+
+  ```sh
+  brain connection secret set <id> env   # one line: {"API_KEY":"..."}
+  ```
+
+  The value is a JSON object of at most 32 string variables, 16 KiB in total,
+  with portable names (`[A-Za-z_][A-Za-z0-9_]*`), no NUL and no newline in a
+  value. Invalid input is refused instead of dropped, and an explicit value
+  overrides an inherited one. Configure only what the server needs: an explicit
+  entry is passed through even if it names a secret.
+- The child still runs as the same OS user with the same working directory and
+  is not sandboxed. Use a container, a dedicated user or an OS sandbox when the
+  server itself is untrusted.
 
 ## Local control API
 

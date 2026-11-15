@@ -87,12 +87,14 @@ func (s *Store) UpdateDecision(ctx context.Context, decision domain.Decision) er
 				SchemaVersion: SchemaVersion,
 				Permalink:     decision.Permalink,
 			},
-			ID:     current.ID,
-			Title:  decision.Title,
-			Status: decision.Status,
-			// Provenance is immutable: an edit must not drop the source.
-			Source:    sourceRefToFrontmatter(current.Source),
-			CreatedAt: current.CreatedAt,
+			// Provenance is immutable: an edit must not drop the source or the
+			// review state.
+			provenanceFrontmatter: provenanceToFrontmatter(current.Provenance),
+			ID:                    current.ID,
+			Title:                 decision.Title,
+			Status:                decision.Status,
+			Source:                sourceRefToFrontmatter(current.Source),
+			CreatedAt:             current.CreatedAt,
 		}
 		if extras := decisionExtras(oldBody); extras != "" && !strings.Contains(decision.Context, extras) {
 			decision.Context = strings.TrimSpace(strings.TrimSpace(decision.Context) + "\n\n" + extras)

@@ -272,6 +272,7 @@ func sessionEnd(ctx context.Context, opts sessionOptions, stdout io.Writer) erro
 		Summary:    autoHandoffPrefix + truncateRunes(summary, sessionSummaryRunes),
 		GitContext: gitinfo.Read(ctx, gitDir(target)).Context(),
 		NextAction: state.NextAction,
+		Provenance: a.AutoCaptureProvenance(),
 	})
 	if err != nil {
 		return err
@@ -326,10 +327,11 @@ func captureDecisions(ctx context.Context, a *app.App, projectID, message string
 			continue
 		}
 		if _, err := a.Decision(ctx, app.DecisionInput{
-			ProjectID: projectID,
-			Title:     truncateRunes(title, 200),
-			Status:    domain.DecisionProposed,
-			Context:   "Captured from the agent's final message at session end; accept or reject with brain record status.",
+			ProjectID:  projectID,
+			Title:      truncateRunes(title, 200),
+			Status:     domain.DecisionProposed,
+			Context:    "Captured from the agent's final message at session end; accept or reject with brain record status.",
+			Provenance: a.AutoCaptureProvenance(),
 		}); err == nil {
 			captured++
 		}

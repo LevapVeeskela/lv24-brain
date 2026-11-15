@@ -50,7 +50,12 @@ const (
 type Server struct {
 	backend Backend
 	version string
-	tools   []tool
+	// tools is the effective tool list: what tools/list reports and what
+	// tools/call may run. allTools also holds the tools the policy omits, so a
+	// call to a hidden write tool gets a typed refusal.
+	tools    []tool
+	allTools []tool
+	policy   Policy
 	// catalog makes toolList report every tool group, including the ones a
 	// given backend would hide. It is set by Catalog only.
 	catalog bool
@@ -58,11 +63,35 @@ type Server struct {
 	mrtKey []byte
 }
 
-// New builds a Server. version is reported as serverInfo.version.
+// New builds an unrestricted Server. version is reported as serverInfo.version.
+// It serves every tool over every registered project, as releases before 0.15
+// did; use NewWithPolicy for a least-privilege profile.
 func New(backend Backend, version string) *Server {
-	s := &Server{backend: backend, version: version, mrtKey: newMRTRKey()}
-	s.tools = s.toolList()
+	return NewWithPolicy(backend, version, Policy{})
+}
+
+// NewWithPolicy builds a Server with a least-privilege policy. The policy is
+// applied when the server is built: a read-only server never lists a write
+// tool, so a host cannot call one it was not offered.
+func NewWithPolicy(backend Backend, version string, policy Policy) *Server {
+	s := &Server{backend: backend, version: version, policy: policy, mrtKey: newMRTRKey()}
+	s.allTools = s.toolList()
+	s.tools = s.applyPolicy(s.allTools)
 	return s
+}
+
+// applyPolicy filters the tool list to the tools the policy exposes.
+func (s *Server) applyPolicy(all []tool) []tool {
+	if !s.policy.ReadOnly {
+		return all
+	}
+	visible := make([]tool, 0, len(all))
+	for _, t := range all {
+		if s.policy.listsTool(t) {
+			visible = append(visible, t)
+		}
+	}
+	return visible
 }
 
 // request is one incoming JSON-RPC message. A missing id marks a notification.
@@ -282,6 +311,13 @@ func (s *Server) callTool(ctx context.Context, env envelope, params json.RawMess
 	}
 	t, ok := s.findTool(p.Name)
 	if !ok {
+		if hidden, known := s.findAnyTool(p.Name); known {
+			// The policy omitted the tool, so the call must not reach the
+			// backend. A typed refusal tells the caller what to do instead.
+			return refusalResult(refusalUnsupported(
+				hidden.Name+" is not available: this server runs read-only",
+				"brain_search or brain_context").Refusal)
+		}
 		return nil, invalidParams("unknown tool: " + p.Name)
 	}
 	outcome := s.checkInput(env, t, p)
@@ -306,6 +342,18 @@ func (s *Server) callTool(ctx context.Context, env envelope, params json.RawMess
 
 func (s *Server) findTool(name string) (tool, bool) {
 	for _, t := range s.tools {
+		if t.Name == name {
+			return t, true
+		}
+	}
+	return tool{}, false
+}
+
+// findAnyTool looks a tool up in the full list, including the tools the policy
+// omits, so a call to a hidden write tool gets a typed refusal instead of
+// "unknown tool".
+func (s *Server) findAnyTool(name string) (tool, bool) {
+	for _, t := range s.allTools {
 		if t.Name == name {
 			return t, true
 		}

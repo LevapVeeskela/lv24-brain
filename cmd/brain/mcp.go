@@ -20,11 +20,18 @@ import (
 // runMCP serves the Model Context Protocol over stdin and stdout until stdin
 // reaches end of file. Stdout carries protocol messages only; diagnostics go
 // to stderr.
+//
+// The server is least-privilege by default: writes may only target the project
+// of the working directory, and --read-only, --projects and --allow-write
+// narrow that further.
 func runMCP(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	fs := newFlagSet("mcp", stderr)
 	cfgPath := configFlag(fs)
 	listTools := fs.Bool("list-tools", false, "print the tool catalogue (name, title, annotations, schemas, limits) and exit without serving")
 	asJSON := fs.Bool("json", false, "with --list-tools, print the catalogue as JSON")
+	readOnly := fs.Bool("read-only", false, "expose read tools only: write tools are omitted and a call to one is refused with UNSUPPORTED")
+	projectsFlag := fs.String("projects", "", "comma-separated project ids or aliases this server may read and write (default: every registered project)")
+	allowWrite := fs.Bool("allow-write", false, "let write tools target any allowed project, not only the project of the working directory")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -32,8 +39,16 @@ func runMCP(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "brain mcp: unexpected arguments: %s\n", strings.Join(fs.Args(), " "))
 		return 2
 	}
+	entries, err := parseProjectAllowlist(*projectsFlag)
+	if err != nil {
+		fmt.Fprintf(stderr, "brain mcp: %v\n", err)
+		return 2
+	}
+	// --read-only wins over --allow-write: the narrower profile is the one the
+	// operator asked to be unable to widen by accident.
+	policy := mcpserver.Policy{ReadOnly: *readOnly, AllowWrite: *allowWrite && !*readOnly, Projects: entries}
 	if *listTools {
-		return printMCPTools(stdout, stderr, *asJSON)
+		return printMCPTools(stdout, stderr, *asJSON, policy)
 	}
 	if *asJSON {
 		fmt.Fprintln(stderr, "brain mcp: --json is only valid with --list-tools")
@@ -48,11 +63,106 @@ func runMCP(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return reportError(stderr, "mcp", err)
 	}
 	defer func() { _ = useCase.Close() }()
-	server := mcpserver.New(mcpBackend{app: useCase.App}, version.Version)
-	if err := server.Serve(context.Background(), stdin, stdout); err != nil {
+	ctx := context.Background()
+	resolved, err := resolveProjectAllowlist(ctx, useCase.App, entries)
+	if err != nil {
+		fmt.Fprintf(stderr, "brain mcp: %v\n", err)
+		return 2
+	}
+	policy.Projects = resolved
+	policy.DefaultProject = defaultWriteProject(ctx, useCase.App)
+	policy.RestrictWrites = true
+	if !policy.ReadOnly && !policy.AllowWrite && policy.DefaultProject == "" {
+		fmt.Fprintln(stderr, "brain mcp: no project resolved from the working directory; write tools will refuse until the server is started with --allow-write")
+	}
+	server := mcpserver.NewWithPolicy(mcpBackend{app: useCase.App, quarantineAgent: cfg.Security.QuarantineAgent}, version.Version, policy)
+	if err := server.Serve(ctx, stdin, stdout); err != nil {
 		return reportError(stderr, "mcp", err)
 	}
 	return 0
+}
+
+// parseProjectAllowlist splits the --projects value. An empty value means every
+// registered project; an empty entry is a usage error, not a silent widening.
+func parseProjectAllowlist(value string) ([]string, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return nil, nil
+	}
+	entries := make([]string, 0, strings.Count(value, ",")+1)
+	seen := map[string]bool{}
+	for _, entry := range strings.Split(value, ",") {
+		entry = strings.TrimSpace(entry)
+		if entry == "" {
+			return nil, fmt.Errorf("--projects must be a comma-separated list of project ids or aliases")
+		}
+		if seen[strings.ToLower(entry)] {
+			continue
+		}
+		seen[strings.ToLower(entry)] = true
+		entries = append(entries, entry)
+	}
+	return entries, nil
+}
+
+// resolveProjectAllowlist maps --projects entries to project ids. An entry is an
+// id or an alias, never a path: a flag must not silently widen to whatever
+// checkout happens to sit in the working directory.
+func resolveProjectAllowlist(ctx context.Context, a *app.App, entries []string) ([]string, error) {
+	if len(entries) == 0 {
+		return nil, nil
+	}
+	projects, err := a.ListProjects(ctx)
+	if err != nil {
+		return nil, err
+	}
+	ids := make([]string, 0, len(entries))
+	seen := map[string]bool{}
+	for _, entry := range entries {
+		matches := make([]string, 0, 1)
+		for _, project := range projects {
+			if projectMatchesSelector(project, entry) {
+				matches = append(matches, project.ID)
+			}
+		}
+		switch len(matches) {
+		case 0:
+			return nil, fmt.Errorf("--projects: %q is not a registered project id or alias", entry)
+		case 1:
+		default:
+			return nil, fmt.Errorf("--projects: %q matches several projects (%s); pass the project id", entry, strings.Join(matches, ", "))
+		}
+		if seen[matches[0]] {
+			continue
+		}
+		seen[matches[0]] = true
+		ids = append(ids, matches[0])
+	}
+	return ids, nil
+}
+
+// projectMatchesSelector reports whether the selector is the project id or one
+// of its aliases, ignoring case as LookupProject does.
+func projectMatchesSelector(project domain.Project, selector string) bool {
+	if strings.EqualFold(project.ID, selector) {
+		return true
+	}
+	for _, alias := range project.Aliases {
+		if strings.EqualFold(alias, selector) {
+			return true
+		}
+	}
+	return false
+}
+
+// defaultWriteProject is the project `brain open` would pick in the working
+// directory, or "" when the working directory is not a project.
+func defaultWriteProject(ctx context.Context, a *app.App) string {
+	resolved, err := resolveTarget(ctx, a, "", "", io.Discard)
+	if err != nil {
+		return ""
+	}
+	return resolved.Project.ID
 }
 
 // mcpCatalogue is the `brain mcp --list-tools --json` document.
@@ -62,13 +172,19 @@ type mcpCatalogue struct {
 		Version string `json:"version"`
 	} `json:"server"`
 	ProtocolVersions []string             `json:"protocol_versions"`
+	Policy           mcpserver.PolicyInfo `json:"policy"`
 	Tools            []mcpserver.ToolSpec `json:"tools"`
+	// OmittedTools are the tools the effective policy hides, so the full
+	// contract stays visible when a profile is applied.
+	OmittedTools []string `json:"omitted_tools"`
 }
 
 // printMCPTools writes the tool contract without serving. It needs no config:
-// the catalogue is static, so an operator can diff it before deploying.
-func printMCPTools(stdout, stderr io.Writer, asJSON bool) int {
-	tools := mcpserver.Catalog(version.Version)
+// the catalogue is static, so an operator can diff it before deploying. The
+// policy is echoed as requested; the running server resolves aliases to ids.
+func printMCPTools(stdout, stderr io.Writer, asJSON bool, policy mcpserver.Policy) int {
+	tools, omitted := mcpserver.CatalogForPolicy(version.Version, policy)
+	info := policy.Info()
 	if !asJSON {
 		for _, tool := range tools {
 			kind := "write"
@@ -77,9 +193,20 @@ func printMCPTools(stdout, stderr io.Writer, asJSON bool) int {
 			}
 			fmt.Fprintf(stdout, "%-22s %-5s %s\n", tool.Name, kind, tool.Title)
 		}
+		projects := "(all)"
+		if len(info.Projects) > 0 {
+			projects = strings.Join(info.Projects, ",")
+		}
+		fmt.Fprintf(stdout, "policy: read_only=%t allow_write=%t projects=%s\n", info.ReadOnly, info.AllowWrite, projects)
+		if len(omitted) > 0 {
+			fmt.Fprintf(stdout, "omitted: %s\n", strings.Join(omitted, " "))
+		}
 		return 0
 	}
-	catalogue := mcpCatalogue{ProtocolVersions: mcpserver.SupportedVersions(), Tools: tools}
+	catalogue := mcpCatalogue{ProtocolVersions: mcpserver.SupportedVersions(), Policy: info, Tools: tools, OmittedTools: omitted}
+	if catalogue.OmittedTools == nil {
+		catalogue.OmittedTools = []string{}
+	}
 	catalogue.Server.Name = mcpserver.ServerName
 	catalogue.Server.Version = version.Version
 	encoder := json.NewEncoder(stdout)
@@ -94,6 +221,16 @@ func printMCPTools(stdout, stderr io.Writer, asJSON bool) int {
 // selection follows the CLI rules (resolveTarget) and never creates projects.
 type mcpBackend struct {
 	app *app.App
+	// quarantineAgent makes MCP writes unreviewed (security.quarantine_agent).
+	quarantineAgent bool
+}
+
+// writeProvenance is the provenance of every record an agent writes through
+// MCP. Agent writes are reviewed immediately unless the instance asks to
+// quarantine them; a quarantined write can only be cleared by an explicit
+// review.
+func (b mcpBackend) writeProvenance() domain.Provenance {
+	return domain.Provenance{Origin: domain.OriginAgent, Reviewed: !b.quarantineAgent}
 }
 
 func (b mcpBackend) Resolve(ctx context.Context, selector string) (mcpserver.Target, error) {
@@ -109,8 +246,10 @@ func (b mcpBackend) Resolve(ctx context.Context, selector string) (mcpserver.Tar
 	return mcpserver.Target{ID: resolved.Project.ID, Path: resolved.Path}, nil
 }
 
-func (b mcpBackend) Bootstrap(ctx context.Context, projectID string, budget int) (string, error) {
-	result, err := b.app.Bootstrap(ctx, app.BootstrapOptions{ProjectID: projectID, Budget: budget})
+func (b mcpBackend) Bootstrap(ctx context.Context, projectID string, budget int, includeUnreviewed bool) (string, error) {
+	result, err := b.app.Bootstrap(ctx, app.BootstrapOptions{
+		ProjectID: projectID, Budget: budget, IncludeUnreviewed: includeUnreviewed,
+	})
 	if err != nil {
 		return "", err
 	}
@@ -147,7 +286,9 @@ func (b mcpBackend) Search(ctx context.Context, in mcpserver.SearchInput) ([]mcp
 }
 
 func (b mcpBackend) Note(ctx context.Context, in mcpserver.NoteInput) (mcpserver.Record, error) {
-	result, err := b.app.Note(ctx, app.NoteInput{ProjectID: in.ProjectID, Title: in.Title, Body: in.Body})
+	result, err := b.app.Note(ctx, app.NoteInput{
+		ProjectID: in.ProjectID, Title: in.Title, Body: in.Body, Provenance: b.writeProvenance(),
+	})
 	if err != nil {
 		return mcpserver.Record{}, err
 	}
@@ -163,6 +304,7 @@ func (b mcpBackend) Decision(ctx context.Context, in mcpserver.DecisionInput) (m
 		Alternatives: in.Alternatives,
 		Consequences: in.Consequences,
 		Paths:        in.Paths,
+		Provenance:   b.writeProvenance(),
 	})
 	if err != nil {
 		return mcpserver.Record{}, err
@@ -177,6 +319,7 @@ func (b mcpBackend) Attempt(ctx context.Context, in mcpserver.AttemptInput) (mcp
 		Hypothesis: in.Hypothesis,
 		Result:     in.Result,
 		Reason:     in.Reason,
+		Provenance: b.writeProvenance(),
 	})
 	if err != nil {
 		return mcpserver.Record{}, err
@@ -197,6 +340,7 @@ func (b mcpBackend) Handoff(ctx context.Context, in mcpserver.HandoffInput) (mcp
 		Summary:    in.Summary,
 		GitContext: gitContext,
 		NextAction: in.NextAction,
+		Provenance: b.writeProvenance(),
 	})
 	if err != nil {
 		return mcpserver.Record{}, err
@@ -335,7 +479,8 @@ func toMCPCatchup(result app.CatchupResult) mcpserver.Catchup {
 		Handoffs: mapAll(result.Handoffs, func(handoff domain.Handoff) mcpserver.CatchupItem {
 			return mcpserver.CatchupItem{Kind: "handoff", ID: handoff.ID, Title: catchupLine(handoff.Summary), CreatedAt: handoff.CreatedAt}
 		}),
-		Journal: mapAll(result.Journal, formatJournalEntry),
+		Quarantined: nonNilStrings(result.Quarantined),
+		Journal:     mapAll(result.Journal, formatJournalEntry),
 	}
 	if result.Baseline != nil {
 		out.BaselineSummary = catchupLine(result.Baseline.Summary)
@@ -387,4 +532,21 @@ func (b mcpBackend) Supersede(ctx context.Context, projectID, oldID, newID strin
 		return mcpserver.RecordSummary{}, err
 	}
 	return toRecordSummary(app.Record{Decision: &decision}.Summary()), nil
+}
+
+// ReviewRecord implements mcpserver.ReviewRecordBackend.
+func (b mcpBackend) ReviewRecord(ctx context.Context, in mcpserver.ReviewRecordInput) (mcpserver.ReviewRecordResult, error) {
+	result, err := b.app.ReviewRecords(ctx, app.ReviewRecordOptions{
+		ProjectID: in.ProjectID,
+		ID:        in.ID,
+		All:       in.All,
+		Trust:     domain.Trust(in.Trust),
+	})
+	if err != nil {
+		return mcpserver.ReviewRecordResult{}, err
+	}
+	return mcpserver.ReviewRecordResult{
+		ProjectID: result.ProjectID,
+		Reviewed:  mapAll(result.Reviewed, toRecordSummary),
+	}, nil
 }

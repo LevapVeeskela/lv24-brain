@@ -90,8 +90,9 @@ type Note struct {
 	Tags      []string   `json:"tags,omitempty"`
 	Permalink string     `json:"permalink,omitempty"`
 	Source    *SourceRef `json:"source,omitempty"`
-	CreatedAt time.Time  `json:"createdAt"`
-	UpdatedAt time.Time  `json:"updatedAt"`
+	Provenance
+	CreatedAt time.Time `json:"createdAt"`
+	UpdatedAt time.Time `json:"updatedAt"`
 }
 
 // Validate checks required note fields.
@@ -100,6 +101,9 @@ func (n Note) Validate() error {
 		return err
 	}
 	if err := ValidateRequired("note.body", n.Body); err != nil {
+		return err
+	}
+	if err := n.Provenance.Validate(); err != nil {
 		return err
 	}
 	return validateRecordSource("note.source", n.ProjectID, n.Source)
@@ -138,8 +142,9 @@ type Decision struct {
 	Paths     []string   `json:"paths,omitempty"`
 	Permalink string     `json:"permalink,omitempty"`
 	Source    *SourceRef `json:"source,omitempty"`
-	CreatedAt time.Time  `json:"createdAt"`
-	UpdatedAt time.Time  `json:"updatedAt"`
+	Provenance
+	CreatedAt time.Time `json:"createdAt"`
+	UpdatedAt time.Time `json:"updatedAt"`
 }
 
 // NormalizePaths trims each path, converts backslashes to forward slashes and
@@ -179,6 +184,9 @@ func (d Decision) Validate() error {
 	if _, err := NormalizePaths(d.Paths); err != nil {
 		return err
 	}
+	if err := d.Provenance.Validate(); err != nil {
+		return err
+	}
 	return validateRecordSource("decision.source", d.ProjectID, d.Source)
 }
 
@@ -192,8 +200,9 @@ type Attempt struct {
 	Reason     string     `json:"reason,omitempty"`
 	Permalink  string     `json:"permalink,omitempty"`
 	Source     *SourceRef `json:"source,omitempty"`
-	CreatedAt  time.Time  `json:"createdAt"`
-	UpdatedAt  time.Time  `json:"updatedAt"`
+	Provenance
+	CreatedAt time.Time `json:"createdAt"`
+	UpdatedAt time.Time `json:"updatedAt"`
 }
 
 // Validate checks required attempt fields.
@@ -204,23 +213,30 @@ func (a Attempt) Validate() error {
 	if err := ValidateRequired("attempt.title", a.Title); err != nil {
 		return err
 	}
+	if err := a.Provenance.Validate(); err != nil {
+		return err
+	}
 	return validateRecordSource("attempt.source", a.ProjectID, a.Source)
 }
 
 // Handoff captures session context for the next person or agent.
 type Handoff struct {
-	ID         string    `json:"id"`
-	ProjectID  string    `json:"projectId"`
-	Summary    string    `json:"summary"`
-	GitContext string    `json:"gitContext,omitempty"`
-	NextAction string    `json:"nextAction,omitempty"`
-	Permalink  string    `json:"permalink,omitempty"`
-	CreatedAt  time.Time `json:"createdAt"`
+	ID         string `json:"id"`
+	ProjectID  string `json:"projectId"`
+	Summary    string `json:"summary"`
+	GitContext string `json:"gitContext,omitempty"`
+	NextAction string `json:"nextAction,omitempty"`
+	Permalink  string `json:"permalink,omitempty"`
+	Provenance
+	CreatedAt time.Time `json:"createdAt"`
 }
 
 // Validate checks required handoff fields.
 func (h Handoff) Validate() error {
 	if err := ValidateRequired("handoff.projectId", h.ProjectID); err != nil {
+		return err
+	}
+	if err := h.Provenance.Validate(); err != nil {
 		return err
 	}
 	return ValidateRequired("handoff.summary", h.Summary)

@@ -10,11 +10,14 @@ import (
 	"testing"
 	"time"
 
+	"github.com/levapveeskela/lv24-brain/internal/adapters/connectionlock"
 	"github.com/levapveeskela/lv24-brain/internal/adapters/fsstore"
 	"github.com/levapveeskela/lv24-brain/internal/adapters/gitstore"
 	"github.com/levapveeskela/lv24-brain/internal/app"
 	"github.com/levapveeskela/lv24-brain/internal/config"
+	"github.com/levapveeskela/lv24-brain/internal/connectorbuild"
 	"github.com/levapveeskela/lv24-brain/internal/domain"
+	"github.com/levapveeskela/lv24-brain/internal/ports"
 )
 
 // rawZoneMachines is one bare remote plus two data directories initialized as
@@ -78,6 +81,16 @@ func (m *rawZoneMachines) store(machine int) *fsstore.Store {
 	return store
 }
 
+// catalogue opens the connection catalogue of one machine.
+func (m *rawZoneMachines) catalogue(machine int) *fsstore.ConnectionStore {
+	m.t.Helper()
+	catalogue, err := fsstore.NewConnectionStore(m.dirs[machine])
+	if err != nil {
+		m.t.Fatalf("NewConnectionStore: %v", err)
+	}
+	return catalogue
+}
+
 // sync commits everything git does not ignore, rebases on the remote and
 // pushes: the same sequence brain sync runs.
 func (m *rawZoneMachines) sync(machine int, message string) {
@@ -120,6 +133,238 @@ func rawZoneItem(round int, observed time.Time) domain.Item {
 		UpdatedAt:  time.Date(2026, 11, 14, 9, 0, 0, 0, time.UTC).Add(time.Duration(round) * time.Minute),
 		ObservedAt: observed,
 	}.WithHash()
+}
+
+// legacyMarker is the connectors/<id>/.gitignore an engine before 0.15 wrote
+// for a shared connection: lock and temporary files only.
+const legacyMarker = "# lv24-brain: shared connection; only lock and temporary files are ignored.\n*.lock\n.tmp-*\n"
+
+// rawZoneSource is a minimal ports.Source returning its batches once.
+type rawZoneSource struct {
+	descriptor domain.SourceDescriptor
+	items      []domain.Item
+	reads      int
+}
+
+func (s *rawZoneSource) Descriptor() domain.SourceDescriptor { return s.descriptor }
+func (s *rawZoneSource) Check(context.Context) error         { return nil }
+func (s *rawZoneSource) Read(context.Context, ports.ReadRequest) (ports.ReadBatch, error) {
+	s.reads++
+	if s.reads > 1 {
+		return ports.ReadBatch{}, nil
+	}
+	return ports.ReadBatch{Items: s.items}, nil
+}
+
+// rawZoneHost wires the real ingestion host (fsstore raw zone, connection
+// catalogue, git publish hooks) for one machine.
+func newRawZoneHost(t *testing.T, dataDir string, source *rawZoneSource) *app.Ingestion {
+	t.Helper()
+	store, err := fsstore.New(dataDir)
+	if err != nil {
+		t.Fatalf("fsstore.New: %v", err)
+	}
+	catalogue, err := fsstore.NewConnectionStore(dataDir)
+	if err != nil {
+		t.Fatalf("NewConnectionStore: %v", err)
+	}
+	locker, err := connectionlock.New(dataDir)
+	if err != nil {
+		t.Fatalf("connectionlock.New: %v", err)
+	}
+	provider, err := gitstore.Open(dataDir, gitstore.Options{})
+	if err != nil {
+		t.Fatalf("gitstore.Open: %v", err)
+	}
+	registry := connectorbuild.NewRegistry()
+	if err := registry.Register(source.Descriptor(), func(domain.Connection, connectorbuild.Deps) (ports.Source, error) {
+		return source, nil
+	}); err != nil {
+		t.Fatalf("register source: %v", err)
+	}
+	return &app.Ingestion{
+		Connections: catalogue, Registry: registry,
+		Items: store.Items(), Checkpoints: store.Checkpoints(), Locker: locker, Runs: store,
+		PreparePublish: provider.PrepareConnectionPublish,
+		RawZoneTracked: provider.RawZoneTracked,
+		Now:            func() time.Time { return time.Date(2026, 11, 15, 12, 0, 0, 0, time.UTC) },
+	}
+}
+
+// rawZoneDescriptor is the provider descriptor these fixtures register.
+func rawZoneDescriptor() domain.SourceDescriptor {
+	return domain.SourceDescriptor{
+		Provider: "sample", DisplayName: "Sample",
+		Capabilities:   domain.Capabilities{AuthModes: []domain.AuthMode{domain.AuthNone}},
+		DefaultPublish: domain.PublishShared,
+		Streams:        []string{"inbox"},
+	}
+}
+
+// seedLegacyRawZone writes the raw zone an engine before 0.15 published: the
+// item keeps observed_at and both the item and the legacy marker are committed.
+func seedLegacyRawZone(t *testing.T, machines *rawZoneMachines, machine int, connectionID string, item domain.Item) (string, string) {
+	t.Helper()
+	ctx := context.Background()
+	store := machines.store(machine)
+	if _, err := store.Items().Upsert(ctx, item); err != nil {
+		t.Fatalf("seed Upsert: %v", err)
+	}
+	dataDir := machines.dirs[machine]
+	itemPath := filepath.Join(dataDir, "connectors", connectionID, "items", itemFileHex(t, item)+".md")
+	markerPath := filepath.Join(dataDir, "connectors", connectionID, ".gitignore")
+	if err := os.WriteFile(markerPath, []byte(legacyMarker), 0o644); err != nil {
+		t.Fatalf("write legacy marker: %v", err)
+	}
+	machines.git(dataDir, "add", "-f", itemPath, markerPath)
+	machines.git(dataDir, "commit", "-q", "-m", "legacy raw zone")
+	return itemPath, markerPath
+}
+
+// TestLegacyTrackedRawZoneStaysSharedAcrossRun: a connection without an
+// explicit policy whose raw zone is already in git keeps everything exactly as
+// it is (marker, index and item bytes) and only reports a recommendation.
+func TestLegacyTrackedRawZoneStaysSharedAcrossRun(t *testing.T) {
+	machines := newRawZoneMachines(t)
+	ctx := context.Background()
+	if err := machines.catalogue(0).Create(ctx, domain.Connection{ID: "gh-acme", Provider: "sample", Settings: map[string]string{}}); err != nil {
+		t.Fatalf("Create connection: %v", err)
+	}
+	item := rawZoneItem(1, time.Date(2026, 11, 14, 10, 0, 0, 0, time.UTC))
+	itemPath, markerPath := seedLegacyRawZone(t, machines, 0, "gh-acme", item)
+	itemBefore := readRawZoneFile(t, itemPath)
+	trackedBefore := strings.TrimSpace(machines.git(machines.dirs[0], "ls-files", "--", "connectors/gh-acme"))
+
+	source := &rawZoneSource{descriptor: rawZoneDescriptor(), items: []domain.Item{item}}
+	host := newRawZoneHost(t, machines.dirs[0], source)
+	for attempt := 1; attempt <= 2; attempt++ {
+		result, err := host.RunConnection(ctx, app.RunConnectionOptions{ConnectionID: "gh-acme"})
+		if err != nil {
+			t.Fatalf("run %d: %v", attempt, err)
+		}
+		if result.Publish != domain.PublishShared || result.PublishChanged {
+			t.Fatalf("run %d: publish=%q changed=%v", attempt, result.Publish, result.PublishChanged)
+		}
+		if !strings.Contains(result.PublishNotice, "grandfathered") || !strings.Contains(result.PublishNotice, "brain connection publish gh-acme") {
+			t.Fatalf("run %d: notice = %q", attempt, result.PublishNotice)
+		}
+	}
+	if trackedAfter := strings.TrimSpace(machines.git(machines.dirs[0], "ls-files", "--", "connectors/gh-acme")); trackedAfter != trackedBefore {
+		t.Fatalf("grandfathered zone was untracked:\nbefore:\n%s\nafter:\n%s", trackedBefore, trackedAfter)
+	}
+	if marker := readRawZoneFile(t, markerPath); marker != legacyMarker {
+		t.Fatalf("marker was rewritten:\n%s", marker)
+	}
+	if itemAfter := readRawZoneFile(t, itemPath); itemAfter != itemBefore {
+		t.Fatalf("item file was rewritten:\n%s", itemAfter)
+	}
+}
+
+// TestNewConnectionRawZoneDefaultsLocalOnly: a connection with no tracked raw
+// zone and no explicit policy publishes nothing and writes the local marker.
+func TestNewConnectionRawZoneDefaultsLocalOnly(t *testing.T) {
+	machines := newRawZoneMachines(t)
+	ctx := context.Background()
+	if err := machines.catalogue(0).Create(ctx, domain.Connection{ID: "gh-acme", Provider: "sample", Settings: map[string]string{}}); err != nil {
+		t.Fatalf("Create connection: %v", err)
+	}
+	source := &rawZoneSource{descriptor: rawZoneDescriptor(), items: []domain.Item{rawZoneItem(1, time.Now().UTC())}}
+	host := newRawZoneHost(t, machines.dirs[0], source)
+	result, err := host.RunConnection(ctx, app.RunConnectionOptions{ConnectionID: "gh-acme"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Publish != domain.PublishLocalOnly || result.PublishNotice != "" {
+		t.Fatalf("result = %+v", result)
+	}
+	marker := readRawZoneFile(t, filepath.Join(machines.dirs[0], "connectors", "gh-acme", ".gitignore"))
+	if !strings.Contains(marker, "\n*\n") {
+		t.Fatalf("marker = %q, want the local-only marker", marker)
+	}
+	if tracked := strings.TrimSpace(machines.git(machines.dirs[0], "ls-files", "--", "connectors")); tracked != "" {
+		t.Fatalf("new connection published files:\n%s", tracked)
+	}
+}
+
+// TestExplicitLocalOnlyUntracksTrackedRawZone: the explicit switch is the only
+// path that untracks files; they stay on disk.
+func TestExplicitLocalOnlyUntracksTrackedRawZone(t *testing.T) {
+	machines := newRawZoneMachines(t)
+	ctx := context.Background()
+	connection := domain.Connection{ID: "gh-acme", Provider: "sample", Publish: domain.PublishLocalOnly, Settings: map[string]string{}}
+	if err := machines.catalogue(0).Create(ctx, connection); err != nil {
+		t.Fatalf("Create connection: %v", err)
+	}
+	item := rawZoneItem(1, time.Date(2026, 11, 14, 10, 0, 0, 0, time.UTC))
+	itemPath, _ := seedLegacyRawZone(t, machines, 0, "gh-acme", item)
+
+	source := &rawZoneSource{descriptor: rawZoneDescriptor(), items: []domain.Item{item}}
+	host := newRawZoneHost(t, machines.dirs[0], source)
+	result, err := host.RunConnection(ctx, app.RunConnectionOptions{ConnectionID: "gh-acme"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Publish != domain.PublishLocalOnly || !result.PublishChanged || result.PublishNotice != "" {
+		t.Fatalf("result = %+v", result)
+	}
+	if tracked := strings.TrimSpace(machines.git(machines.dirs[0], "ls-files", "--", "connectors/gh-acme")); tracked != "" {
+		t.Fatalf("explicit local-only still tracks:\n%s", tracked)
+	}
+	if _, err := os.Stat(itemPath); err != nil {
+		t.Fatalf("untrack removed the file: %v", err)
+	}
+	marker := readRawZoneFile(t, filepath.Join(machines.dirs[0], "connectors", "gh-acme", ".gitignore"))
+	if !strings.Contains(marker, "\n*\n") {
+		t.Fatalf("marker = %q, want the local-only marker", marker)
+	}
+}
+
+// TestExplicitSharedKeepsItemsAndUntracksCheckpoints: publishing items never
+// publishes cursors.
+func TestExplicitSharedKeepsItemsAndUntracksCheckpoints(t *testing.T) {
+	machines := newRawZoneMachines(t)
+	ctx := context.Background()
+	connection := domain.Connection{ID: "gh-acme", Provider: "sample", Publish: domain.PublishShared, Settings: map[string]string{}}
+	if err := machines.catalogue(0).Create(ctx, connection); err != nil {
+		t.Fatalf("Create connection: %v", err)
+	}
+	item := rawZoneItem(1, time.Date(2026, 11, 14, 10, 0, 0, 0, time.UTC))
+	itemPath, _ := seedLegacyRawZone(t, machines, 0, "gh-acme", item)
+	store := machines.store(0)
+	if err := store.Checkpoints().Put(ctx, "gh-acme", domain.Checkpoint{Stream: "inbox", Version: 1, Data: []byte("cursor")}); err != nil {
+		t.Fatalf("Put checkpoint: %v", err)
+	}
+	checkpointDir := filepath.Join(machines.dirs[0], "connectors", "gh-acme", "checkpoints")
+	entries, err := os.ReadDir(checkpointDir)
+	if err != nil || len(entries) == 0 {
+		t.Fatalf("checkpoint files: %v", err)
+	}
+	checkpointPath := filepath.Join(checkpointDir, entries[0].Name())
+	machines.git(machines.dirs[0], "add", "-f", checkpointPath)
+	machines.git(machines.dirs[0], "commit", "-q", "-m", "legacy checkpoint")
+
+	source := &rawZoneSource{descriptor: rawZoneDescriptor(), items: []domain.Item{item}}
+	host := newRawZoneHost(t, machines.dirs[0], source)
+	result, err := host.RunConnection(ctx, app.RunConnectionOptions{ConnectionID: "gh-acme"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Publish != domain.PublishShared || result.PublishNotice != "" {
+		t.Fatalf("result = %+v", result)
+	}
+	tracked := machines.git(machines.dirs[0], "ls-files", "--", "connectors/gh-acme")
+	if !strings.Contains(tracked, "connectors/gh-acme/items/") || strings.Contains(tracked, "connectors/gh-acme/checkpoints/") {
+		t.Fatalf("tracked raw files:\n%s", tracked)
+	}
+	for _, path := range []string{itemPath, checkpointPath} {
+		if _, err := os.Stat(path); err != nil {
+			t.Fatalf("untrack removed %s: %v", path, err)
+		}
+	}
+	marker := readRawZoneFile(t, filepath.Join(machines.dirs[0], "connectors", "gh-acme", ".gitignore"))
+	if !strings.Contains(marker, "checkpoints/") {
+		t.Fatalf("marker = %q, want a shared marker that ignores checkpoints", marker)
+	}
 }
 
 // rawZoneSyncs is how many sync operations the two-machine pair performs in the
@@ -187,6 +432,10 @@ func TestSharedRawZonePublishesItemsWithoutConflicts(t *testing.T) {
 	stores := []*fsstore.Store{machines.store(0), machines.store(1)}
 	base := time.Date(2026, 11, 15, 12, 0, 0, 0, time.UTC)
 	for machine, store := range stores {
+		connection := domain.Connection{ID: "gh-acme", Provider: "sample", Publish: domain.PublishShared, Settings: map[string]string{}}
+		if err := machines.catalogue(machine).Create(ctx, connection); err != nil {
+			t.Fatalf("machine %d: Create connection: %v", machine, err)
+		}
 		if err := store.Items().SetPublishPolicy(ctx, "gh-acme", domain.PublishShared); err != nil {
 			t.Fatalf("SetPublishPolicy: %v", err)
 		}
@@ -245,26 +494,11 @@ func readRawZoneItemFile(t *testing.T, dataDir string) string {
 	return ""
 }
 
-// TestDoctorWarnsAboutTrackedRawZone: doctor reports raw-zone files that the
-// shared tree tracks, names them, and changes nothing.
-func TestDoctorWarnsAboutTrackedRawZone(t *testing.T) {
-	machines := newRawZoneMachines(t)
-	ctx := context.Background()
-	dataDir := machines.dirs[0]
-	store := machines.store(0)
-	item := rawZoneItem(1, time.Date(2026, 11, 15, 12, 0, 0, 0, time.UTC))
-	if _, err := store.Items().Upsert(ctx, item); err != nil {
-		t.Fatalf("Upsert: %v", err)
-	}
-	// A connection with no explicit publish setting is local-only: this is the
-	// upgrade case where an earlier engine published the raw zone.
-	connections, err := fsstore.NewConnectionStore(dataDir)
-	if err != nil {
-		t.Fatalf("NewConnectionStore: %v", err)
-	}
-	if err := connections.Create(ctx, domain.Connection{ID: "gh-acme", Provider: "github", Settings: map[string]string{}}); err != nil {
-		t.Fatalf("Create connection: %v", err)
-	}
+// doctorFor opens doctor over one machine's git repository.
+func doctorFor(t *testing.T, machines *rawZoneMachines, machine int) *app.App {
+	t.Helper()
+	dataDir := machines.dirs[machine]
+	store := machines.store(machine)
 	provider, err := gitstore.Open(dataDir, gitstore.Options{})
 	if err != nil {
 		t.Fatalf("gitstore.Open: %v", err)
@@ -273,50 +507,86 @@ func TestDoctorWarnsAboutTrackedRawZone(t *testing.T) {
 	cfg.Mode = config.ModeGit
 	cfg.DataDir = dataDir
 	cfg.SchemaVersion = config.CurrentSchemaVersion
-	doctor := app.New(cfg, app.Dependencies{Store: store, Sync: provider, Connections: connections})
+	return app.New(cfg, app.Dependencies{Store: store, Sync: provider, Connections: machines.catalogue(machine)})
+}
 
-	clean, err := doctor.Doctor(ctx, app.DoctorOptions{})
+// TestDoctorWarnsAboutGrandfatheredRawZone: a tracked zone without an explicit
+// policy is reported as compatibility mode with the command that fixes it, and
+// nothing is changed.
+func TestDoctorWarnsAboutGrandfatheredRawZone(t *testing.T) {
+	machines := newRawZoneMachines(t)
+	ctx := context.Background()
+	if err := machines.catalogue(0).Create(ctx, domain.Connection{ID: "gh-acme", Provider: "sample", Settings: map[string]string{}}); err != nil {
+		t.Fatalf("Create connection: %v", err)
+	}
+	item := rawZoneItem(1, time.Date(2026, 11, 14, 10, 0, 0, 0, time.UTC))
+	itemPath, _ := seedLegacyRawZone(t, machines, 0, "gh-acme", item)
+
+	report, err := doctorFor(t, machines, 0).Doctor(ctx, app.DoctorOptions{})
 	if err != nil {
 		t.Fatalf("Doctor: %v", err)
 	}
-	if check := findDoctorCheck(t, clean, "raw-zone"); check.Status != "ok" {
-		t.Fatalf("clean raw zone = %+v", check)
+	check := findDoctorCheck(t, report, "raw-zone-policy")
+	if check.Status != "warn" || check.Code != "raw-zone-grandfathered" || !strings.Contains(check.Message, "brain connection publish") {
+		t.Fatalf("grandfathered check = %+v", check)
 	}
-
-	itemPath := filepath.Join(dataDir, "connectors", "gh-acme", "items", itemFileHexForTest(t, item)+".md")
-	machines.git(dataDir, "add", "-f", itemPath)
-	machines.git(dataDir, "commit", "-q", "-m", "tracked raw zone")
-
-	report, err := doctor.Doctor(ctx, app.DoctorOptions{})
-	if err != nil {
-		t.Fatalf("Doctor: %v", err)
-	}
-	check := findDoctorCheck(t, report, "raw-zone")
-	if check.Status != "warn" || check.Code != "raw-zone-tracked" ||
-		!strings.Contains(check.Message, "connectors/gh-acme/items/") || !strings.Contains(check.Message, "git rm --cached") {
-		t.Fatalf("tracked raw zone = %+v", check)
+	if check := findDoctorCheck(t, report, "raw-zone"); check.Status != "ok" {
+		t.Fatalf("leftovers check = %+v", check)
 	}
 	if _, err := os.Stat(itemPath); err != nil {
 		t.Fatalf("doctor changed the working tree: %v", err)
 	}
 }
 
-// TestDoctorIgnoresTrackedSharedItems: a connection that explicitly publishes
-// its items is not a finding, while its checkpoints are (cursors never leave
-// the machine that read the stream).
+// TestDoctorWarnsAboutLocalOnlyTrackedRawZone: the explicit local-only case is
+// a leftovers finding that recommends untracking.
+func TestDoctorWarnsAboutLocalOnlyTrackedRawZone(t *testing.T) {
+	machines := newRawZoneMachines(t)
+	ctx := context.Background()
+	connection := domain.Connection{ID: "gh-acme", Provider: "sample", Publish: domain.PublishLocalOnly, Settings: map[string]string{}}
+	if err := machines.catalogue(0).Create(ctx, connection); err != nil {
+		t.Fatalf("Create connection: %v", err)
+	}
+	item := rawZoneItem(1, time.Date(2026, 11, 14, 10, 0, 0, 0, time.UTC))
+	itemPath, _ := seedLegacyRawZone(t, machines, 0, "gh-acme", item)
+	doctor := doctorFor(t, machines, 0)
+
+	report, err := doctor.Doctor(ctx, app.DoctorOptions{})
+	if err != nil {
+		t.Fatalf("Doctor: %v", err)
+	}
+	check := findDoctorCheck(t, report, "raw-zone")
+	if check.Status != "warn" || check.Code != "raw-zone-tracked" || !strings.Contains(check.Message, "git rm --cached") {
+		t.Fatalf("leftovers check = %+v", check)
+	}
+	if check := findDoctorCheck(t, report, "raw-zone-policy"); check.Status != "ok" {
+		t.Fatalf("policy check = %+v", check)
+	}
+	machines.git(machines.dirs[0], "rm", "--cached", "-r", "-q", "--", "connectors/gh-acme")
+	report, err = doctor.Doctor(ctx, app.DoctorOptions{})
+	if err != nil {
+		t.Fatalf("Doctor after untrack: %v", err)
+	}
+	for _, name := range []string{"raw-zone", "raw-zone-policy"} {
+		if check := findDoctorCheck(t, report, name); check.Status != "ok" {
+			t.Fatalf("%s after untrack = %+v", name, check)
+		}
+	}
+	if _, err := os.Stat(itemPath); err != nil {
+		t.Fatalf("untrack removed the file: %v", err)
+	}
+}
+
+// TestDoctorIgnoresTrackedSharedItems: an explicit shared connection may publish
+// items, but its checkpoints are still a finding.
 func TestDoctorIgnoresTrackedSharedItems(t *testing.T) {
 	machines := newRawZoneMachines(t)
 	ctx := context.Background()
-	dataDir := machines.dirs[0]
-	store := machines.store(0)
-	connections, err := fsstore.NewConnectionStore(dataDir)
-	if err != nil {
-		t.Fatalf("NewConnectionStore: %v", err)
-	}
-	connection := domain.Connection{ID: "gh-acme", Provider: "github", Publish: domain.PublishShared, Settings: map[string]string{}}
-	if err := connections.Create(ctx, connection); err != nil {
+	connection := domain.Connection{ID: "gh-acme", Provider: "sample", Publish: domain.PublishShared, Settings: map[string]string{}}
+	if err := machines.catalogue(0).Create(ctx, connection); err != nil {
 		t.Fatalf("Create connection: %v", err)
 	}
+	store := machines.store(0)
 	if err := store.Items().SetPublishPolicy(ctx, "gh-acme", domain.PublishShared); err != nil {
 		t.Fatalf("SetPublishPolicy: %v", err)
 	}
@@ -324,46 +594,37 @@ func TestDoctorIgnoresTrackedSharedItems(t *testing.T) {
 	if _, err := store.Items().Upsert(ctx, item); err != nil {
 		t.Fatalf("Upsert: %v", err)
 	}
-	checkpoint := domain.Checkpoint{Stream: "issues", Version: 1, Data: []byte("cursor")}
-	if err := store.Checkpoints().Put(ctx, "gh-acme", checkpoint); err != nil {
-		t.Fatalf("Put checkpoint: %v", err)
-	}
-	itemPath := filepath.Join(dataDir, "connectors", "gh-acme", "items", itemFileHexForTest(t, item)+".md")
-	machines.git(dataDir, "add", "-f", itemPath)
-	machines.git(dataDir, "commit", "-q", "-m", "publish shared items")
+	itemPath := filepath.Join(machines.dirs[0], "connectors", "gh-acme", "items", itemFileHex(t, item)+".md")
+	machines.git(machines.dirs[0], "add", "-f", itemPath)
+	machines.git(machines.dirs[0], "commit", "-q", "-m", "publish shared items")
+	doctor := doctorFor(t, machines, 0)
 
-	provider, err := gitstore.Open(dataDir, gitstore.Options{})
-	if err != nil {
-		t.Fatalf("gitstore.Open: %v", err)
-	}
-	cfg := config.Default()
-	cfg.Mode = config.ModeGit
-	cfg.DataDir = dataDir
-	cfg.SchemaVersion = config.CurrentSchemaVersion
-	doctor := app.New(cfg, app.Dependencies{Store: store, Sync: provider, Connections: connections})
 	report, err := doctor.Doctor(ctx, app.DoctorOptions{})
 	if err != nil {
 		t.Fatalf("Doctor: %v", err)
 	}
-	if check := findDoctorCheck(t, report, "raw-zone"); check.Status != "ok" {
-		t.Fatalf("shared items reported: %+v", check)
+	for _, name := range []string{"raw-zone", "raw-zone-policy"} {
+		if check := findDoctorCheck(t, report, name); check.Status != "ok" {
+			t.Fatalf("%s with shared items = %+v", name, check)
+		}
 	}
 
-	checkpointDir := filepath.Join(dataDir, "connectors", "gh-acme", "checkpoints")
-	entries, err := os.ReadDir(checkpointDir)
+	if err := store.Checkpoints().Put(ctx, "gh-acme", domain.Checkpoint{Stream: "inbox", Version: 1, Data: []byte("cursor")}); err != nil {
+		t.Fatalf("Put checkpoint: %v", err)
+	}
+	entries, err := os.ReadDir(filepath.Join(machines.dirs[0], "connectors", "gh-acme", "checkpoints"))
 	if err != nil || len(entries) == 0 {
 		t.Fatalf("checkpoint files: %v", err)
 	}
-	checkpointPath := filepath.Join(checkpointDir, entries[0].Name())
-	machines.git(dataDir, "add", "-f", checkpointPath)
-	machines.git(dataDir, "commit", "-q", "-m", "tracked checkpoints")
+	machines.git(machines.dirs[0], "add", "-f", filepath.Join(machines.dirs[0], "connectors", "gh-acme", "checkpoints", entries[0].Name()))
+	machines.git(machines.dirs[0], "commit", "-q", "-m", "tracked checkpoints")
 
 	report, err = doctor.Doctor(ctx, app.DoctorOptions{})
 	if err != nil {
 		t.Fatalf("Doctor: %v", err)
 	}
 	check := findDoctorCheck(t, report, "raw-zone")
-	if check.Status != "warn" || !strings.Contains(check.Message, "checkpoints/") {
+	if check.Status != "warn" || !strings.Contains(check.Message, "checkpoints") {
 		t.Fatalf("tracked checkpoint = %+v", check)
 	}
 }
@@ -379,7 +640,16 @@ func findDoctorCheck(t *testing.T, report app.DoctorReport, name string) app.Doc
 	return app.DoctorCheck{}
 }
 
-func itemFileHexForTest(t *testing.T, item domain.Item) string {
+func readRawZoneFile(t *testing.T, path string) string {
+	t.Helper()
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read %s: %v", path, err)
+	}
+	return string(raw)
+}
+
+func itemFileHex(t *testing.T, item domain.Item) string {
 	t.Helper()
 	_, hexPart, ok := strings.Cut(item.Key(), "/")
 	if !ok {

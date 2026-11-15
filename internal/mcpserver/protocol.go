@@ -32,6 +32,9 @@ const (
 	toolsListTTLMs   = 300_000
 	discoverTTLMs    = 3_600_000
 	cacheScopePublic = "public"
+	// cacheScopePrivate marks a result that varies per caller or per server
+	// profile and must not be shared through a cache.
+	cacheScopePrivate = "private"
 )
 
 // Reserved 2026 _meta keys.
@@ -214,7 +217,7 @@ func (s *Server) finalizeResult(env envelope, method string, result json.RawMess
 		payload["resultType"] = resultComplete
 	}
 	payload["_meta"] = withServerInfo(payload["_meta"], serverInfo{Name: ServerName, Version: s.version})
-	if ttl, scope, ok := cacheHints(method); ok {
+	if ttl, scope, ok := s.cacheHints(method); ok {
 		payload["ttlMs"] = ttl
 		payload["cacheScope"] = scope
 	}
@@ -236,11 +239,16 @@ func withServerInfo(existing any, info serverInfo) map[string]any {
 }
 
 // cacheHints returns the ttlMs and cacheScope a method's results must carry
-// under the 2026 revision. The tool list and the discovery result are
-// server-wide and identical for every caller, so they are public.
-func cacheHints(method string) (ttlMs int, scope string, ok bool) {
+// under the 2026 revision. The discovery result is server-wide and identical
+// for every caller, so it is public. The tool list is identical for every
+// caller only when no profile hides tools: a read-only server's list differs
+// from a writable one, so it is private.
+func (s *Server) cacheHints(method string) (ttlMs int, scope string, ok bool) {
 	switch method {
 	case "tools/list":
+		if s.policy.ReadOnly {
+			return toolsListTTLMs, cacheScopePrivate, true
+		}
 		return toolsListTTLMs, cacheScopePublic, true
 	case "server/discover":
 		return discoverTTLMs, cacheScopePublic, true

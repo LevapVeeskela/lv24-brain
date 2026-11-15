@@ -18,6 +18,9 @@ const (
 	JournalAttempt  = "attempt"
 	JournalHandoff  = "handoff"
 	JournalCommit   = "commit"
+	// JournalReview marks a provenance review of one record (quarantine
+	// cleared by `brain record review` or brain_review_record).
+	JournalReview = "review"
 )
 
 // JournalUser is the identity journal lines are attributed to: brain.yaml

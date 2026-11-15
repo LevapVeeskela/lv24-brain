@@ -42,8 +42,8 @@ func TestMCPListToolsJSONNeedsNoConfig(t *testing.T) {
 	if len(catalogue.ProtocolVersions) == 0 || catalogue.ProtocolVersions[0] != "2026-07-28" {
 		t.Fatalf("protocol_versions = %v", catalogue.ProtocolVersions)
 	}
-	if len(catalogue.Tools) != 16 {
-		t.Fatalf("tools = %d, want 16", len(catalogue.Tools))
+	if len(catalogue.Tools) != 17 {
+		t.Fatalf("tools = %d, want 17", len(catalogue.Tools))
 	}
 	for _, tool := range catalogue.Tools {
 		if tool.Name == "" || tool.Title == "" || tool.Description == "" {

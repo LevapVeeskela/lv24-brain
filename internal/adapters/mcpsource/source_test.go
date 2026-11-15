@@ -371,9 +371,13 @@ func TestHTTPTransportBearerAndRedirectRefusal(t *testing.T) {
 }
 
 func TestStdioCommandTransport(t *testing.T) {
-	t.Setenv("LV24_MCP_STDIO_HELPER", "1")
+	// The child inherits a minimal environment, so its helper flag is passed
+	// through the connection's explicit env instead of the parent process.
 	conn := stdioConnection(map[string]string{"tools": "stdio_search"})
-	credentials := stdioCredentials{command: os.Args[0], args: "-test.run=^TestMCPStdioHelper$"}
+	credentials := stdioCredentials{
+		command: os.Args[0], args: "-test.run=^TestMCPStdioHelper$",
+		env: `{"LV24_MCP_STDIO_HELPER":"1"}`,
+	}
 	source, err := NewSource(conn, credentials, nil)
 	if err != nil {
 		t.Fatalf("NewSource: %v", err)
@@ -621,7 +625,7 @@ func TestStdioCommandComesFromCredentials(t *testing.T) {
 	}
 }
 
-type stdioCredentials struct{ command, args string }
+type stdioCredentials struct{ command, args, env string }
 
 func (c stdioCredentials) Get(_ context.Context, _ string, field string) (string, error) {
 	switch field {
@@ -632,6 +636,11 @@ func (c stdioCredentials) Get(_ context.Context, _ string, field string) (string
 		return c.command, nil
 	case "args":
 		return c.args, nil
+	case "env":
+		if c.env == "" {
+			return "", domain.ErrNotFound
+		}
+		return c.env, nil
 	default:
 		return "", domain.ErrNotFound
 	}

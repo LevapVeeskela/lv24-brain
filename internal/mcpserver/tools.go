@@ -131,8 +131,9 @@ type Backend interface {
 	// selector means the working directory. It never creates a project.
 	Resolve(ctx context.Context, selector string) (Target, error)
 	// Bootstrap returns the bounded context summary of a project. budget zero
-	// selects the default size.
-	Bootstrap(ctx context.Context, projectID string, budget int) (string, error)
+	// selects the default size. includeUnreviewed includes quarantined
+	// records that are excluded from trusted context by default.
+	Bootstrap(ctx context.Context, projectID string, budget int, includeUnreviewed bool) (string, error)
 	// Search runs full-text search. An empty ProjectID searches every project.
 	Search(ctx context.Context, in SearchInput) ([]Hit, error)
 	Note(ctx context.Context, in NoteInput) (Record, error)
@@ -185,8 +186,9 @@ func (s *Server) coreTools() []tool {
 			Annotations: readOnlyAnnotations("Open project context"),
 			Description: "Load the curated context of a project: state, recent decisions, attempts and the latest handoff. Call at the start of a session.",
 			InputSchema: objectSchema(nil, map[string]any{
-				"project": project,
-				"budget":  intProp("Summary size budget in runes; 0 selects the default.", 0),
+				"project":            project,
+				"budget":             intProp("Summary size budget in runes; 0 selects the default.", 0),
+				"include_unreviewed": boolProp("Include quarantined records (unreviewed agent, connector or import writes) that are excluded by default."),
 			}),
 			OutputSchema: outputObject(map[string]any{
 				"workspace":  boolProp("True when the selector resolved to a workspace root; overview then holds its projects."),
@@ -320,8 +322,9 @@ func (s *Server) coreTools() []tool {
 
 func (s *Server) open(ctx context.Context, raw json.RawMessage) (toolResult, error) {
 	var args struct {
-		Project string `json:"project"`
-		Budget  int    `json:"budget"`
+		Project           string `json:"project"`
+		Budget            int    `json:"budget"`
+		IncludeUnreviewed bool   `json:"include_unreviewed"`
 	}
 	if err := decodeArgs(raw, &args); err != nil {
 		return toolResult{}, err
@@ -329,9 +332,14 @@ func (s *Server) open(ctx context.Context, raw json.RawMessage) (toolResult, err
 	if args.Budget < 0 {
 		return toolResult{}, refusalInvalid("budget must not be negative")
 	}
-	target, err := s.backend.Resolve(ctx, strings.TrimSpace(args.Project))
+	target, err := s.resolveTarget(ctx, strings.TrimSpace(args.Project))
 	var overview *WorkspaceOverview
 	if errors.As(err, &overview) {
+		// A workspace overview lists every project of the data directory, so a
+		// project allowlist must not reach it: the client has to name one.
+		if len(s.policy.Projects) > 0 {
+			return toolResult{}, refusalInvalidf("project is required: this server is limited to %s; a workspace root lists every project", s.policy.projectList())
+		}
 		return toolResult{
 			Text: overview.Text,
 			Structured: struct {
@@ -343,7 +351,7 @@ func (s *Server) open(ctx context.Context, raw json.RawMessage) (toolResult, err
 	if err != nil {
 		return toolResult{}, err
 	}
-	summary, err := s.backend.Bootstrap(ctx, target.ID, args.Budget)
+	summary, err := s.backend.Bootstrap(ctx, target.ID, args.Budget, args.IncludeUnreviewed)
 	if err != nil {
 		return toolResult{}, err
 	}
@@ -436,7 +444,7 @@ func (s *Server) note(ctx context.Context, raw json.RawMessage) (toolResult, err
 	if _, err := requireText("text", args.Text); err != nil {
 		return toolResult{}, err
 	}
-	target, err := s.backend.Resolve(ctx, strings.TrimSpace(args.Project))
+	target, err := s.writeTarget(ctx, strings.TrimSpace(args.Project))
 	if err != nil {
 		return toolResult{}, err
 	}
@@ -471,7 +479,7 @@ func (s *Server) decision(ctx context.Context, raw json.RawMessage) (toolResult,
 	if args.Status != "" && !slices.Contains(decisionStatuses, args.Status) {
 		return toolResult{}, refusalInvalidf("status must be one of %s", strings.Join(decisionStatuses, ", "))
 	}
-	target, err := s.backend.Resolve(ctx, strings.TrimSpace(args.Project))
+	target, err := s.writeTarget(ctx, strings.TrimSpace(args.Project))
 	if err != nil {
 		return toolResult{}, err
 	}
@@ -505,7 +513,7 @@ func (s *Server) attempt(ctx context.Context, raw json.RawMessage) (toolResult, 
 	if err != nil {
 		return toolResult{}, err
 	}
-	target, err := s.backend.Resolve(ctx, strings.TrimSpace(args.Project))
+	target, err := s.writeTarget(ctx, strings.TrimSpace(args.Project))
 	if err != nil {
 		return toolResult{}, err
 	}
@@ -535,7 +543,7 @@ func (s *Server) handoff(ctx context.Context, raw json.RawMessage) (toolResult, 
 	if err != nil {
 		return toolResult{}, err
 	}
-	target, err := s.backend.Resolve(ctx, strings.TrimSpace(args.Project))
+	target, err := s.writeTarget(ctx, strings.TrimSpace(args.Project))
 	if err != nil {
 		return toolResult{}, err
 	}
@@ -616,6 +624,7 @@ func (s *Server) projects(ctx context.Context, raw json.RawMessage) (toolResult,
 	if err != nil {
 		return toolResult{}, err
 	}
+	projects = s.policy.filterProjects(projects)
 	if projects == nil {
 		projects = []Project{}
 	}
@@ -638,17 +647,42 @@ func (s *Server) projects(ctx context.Context, raw json.RawMessage) (toolResult,
 	}, nil
 }
 
-// optionalProject resolves an optional project selector; "" stays "" (all
-// projects).
+// optionalProject resolves an optional project selector; an empty selector
+// means "every project" when the policy has no allowlist, the only allowed
+// project when it has one, and a refusal when it has several.
 func (s *Server) optionalProject(ctx context.Context, selector string) (string, error) {
 	if strings.TrimSpace(selector) == "" {
-		return "", nil
+		return s.policy.readProject()
 	}
-	target, err := s.backend.Resolve(ctx, strings.TrimSpace(selector))
+	target, err := s.resolveTarget(ctx, strings.TrimSpace(selector))
 	if err != nil {
 		return "", err
 	}
 	return target.ID, nil
+}
+
+// resolveTarget resolves a selector and enforces the project allowlist.
+func (s *Server) resolveTarget(ctx context.Context, selector string) (Target, error) {
+	target, err := s.backend.Resolve(ctx, selector)
+	if err != nil {
+		return Target{}, err
+	}
+	if err := s.policy.checkProject(target.ID); err != nil {
+		return Target{}, err
+	}
+	return target, nil
+}
+
+// writeTarget resolves a write destination and enforces the write scope.
+func (s *Server) writeTarget(ctx context.Context, selector string) (Target, error) {
+	target, err := s.resolveTarget(ctx, selector)
+	if err != nil {
+		return Target{}, err
+	}
+	if err := s.policy.checkWrite(target.ID); err != nil {
+		return Target{}, err
+	}
+	return target, nil
 }
 
 func recordResult(kind string, rec Record) toolResult {

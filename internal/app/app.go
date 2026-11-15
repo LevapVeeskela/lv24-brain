@@ -130,12 +130,19 @@ type BootstrapOptions struct {
 	ProjectID string
 	// Budget bounds the summary in runes; zero selects DefaultBootstrapBudget.
 	Budget int
+	// IncludeUnreviewed includes quarantined records (unreviewed agent,
+	// connector or import writes, or an unknown origin) that are excluded from
+	// trusted context by default.
+	IncludeUnreviewed bool
 }
 
 // BootstrapResult summarizes generated context.
 type BootstrapResult struct {
 	ProjectID string
 	Summary   string
+	// Quarantined lists the ids of records left out of the summary. It is
+	// always populated, whether or not IncludeUnreviewed was set.
+	Quarantined []string
 }
 
 // NoteInput is a new note.
@@ -149,6 +156,11 @@ type NoteInput struct {
 	ID string
 	// Source records the external item a promoted note came from.
 	Source *domain.SourceRef
+	// Provenance records who wrote the note and whether it was reviewed. The
+	// zero value is the CLI default: human, reviewed, verified. MCP writes pass
+	// agent; promotion passes connector/stated; an importer passes
+	// import/unreviewed so the text stays quarantined until review.
+	Provenance domain.Provenance
 	// CreateProject registers ProjectID when no project, alias or path
 	// matches; without it an unknown project is an error.
 	CreateProject bool
@@ -175,6 +187,8 @@ type DecisionInput struct {
 	ID string
 	// Source records the external item a promoted decision came from.
 	Source *domain.SourceRef
+	// Provenance is the write provenance; zero means human/reviewed/verified.
+	Provenance domain.Provenance
 	// CreateProject registers ProjectID when no project, alias or path
 	// matches; without it an unknown project is an error.
 	CreateProject bool
@@ -197,6 +211,8 @@ type AttemptInput struct {
 	ID string
 	// Source records the external item a promoted attempt came from.
 	Source *domain.SourceRef
+	// Provenance is the write provenance; zero means human/reviewed/verified.
+	Provenance domain.Provenance
 	// CreateProject registers ProjectID when no project, alias or path
 	// matches; without it an unknown project is an error.
 	CreateProject bool
@@ -214,6 +230,8 @@ type HandoffInput struct {
 	Summary    string
 	GitContext string
 	NextAction string
+	// Provenance is the write provenance; zero means human/reviewed/verified.
+	Provenance domain.Provenance
 	// CreateProject registers ProjectID when no project, alias or path
 	// matches; without it an unknown project is an error.
 	CreateProject bool

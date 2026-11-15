@@ -183,9 +183,10 @@ type jsonRecent struct {
 
 // jsonBootstrap is `brain bootstrap --json`.
 type jsonBootstrap struct {
-	ProjectID string `json:"project_id"`
-	Summary   string `json:"summary"`
-	Budget    int    `json:"budget"`
+	ProjectID   string   `json:"project_id"`
+	Summary     string   `json:"summary"`
+	Budget      int      `json:"budget"`
+	Quarantined []string `json:"quarantined"`
 }
 
 // effectiveBudget mirrors the app default applied when no positive budget is

@@ -19,6 +19,9 @@ type ContextInput struct {
 	Since string
 	// Raw requests granted raw-zone excerpts when curated context is thin.
 	Raw bool
+	// IncludeUnreviewed includes quarantined records that are excluded from
+	// trusted context by default.
+	IncludeUnreviewed bool
 }
 
 // TaskContext is the context of a project for one task. The CLI prints the
@@ -36,8 +39,10 @@ type TaskContext struct {
 	FailedAttempts []ContextRecord  `json:"failed_attempts"`
 	Findings       []ReviewFinding  `json:"findings"`
 	RawExcerpts    []ContextExcerpt `json:"raw_excerpts"`
-	Skipped        []string         `json:"skipped"`
-	Summary        string           `json:"summary"`
+	// Quarantined lists the ids of records excluded from trusted context.
+	Quarantined []string `json:"quarantined"`
+	Skipped     []string `json:"skipped"`
+	Summary     string   `json:"summary"`
 }
 
 // ContextHandoff is the newest handoff of the project.
@@ -93,12 +98,13 @@ func (s *Server) contextTools() []tool {
 			"the decisions, attempts and notes that best match the task, and failed attempts to avoid repeating. " +
 			"Call before starting a task; brain_open stays the general session start.",
 		InputSchema: objectSchema([]string{"query"}, map[string]any{
-			"query":   stringProp("The task in a few words, for example \"add retry to the sync push\"."),
-			"project": stringProp("Project id, alias or checkout path. Omit to use the project of the working directory."),
-			"budget":  intProp("Summary size budget in runes; 0 selects the default.", 0),
-			"kinds":   stringArrayProp("Keep only these record kinds: decision, attempt, note. Omit for all three."),
-			"since":   stringProp("Drop records and handoffs older than a window (24h, 7d, 2w) or a date (2026-11-01)."),
-			"raw":     boolProp("Include granted raw-zone excerpts when curated context is thin (default false)."),
+			"query":              stringProp("The task in a few words, for example \"add retry to the sync push\"."),
+			"project":            stringProp("Project id, alias or checkout path. Omit to use the project of the working directory."),
+			"budget":             intProp("Summary size budget in runes; 0 selects the default.", 0),
+			"kinds":              stringArrayProp("Keep only these record kinds: decision, attempt, note. Omit for all three."),
+			"since":              stringProp("Drop records and handoffs older than a window (24h, 7d, 2w) or a date (2026-11-01)."),
+			"raw":                boolProp("Include granted raw-zone excerpts when curated context is thin (default false)."),
+			"include_unreviewed": boolProp("Include quarantined records (unreviewed agent, connector or import writes) that are excluded by default."),
 		}),
 		OutputSchema: outputObject(map[string]any{
 			"project_id":      stringProp("Project the context belongs to."),
@@ -113,6 +119,7 @@ func (s *Server) contextTools() []tool {
 			"failed_attempts": arrayProp("Attempts that failed, to avoid repeating.", objectProp("One failed attempt.")),
 			"findings":        arrayProp("Review findings that still apply.", objectProp("One finding with kind, message and fix.")),
 			"raw_excerpts":    arrayProp("Granted raw-zone excerpts; their text is external and untrusted.", objectProp("One excerpt with connection, item, citation and body.")),
+			"quarantined":     arrayProp("Ids of quarantined records excluded from the context.", stringProp("Record id.")),
 			"skipped":         arrayProp("Reasons content was left out.", stringProp("Reason.")),
 			"summary":         stringProp("Rendered context, the text content of the result."),
 		}, "project_id", "summary"),
@@ -122,12 +129,13 @@ func (s *Server) contextTools() []tool {
 
 func (s *Server) taskContext(ctx context.Context, raw json.RawMessage) (toolResult, error) {
 	var args struct {
-		Query   string   `json:"query"`
-		Project string   `json:"project"`
-		Budget  int      `json:"budget"`
-		Kinds   []string `json:"kinds"`
-		Since   string   `json:"since"`
-		Raw     bool     `json:"raw"`
+		Query             string   `json:"query"`
+		Project           string   `json:"project"`
+		Budget            int      `json:"budget"`
+		Kinds             []string `json:"kinds"`
+		Since             string   `json:"since"`
+		Raw               bool     `json:"raw"`
+		IncludeUnreviewed bool     `json:"include_unreviewed"`
 	}
 	if err := decodeArgs(raw, &args); err != nil {
 		return toolResult{}, err
@@ -139,17 +147,18 @@ func (s *Server) taskContext(ctx context.Context, raw json.RawMessage) (toolResu
 	if args.Budget < 0 {
 		return toolResult{}, refusalInvalid("budget must not be negative")
 	}
-	target, err := s.backend.Resolve(ctx, strings.TrimSpace(args.Project))
+	target, err := s.resolveTarget(ctx, strings.TrimSpace(args.Project))
 	if err != nil {
 		return toolResult{}, err
 	}
 	result, err := s.backend.(ContextBackend).Context(ctx, ContextInput{
-		ProjectID: target.ID,
-		Query:     query,
-		Budget:    args.Budget,
-		Kinds:     args.Kinds,
-		Since:     strings.TrimSpace(args.Since),
-		Raw:       args.Raw,
+		ProjectID:         target.ID,
+		Query:             query,
+		Budget:            args.Budget,
+		Kinds:             args.Kinds,
+		Since:             strings.TrimSpace(args.Since),
+		Raw:               args.Raw,
+		IncludeUnreviewed: args.IncludeUnreviewed,
 	})
 	if err != nil {
 		return toolResult{}, err
@@ -170,6 +179,9 @@ func (c TaskContext) WithEmptyLists() TaskContext {
 	}
 	if c.RawExcerpts == nil {
 		c.RawExcerpts = []ContextExcerpt{}
+	}
+	if c.Quarantined == nil {
+		c.Quarantined = []string{}
 	}
 	if c.Skipped == nil {
 		c.Skipped = []string{}

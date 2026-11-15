@@ -38,6 +38,15 @@ type RecordEditor interface {
 	ListTrash(ctx context.Context, projectID string) ([]TrashedRecord, error)
 }
 
+// RecordReviewer is implemented by stores that can change the review state of
+// one stored record (local and git mode). It is optional for the same reason
+// as RecordEditor: server clients have no provenance-edit route yet. trust
+// empty keeps the stored trust level. changed is false for an idempotent
+// repeat of a review that changes nothing.
+type RecordReviewer interface {
+	ReviewRecord(ctx context.Context, projectID, kind, id string, trust domain.Trust) (changed bool, err error)
+}
+
 // TrashedRecord identifies one record in a project's trash.
 type TrashedRecord struct {
 	Kind  string

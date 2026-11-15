@@ -211,15 +211,17 @@ func (a *App) promoteLocked(ctx context.Context, opts PromoteOptions, proposal d
 	}
 
 	source := proposalSourceRef(proposal)
+	provenance := promotedProvenance()
 	switch targetKind {
 	case domain.ProposalDecision:
 		result, err := a.Decision(ctx, DecisionInput{
-			ProjectID: proposal.ProjectID,
-			Title:     title,
-			Status:    status,
-			Context:   promoteDecisionContext(proposal),
-			Evidence:  promoteEvidence(proposal),
-			Source:    source,
+			ProjectID:  proposal.ProjectID,
+			Title:      title,
+			Status:     status,
+			Context:    promoteDecisionContext(proposal),
+			Evidence:   promoteEvidence(proposal),
+			Source:     source,
+			Provenance: provenance,
 		})
 		if err != nil {
 			return PromoteResult{}, fmt.Errorf("create decision from proposal %s: %w", proposal.ID, err)
@@ -233,6 +235,7 @@ func (a *App) promoteLocked(ctx context.Context, opts PromoteOptions, proposal d
 			Result:     proposalSection(proposal, "Result"),
 			Reason:     promoteAttemptReason(proposal),
 			Source:     source,
+			Provenance: provenance,
 		})
 		if err != nil {
 			return PromoteResult{}, fmt.Errorf("create attempt from proposal %s: %w", proposal.ID, err)
@@ -244,10 +247,11 @@ func (a *App) promoteLocked(ctx context.Context, opts PromoteOptions, proposal d
 			body = title
 		}
 		result, err := a.Note(ctx, NoteInput{
-			ProjectID: proposal.ProjectID,
-			Title:     title,
-			Body:      body,
-			Source:    source,
+			ProjectID:  proposal.ProjectID,
+			Title:      title,
+			Body:       body,
+			Source:     source,
+			Provenance: provenance,
 		})
 		if err != nil {
 			return PromoteResult{}, fmt.Errorf("create note from proposal %s: %w", proposal.ID, err)
@@ -370,6 +374,13 @@ func (a *App) plannedRecordID(kind domain.ProposalKind, title string, now time.T
 		return "", err
 	}
 	return domain.NewRecordID(string(kind), now, domain.Slugify(title), ulid), nil
+}
+
+// promotedProvenance is the provenance of a record created from a proposal.
+// Promotion is the review, so the record is reviewed; the connector stated the
+// claim, so its trust is stated rather than verified.
+func promotedProvenance() domain.Provenance {
+	return domain.Provenance{Origin: domain.OriginConnector, Reviewed: true, Trust: domain.TrustStated}
 }
 
 // proposalRecordKind recovers the kind from a curated record id prefix, which

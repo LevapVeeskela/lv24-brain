@@ -26,6 +26,8 @@ func runRecord(args []string, stdout, stderr io.Writer) int {
   brain record show <id> [--project p] [--json]
   brain record status <id> <proposed|accepted|rejected|superseded> [--project p]
   brain record supersede <old-id> --by <new-id> [--project p]
+  brain record review <id> [--trust verified|stated|inferred] [--project p]
+  brain record review --all [--trust verified|stated|inferred] [--project p]
   brain record trash <id> --yes [--project p]
   brain record restore <id> [--project p]
   brain record trash-list [project] [--json]
@@ -47,6 +49,8 @@ Trash is reversible: restore brings a trashed record back.
 		return runRecordStatus(args[1:], stdout, stderr)
 	case "supersede":
 		return runRecordSupersede(args[1:], stdout, stderr)
+	case "review":
+		return runRecordReview(args[1:], stdout, stderr)
 	case "trash":
 		return runRecordTrash(args[1:], stdout, stderr)
 	case "restore":
@@ -201,6 +205,59 @@ func runRecordSupersede(args []string, stdout, stderr io.Writer) int {
 		return reportError(stderr, "record supersede", err)
 	}
 	fmt.Fprintf(stdout, "decision %s: superseded by %s\n", decision.ID, newID)
+	return 0
+}
+
+// runRecordReview clears the quarantine of one record or of every unreviewed
+// record of the project.
+func runRecordReview(args []string, stdout, stderr io.Writer) int {
+	fs := newFlagSet("record review", stderr)
+	project := fs.String("project", "", "project id or alias")
+	all := fs.Bool("all", false, "review every unreviewed record of the project")
+	trust := fs.String("trust", "", "set the trust level: verified, stated or inferred")
+	cfgPath := configFlag(fs)
+	positional, err := parseInterspersed(fs, args)
+	if err != nil {
+		return 2
+	}
+	if *all && len(positional) > 0 {
+		fmt.Fprintln(stderr, "brain record review: pass either a record id or --all, not both")
+		return 2
+	}
+	if !*all && !expectArgs("record review", positional, 1, "<id> [--trust verified|stated|inferred]", stderr) {
+		return 2
+	}
+	trustValue := domain.Trust(strings.TrimSpace(*trust))
+	if trustValue != "" && !trustValue.Valid() {
+		fmt.Fprintf(stderr, "brain record review: unknown trust %q (verified, stated, inferred)\n", *trust)
+		return 2
+	}
+	id := ""
+	if len(positional) == 1 {
+		id = positional[0]
+	}
+	ctx := context.Background()
+	runtime, target, code := stateTarget(ctx, *cfgPath, *project, nil, stderr, "record review")
+	if code != 0 {
+		return code
+	}
+	defer func() { _ = runtime.Close() }()
+	result, err := runtime.App.ReviewRecords(ctx, app.ReviewRecordOptions{
+		ProjectID: target.Project.ID,
+		ID:        id,
+		All:       *all,
+		Trust:     trustValue,
+	})
+	if err != nil {
+		return reportError(stderr, "record review", err)
+	}
+	if len(result.Reviewed) == 0 {
+		fmt.Fprintln(stdout, "no unreviewed records")
+		return 0
+	}
+	for _, record := range result.Reviewed {
+		fmt.Fprintf(stdout, "reviewed %s %s\n", record.Kind, record.ID)
+	}
 	return 0
 }
 

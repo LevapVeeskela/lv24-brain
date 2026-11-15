@@ -393,7 +393,14 @@ func (s *ItemStore) SetPublishPolicy(ctx context.Context, connectionID string, p
 	if policy == domain.PublishLocalOnly {
 		content = localOnlyIgnore
 	}
-	return writeFileAtomic(filepath.Join(dir, connectionIgnoreFile), []byte(content))
+	path := filepath.Join(dir, connectionIgnoreFile)
+	// The marker is rewritten only when it differs, so a run that applies an
+	// unchanged policy costs one read and an older marker (which did not ignore
+	// checkpoints/) is upgraded exactly once.
+	if raw, err := os.ReadFile(path); err == nil && string(raw) == content {
+		return nil
+	}
+	return writeFileAtomic(path, []byte(content))
 }
 
 // PublishPolicy reads the policy SetPublishPolicy recorded. A directory

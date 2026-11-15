@@ -29,12 +29,14 @@ const (
 	FindingStateExpired         FindingKind = "state-expired"
 	FindingStateBehindCommits   FindingKind = "state-behind-commits"
 	FindingDecisionCodeChanged  FindingKind = "decision-code-changed"
+	FindingQuarantined          FindingKind = "quarantined"
 )
 
 var findingKinds = []FindingKind{
 	FindingNextBehindHandoff, FindingNextMaybeDone, FindingQuestionAnswered,
 	FindingDecisionContradicted, FindingStateExpired, FindingStateBehindCommits,
 	FindingDecisionCodeChanged, FindingBrokenLink, FindingNearDuplicate,
+	FindingQuarantined,
 }
 
 const (
@@ -118,6 +120,9 @@ func (a *App) Findings(ctx context.Context, projectID string) ([]Finding, error)
 	}
 	now := a.now()
 	var findings []Finding
+	// Quarantine comes first so a short context or session summary never
+	// truncates the one finding that says external text is waiting for review.
+	findings = append(findings, quarantinedFindings(in)...)
 	findings = append(findings, stateFindings(in, now)...)
 	findings = append(findings, nextActionFindings(in)...)
 	findings = append(findings, questionFindings(in)...)
@@ -228,6 +233,27 @@ func (a *App) reviewInputs(ctx context.Context, projectID string) (reviewInputs,
 		in.commits = entries
 	}
 	return in, nil
+}
+
+func quarantinedFindings(in reviewInputs) []Finding {
+	ids := quarantinedIDs(in.notes, in.decisions, in.attempts, in.handoffs)
+	if len(ids) == 0 {
+		return nil
+	}
+	return []Finding{{
+		Kind:     FindingQuarantined,
+		Message:  fmt.Sprintf("%d quarantined records are excluded from context until reviewed: %s; clear one with `brain record review <id>` or all with `brain record review --all`", len(ids), quarantineIDSample(ids)),
+		Evidence: strings.Join(ids, ", "),
+	}}
+}
+
+// quarantineIDSample lists at most maxListedItems ids in a finding message; the
+// full list stays in Evidence and `brain review`.
+func quarantineIDSample(ids []string) string {
+	if len(ids) <= maxListedItems {
+		return strings.Join(ids, ", ")
+	}
+	return strings.Join(ids[:maxListedItems], ", ") + fmt.Sprintf(", … %d more", len(ids)-maxListedItems)
 }
 
 func stateFindings(in reviewInputs, now time.Time) []Finding {

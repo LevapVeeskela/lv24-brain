@@ -3,6 +3,8 @@ package gitstore
 import (
 	"context"
 	"fmt"
+	"path/filepath"
+	"strings"
 
 	"github.com/levapveeskela/lv24-brain/internal/domain"
 	"github.com/levapveeskela/lv24-brain/internal/ports"
@@ -48,4 +50,42 @@ func (p *Provider) TrackedPaths(ctx context.Context, prefix string) ([]string, e
 		return nil, err
 	}
 	return splitNul(out), nil
+}
+
+// TrackedRawZonePaths lists the items and checkpoints of a connection that the
+// repository index tracks.
+func (p *Provider) TrackedRawZonePaths(ctx context.Context, id string) ([]string, error) {
+	if err := domain.ValidateConnectionID("connection.id", id); err != nil {
+		return nil, err
+	}
+	paths, err := p.TrackedPaths(ctx, "connectors/"+id)
+	if err != nil {
+		return nil, err
+	}
+	raw := make([]string, 0, len(paths))
+	for _, path := range paths {
+		if rawZoneFilePath(path) {
+			raw = append(raw, path)
+		}
+	}
+	return raw, nil
+}
+
+// RawZoneTracked reports whether the index tracks items or checkpoints of the
+// connection. The ingestion host uses it to grandfather a raw zone that an
+// earlier engine published: a true answer with no explicit publish policy keeps
+// the connection shared instead of untracking it.
+func (p *Provider) RawZoneTracked(ctx context.Context, id string) (bool, error) {
+	paths, err := p.TrackedRawZonePaths(ctx, id)
+	if err != nil {
+		return false, err
+	}
+	return len(paths) > 0, nil
+}
+
+// rawZoneFilePath reports whether a repository path is an item or checkpoint
+// file of a connection (connectors/<id>/items/... or .../checkpoints/...).
+func rawZoneFilePath(path string) bool {
+	slash := filepath.ToSlash(path)
+	return strings.Contains(slash, "/items/") || strings.Contains(slash, "/checkpoints/")
 }

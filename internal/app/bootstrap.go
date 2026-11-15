@@ -36,6 +36,16 @@ func (a *App) Bootstrap(ctx context.Context, opts BootstrapOptions) (BootstrapRe
 	if err != nil {
 		return BootstrapResult{}, err
 	}
+	notes, err := a.listNotes(ctx, project.ID)
+	if err != nil {
+		return BootstrapResult{}, err
+	}
+	quarantined := quarantinedIDs(notes, decisions, attempts, handoffs)
+	if !opts.IncludeUnreviewed {
+		decisions = trustedDecisions(decisions)
+		attempts = trustedAttempts(attempts)
+		handoffs = trustedHandoffs(handoffs)
+	}
 
 	now := a.now()
 	var out strings.Builder
@@ -47,6 +57,9 @@ func (a *App) Bootstrap(ctx context.Context, opts BootstrapOptions) (BootstrapRe
 	}
 	fmt.Fprintf(&out, "state_updated: %s (age %s)\n", formatTime(state.UpdatedAt), stateAge(now, state))
 	fmt.Fprintf(&out, "freshness: %s\n", freshness(now, state))
+	if line := quarantineLine(quarantined, opts.IncludeUnreviewed); line != "" {
+		out.WriteString(line + "\n")
+	}
 	fmt.Fprintf(&out, "goal: %s\n", valueOr(state.Goal, "not set"))
 	fmt.Fprintf(&out, "next_action: %s\n", valueOr(state.NextAction, "not set"))
 	writePromptList(&out, "active", state.Active)
@@ -106,8 +119,9 @@ func (a *App) Bootstrap(ctx context.Context, opts BootstrapOptions) (BootstrapRe
 		budget = DefaultBootstrapBudget
 	}
 	return BootstrapResult{
-		ProjectID: project.ID,
-		Summary:   truncateSummary(out.String(), budget),
+		ProjectID:   project.ID,
+		Summary:     truncateSummary(out.String(), budget),
+		Quarantined: quarantined,
 	}, nil
 }
 

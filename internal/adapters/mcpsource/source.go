@@ -61,6 +61,7 @@ func Descriptor() domain.SourceDescriptor {
 			{Key: "transport", Label: "Transport", Required: true, Help: "stdio or http."},
 			{Key: "command", Label: "Command", Secret: true, Help: "Required for stdio. Stored in the local credential store, never in the synced catalogue; executable path or PATH name, invoked without a shell."},
 			{Key: "args", Label: "Arguments", Secret: true, Help: "Optional for stdio, stored in the local credential store. Newline-separated argv; each line is one literal argument, with no shell interpolation."},
+			{Key: "env", Label: "Environment", Secret: true, Help: "Optional for stdio, stored in the local credential store: a one-line JSON object of extra environment variables for the child, for example {\"API_KEY\":\"...\"}. The child inherits only PATH, HOME, TMP/TEMP, SystemRoot, ComSpec, PATHEXT, LANG and LC_*; brain tokens, database URLs and cloud credentials are never inherited."},
 			{Key: "url", Label: "Streamable HTTP URL", Help: "Required for http. HTTPS, or HTTP to loopback only; URL credentials, query and fragment are forbidden."},
 			{Key: "token", Label: "Bearer token", Secret: true, Help: "Optional HTTP Bearer token. Never sent to stdio servers."},
 			{Key: "tools", Label: "Read tools", Help: "Optional exact comma/newline-separated names (letters, digits, '_', '-', '.'). Without this, names matching search/list/recent/query/find are selected, except names containing destructive verbs (create/update/delete/remove/write/send/execute/run/call/set/add/insert/upsert/upload/post/put/patch/archive/purge/destroy/drop/truncate/approve/merge/assign/move/rename/edit/save/commit/push/reset/revoke/grant/publish/deploy/invite/share/cancel/close/reopen/disable/enable/lock/unlock/mark/mute/kick/ban/track/untrack) or a destructive annotation."},
@@ -358,7 +359,12 @@ func (s *Source) connect(ctx context.Context) (*mcp.ClientSession, func(), error
 		if err != nil {
 			return nil, func() {}, err
 		}
+		env, err := s.childEnv(ctx)
+		if err != nil {
+			return nil, func() {}, err
+		}
 		cmd := exec.CommandContext(ctx, command, args...)
+		cmd.Env = env
 		transport = &mcp.CommandTransport{Command: cmd}
 	} else {
 		httpClient := newHTTPClient(token)

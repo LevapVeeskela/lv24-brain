@@ -22,13 +22,14 @@ func (a *App) Note(ctx context.Context, input NoteInput) (NoteResult, error) {
 	}
 	now := a.now()
 	note := domain.Note{
-		ProjectID: project.ID,
-		Title:     fallbackTitle(input.Title, input.Body),
-		Body:      input.Body,
-		Tags:      input.Tags,
-		Source:    input.Source,
-		CreatedAt: now,
-		UpdatedAt: now,
+		ProjectID:  project.ID,
+		Title:      fallbackTitle(input.Title, input.Body),
+		Body:       input.Body,
+		Tags:       input.Tags,
+		Source:     input.Source,
+		Provenance: input.Provenance.Normalized(),
+		CreatedAt:  now,
+		UpdatedAt:  now,
 	}
 	if err := note.Validate(); err != nil {
 		return NoteResult{}, err
@@ -94,6 +95,7 @@ func (a *App) Decision(ctx context.Context, input DecisionInput) (DecisionResult
 		Evidence:     input.Evidence,
 		Paths:        paths,
 		Source:       input.Source,
+		Provenance:   input.Provenance.Normalized(),
 		CreatedAt:    now,
 		UpdatedAt:    now,
 	}
@@ -146,6 +148,7 @@ func (a *App) Attempt(ctx context.Context, input AttemptInput) (AttemptResult, e
 		Result:     input.Result,
 		Reason:     input.Reason,
 		Source:     input.Source,
+		Provenance: input.Provenance.Normalized(),
 		CreatedAt:  now,
 		UpdatedAt:  now,
 	}
@@ -197,6 +200,7 @@ func (a *App) Handoff(ctx context.Context, input HandoffInput) (HandoffResult, e
 		Summary:    input.Summary,
 		GitContext: input.GitContext,
 		NextAction: input.NextAction,
+		Provenance: input.Provenance.Normalized(),
 		CreatedAt:  now,
 	}
 	if err := handoff.Validate(); err != nil {

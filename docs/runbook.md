@@ -143,6 +143,8 @@ brain record list [project] --kind decision --status proposed --since 7d
 brain record show <id>
 brain record status <id> accepted          # proposed|accepted|rejected|superseded
 brain record supersede <old-id> --by <new-id>
+brain record review <id> [--trust verified|stated|inferred]
+brain record review --all
 brain record trash <id> --yes              # moves it to projects/<p>/trash/
 brain record trash-list [project]
 brain record restore <id>
@@ -154,6 +156,48 @@ brain record restore <id>
   trashed; edit the daily file instead.
 - Agents get `brain_records`, `brain_record` and `brain_decision_status` over
   MCP; trash and restore stay CLI-only.
+
+### Quarantine and provenance review (0.15)
+
+Every record has `origin` (human/agent/connector/import), `reviewed` and `trust`
+(verified/stated/inferred). Missing keys are the old defaults: human, reviewed,
+verified. Quarantined records are unreviewed non-human writes or records whose
+origin is unknown; they are left out of `brain context`, `brain open` and the
+MCP equivalents. The output lists only their ids:
+
+```text
+quarantined: 2 (decision-2026-11-14-raise-retry-budget-01j…, note-2026-11-14-ci-flake-01j…)
+```
+
+Routine:
+
+```sh
+brain review                                   # quarantined finding + ids
+brain record show <id>                         # read the record before trusting it
+brain record review <id>                       # clear one record
+brain record review --all --trust stated       # clear the queue
+brain context "task" --include-unreviewed      # inspect without clearing
+brain doctor                                   # quarantine: warn with N records
+```
+
+- Review is idempotent, keeps the body and timestamps, and journals a `review`
+  event. It edits the marker of a note or the provenance keys of a decision,
+  attempt or handoff.
+- A hand-written note section has no marker and cannot be reviewed; edit the
+  daily file instead.
+- Set `security.quarantine_agent: true` in `brain.yaml` to make MCP writes and
+  the automatic session-end capture unreviewed. Leave it off if agents are
+  trusted and you want their records in context immediately. `brain promote`
+  always writes reviewed records with `trust: stated`; session-end handoffs and
+  captured decisions are `origin: agent, trust: stated`.
+- `brain catchup` follows the same rule: quarantined notes, decisions, attempts
+  and handoffs are left out (and cannot become the baseline handoff) unless you
+  pass `--include-unreviewed`; the report prints `quarantined: N (ids)` either
+  way.
+- `brain record review` is local/git only for now; server mode has no
+  provenance-edit route. `brain_review_record` is the temporary MCP equivalent
+  and is listed only for backends that can review records. `state.md` has no
+  provenance yet, so state writes are always trusted.
 
 ### Links between records (since v0.8.0)
 
@@ -318,24 +362,46 @@ safely, stop and ask the maintainer.
 ### Raw zone and publishing (since 0.15)
 
 `connectors/<id>/items/` and `connectors/<id>/checkpoints/` are a machine-local
-cache: `brain sync` does not commit them, so two machines that ingest the same
-connection never conflict on `observed_at` or cursor bytes. Checkpoints are
-never published, not even for a shared connection.
+cache: `brain sync` does not commit them unless the connection is shared, so two
+machines that ingest the same connection never conflict on `observed_at` or
+cursor bytes. Checkpoints are never published, not even for a shared connection.
 
-- Publish the items of one connection on purpose with
-  `brain connection add ... --publish shared`, or set `"publish": "shared"` for
-  the connection in `connectors/connections.json`, then run it once. Shared item
-  files are written without the host `observed_at`, so both machines produce the
-  same bytes at the same path.
-- Stop publishing by setting the connection back to `local-only` and running it
-  once: the run untracks `connectors/<id>` (`git rm --cached -r`) before writing,
-  and the next `brain sync --push` records the removal. The files stay on disk;
-  blobs already committed stay in git history.
-- Upgrading from an engine before 0.15: the next run of each connection applies
-  the new default and untracks a previously published directory. Until then
-  `brain doctor` reports the tracked raw files as `raw-zone: warn`;
-  `git rm --cached -r connectors/<id>` drops them from the index without
-  deleting the working tree.
+Each run decides the policy in this order:
+
+1. An explicit `publish: shared` or `publish: local-only` on the connection
+   always wins.
+2. No explicit policy, but git already tracks the connection's items or
+   checkpoints: the zone keeps publishing exactly as before (grandfathered). The
+   run changes nothing — no marker, no untrack, no rewrite — and prints a notice.
+   This is what protects a pre-0.15 data repository on upgrade.
+3. No explicit policy and nothing tracked: the zone is local-only.
+
+Choose explicitly with `brain connection publish <id> shared|local-only`:
+
+```sh
+brain connection publish gh-acme local-only   # untrack, keep files and history
+brain connection publish gh-acme shared       # publish items, keep checkpoints local
+```
+
+- `local-only` records the policy, writes the local marker and untracks
+  `connectors/<id>` (`git rm --cached -r`). The next `brain sync --push` records
+  the removal. The files stay on disk and blobs already committed stay in git
+  history; untracking never rewrites history.
+- `shared` records the policy, keeps items tracked and untracks
+  `connectors/<id>/checkpoints/`. Shared item files are written without the host
+  `observed_at`, so both machines produce the same bytes at the same path. Items
+  written while the zone was local-only are rewritten once, at the switch.
+- Both are idempotent and print how many raw-zone files git tracked before and
+  after. The command takes the connection lock, so it waits for an active run to
+  finish instead of changing a zone mid-run.
+
+Upgrading from an engine before 0.15 needs no manual step: connections whose raw
+zone was already published keep publishing (grandfathered), and `brain doctor`
+reports `raw-zone-policy` with the exact `brain connection publish` command to
+make the choice explicit. A tracked zone of a connection that is already
+explicitly local-only is reported as `raw-zone`; untrack it with
+`git rm --cached -r connectors/<id>` (or `brain connection publish <id>
+local-only`), which drops it from the index without deleting the working tree.
 
 ### Retired checkouts
 
@@ -469,7 +535,7 @@ handshake revision for older clients. Tool annotations, output schemas, the
 typed refusal envelope, pagination limits and the raw JSON-RPC harness are
 documented in [mcp.md](mcp.md).
 
-The 16 tools are:
+The 17 tools are:
 
 - `brain_open` - load a project's state, recent decisions, attempts and last handoff.
 - `brain_context` - context for one task: state, review findings, latest handoff, best-matching decisions/attempts/notes and failed attempts to avoid (`query`, optional `project`, `budget`, `kinds`, `since`).
@@ -487,6 +553,7 @@ The 16 tools are:
 - `brain_records` - list a project's records with ids and status, newest first (`limit`, `cursor`; paginated).
 - `brain_record` - read one record in full by id.
 - `brain_decision_status` - accept, reject or supersede a decision; a 2026 client that declared elicitation is asked to confirm a supersede first.
+- `brain_review_record` - clear a record's quarantine (`id` or `all`, optional `trust`); temporary 0.15 tool, merged into `brain_judge` in 0.17.
 
 `brain mcp --list-tools --json` prints the whole contract (titles, annotations,
 schemas, page limits) without a config or a running server.

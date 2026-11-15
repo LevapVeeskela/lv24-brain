@@ -20,7 +20,9 @@ type Catchup struct {
 	Decisions       []CatchupItem `json:"decisions"`
 	Attempts        []CatchupItem `json:"attempts"`
 	Handoffs        []CatchupItem `json:"handoffs"`
-	Journal         []string      `json:"journal"`
+	// Quarantined lists the ids of records excluded from the report.
+	Quarantined []string `json:"quarantined"`
+	Journal     []string `json:"journal"`
 }
 
 // CatchupItem is one record written after the baseline. CreatedAt is the
@@ -64,8 +66,9 @@ func (s *Server) catchupTools() []tool {
 			"decisions":        arrayProp("Decisions written or updated after the baseline.", catchupItemSchema()),
 			"attempts":         arrayProp("Attempts written after the baseline.", catchupItemSchema()),
 			"handoffs":         arrayProp("Handoffs written after the baseline.", catchupItemSchema()),
+			"quarantined":      arrayProp("Ids of quarantined records excluded from the report.", stringProp("Record id.")),
 			"journal":          arrayProp("Activity lines after the baseline.", stringProp("One journal line.")),
-		}, "project_id", "since", "since_source", "state_changed", "notes", "decisions", "attempts", "handoffs", "journal"),
+		}, "project_id", "since", "since_source", "state_changed", "notes", "decisions", "attempts", "handoffs", "quarantined", "journal"),
 		run: s.catchup,
 	}}
 }
@@ -95,7 +98,7 @@ func (s *Server) catchup(ctx context.Context, raw json.RawMessage) (toolResult, 
 	if args.Limit < 0 {
 		return toolResult{}, refusalInvalid("limit must not be negative")
 	}
-	target, err := s.backend.Resolve(ctx, strings.TrimSpace(args.Project))
+	target, err := s.resolveTarget(ctx, strings.TrimSpace(args.Project))
 	if err != nil {
 		return toolResult{}, err
 	}
@@ -106,6 +109,9 @@ func (s *Server) catchup(ctx context.Context, raw json.RawMessage) (toolResult, 
 	result, err := s.backend.(CatchupBackend).Catchup(ctx, target.ID, since, args.Limit)
 	if err != nil {
 		return toolResult{}, err
+	}
+	if result.Quarantined == nil {
+		result.Quarantined = []string{}
 	}
 	return toolResult{Text: catchupText(result), Structured: result}, nil
 }
@@ -118,8 +124,13 @@ func (c Catchup) empty() bool {
 
 func catchupText(c Catchup) string {
 	since := c.Since.UTC().Format(time.RFC3339)
+	quarantine := catchupQuarantineLine(c.Quarantined)
 	if c.empty() {
-		return fmt.Sprintf("nothing new in %s since %s (%s)", c.ProjectID, since, c.SinceSource)
+		text := fmt.Sprintf("nothing new in %s since %s (%s)", c.ProjectID, since, c.SinceSource)
+		if quarantine != "" {
+			text += "\n" + quarantine
+		}
+		return text
 	}
 	var b strings.Builder
 	source := c.SinceSource
@@ -127,6 +138,9 @@ func catchupText(c Catchup) string {
 		source += ": " + c.BaselineSummary
 	}
 	fmt.Fprintf(&b, "project: %s\nsince: %s (%s)\n", c.ProjectID, since, source)
+	if quarantine != "" {
+		b.WriteString(quarantine + "\n")
+	}
 	if c.State != nil {
 		fmt.Fprintf(&b, "state changed: goal=%s next=%s\n", orNone(c.State.Goal), orNone(c.State.NextAction))
 	}
@@ -141,6 +155,22 @@ func catchupText(c Catchup) string {
 		}
 	}
 	return strings.TrimRight(b.String(), "\n")
+}
+
+// catchupQuarantineLine renders the `quarantined: N (ids)` header, capped at
+// ten ids. It never carries a record body.
+func catchupQuarantineLine(ids []string) string {
+	if len(ids) == 0 {
+		return ""
+	}
+	const listed = 10
+	shown := ids
+	suffix := ""
+	if len(shown) > listed {
+		suffix = fmt.Sprintf(", … %d more", len(shown)-listed)
+		shown = shown[:listed]
+	}
+	return fmt.Sprintf("quarantined: %d (%s%s)", len(ids), strings.Join(shown, ", "), suffix)
 }
 
 func writeCatchupSection(b *strings.Builder, label string, items []CatchupItem) {
