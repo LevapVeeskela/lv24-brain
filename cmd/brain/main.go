@@ -486,7 +486,7 @@ func runDoctor(args []string, stdout, stderr io.Writer) int {
 func runOpen(args []string, stdout, stderr io.Writer) int {
 	fs := newFlagSet("open", stderr)
 	project := fs.String("project", "", "project id or alias")
-	budget := fs.Int("budget", app.DefaultBootstrapBudget, "summary size budget in runes")
+	budget := fs.Int("budget", 0, "context token budget; 0 selects context.budget or the default 6000")
 	brief := fs.Bool("brief", false, "print only the project and state fields")
 	includeUnreviewed := fs.Bool("include-unreviewed", false, "include quarantined records (unreviewed agent, connector or import writes)")
 	validity := addValidityFlags(fs)
@@ -498,6 +498,14 @@ func runOpen(args []string, stdout, stderr io.Writer) int {
 	}
 	if len(positional) > 1 {
 		fmt.Fprintf(stderr, "brain open: unexpected arguments: %s\n", strings.Join(positional[1:], " "))
+		return 2
+	}
+	if *budget < 0 {
+		fmt.Fprintln(stderr, "brain open: --budget must not be negative")
+		return 2
+	}
+	if *budget > domain.MaxContextBudgetTokens {
+		fmt.Fprintf(stderr, "brain open: --budget must be at most %d tokens\n", domain.MaxContextBudgetTokens)
 		return 2
 	}
 	asOf, includeSuperseded, err := validity.parse()
@@ -512,6 +520,13 @@ func runOpen(args []string, stdout, stderr io.Writer) int {
 	cfg, err := loadRequiredConfig(*cfgPath)
 	if err != nil {
 		return reportError(stderr, "open", err)
+	}
+	if err := cfg.Context.Validate(); err != nil {
+		return reportError(stderr, "open", err)
+	}
+	openBudget := *budget
+	if openBudget == 0 {
+		openBudget = cfg.EffectiveContextBudget()
 	}
 	useCase, err := bootstrap.Build(cfg)
 	if err != nil {
@@ -547,7 +562,7 @@ func runOpen(args []string, stdout, stderr io.Writer) int {
 		return 0
 	}
 	result, err := useCase.App.Bootstrap(ctx, app.BootstrapOptions{
-		ProjectID: target.Project.ID, Budget: *budget, IncludeUnreviewed: *includeUnreviewed,
+		ProjectID: target.Project.ID, TokenBudget: openBudget, IncludeUnreviewed: *includeUnreviewed,
 		AsOf: asOf, IncludeSuperseded: includeSuperseded,
 	})
 	if err != nil {

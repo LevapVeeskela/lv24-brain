@@ -18,7 +18,8 @@ import (
 func runContext(args []string, stdout, stderr io.Writer) int {
 	fs := newFlagSet("context", stderr)
 	project := fs.String("project", "", "project id or alias (default: the working directory's project)")
-	budget := fs.Int("budget", app.DefaultBootstrapBudget, "summary size budget in runes")
+	budget := fs.Int("budget", 0, "total token budget; 0 selects context.budget or the default 6000")
+	explain := fs.Bool("explain", false, "print the per-layer token budget table")
 	var kinds repeatedFlag
 	fs.Var(&kinds, "kind", "keep only this record kind: decision, attempt or note (repeatable)")
 	since := fs.String("since", "", "drop records older than a window (24h, 7d, 2w) or a date (2026-11-01)")
@@ -40,6 +41,10 @@ func runContext(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "brain context: --budget must not be negative")
 		return 2
 	}
+	if *budget > domain.MaxContextBudgetTokens {
+		fmt.Fprintf(stderr, "brain context: --budget must be at most %d tokens\n", domain.MaxContextBudgetTokens)
+		return 2
+	}
 	// Validate early so a bad value is a usage error (exit 2) like in search.
 	if _, err := domain.ParseSince(*since, time.Now()); err != nil {
 		fmt.Fprintf(stderr, "brain context: --%v\n", err)
@@ -52,6 +57,9 @@ func runContext(args []string, stdout, stderr io.Writer) int {
 	}
 	cfg, err := loadRequiredConfig(*cfgPath)
 	if err != nil {
+		return reportError(stderr, "context", err)
+	}
+	if err := cfg.Context.Validate(); err != nil {
 		return reportError(stderr, "context", err)
 	}
 	runtime, err := bootstrap.Build(cfg)
@@ -67,7 +75,7 @@ func runContext(args []string, stdout, stderr io.Writer) int {
 	result, err := runtime.App.Context(ctx, app.ContextOptions{
 		ProjectID:         target.Project.ID,
 		Query:             query,
-		Budget:            *budget,
+		TokenBudget:       *budget,
 		Kinds:             kinds,
 		Since:             *since,
 		Raw:               *raw,
@@ -79,9 +87,13 @@ func runContext(args []string, stdout, stderr io.Writer) int {
 		return reportError(stderr, "context", err)
 	}
 	if *asJSON {
-		return writeJSONReport(stdout, stderr, "context", toMCPContext(result).WithEmptyLists())
+		return writeJSONReport(stdout, stderr, "context", toMCPContext(result, *explain).WithEmptyLists())
 	}
 	printSummary(stdout, result.Summary)
+	if *explain {
+		fmt.Fprintln(stdout)
+		fmt.Fprintln(stdout, result.Pack.ExplainText())
+	}
 	return 0
 }
 
@@ -90,7 +102,7 @@ func (b mcpBackend) Context(ctx context.Context, in mcpserver.ContextInput) (mcp
 	result, err := b.app.Context(ctx, app.ContextOptions{
 		ProjectID:         in.ProjectID,
 		Query:             in.Query,
-		Budget:            in.Budget,
+		TokenBudget:       in.Budget,
 		Kinds:             in.Kinds,
 		Since:             in.Since,
 		Raw:               in.Raw,
@@ -99,22 +111,26 @@ func (b mcpBackend) Context(ctx context.Context, in mcpserver.ContextInput) (mcp
 	if err != nil {
 		return mcpserver.TaskContext{}, err
 	}
-	return toMCPContext(result), nil
+	return toMCPContext(result, in.Explain), nil
 }
 
 // toMCPContext maps the use case result to the shape shared by brain_context
 // and brain context --json.
-func toMCPContext(result app.ContextResult) mcpserver.TaskContext {
+func toMCPContext(result app.ContextResult, explain bool) mcpserver.TaskContext {
 	out := mcpserver.TaskContext{
-		ProjectID:      result.Project.ID,
-		ProjectName:    result.Project.Name,
-		Mode:           result.Mode,
-		Query:          result.Query,
-		Since:          result.Since,
-		Budget:         result.Budget,
-		State:          toMCPState(result.State),
-		Records:        mapAll(result.Records, toMCPContextRecord),
-		FailedAttempts: mapAll(result.FailedAttempts, toMCPContextRecord),
+		ProjectID:        result.Project.ID,
+		ProjectName:      result.Project.Name,
+		Mode:             result.Mode,
+		Query:            result.Query,
+		Since:            result.Since,
+		Budget:           contextBudgetOf(result),
+		TotalTokens:      result.Pack.TotalTokens,
+		State:            toMCPState(result.State),
+		Records:          mapAll(result.Records, toMCPContextRecord),
+		FailedAttempts:   mapAll(result.FailedAttempts, toMCPContextRecord),
+		Sections:         mapAll(result.Pack.Sections, toMCPContextSection),
+		Truncated:        mapAll(result.Pack.Truncated, toMCPContextTruncation),
+		QuarantinedCount: len(result.Quarantined),
 		Findings: mapAll(result.Findings, func(finding app.Finding) mcpserver.ReviewFinding {
 			return mcpserver.ReviewFinding{
 				Kind: string(finding.Kind), Severity: string(finding.Severity),
@@ -130,7 +146,35 @@ func toMCPContext(result app.ContextResult) mcpserver.TaskContext {
 	if result.Handoff != nil {
 		out.Handoff = toMCPContextHandoff(*result.Handoff)
 	}
+	if explain {
+		out.Explain = result.Pack.ExplainLines()
+	}
 	return out
+}
+
+// contextBudgetOf reports the token budget actually applied. The legacy rune
+// budget is the fallback for a result built without the packer.
+func contextBudgetOf(result app.ContextResult) int {
+	if result.Pack.Budget > 0 {
+		return result.Pack.Budget
+	}
+	return result.Budget
+}
+
+func toMCPContextSection(section app.ContextSection) mcpserver.ContextSection {
+	return mcpserver.ContextSection{
+		Name: section.Name, Cap: section.Cap, Tokens: section.Tokens,
+		Records: mapAll(section.Records, func(record app.ContextSectionRecord) mcpserver.ContextSectionRecord {
+			return mcpserver.ContextSectionRecord{
+				ID: record.ID, Kind: record.Kind, Title: record.Title, Path: record.Path,
+				Tokens: record.Tokens, Score: record.Score,
+			}
+		}),
+	}
+}
+
+func toMCPContextTruncation(truncation app.ContextTruncation) mcpserver.ContextTruncation {
+	return mcpserver.ContextTruncation{ID: truncation.ID, Section: truncation.Section, Reason: truncation.Reason}
 }
 
 func toMCPContextHandoff(handoff domain.Handoff) *mcpserver.ContextHandoff {

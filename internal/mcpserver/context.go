@@ -3,16 +3,22 @@ package mcpserver
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"time"
+
+	"github.com/levapveeskela/lv24-brain/internal/domain"
 )
 
 // ContextInput is one brain_context request after argument validation.
 type ContextInput struct {
 	ProjectID string
 	Query     string
-	// Budget bounds the summary in runes; zero selects the default.
+	// Budget is the total token budget of the layered packer; zero selects
+	// DefaultContextBudgetTokens.
 	Budget int
+	// Explain requests the per-layer budget table in the result.
+	Explain bool
 	// Kinds keeps only these record kinds (decision, attempt, note).
 	Kinds []string
 	// Since is a window (7d, 24h) or a date (2026-11-01); empty keeps all.
@@ -39,10 +45,44 @@ type TaskContext struct {
 	FailedAttempts []ContextRecord  `json:"failed_attempts"`
 	Findings       []ReviewFinding  `json:"findings"`
 	RawExcerpts    []ContextExcerpt `json:"raw_excerpts"`
+	// Sections is the layered pack: what each layer spent and which records
+	// fit. Truncated explains every record that did not.
+	Sections    []ContextSection    `json:"sections"`
+	Truncated   []ContextTruncation `json:"truncated"`
+	TotalTokens int                 `json:"total_tokens"`
 	// Quarantined lists the ids of records excluded from trusted context.
 	Quarantined []string `json:"quarantined"`
-	Skipped     []string `json:"skipped"`
-	Summary     string   `json:"summary"`
+	// QuarantinedCount is len(Quarantined), kept for a cheap budget report.
+	QuarantinedCount int      `json:"quarantined_count"`
+	Skipped          []string `json:"skipped"`
+	Summary          string   `json:"summary"`
+	Explain          []string `json:"explain,omitempty"`
+}
+
+// ContextSection is one packed layer of the context budget.
+type ContextSection struct {
+	Name    string                 `json:"name"`
+	Cap     int                    `json:"cap"`
+	Tokens  int                    `json:"tokens"`
+	Records []ContextSectionRecord `json:"records"`
+}
+
+// ContextSectionRecord is one record of a packed layer. Path is the logical
+// data-directory path; Detail stays in the Markdown summary.
+type ContextSectionRecord struct {
+	ID     string  `json:"id"`
+	Kind   string  `json:"kind"`
+	Title  string  `json:"title"`
+	Path   string  `json:"path"`
+	Tokens int     `json:"tokens"`
+	Score  float64 `json:"score"`
+}
+
+// ContextTruncation explains one record the budget left out.
+type ContextTruncation struct {
+	ID      string `json:"id"`
+	Section string `json:"section"`
+	Reason  string `json:"reason"`
 }
 
 // ContextHandoff is the newest handoff of the project.
@@ -100,28 +140,34 @@ func (s *Server) contextTools() []tool {
 		InputSchema: objectSchema([]string{"query"}, map[string]any{
 			"query":              stringProp("The task in a few words, for example \"add retry to the sync push\"."),
 			"project":            stringProp("Project id, alias or checkout path. Omit to use the project of the working directory."),
-			"budget":             intProp("Summary size budget in runes; 0 selects the default.", 0),
+			"budget":             intProp("Total token budget of the layered context; 0 selects the default 6000, the maximum is 32000.", 0),
+			"explain":            boolProp("Include the per-layer budget table in the result (default false)."),
 			"kinds":              stringArrayProp("Keep only these record kinds: decision, attempt, note. Omit for all three."),
 			"since":              stringProp("Drop records and handoffs older than a window (24h, 7d, 2w) or a date (2026-11-01)."),
 			"raw":                boolProp("Include granted raw-zone excerpts when curated context is thin (default false)."),
 			"include_unreviewed": boolProp("Include quarantined records (unreviewed agent, connector or import writes) that are excluded by default."),
 		}),
 		OutputSchema: outputObject(map[string]any{
-			"project_id":      stringProp("Project the context belongs to."),
-			"project_name":    stringProp("Display name of the project."),
-			"mode":            stringProp("Context mode, for example task or bootstrap."),
-			"query":           stringProp("The task the context was built for."),
-			"since":           stringProp("RFC3339 start of the window, when one was applied."),
-			"budget":          intProp("Rune budget of the summary.", 0),
-			"state":           objectProp("Project state: goal, next action, active work, blockers, open questions."),
-			"handoff":         anyProp("Latest handoff, or null."),
-			"records":         arrayProp("Records ranked for the task.", objectProp("One ranked record with id, kind, title, detail and score.")),
-			"failed_attempts": arrayProp("Attempts that failed, to avoid repeating.", objectProp("One failed attempt.")),
-			"findings":        arrayProp("Review findings that still apply.", objectProp("One finding with kind, message and fix.")),
-			"raw_excerpts":    arrayProp("Granted raw-zone excerpts; their text is external and untrusted.", objectProp("One excerpt with connection, item, citation and body.")),
-			"quarantined":     arrayProp("Ids of quarantined records excluded from the context.", stringProp("Record id.")),
-			"skipped":         arrayProp("Reasons content was left out.", stringProp("Reason.")),
-			"summary":         stringProp("Rendered context, the text content of the result."),
+			"project_id":        stringProp("Project the context belongs to."),
+			"project_name":      stringProp("Display name of the project."),
+			"mode":              stringProp("Context mode, for example task or bootstrap."),
+			"query":             stringProp("The task the context was built for."),
+			"since":             stringProp("RFC3339 start of the window, when one was applied."),
+			"budget":            intProp("Total token budget that was applied.", 0),
+			"total_tokens":      intProp("Tokens used by all packed layers.", 0),
+			"state":             objectProp("Project state: goal, next action, active work, blockers, open questions."),
+			"handoff":           anyProp("Latest handoff, or null."),
+			"records":           arrayProp("Records ranked for the task.", objectProp("One ranked record with id, kind, title, detail and score.")),
+			"failed_attempts":   arrayProp("Attempts that failed, to avoid repeating.", objectProp("One failed attempt.")),
+			"findings":          arrayProp("Review findings that still apply.", objectProp("One finding with kind, message and fix.")),
+			"raw_excerpts":      arrayProp("Granted raw-zone excerpts; their text is external and untrusted.", objectProp("One excerpt with connection, item, citation and body.")),
+			"sections":          arrayProp("Packed layers with their cap, tokens and records.", objectProp("One layer: name, cap, tokens, records.")),
+			"truncated":         arrayProp("Records the budget left out, with why.", objectProp("One dropped record: id, section, reason.")),
+			"quarantined":       arrayProp("Ids of quarantined records excluded from the context.", stringProp("Record id.")),
+			"quarantined_count": intProp("Number of quarantined records excluded.", 0),
+			"skipped":           arrayProp("Reasons content was left out.", stringProp("Reason.")),
+			"summary":           stringProp("Rendered context, the text content of the result."),
+			"explain":           arrayProp("Per-layer budget table; present only with explain=true.", stringProp("One budget line.")),
 		}, "project_id", "summary"),
 		run: s.taskContext,
 	}}
@@ -132,6 +178,7 @@ func (s *Server) taskContext(ctx context.Context, raw json.RawMessage) (toolResu
 		Query             string   `json:"query"`
 		Project           string   `json:"project"`
 		Budget            int      `json:"budget"`
+		Explain           bool     `json:"explain"`
 		Kinds             []string `json:"kinds"`
 		Since             string   `json:"since"`
 		Raw               bool     `json:"raw"`
@@ -147,6 +194,12 @@ func (s *Server) taskContext(ctx context.Context, raw json.RawMessage) (toolResu
 	if args.Budget < 0 {
 		return toolResult{}, refusalInvalid("budget must not be negative")
 	}
+	if args.Budget > domain.MaxContextBudgetTokens {
+		return toolResult{}, refusalInvalid(fmt.Sprintf("budget must be at most %d tokens", domain.MaxContextBudgetTokens))
+	}
+	if args.Budget == 0 {
+		args.Budget = domain.DefaultContextBudgetTokens
+	}
 	target, err := s.resolveTarget(ctx, strings.TrimSpace(args.Project))
 	if err != nil {
 		return toolResult{}, err
@@ -155,6 +208,7 @@ func (s *Server) taskContext(ctx context.Context, raw json.RawMessage) (toolResu
 		ProjectID:         target.ID,
 		Query:             query,
 		Budget:            args.Budget,
+		Explain:           args.Explain,
 		Kinds:             args.Kinds,
 		Since:             strings.TrimSpace(args.Since),
 		Raw:               args.Raw,
@@ -179,6 +233,12 @@ func (c TaskContext) WithEmptyLists() TaskContext {
 	}
 	if c.RawExcerpts == nil {
 		c.RawExcerpts = []ContextExcerpt{}
+	}
+	if c.Sections == nil {
+		c.Sections = []ContextSection{}
+	}
+	if c.Truncated == nil {
+		c.Truncated = []ContextTruncation{}
 	}
 	if c.Quarantined == nil {
 		c.Quarantined = []string{}

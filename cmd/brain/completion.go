@@ -85,7 +85,7 @@ var completionTable = []completionCmd{
 	),
 	cmdLeaf("bootstrap", valueFlag("project"), valueFlag("budget"), boolFlag("include-unreviewed"),
 		valueFlag("as-of"), boolFlag("include-superseded"), boolFlag("all-time"), boolFlag("json"), valueFlag("config")),
-	cmdLeaf("context", valueFlag("project"), valueFlag("budget"), choiceFlag("kind", "decision", "attempt", "note"),
+	cmdLeaf("context", valueFlag("project"), valueFlag("budget"), boolFlag("explain"), choiceFlag("kind", "decision", "attempt", "note"),
 		valueFlag("since"), boolFlag("raw"), boolFlag("include-unreviewed"),
 		valueFlag("as-of"), boolFlag("include-superseded"), boolFlag("all-time"), boolFlag("json"), valueFlag("config")),
 	cmdLeaf("note", valueFlag("project"), valueFlag("title"), valueFlag("body"), valueFlag("tags"),

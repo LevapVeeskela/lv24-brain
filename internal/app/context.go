@@ -11,6 +11,7 @@ import (
 
 	"github.com/levapveeskela/lv24-brain/internal/domain"
 	"github.com/levapveeskela/lv24-brain/internal/ports"
+	"github.com/levapveeskela/lv24-brain/internal/textbudget"
 )
 
 // Record kinds that brain context ranks. Handoffs and state have their own
@@ -53,8 +54,13 @@ type ContextOptions struct {
 	ProjectID string
 	// Query describes the task; it drives the search for relevant records.
 	Query string
-	// Budget bounds Summary in runes; zero selects DefaultBootstrapBudget.
+	// Budget bounds Summary in runes; zero applies no rune cap and lets the
+	// token budget below decide the size.
 	Budget int
+	// TokenBudget is the total budget of the layered packer in tokens. Zero
+	// resolves to the context.budget configuration, then to
+	// DefaultContextBudgetTokens.
+	TokenBudget int
 	// Kinds keeps only these record kinds (decision, attempt, note) in the
 	// relevant records; empty keeps all three. Failed attempts matching the
 	// task are listed regardless.
@@ -84,7 +90,10 @@ type ContextRecord struct {
 	Status    string // decisions only
 	Detail    string // first line of the context, reason or body
 	CreatedAt time.Time
-	Score     float64
+	UpdatedAt time.Time
+	// Path is the logical data-directory path of the record.
+	Path  string
+	Score float64
 	// Validity is the record's temporal validity; the default context keeps
 	// current records only.
 	Validity domain.Validity
@@ -137,6 +146,8 @@ type ContextResult struct {
 	// IncludeUnreviewed reports that quarantined records were included in the
 	// summary at the caller's request.
 	IncludeUnreviewed bool
+	// Pack is the layered token budget accounting of this answer.
+	Pack ContextPack
 	// Skipped names the parts that are unavailable in this mode, with why.
 	Skipped []string
 	Summary string
@@ -155,6 +166,10 @@ func (a *App) Context(ctx context.Context, opts ContextOptions) (ContextResult, 
 		return ContextResult{}, domain.NewValidationError("context.query", "is required")
 	}
 	kinds, err := normalizeContextKinds(opts.Kinds)
+	if err != nil {
+		return ContextResult{}, err
+	}
+	tokenBudget, err := a.contextTokenBudget(opts.TokenBudget)
 	if err != nil {
 		return ContextResult{}, err
 	}
@@ -194,12 +209,12 @@ func (a *App) Context(ctx context.Context, opts ContextOptions) (ContextResult, 
 		Budget: opts.Budget, State: state, Handoff: handoff, Quarantined: quarantined,
 		IncludeUnreviewed: opts.IncludeUnreviewed,
 	}
-	if result.Budget <= 0 {
-		result.Budget = DefaultBootstrapBudget
+	if result.Budget < 0 {
+		result.Budget = 0
 	}
 	ranking := contextRanking{
-		catalog: catalog, since: since, now: now, includeUnreviewed: opts.IncludeUnreviewed,
-		filter: filter,
+		catalog: catalog, projectID: project.ID, since: since, now: now,
+		includeUnreviewed: opts.IncludeUnreviewed, filter: filter,
 	}
 
 	hits, err := a.contextSearch(ctx, query, project.ID, kinds, since, opts)
@@ -242,6 +257,15 @@ func (a *App) Context(ctx context.Context, opts ContextOptions) (ContextResult, 
 			result.PendingProposals = &count
 		}
 	}
+	pack, packErr := a.packContext(ctx, result, ranking, kinds, tokenBudget, now)
+	if packErr != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return ContextResult{}, ctxErr
+		}
+		result.Skipped = append(result.Skipped, "linked records: "+packErr.Error())
+	}
+	result.Pack = pack
+	result.Records, result.FailedAttempts = splitQuerySection(pack, recordIDs(result.FailedAttempts))
 	if opts.Raw {
 		curated := len(result.Records) + len(result.FailedAttempts) + len(result.Findings)
 		excerpts, skipped, excerptErr := a.contextExcerpts(ctx, project, query, since, now, curated)
@@ -252,7 +276,11 @@ func (a *App) Context(ctx context.Context, opts ContextOptions) (ContextResult, 
 		result.Skipped = append(result.Skipped, skipped...)
 	}
 
-	result.Summary = truncateSummary(renderContext(result, a.revision(ctx), now), result.Budget)
+	summary := renderContext(result, a.revision(ctx), now)
+	if result.Budget > 0 {
+		summary = truncateSummary(summary, result.Budget)
+	}
+	result.Summary = summary
 	return result, nil
 }
 
@@ -311,6 +339,7 @@ func (a *App) contextCatalog(ctx context.Context, projectID string) (contextCata
 			catalog.records[decision.ID] = ContextRecord{
 				ID: decision.ID, Kind: ContextKindDecision, Title: decision.Title, Status: string(decision.Status),
 				Detail: SummarizeLine(decision.Context, promptLineRunes), CreatedAt: decision.CreatedAt,
+				UpdatedAt: decision.UpdatedAt, Path: contextRecordPath(projectID, ContextKindDecision, decision.ID),
 				Validity: decision.Validity, Quarantined: decision.Quarantined(),
 			}
 			if decision.Quarantined() {
@@ -328,6 +357,7 @@ func (a *App) contextCatalog(ctx context.Context, projectID string) (contextCata
 			catalog.records[attempt.ID] = ContextRecord{
 				ID: attempt.ID, Kind: ContextKindAttempt, Title: attempt.Title,
 				Detail: attemptDetail(attempt), CreatedAt: attempt.CreatedAt,
+				UpdatedAt: attempt.UpdatedAt, Path: contextRecordPath(projectID, ContextKindAttempt, attempt.ID),
 				Validity: attempt.Validity, Quarantined: attempt.Quarantined(),
 			}
 			if attempt.Quarantined() {
@@ -345,6 +375,7 @@ func (a *App) contextCatalog(ctx context.Context, projectID string) (contextCata
 			catalog.records[note.ID] = ContextRecord{
 				ID: note.ID, Kind: ContextKindNote, Title: valueOr(note.Title, SummarizeLine(note.Body, 80)),
 				Detail: SummarizeLine(note.Body, promptLineRunes), CreatedAt: note.CreatedAt,
+				UpdatedAt: note.UpdatedAt, Path: contextRecordPath(projectID, ContextKindNote, note.ID),
 				Validity: note.Validity, Quarantined: note.Quarantined(),
 			}
 			if note.Quarantined() {
@@ -378,6 +409,7 @@ func (c contextCatalog) lookup(hit ports.Hit) (ContextRecord, bool) {
 
 type contextRanking struct {
 	catalog           contextCatalog
+	projectID         string
 	since             time.Time
 	now               time.Time
 	includeUnreviewed bool
@@ -407,6 +439,9 @@ func (r contextRanking) candidates(hits []ports.Hit, exclude map[string]bool) []
 		}
 		if !r.since.IsZero() && !record.CreatedAt.IsZero() && record.CreatedAt.Before(r.since) {
 			continue
+		}
+		if record.Path == "" {
+			record.Path = contextRecordPath(r.projectID, record.Kind, record.ID)
 		}
 		out = append(out, record)
 	}
@@ -493,9 +528,9 @@ func normalizeContextKinds(values []string) ([]string, error) {
 	return kinds, nil
 }
 
-// renderContext writes the Markdown context. Sections are ordered by how much
-// they matter, because the budget truncates from the end.
-func renderContext(result ContextResult, revision string, now time.Time) string {
+// renderContextHeader writes the project identity and task metadata. It is not
+// part of a layer, but its tokens count against the core cap in the packer.
+func renderContextHeader(result ContextResult, revision string) string {
 	var out strings.Builder
 	name := valueOr(result.Project.Name, result.Project.ID)
 	fmt.Fprintf(&out, "# %s — context\n", name)
@@ -517,22 +552,82 @@ func renderContext(result ContextResult, revision string, now time.Time) string 
 	for _, skipped := range result.Skipped {
 		fmt.Fprintf(&out, "skipped: %s\n", SummarizeLine(skipped, promptLineRunes))
 	}
-	state := result.State
-	fmt.Fprintf(&out, "state_updated: %s (age %s)\n", formatTime(state.UpdatedAt), stateAge(now, state))
-	fmt.Fprintf(&out, "freshness: %s\n", freshness(now, state))
-	fmt.Fprintf(&out, "goal: %s\n", valueOr(state.Goal, "not set"))
-	fmt.Fprintf(&out, "next_action: %s\n", valueOr(state.NextAction, "not set"))
-	writePromptList(&out, "active", state.Active)
-	writePromptList(&out, "blocked", state.Blocked)
-	writePromptList(&out, "open_questions", state.OpenQuestions)
+	return out.String()
+}
 
-	writeContextFindings(&out, result.Findings)
+// writeContextState writes the project state block of the core layer.
+func writeContextState(out *strings.Builder, state domain.State, now time.Time) {
+	fmt.Fprintf(out, "state_updated: %s (age %s)\n", formatTime(state.UpdatedAt), stateAge(now, state))
+	fmt.Fprintf(out, "freshness: %s\n", freshness(now, state))
+	fmt.Fprintf(out, "goal: %s\n", valueOr(state.Goal, "not set"))
+	fmt.Fprintf(out, "next_action: %s\n", valueOr(state.NextAction, "not set"))
+	writePromptList(out, "active", state.Active)
+	writePromptList(out, "blocked", state.Blocked)
+	writePromptList(out, "open_questions", state.OpenQuestions)
+}
+
+// renderContextCore renders the always-present core layer (state, latest
+// handoff, review findings) and the record metadata that accounts for it.
+func renderContextCore(result ContextResult, now time.Time) (string, []ContextSectionRecord) {
+	var out strings.Builder
+	writeContextState(&out, result.State, now)
+	stateTokens := textbudget.Tokens(out.String())
+	records := []ContextSectionRecord{{
+		ID: "state", Kind: "state", Title: "Project state", Path: "state.md",
+		Tokens: stateTokens, Score: 1,
+	}}
+
+	start := out.Len()
 	writeContextHandoff(&out, result.Handoff)
+	handoffTokens := textbudget.Tokens(out.String()[start:])
+	if result.Handoff != nil {
+		records = append(records, ContextSectionRecord{
+			ID: result.Handoff.ID, Kind: "handoff", Title: handoffTitle(*result.Handoff),
+			Path:      recordDataPath(result.Project.ID, "handoff", result.Handoff.ID+".md"),
+			CreatedAt: result.Handoff.CreatedAt, UpdatedAt: result.Handoff.CreatedAt,
+			Tokens: handoffTokens, Score: 1,
+		})
+	}
 
+	start = out.Len()
+	writeContextFindings(&out, result.Findings)
+	findingsTokens := textbudget.Tokens(out.String()[start:])
+	if len(result.Findings) > 0 {
+		records = append(records, ContextSectionRecord{
+			ID: "review-findings", Kind: "finding", Title: fmt.Sprintf("Review findings (%d)", len(result.Findings)),
+			Path: "review", Tokens: findingsTokens, Score: 1,
+		})
+	}
+	return out.String(), records
+}
+
+// renderContext writes the Markdown context from the packed sections. Layers
+// are ordered by how much they matter, so a reader meets the state first.
+func renderContext(result ContextResult, revision string, now time.Time) string {
+	var out strings.Builder
+	out.WriteString(renderContextHeader(result, revision))
+	if core, ok := contextSection(result.Pack, ContextLayerCore); ok {
+		out.WriteString(core.Text)
+	} else {
+		coreText, _ := renderContextCore(result, now)
+		out.WriteString(coreText)
+	}
+	if records := sectionRecords(result.Pack, ContextLayerDecisions); len(records) > 0 {
+		out.WriteString("\n## Current decisions\n")
+		writeContextRecords(&out, records, "")
+	}
+	if records := sectionRecords(result.Pack, ContextLayerAttempts); len(records) > 0 {
+		out.WriteString("\n## Recent attempts\n")
+		writeContextRecords(&out, records, "")
+	}
 	out.WriteString("\n## Relevant records\n")
 	writeContextRecords(&out, result.Records, "- none matched the task\n")
 	out.WriteString("\n## Failed attempts matching the task\n")
 	writeContextRecords(&out, result.FailedAttempts, "- none beyond the relevant records\n")
+	if records := sectionRecords(result.Pack, ContextLayerLinked); len(records) > 0 {
+		out.WriteString("\n## Linked records\n")
+		writeContextRecords(&out, records, "")
+	}
 	writeContextExcerpts(&out, result.RawExcerpts)
 	return out.String()
 }
@@ -573,16 +668,24 @@ func writeContextRecords(out *strings.Builder, records []ContextRecord, empty st
 		return
 	}
 	for _, record := range records {
-		label := record.Kind
-		if record.Status != "" {
-			label += "/" + record.Status
-		}
-		if record.Quarantined {
-			label += "/quarantined"
-		}
-		fmt.Fprintf(out, "- [%s] %s (%s, %s)\n", label, SummarizeLine(record.Title, promptLineRunes), formatDate(record.CreatedAt), record.ID)
-		if record.Detail != "" && record.Detail != SummarizeLine(record.Title, promptLineRunes) {
-			fmt.Fprintf(out, "  %s\n", record.Detail)
-		}
+		out.WriteString(contextRecordText(record))
 	}
+}
+
+// contextRecordText is the exact Markdown of one record. The packer counts its
+// tokens, so the budget and the printed answer cannot drift apart.
+func contextRecordText(record ContextRecord) string {
+	var out strings.Builder
+	label := record.Kind
+	if record.Status != "" {
+		label += "/" + record.Status
+	}
+	if record.Quarantined {
+		label += "/quarantined"
+	}
+	fmt.Fprintf(&out, "- [%s] %s (%s, %s)\n", label, SummarizeLine(record.Title, promptLineRunes), formatDate(record.CreatedAt), record.ID)
+	if record.Detail != "" && record.Detail != SummarizeLine(record.Title, promptLineRunes) {
+		fmt.Fprintf(&out, "  %s\n", record.Detail)
+	}
+	return out.String()
 }

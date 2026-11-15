@@ -49,6 +49,9 @@ type BrainConfig struct {
 	// Review sets the per-kind review cadence. An omitted block keeps the
 	// documented defaults; nothing expires, a due record is only reported.
 	Review ReviewConfig `yaml:"review,omitempty"`
+	// Context sets the token budget of the layered context packer. An omitted
+	// block keeps DefaultContextBudgetTokens.
+	Context ContextConfig `yaml:"context,omitempty"`
 	// RetiredPaths lists retired checkouts of this workspace. The engine ships
 	// no defaults: selection redirects to ReplacedBy and registration is
 	// refused, but nothing on disk is touched.
@@ -186,6 +189,43 @@ func normalizePatterns(values []string) []string {
 		return nil
 	}
 	return out
+}
+
+// ContextConfig is the `context` block of brain.yaml. It is additive: a
+// configuration without the block keeps DefaultContextBudgetTokens.
+type ContextConfig struct {
+	// Budget is the total token budget of one `brain context` or
+	// `brain_context` answer. Zero selects DefaultContextBudgetTokens.
+	Budget int `yaml:"budget,omitempty"`
+}
+
+// IsZero lets yaml omit a context block that was never configured.
+func (c ContextConfig) IsZero() bool { return c.Budget == 0 }
+
+// EffectiveBudget resolves an omitted budget to the default.
+func (c ContextConfig) EffectiveBudget() int {
+	if c.Budget <= 0 {
+		return domain.DefaultContextBudgetTokens
+	}
+	return c.Budget
+}
+
+// EffectiveContextBudget returns the token budget the context packer applies.
+func (c BrainConfig) EffectiveContextBudget() int {
+	return c.Context.EffectiveBudget()
+}
+
+// Validate rejects a negative or oversized context budget and names the key.
+func (c ContextConfig) Validate() error {
+	if c.Budget < 0 {
+		return domain.NewValidationError("config.context.budget",
+			"must be zero (use the default) or a positive number of tokens")
+	}
+	if c.Budget > domain.MaxContextBudgetTokens {
+		return domain.NewValidationError("config.context.budget",
+			fmt.Sprintf("must be at most %d tokens", domain.MaxContextBudgetTokens))
+	}
+	return nil
 }
 
 // ReviewConfig is the `review` block of brain.yaml: how long a record of each
@@ -437,6 +477,9 @@ func (c BrainConfig) Validate() error {
 		return err
 	}
 	if err := c.Review.Defaults.Validate(); err != nil {
+		return err
+	}
+	if err := c.Context.Validate(); err != nil {
 		return err
 	}
 	for _, entry := range c.RetiredPaths {

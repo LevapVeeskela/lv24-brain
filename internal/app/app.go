@@ -130,6 +130,9 @@ type BootstrapOptions struct {
 	ProjectID string
 	// Budget bounds the summary in runes; zero selects DefaultBootstrapBudget.
 	Budget int
+	// TokenBudget switches the summary to the layered packer with this total
+	// token budget. Zero keeps the legacy rune-only rendering.
+	TokenBudget int
 	// IncludeUnreviewed includes quarantined records (unreviewed agent,
 	// connector or import writes, or an unknown origin) that are excluded from
 	// trusted context by default.
@@ -148,6 +151,8 @@ type BootstrapResult struct {
 	// Quarantined lists the ids of records left out of the summary. It is
 	// always populated, whether or not IncludeUnreviewed was set.
 	Quarantined []string
+	// Pack is the layered budget accounting when TokenBudget was set.
+	Pack ContextPack
 }
 
 // NoteInput is a new note.
