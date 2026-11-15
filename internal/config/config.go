@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -40,10 +41,147 @@ type BrainConfig struct {
 	MinEngineVersion string         `yaml:"min_engine_version,omitempty"`
 	UpdateChannel    string         `yaml:"update_channel"`
 	Security         SecurityConfig `yaml:"security,omitempty"`
+	// Limits bounds one record write and protects curated paths from writes.
+	// Omitted and zero values select the defaults; the effective values are
+	// never below one, so a cap cannot be disabled by setting zero.
+	Limits LimitsConfig `yaml:"limits,omitempty"`
 	// RetiredPaths lists retired checkouts of this workspace. The engine ships
 	// no defaults: selection redirects to ReplacedBy and registration is
 	// refused, but nothing on disk is touched.
 	RetiredPaths []RetiredPath `yaml:"retired_paths,omitempty"`
+}
+
+// Default write-time limits. They are generous enough that a normal note,
+// decision or handoff never reaches them; they exist to stop an agent from
+// writing an unbounded record or a runaway metadata list.
+const (
+	// DefaultMaxBodyBytes is the 1 MiB body budget of one record.
+	DefaultMaxBodyBytes = 1 << 20
+	// DefaultMaxTitleChars is the title budget in Unicode code points.
+	DefaultMaxTitleChars = 200
+	// DefaultMaxMetadataBytes is the 16 KiB budget of the tag, evidence,
+	// alternatives and consequences lists.
+	DefaultMaxMetadataBytes = 16 << 10
+	// MinLimit is the smallest effective value of any size limit. Zero in
+	// brain.yaml means "use the default", never "no limit".
+	MinLimit = 1
+)
+
+// LimitsConfig is the `limits` block of brain.yaml. It is additive: a
+// configuration without the block keeps the defaults.
+type LimitsConfig struct {
+	// MaxBodyBytes caps the free text of one record. Zero selects
+	// DefaultMaxBodyBytes.
+	MaxBodyBytes int `yaml:"max_body_bytes,omitempty"`
+	// MaxTitleChars caps a record title in Unicode code points. Zero selects
+	// DefaultMaxTitleChars. A handoff has no title field.
+	MaxTitleChars int `yaml:"max_title_chars,omitempty"`
+	// MaxMetadataBytes caps the combined size of the tag, evidence,
+	// alternatives and consequences lists. Zero selects
+	// DefaultMaxMetadataBytes.
+	MaxMetadataBytes int `yaml:"max_metadata_bytes,omitempty"`
+	// ProtectedProjects refuses record writes and imports into these project
+	// ids. The default is empty; a workspace that owns a shared `global` or
+	// `templates` project usually lists it here.
+	ProtectedProjects []string `yaml:"protected_projects,omitempty"`
+	// ProtectedGlobs refuses record writes whose data-directory path matches
+	// one of these slash-separated globs. A pattern also protects every
+	// directory below a path it matches, so "projects/global/**" covers the
+	// whole project tree.
+	ProtectedGlobs []string `yaml:"protected_globs,omitempty"`
+}
+
+// IsZero lets yaml omit a limits block that was never configured.
+func (l LimitsConfig) IsZero() bool {
+	return l.MaxBodyBytes == 0 && l.MaxTitleChars == 0 && l.MaxMetadataBytes == 0 &&
+		len(l.ProtectedProjects) == 0 && len(l.ProtectedGlobs) == 0
+}
+
+// Effective resolves omitted and non-positive sizes to their defaults and
+// normalizes the protected lists. The result is what the write path enforces.
+func (l LimitsConfig) Effective() LimitsConfig {
+	out := LimitsConfig{
+		MaxBodyBytes:      l.MaxBodyBytes,
+		MaxTitleChars:     l.MaxTitleChars,
+		MaxMetadataBytes:  l.MaxMetadataBytes,
+		ProtectedProjects: normalizePatterns(l.ProtectedProjects),
+		ProtectedGlobs:    normalizePatterns(l.ProtectedGlobs),
+	}
+	if out.MaxBodyBytes < MinLimit {
+		out.MaxBodyBytes = DefaultMaxBodyBytes
+	}
+	if out.MaxTitleChars < MinLimit {
+		out.MaxTitleChars = DefaultMaxTitleChars
+	}
+	if out.MaxMetadataBytes < MinLimit {
+		out.MaxMetadataBytes = DefaultMaxMetadataBytes
+	}
+	return out
+}
+
+// EffectiveLimits returns the limits the write path enforces for this config.
+func (c BrainConfig) EffectiveLimits() LimitsConfig {
+	return c.Limits.Effective()
+}
+
+// Validate checks the limits block: negative sizes are configuration errors,
+// protected entries must be non-empty, and every glob must be a valid
+// slash-separated pattern.
+func (l LimitsConfig) Validate() error {
+	sizes := []struct {
+		field string
+		value int
+	}{
+		{"config.limits.max_body_bytes", l.MaxBodyBytes},
+		{"config.limits.max_title_chars", l.MaxTitleChars},
+		{"config.limits.max_metadata_bytes", l.MaxMetadataBytes},
+	}
+	for _, size := range sizes {
+		if size.value < 0 {
+			return domain.NewValidationError(size.field, "must be zero (use the default) or a positive number")
+		}
+	}
+	for i, project := range l.ProtectedProjects {
+		trimmed := strings.TrimSpace(project)
+		if trimmed == "" {
+			return domain.NewValidationError("config.limits.protected_projects", fmt.Sprintf("entry %d is empty", i+1))
+		}
+		if strings.ContainsAny(trimmed, `/\`) || trimmed == "." || trimmed == ".." {
+			return domain.NewValidationError("config.limits.protected_projects",
+				fmt.Sprintf("%q is not a project id (no path separators)", trimmed))
+		}
+	}
+	for i, glob := range l.ProtectedGlobs {
+		trimmed := strings.TrimSpace(filepath.ToSlash(glob))
+		if trimmed == "" {
+			return domain.NewValidationError("config.limits.protected_globs", fmt.Sprintf("entry %d is empty", i+1))
+		}
+		if _, err := path.Match(trimmed, "projects/example"); err != nil {
+			return domain.NewValidationError("config.limits.protected_globs",
+				fmt.Sprintf("%q is not a valid glob: %v", glob, err))
+		}
+	}
+	return nil
+}
+
+// normalizePatterns trims entries and drops empty ones, so an in-memory
+// configuration that bypassed Load still yields a usable matcher.
+func normalizePatterns(values []string) []string {
+	if len(values) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		trimmed := strings.TrimSpace(filepath.ToSlash(value))
+		trimmed = strings.TrimSuffix(trimmed, "/")
+		if trimmed != "" {
+			out = append(out, trimmed)
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 // SecurityConfig controls how untrusted writes are treated.
@@ -170,6 +308,9 @@ func (c BrainConfig) Validate() error {
 	}
 	if c.MinEngineVersion != "" && !engineVersionPattern.MatchString(c.MinEngineVersion) {
 		return domain.NewValidationError("config.min_engine_version", "must look like 1.2.3")
+	}
+	if err := c.Limits.Validate(); err != nil {
+		return err
 	}
 	for _, entry := range c.RetiredPaths {
 		if strings.TrimSpace(entry.Path) == "" {

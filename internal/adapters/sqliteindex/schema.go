@@ -14,7 +14,9 @@ var schemaStatements = []string{
 		valid_from INTEGER NOT NULL DEFAULT 0,
 		valid_to INTEGER,
 		superseded_by TEXT,
-		supersedes TEXT
+		supersedes TEXT,
+		status TEXT NOT NULL DEFAULT '',
+		confidence REAL NOT NULL DEFAULT 0
 	)`,
 	`CREATE INDEX IF NOT EXISTS documents_project_idx ON documents(project_id)`,
 	`CREATE INDEX IF NOT EXISTS documents_valid_idx ON documents(kind, valid_to)`,
@@ -40,8 +42,8 @@ var schemaStatements = []string{
 	END`,
 }
 
-const upsertSQL = `INSERT INTO documents (id, project_id, kind, title, body, updated_at, valid_from, valid_to, superseded_by, supersedes)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+const upsertSQL = `INSERT INTO documents (id, project_id, kind, title, body, updated_at, valid_from, valid_to, superseded_by, supersedes, status, confidence)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(id) DO UPDATE SET
 	project_id = excluded.project_id,
 	kind = excluded.kind,
@@ -51,23 +53,11 @@ ON CONFLICT(id) DO UPDATE SET
 	valid_from = excluded.valid_from,
 	valid_to = excluded.valid_to,
 	superseded_by = excluded.superseded_by,
-	supersedes = excluded.supersedes`
+	supersedes = excluded.supersedes,
+	status = excluded.status,
+	confidence = excluded.confidence`
 
 const deleteSQL = `DELETE FROM documents WHERE id = ?`
-
-// searchSelectSQL is the FTS5 search prefix. Its four snippet placeholders
-// precede the MATCH placeholder; optional filters are appended by
-// buildSearchStatement. Values are only ever bound, never interpolated.
-const searchSelectSQL = `SELECT d.id, d.project_id, d.kind, d.title,
-	snippet(documents_fts, -1, ?, ?, ?, ?), bm25(documents_fts),
-	d.valid_from, d.valid_to, d.superseded_by
-FROM documents_fts
-JOIN documents d ON d.rowid = documents_fts.rowid
-WHERE documents_fts MATCH ?`
-
-const searchOrderSQL = `
-ORDER BY bm25(documents_fts), d.updated_at DESC, d.id ASC
-LIMIT ?`
 
 // schemaVersion is stored in SQLite's user_version. Bump it when the document
 // id scheme or the table layout changes: the index is derived data, so a
@@ -75,7 +65,8 @@ LIMIT ?`
 // Version 2 scopes record ids by project ("<projectID>/<recordID>").
 // Version 3 adds temporal validity (valid_from, valid_to, superseded_by,
 // supersedes) and its indexes.
-const schemaVersion = 3
+// Version 4 adds the ranking inputs (decision status, author confidence).
+const schemaVersion = 4
 
 // dropStatements remove everything schemaStatements creates. Triggers go
 // first because they reference the tables.

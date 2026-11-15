@@ -200,21 +200,42 @@ func effectiveBudget(budget int) int {
 
 // jsonHit is one search result.
 type jsonHit struct {
-	ID           string  `json:"id"`
-	ProjectID    string  `json:"project_id"`
-	Kind         string  `json:"kind"`
-	Title        string  `json:"title"`
-	Snippet      string  `json:"snippet"`
-	Score        float64 `json:"score"`
-	ValidFrom    *string `json:"valid_from"`
-	ValidTo      *string `json:"valid_to"`
-	SupersededBy string  `json:"superseded_by,omitempty"`
+	ID           string       `json:"id"`
+	ProjectID    string       `json:"project_id"`
+	Kind         string       `json:"kind"`
+	Title        string       `json:"title"`
+	Snippet      string       `json:"snippet"`
+	Score        float64      `json:"score"`
+	MatchReasons []string     `json:"match_reasons,omitempty"`
+	Explain      *jsonExplain `json:"explain,omitempty"`
+	ValidFrom    *string      `json:"valid_from"`
+	ValidTo      *string      `json:"valid_to"`
+	SupersededBy string       `json:"superseded_by,omitempty"`
+	// Body is the full record text; it is set only with --full.
+	Body string `json:"body,omitempty"`
 }
 
-// jsonSearch is `brain search --json`.
+// jsonExplain is the weighted contribution of each ranking signal, printed by
+// `brain search --explain --json`.
+type jsonExplain struct {
+	BM25       float64 `json:"bm25"`
+	Recency    float64 `json:"recency"`
+	Importance float64 `json:"importance"`
+	Pin        float64 `json:"pin"`
+	Link       float64 `json:"link"`
+}
+
+// jsonSearch is `brain search --json`. Relaxed reports that the strict term
+// match found nothing and the terms were retried joined with OR; the page
+// fields follow the MCP pagination contract.
 type jsonSearch struct {
-	Query string    `json:"query"`
-	Hits  []jsonHit `json:"hits"`
+	Query      string    `json:"query"`
+	Relaxed    bool      `json:"relaxed"`
+	Page       int       `json:"page"`
+	PageSize   int       `json:"page_size"`
+	HasMore    bool      `json:"has_more"`
+	NextCursor string    `json:"next_cursor,omitempty"`
+	Hits       []jsonHit `json:"hits"`
 }
 
 func toJSONHits(hits []ports.Hit) []jsonHit {
@@ -227,12 +248,28 @@ func toJSONHits(hits []ports.Hit) []jsonHit {
 			Title:        hit.Title,
 			Snippet:      hit.Snippet,
 			Score:        hit.Score,
+			MatchReasons: hit.MatchReasons,
+			Explain:      toJSONExplain(hit.Explain),
 			ValidFrom:    jsonTime(hit.ValidFrom),
 			ValidTo:      jsonTime(hit.ValidTo),
 			SupersededBy: hit.SupersededBy,
+			Body:         hit.Body,
 		})
 	}
 	return out
+}
+
+func toJSONExplain(explain *ports.Explain) *jsonExplain {
+	if explain == nil {
+		return nil
+	}
+	return &jsonExplain{
+		BM25:       explain.BM25,
+		Recency:    explain.Recency,
+		Importance: explain.Importance,
+		Pin:        explain.Pin,
+		Link:       explain.Link,
+	}
 }
 
 // jsonProposalDigest is `brain digest --source --json`. Mode is "proposals" so

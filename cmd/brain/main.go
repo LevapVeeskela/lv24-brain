@@ -139,6 +139,10 @@ func runCommand(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return runIndex(rest, stdout, stderr)
 	case "search":
 		return runSearch(rest, stdout, stderr)
+	case "get":
+		return runGet(rest, stdout, stderr)
+	case "timeline":
+		return runTimeline(rest, stdout, stderr)
 	case "eval":
 		return runEval(rest, stdout, stderr)
 	case "journal":
@@ -232,6 +236,8 @@ Commands:
   sync       Pull, commit, and push brain data (exit 3 on conflict)
   index      Rebuild or refresh the local search index
   search     Search notes, decisions, attempts and handoffs (--dumps adds connector dumps)
+  get        Print one record's text under a token budget (--max-tokens)
+  timeline   Show the records around one record, oldest first
   eval       Score retrieval fixtures and compare with a baseline (exit 1 on regression)
   journal    Show the per-user activity journal (local/git)
   event      Record an external event, e.g. "event commit" from a git hook
@@ -1033,6 +1039,7 @@ func runNote(args []string, stdout, stderr io.Writer) int {
 	supersededBy := fs.String("superseded-by", "", "id of the note that already replaced this one (repair)")
 	confidence := fs.Float64("confidence", 0, "author confidence between 0 and 1")
 	create := fs.Bool("create", false, "register --project first if it does not exist yet")
+	allowProtected := fs.Bool("allow-protected", false, "write even though limits.protected_projects or limits.protected_globs protect the project or path")
 	cfgPath := configFlag(fs)
 	positional, err := parseInterspersed(fs, args)
 	if err != nil {
@@ -1058,14 +1065,15 @@ func runNote(args []string, stdout, stderr io.Writer) int {
 	}
 	defer func() { _ = useCase.Close() }()
 	result, err := useCase.App.Note(context.Background(), app.NoteInput{
-		CreateProject: *create,
-		ProjectID:     *project,
-		Title:         *title,
-		Body:          *body,
-		Tags:          splitList(*tags),
-		Supersedes:    *supersedes,
-		SupersededBy:  *supersededBy,
-		Confidence:    *confidence,
+		CreateProject:  *create,
+		ProjectID:      *project,
+		Title:          *title,
+		Body:           *body,
+		Tags:           splitList(*tags),
+		Supersedes:     *supersedes,
+		SupersededBy:   *supersededBy,
+		Confidence:     *confidence,
+		AllowProtected: *allowProtected,
 	})
 	if err != nil {
 		return reportError(stderr, "note", err)
@@ -1088,6 +1096,7 @@ func runDecision(args []string, stdout, stderr io.Writer) int {
 	supersededBy := fs.String("superseded-by", "", "id of the decision that already replaced this one (repair)")
 	confidence := fs.Float64("confidence", 0, "author confidence between 0 and 1")
 	create := fs.Bool("create", false, "register --project first if it does not exist yet")
+	allowProtected := fs.Bool("allow-protected", false, "write even though limits.protected_projects or limits.protected_globs protect the project or path")
 	cfgPath := configFlag(fs)
 	positional, err := parseInterspersed(fs, args)
 	if err != nil {
@@ -1110,18 +1119,19 @@ func runDecision(args []string, stdout, stderr io.Writer) int {
 	}
 	defer func() { _ = useCase.Close() }()
 	result, err := useCase.App.Decision(context.Background(), app.DecisionInput{
-		CreateProject: *create,
-		ProjectID:     *project,
-		Title:         *title,
-		Status:        domain.DecisionStatus(*status),
-		Context:       *contextText,
-		Alternatives:  splitList(*alternatives),
-		Consequences:  splitList(*consequences),
-		Evidence:      splitList(*evidence),
-		Paths:         splitList(*paths),
-		Supersedes:    *supersedes,
-		SupersededBy:  *supersededBy,
-		Confidence:    *confidence,
+		CreateProject:  *create,
+		ProjectID:      *project,
+		Title:          *title,
+		Status:         domain.DecisionStatus(*status),
+		Context:        *contextText,
+		Alternatives:   splitList(*alternatives),
+		Consequences:   splitList(*consequences),
+		Evidence:       splitList(*evidence),
+		Paths:          splitList(*paths),
+		Supersedes:     *supersedes,
+		SupersededBy:   *supersededBy,
+		Confidence:     *confidence,
+		AllowProtected: *allowProtected,
 	})
 	if err != nil {
 		return reportError(stderr, "decision", err)
@@ -1141,6 +1151,7 @@ func runAttempt(args []string, stdout, stderr io.Writer) int {
 	supersededBy := fs.String("superseded-by", "", "id of the attempt that already replaced this one (repair)")
 	confidence := fs.Float64("confidence", 0, "author confidence between 0 and 1")
 	create := fs.Bool("create", false, "register --project first if it does not exist yet")
+	allowProtected := fs.Bool("allow-protected", false, "write even though limits.protected_projects or limits.protected_globs protect the project or path")
 	cfgPath := configFlag(fs)
 	positional, err := parseInterspersed(fs, args)
 	if err != nil {
@@ -1163,15 +1174,16 @@ func runAttempt(args []string, stdout, stderr io.Writer) int {
 	}
 	defer func() { _ = useCase.Close() }()
 	result, err := useCase.App.Attempt(context.Background(), app.AttemptInput{
-		CreateProject: *create,
-		ProjectID:     *project,
-		Title:         *title,
-		Hypothesis:    *hypothesis,
-		Result:        *resultText,
-		Reason:        *reason,
-		Supersedes:    *supersedes,
-		SupersededBy:  *supersededBy,
-		Confidence:    *confidence,
+		CreateProject:  *create,
+		ProjectID:      *project,
+		Title:          *title,
+		Hypothesis:     *hypothesis,
+		Result:         *resultText,
+		Reason:         *reason,
+		Supersedes:     *supersedes,
+		SupersededBy:   *supersededBy,
+		Confidence:     *confidence,
+		AllowProtected: *allowProtected,
 	})
 	if err != nil {
 		return reportError(stderr, "attempt", err)
@@ -1191,6 +1203,7 @@ func runHandoff(args []string, stdout, stderr io.Writer) int {
 	supersededBy := fs.String("superseded-by", "", "id of the handoff that already replaced this one (repair)")
 	confidence := fs.Float64("confidence", 0, "author confidence between 0 and 1")
 	create := fs.Bool("create", false, "register --project first if it does not exist yet")
+	allowProtected := fs.Bool("allow-protected", false, "write even though limits.protected_projects or limits.protected_globs protect the project or path")
 	cfgPath := configFlag(fs)
 	positional, err := parseInterspersed(fs, args)
 	if err != nil {
@@ -1226,14 +1239,15 @@ func runHandoff(args []string, stdout, stderr io.Writer) int {
 		*gitContext = gitinfo.Read(ctx, gitDir(target)).Context()
 	}
 	result, err := useCase.App.Handoff(ctx, app.HandoffInput{
-		CreateProject: *create,
-		ProjectID:     *project,
-		Summary:       *summary,
-		GitContext:    *gitContext,
-		NextAction:    *next,
-		Supersedes:    *supersedes,
-		SupersededBy:  *supersededBy,
-		Confidence:    *confidence,
+		CreateProject:  *create,
+		ProjectID:      *project,
+		Summary:        *summary,
+		GitContext:     *gitContext,
+		NextAction:     *next,
+		Supersedes:     *supersedes,
+		SupersededBy:   *supersededBy,
+		Confidence:     *confidence,
+		AllowProtected: *allowProtected,
 	})
 	if err != nil {
 		return reportError(stderr, "handoff", err)
@@ -1549,20 +1563,31 @@ func runIndex(args []string, stdout, stderr io.Writer) int {
 func runSearch(args []string, stdout, stderr io.Writer) int {
 	fs := newFlagSet("search", stderr)
 	project := fs.String("project", "", "project id filter")
-	limit := fs.Int("limit", app.DefaultSearchLimit, "maximum results")
+	limit := fs.Int("limit", app.DefaultSearchLimit, "maximum results on this page")
 	kinds := fs.String("kind", "", "comma-separated kinds to keep: note, decision, attempt, handoff, dump, item (raw-zone external items; excluded by default)")
 	dumps := fs.Bool("dumps", false, "include connector dumps (mail, GitHub/GitLab issues and PRs)")
 	since := fs.String("since", "", "only documents updated since: duration (24h, 7d), date (2026-11-01) or RFC3339 time")
+	matchMode := fs.String("match-mode", "", "how query terms combine: all (every term, the default) or any (any term)")
+	minScore := fs.Float64("min-score", 0, "drop hits with a composite relevance below this value (0..1)")
+	relaxed := fs.Bool("relaxed", false, "with --match-mode all, retry the terms joined with OR when the strict pass finds nothing")
+	explain := fs.Bool("explain", false, "show the weighted contribution of every ranking signal")
+	full := fs.Bool("full", false, "print the whole record body instead of a preview")
+	pageSize := fs.Int("page-size", 0, "hits per page with --cursor; 0 uses --limit")
+	cursor := fs.String("cursor", "", "page cursor from a previous search; cursors are bound to their query")
 	validity := addValidityFlags(fs)
 	asJSON := fs.Bool("json", false, "print JSON")
 	cfgPath := configFlag(fs)
 	flagArgs, queryParts := splitValueFlags(args, map[string]bool{
-		"project": true,
-		"limit":   true,
-		"kind":    true,
-		"since":   true,
-		"as-of":   true,
-		"config":  true,
+		"project":    true,
+		"limit":      true,
+		"kind":       true,
+		"since":      true,
+		"as-of":      true,
+		"match-mode": true,
+		"min-score":  true,
+		"page-size":  true,
+		"cursor":     true,
+		"config":     true,
 	})
 	if err := fs.Parse(flagArgs); err != nil {
 		return 2
@@ -1573,6 +1598,31 @@ func runSearch(args []string, stdout, stderr io.Writer) int {
 	}
 	if *limit < 0 {
 		fmt.Fprintln(stderr, "brain search: --limit must not be negative")
+		return 2
+	}
+	switch strings.ToLower(strings.TrimSpace(*matchMode)) {
+	case "", "all", "any":
+	default:
+		fmt.Fprintln(stderr, "brain search: --match-mode must be all or any")
+		return 2
+	}
+	if *pageSize < 0 {
+		fmt.Fprintln(stderr, "brain search: --page-size must not be negative")
+		return 2
+	}
+	size := *pageSize
+	if size == 0 {
+		size = *limit
+	}
+	if size <= 0 {
+		size = app.DefaultSearchLimit
+	}
+	if size > searchMaxWindow {
+		fmt.Fprintf(stderr, "brain search: --page-size must not exceed %d\n", searchMaxWindow)
+		return 2
+	}
+	if *minScore < 0 || *minScore > 1 {
+		fmt.Fprintln(stderr, "brain search: --min-score must be between 0 and 1")
 		return 2
 	}
 	sinceTime, err := domain.ParseSince(*since, time.Now())
@@ -1590,6 +1640,13 @@ func runSearch(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "brain search: query is required")
 		return 1
 	}
+	filter := searchFilterFingerprint(query, *project, strings.ToLower(strings.TrimSpace(*matchMode)),
+		fmt.Sprint(*minScore), fmt.Sprint(*dumps), *kinds, *since, asOf.Format(time.RFC3339Nano), fmt.Sprint(includeSuperseded))
+	offset, err := decodeSearchCursor(*cursor, filter)
+	if err != nil {
+		fmt.Fprintf(stderr, "brain search: --cursor: %v\n", err)
+		return 2
+	}
 	cfg, err := loadRequiredConfig(*cfgPath)
 	if err != nil {
 		return reportError(stderr, "search", err)
@@ -1599,29 +1656,66 @@ func runSearch(args []string, stdout, stderr io.Writer) int {
 		return reportError(stderr, "search", err)
 	}
 	defer func() { _ = runtime.Close() }()
-	hits, notice, err := runtime.App.SearchWithNotice(context.Background(), app.SearchOptions{
+	requested := searchFetchLimit(offset, size)
+	report, err := runtime.App.SearchWithReport(context.Background(), app.SearchOptions{
 		Text:              query,
 		ProjectID:         *project,
-		Limit:             *limit,
+		Limit:             requested,
 		Kinds:             splitList(*kinds),
 		IncludeDumps:      *dumps,
 		Since:             sinceTime,
 		AsOf:              asOf,
 		IncludeSuperseded: includeSuperseded,
+		MatchMode:         *matchMode,
+		Relaxed:           *relaxed,
+		MinScore:          *minScore,
+		Explain:           *explain,
+		Full:              *full,
 	})
 	if err != nil {
 		return reportError(stderr, "search", err)
 	}
-	if notice != "" {
-		fmt.Fprintf(stderr, "brain search: %s\n", notice)
+	if report.Notice != "" {
+		fmt.Fprintf(stderr, "brain search: %s\n", report.Notice)
 	}
+	pageHits, page := pageSearchHits(report.Hits, offset, size, requested, filter)
 	if *asJSON {
-		return writeJSONReport(stdout, stderr, "search", jsonSearch{Query: query, Hits: toJSONHits(hits)})
+		return writeJSONReport(stdout, stderr, "search", jsonSearch{
+			Query:      query,
+			Relaxed:    report.Relaxed,
+			Page:       page.Page,
+			PageSize:   page.PageSize,
+			HasMore:    page.HasMore,
+			NextCursor: page.NextCursor,
+			Hits:       toJSONHits(pageHits),
+		})
 	}
-	for _, hit := range hits {
+	if report.Relaxed {
+		fmt.Fprintf(stderr, "brain search: strict match found nothing; results are relaxed (any term)\n")
+	}
+	for _, hit := range pageHits {
 		fmt.Fprintf(stdout, "%s/%s/%s\n  %s\n", hit.Kind, hit.ProjectID, hit.Title, hit.Snippet)
+		if *full && hit.Body != "" {
+			fmt.Fprintf(stdout, "%s\n", hit.Body)
+		}
+		if *explain {
+			fmt.Fprintf(stdout, "  score %.3f  %s\n", hit.Score, explainLine(hit))
+		}
+	}
+	if page.HasMore {
+		fmt.Fprintf(stderr, "brain search: more results; pass --cursor %q for page %d\n", page.NextCursor, page.Page+1)
 	}
 	return 0
+}
+
+// explainLine renders the signal contributions of one hit for --explain.
+func explainLine(hit ports.Hit) string {
+	reasons := strings.Join(hit.MatchReasons, ",")
+	if hit.Explain == nil {
+		return "reasons: " + reasons
+	}
+	return fmt.Sprintf("reasons: %s  bm25 %.3f  recency %.3f  importance %.3f  pin %.3f  link %.3f",
+		reasons, hit.Explain.BM25, hit.Explain.Recency, hit.Explain.Importance, hit.Explain.Pin, hit.Explain.Link)
 }
 
 func runConnector(args []string, stdout, stderr io.Writer) int {

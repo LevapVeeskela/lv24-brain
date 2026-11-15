@@ -275,11 +275,13 @@ func (b mcpBackend) Search(ctx context.Context, in mcpserver.SearchInput) ([]mcp
 	out := make([]mcpserver.Hit, 0, len(hits))
 	for _, hit := range hits {
 		out = append(out, mcpserver.Hit{
-			ID:        hit.ID,
-			ProjectID: hit.ProjectID,
-			Kind:      hit.Kind,
-			Title:     hit.Title,
-			Snippet:   hit.Snippet,
+			ID:           hit.ID,
+			ProjectID:    hit.ProjectID,
+			Kind:         hit.Kind,
+			Title:        hit.Title,
+			Snippet:      hit.Snippet,
+			Score:        hit.Score,
+			MatchReasons: hit.MatchReasons,
 		})
 	}
 	return out, nil

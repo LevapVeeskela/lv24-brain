@@ -93,6 +93,40 @@ type Document struct {
 	// SupersededBy and Supersedes are the ids of the supersede chain links.
 	SupersededBy string
 	Supersedes   string
+	// Status is the decision status (proposed, accepted, rejected,
+	// superseded) and is empty for other kinds. Ranking treats an accepted
+	// decision as pinned authority.
+	Status string
+	// Confidence is the optional 0..1 author confidence of the record.
+	Confidence float64
+}
+
+// Match modes of a query. The zero value keeps the historical behaviour: the
+// strict AND pass first, then the same terms joined with OR when it finds
+// nothing.
+const (
+	MatchModeAll = "all"
+	MatchModeAny = "any"
+)
+
+// Match reasons reported by a ranked search. A reason is listed only when its
+// signal fired for that hit.
+const (
+	ReasonBM25       = "bm25"
+	ReasonRecency    = "recency"
+	ReasonImportance = "importance"
+	ReasonPin        = "pin"
+	ReasonLink       = "link"
+)
+
+// Explain is the weighted contribution of each ranking signal to one hit's
+// composite score. The contributions sum to the hit's Score.
+type Explain struct {
+	BM25       float64
+	Recency    float64
+	Importance float64
+	Pin        float64
+	Link       float64
 }
 
 // Query narrows a full-text search.
@@ -114,14 +148,34 @@ type Query struct {
 	// selects the point in time and takes precedence.
 	IncludeSuperseded bool
 	// Now is the instant a default query evaluates "current" at. Zero means
-	// the adapter clock.
+	// the adapter clock. Ranking recency is measured from the same instant.
 	Now time.Time
+	// MatchMode is MatchModeAll or MatchModeAny. Empty keeps the historical
+	// AND-then-OR fallback.
+	MatchMode string
+	// MinScore drops hits whose composite score is below it; zero keeps
+	// every hit. The composite score is in [0, 1].
+	MinScore float64
+	// Explain also fills Hit.MatchReasons and Hit.Explain. MatchReasons is
+	// always filled by a ranked index; Explain is the costlier part.
+	Explain bool
+	// IncludeBody also returns the full document body in Hit.Body.
+	IncludeBody bool
 }
 
 // AllowsSince reports whether a document updated at updatedAt passes the
 // Since filter. Adapters without SQL use it; SQL adapters apply the same rule.
 func (q Query) AllowsSince(updatedAt time.Time) bool {
 	return q.Since.IsZero() || !updatedAt.Before(q.Since)
+}
+
+// NowOrClock returns the query's ranking and validity instant, or the current
+// clock when the caller left it zero.
+func (q Query) NowOrClock() time.Time {
+	if !q.Now.IsZero() {
+		return q.Now
+	}
+	return time.Now()
 }
 
 // AllowsKind reports whether a hit of kind passes the Kinds and ExcludeKinds
@@ -146,6 +200,15 @@ type Hit struct {
 	ValidFrom    time.Time
 	ValidTo      time.Time
 	SupersededBy string
+	// Body is the full document text; it is set only when the query asked
+	// for it (Query.IncludeBody).
+	Body string
+	// MatchReasons names the ranking signals that fired, in the order bm25,
+	// recency, importance, pin, link.
+	MatchReasons []string
+	// Explain holds the weighted contribution of each signal and is set only
+	// when the query asked for it (Query.Explain).
+	Explain *Explain
 }
 
 // Index provides full-text search over stored knowledge.

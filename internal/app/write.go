@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/levapveeskela/lv24-brain/internal/domain"
+	"github.com/levapveeskela/lv24-brain/internal/ports"
 )
 
 // writeValidity builds the validity of a new record and checks its supersede
@@ -74,6 +75,10 @@ func (a *App) Note(ctx context.Context, input NoteInput) (NoteResult, error) {
 	if err := a.requireStore(); err != nil {
 		return NoteResult{}, err
 	}
+	title := fallbackTitle(input.Title, input.Body)
+	if err := a.checkProtectedSelector(input.ProjectID, ports.RecordNote, title, input.AllowProtected); err != nil {
+		return NoteResult{}, err
+	}
 	project, err := a.ensureProject(ctx, input.ProjectID, input.CreateProject)
 	if err != nil {
 		return NoteResult{}, err
@@ -85,7 +90,7 @@ func (a *App) Note(ctx context.Context, input NoteInput) (NoteResult, error) {
 	}
 	note := domain.Note{
 		ProjectID:  project.ID,
-		Title:      fallbackTitle(input.Title, input.Body),
+		Title:      title,
 		Body:       input.Body,
 		Tags:       input.Tags,
 		Source:     input.Source,
@@ -95,6 +100,9 @@ func (a *App) Note(ctx context.Context, input NoteInput) (NoteResult, error) {
 		UpdatedAt:  now,
 	}
 	if err := note.Validate(); err != nil {
+		return NoteResult{}, err
+	}
+	if err := a.enforceCreateLimits(project.ID, ports.RecordNote, noteWriteContent(note), input.AllowProtected); err != nil {
 		return NoteResult{}, err
 	}
 	existing, err := a.listNotes(ctx, project.ID)
@@ -143,6 +151,9 @@ func (a *App) Decision(ctx context.Context, input DecisionInput) (DecisionResult
 	if err := a.requireStore(); err != nil {
 		return DecisionResult{}, err
 	}
+	if err := a.checkProtectedSelector(input.ProjectID, ports.RecordDecision, strings.TrimSpace(input.Title), input.AllowProtected); err != nil {
+		return DecisionResult{}, err
+	}
 	project, err := a.ensureProject(ctx, input.ProjectID, input.CreateProject)
 	if err != nil {
 		return DecisionResult{}, err
@@ -176,6 +187,9 @@ func (a *App) Decision(ctx context.Context, input DecisionInput) (DecisionResult
 		UpdatedAt:    now,
 	}
 	if err := decision.Validate(); err != nil {
+		return DecisionResult{}, err
+	}
+	if err := a.enforceCreateLimits(project.ID, ports.RecordDecision, decisionWriteContent(decision), input.AllowProtected); err != nil {
 		return DecisionResult{}, err
 	}
 	existing, err := a.listDecisions(ctx, project.ID)
@@ -215,6 +229,9 @@ func (a *App) Attempt(ctx context.Context, input AttemptInput) (AttemptResult, e
 	if err := a.requireStore(); err != nil {
 		return AttemptResult{}, err
 	}
+	if err := a.checkProtectedSelector(input.ProjectID, ports.RecordAttempt, strings.TrimSpace(input.Title), input.AllowProtected); err != nil {
+		return AttemptResult{}, err
+	}
 	project, err := a.ensureProject(ctx, input.ProjectID, input.CreateProject)
 	if err != nil {
 		return AttemptResult{}, err
@@ -237,6 +254,9 @@ func (a *App) Attempt(ctx context.Context, input AttemptInput) (AttemptResult, e
 		UpdatedAt:  now,
 	}
 	if err := attempt.Validate(); err != nil {
+		return AttemptResult{}, err
+	}
+	if err := a.enforceCreateLimits(project.ID, ports.RecordAttempt, attemptWriteContent(attempt), input.AllowProtected); err != nil {
 		return AttemptResult{}, err
 	}
 	existing, err := a.listAttempts(ctx, project.ID)
@@ -277,6 +297,9 @@ func (a *App) Handoff(ctx context.Context, input HandoffInput) (HandoffResult, e
 	if err := a.requireStore(); err != nil {
 		return HandoffResult{}, err
 	}
+	if err := a.checkProtectedSelector(input.ProjectID, ports.RecordHandoff, "", input.AllowProtected); err != nil {
+		return HandoffResult{}, err
+	}
 	project, err := a.ensureProject(ctx, input.ProjectID, input.CreateProject)
 	if err != nil {
 		return HandoffResult{}, err
@@ -296,6 +319,9 @@ func (a *App) Handoff(ctx context.Context, input HandoffInput) (HandoffResult, e
 		CreatedAt:  now,
 	}
 	if err := handoff.Validate(); err != nil {
+		return HandoffResult{}, err
+	}
+	if err := a.enforceCreateLimits(project.ID, ports.RecordHandoff, handoffWriteContent(handoff), input.AllowProtected); err != nil {
 		return HandoffResult{}, err
 	}
 	existing, err := a.listHandoffs(ctx, project.ID)

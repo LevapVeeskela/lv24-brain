@@ -142,6 +142,14 @@ func (a *App) linkSupersede(ctx context.Context, projectID, oldID, newID string)
 	if err := checkSupersedeCycle(index, oldID, newID); err != nil {
 		return false, err
 	}
+	// Check both ends before the first write: a cap or protection refusal on
+	// the replacement must not leave the old record already ended.
+	for _, record := range []Record{old, replacement} {
+		summary := record.Summary()
+		if err := a.enforceUpdateLimits(projectID, summary.Kind, summary.ID, recordWriteContent(record)); err != nil {
+			return false, err
+		}
+	}
 
 	changed := false
 	if old.Validity().SupersededBy != newID || old.Validity().ValidTo.IsZero() {
@@ -210,6 +218,9 @@ func (a *App) setRecordValidity(ctx context.Context, projectID string, record Re
 		return fmt.Errorf("%w: this store cannot change record validity", domain.ErrUnsupported)
 	}
 	summary := record.Summary()
+	if err := a.enforceUpdateLimits(projectID, summary.Kind, summary.ID, recordWriteContent(record)); err != nil {
+		return err
+	}
 	if err := setter.SetRecordValidity(ctx, projectID, summary.Kind, summary.ID, validity); err != nil {
 		return err
 	}

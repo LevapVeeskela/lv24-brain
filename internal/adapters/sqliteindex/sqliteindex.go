@@ -280,6 +280,8 @@ func (i *Index) Upsert(ctx context.Context, doc ports.Document) error {
 		nullableNanos(doc.ValidTo),
 		nullableString(doc.SupersededBy),
 		nullableString(doc.Supersedes),
+		doc.Status,
+		doc.Confidence,
 	); err != nil {
 		return fmt.Errorf("sqliteindex: upsert %q: %w", doc.ID, err)
 	}
@@ -347,49 +349,82 @@ func (i *Index) Delete(ctx context.Context, id string) error {
 	return nil
 }
 
-// Search returns matching documents ordered by relevance, recency and id.
-// Every term must match (AND). When that finds nothing and the query has two or
-// more terms, the same terms are retried with OR. Filters apply to both passes.
+// Search returns matching documents ordered by the composite score, then
+// recency and id. A query without a match mode keeps the historical behaviour:
+// every term must match (AND), and when that finds nothing and the query has
+// two or more terms the same terms are retried with OR. MatchModeAll skips the
+// retry, MatchModeAny starts with OR. Filters apply to every pass.
 func (i *Index) Search(ctx context.Context, query ports.Query) ([]ports.Hit, error) {
+	mode := strings.TrimSpace(query.MatchMode)
+	if mode == ports.MatchModeAny {
+		match, ok := matchExpression(query.Text, joinAny)
+		if !ok {
+			return []ports.Hit{}, nil
+		}
+		return i.runSearch(ctx, query, match)
+	}
 	match, ok := matchExpression(query.Text, joinAll)
 	if !ok {
 		return []ports.Hit{}, nil
 	}
-	limit := normalizeLimit(query.Limit)
-	hits, err := i.runSearch(ctx, query, match, limit)
-	if err != nil || len(hits) > 0 || termCount(query.Text) < 2 {
+	hits, err := i.runSearch(ctx, query, match)
+	if err != nil || len(hits) > 0 || mode == ports.MatchModeAll || termCount(query.Text) < 2 {
 		return hits, err
 	}
 	anyMatch, _ := matchExpression(query.Text, joinAny)
-	return i.runSearch(ctx, query, anyMatch, limit)
+	return i.runSearch(ctx, query, anyMatch)
 }
 
 // runSearch executes one FTS5 MATCH expression with the query filters applied.
-func (i *Index) runSearch(ctx context.Context, query ports.Query, match string, limit int) ([]ports.Hit, error) {
-	statement, args := buildSearchStatement(query, match, limit)
+// Hits carry the composite score, the signals that fired and, when the query
+// asks for it, the weighted contribution of each signal and the document body.
+func (i *Index) runSearch(ctx context.Context, query ports.Query, match string) ([]ports.Hit, error) {
+	statement, args := buildSearchStatement(query, match)
 	rows, err := i.db.QueryContext(ctx, statement, args...)
 	if err != nil {
 		return nil, fmt.Errorf("sqliteindex: search: %w", err)
 	}
 	defer rows.Close()
 
-	hits := make([]ports.Hit, 0, limit)
+	now := query.Now
+	if now.IsZero() {
+		now = time.Now()
+	}
+	hits := make([]ports.Hit, 0, normalizeLimit(query.Limit))
 	for rows.Next() {
 		var (
 			hit          ports.Hit
 			snippet      sql.NullString
-			rank         float64
+			body         sql.NullString
+			score        float64
+			contrib      [5]float64
 			validFrom    int64
 			validTo      sql.NullInt64
 			supersededBy sql.NullString
+			status       string
+			confidence   float64
+			updatedAt    int64
 		)
-		if err := rows.Scan(&hit.ID, &hit.ProjectID, &hit.Kind, &hit.Title, &snippet, &rank,
-			&validFrom, &validTo, &supersededBy); err != nil {
+		if err := rows.Scan(&hit.ID, &hit.ProjectID, &hit.Kind, &hit.Title, &snippet, &body, &score,
+			&contrib[0], &contrib[1], &contrib[2], &contrib[3], &contrib[4],
+			&validFrom, &validTo, &supersededBy, &status, &confidence, &updatedAt); err != nil {
 			return nil, fmt.Errorf("sqliteindex: scan hit: %w", err)
 		}
 		hit.ID = recordID(hit.ProjectID, hit.ID)
 		hit.Snippet = snippet.String
-		hit.Score = -rank
+		hit.Body = body.String
+		hit.Score = score
+		fresh := isFresh(time.Unix(0, updatedAt), now)
+		hit.MatchReasons = matchReasons(hit.Kind, contributions(contrib), fresh, pinned(hit.Kind, status, confidence))
+		if query.Explain {
+			hit.Explain = &ports.Explain{
+				BM25:       contrib[0],
+				Recency:    contrib[1],
+				Importance: contrib[2],
+				Pin:        contrib[3],
+				Link:       contrib[4],
+			}
+		}
 		if validFrom > 0 {
 			hit.ValidFrom = time.Unix(0, validFrom).UTC()
 		}
@@ -402,15 +437,29 @@ func (i *Index) runSearch(ctx context.Context, query ports.Query, match string, 
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("sqliteindex: read hits: %w", err)
 	}
+	if len(hits) == 0 {
+		// Callers merge empty pages into a nil slice; return an empty one so
+		// JSON encodes [] rather than null.
+		return []ports.Hit{}, nil
+	}
 	return hits, nil
 }
 
-// buildSearchStatement assembles the FTS5 query. Project, include and exclude
-// kind, and since filters are appended as bound placeholders in the same order as args.
-func buildSearchStatement(query ports.Query, match string, limit int) (string, []any) {
+// contributions converts the scanned contribution array into a slice.
+func contributions(values [5]float64) []float64 {
+	return values[:]
+}
+
+// buildSearchStatement assembles the ranked FTS5 query. The four snippet
+// placeholders, the MATCH placeholder and the ranking instant come first;
+// project, kind, since, validity, score and limit follow in the order the
+// placeholders appear in rankedSelectPrefix and rankedSelectSuffix.
+func buildSearchStatement(query ports.Query, match string) (string, []any) {
 	var builder strings.Builder
-	builder.WriteString(searchSelectSQL)
-	args := []any{snippetStart, snippetEnd, snippetEllipsis, snippetTokenSpan, match}
+	builder.WriteString(rankedSelectPrefix(query.IncludeBody))
+	// Placeholder order follows the SQL text: the four snippet arguments, the
+	// ranking instant (recency) and then the MATCH expression.
+	args := []any{snippetStart, snippetEnd, snippetEllipsis, snippetTokenSpan, query.NowOrClock().Unix(), match}
 
 	if query.ProjectID != "" {
 		builder.WriteString(" AND d.project_id = ?")
@@ -436,16 +485,12 @@ func buildSearchStatement(query ports.Query, match string, limit int) (string, [
 		builder.WriteString(" AND d.valid_from <= ? AND (d.valid_to IS NULL OR d.valid_to > ?)")
 		args = append(args, query.AsOf.UnixNano(), query.AsOf.UnixNano())
 	case !query.IncludeSuperseded:
-		now := query.Now
-		if now.IsZero() {
-			now = time.Now()
-		}
 		builder.WriteString(" AND (d.valid_to IS NULL OR d.valid_to > ?)")
-		args = append(args, now.UnixNano())
+		args = append(args, query.NowOrClock().UnixNano())
 	}
 
-	builder.WriteString(searchOrderSQL)
-	args = append(args, limit)
+	builder.WriteString(rankedSelectSuffix())
+	args = append(args, query.MinScore, normalizeLimit(query.Limit))
 	return builder.String(), args
 }
 

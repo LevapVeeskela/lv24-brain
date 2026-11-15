@@ -9,6 +9,8 @@ import (
 	"slices"
 	"strings"
 	"time"
+
+	"github.com/levapveeskela/lv24-brain/internal/textbudget"
 )
 
 // DefaultJournalLimit is used by brain_journal when no limit is given.
@@ -46,6 +48,11 @@ type Hit struct {
 	Kind      string `json:"kind"`
 	Title     string `json:"title"`
 	Snippet   string `json:"snippet"`
+	// Score is the composite relevance in [0, 1].
+	Score float64 `json:"score"`
+	// MatchReasons names the ranking signals that fired: bm25, recency,
+	// importance, pin, link. A backend without a ranked index returns none.
+	MatchReasons []string `json:"match_reasons,omitempty"`
 }
 
 // SearchInput is one brain_search request after argument validation.
@@ -202,7 +209,8 @@ func (s *Server) coreTools() []tool {
 		{
 			Name:        "brain_search",
 			Annotations: readOnlyAnnotations("Search the brain"),
-			Description: "Full-text search over notes, decisions, attempts and handoffs. Searches every project unless project is given. Connector dumps (mail, GitHub/GitLab issues and PRs) are excluded unless include_dumps is true or kinds contains \"dump\". Raw-zone external items are excluded unless kinds contains \"item\".",
+			Description: "Full-text search over notes, decisions, attempts and handoffs. Searches every project unless project is given. Connector dumps (mail, GitHub/GitLab issues and PRs) are excluded unless include_dumps is true or kinds contains \"dump\". Raw-zone external items are excluded unless kinds contains \"item\". " +
+				"Hits carry an id, the kind, the title, a preview of at most " + fmt.Sprint(textbudget.PreviewRunes) + " characters and the ranking score; bodies are never returned by default. Read one with expand_ids, or set compact=false to expand the whole page.",
 			InputSchema: objectSchema([]string{"query"}, map[string]any{
 				"query":         stringProp("Words to search for."),
 				"project":       project,
@@ -211,15 +219,23 @@ func (s *Server) coreTools() []tool {
 				"kinds":         stringArrayProp("Keep only these kinds: note, decision, attempt, handoff, dump, item. Omit for curated kinds; raw-zone dumps and external items require an explicit request."),
 				"include_dumps": boolProp("Include connector dumps in an unfiltered search."),
 				"since":         stringProp("Only documents updated since: a duration (24h, 7d), a date (2026-11-01) or an RFC3339 time. Omit for all time."),
+				"compact":       boolProp("Return previews only (the default). Set false to return the whole body of every hit on the page; prefer expand_ids for one record."),
+				"expand":        boolProp("Expand every hit on this page to its full record. Prefer expand_ids when only one or two records matter."),
+				"expand_ids":    stringArrayProp("Ids from the hits of this call to return in full in the same response. At most " + fmt.Sprint(ExpandMaxRecords) + " ids."),
+				"max_tokens":    intProp("Token budget per expanded record; 0 selects the default of "+fmt.Sprint(ExpandDefaultMaxTokens)+", the maximum is "+fmt.Sprint(ExpandMaxTokens)+".", 0),
 			}),
 			OutputSchema: outputObject(pageOutput(map[string]any{
 				"hits": arrayProp("Ranked hits, best first.", outputObject(map[string]any{
-					"id":         stringProp("Record id."),
-					"project_id": stringProp("Project that owns the record."),
-					"kind":       stringProp("Record kind."),
-					"title":      stringProp("Record title."),
-					"snippet":    stringProp("Matching excerpt."),
+					"id":            stringProp("Record id."),
+					"project_id":    stringProp("Project that owns the record."),
+					"kind":          stringProp("Record kind."),
+					"title":         stringProp("Record title."),
+					"snippet":       stringProp("Matching preview, at most " + fmt.Sprint(textbudget.PreviewRunes) + " characters."),
+					"score":         numberProp("Composite relevance in [0, 1]."),
+					"match_reasons": stringArrayProp("Ranking signals that fired: bm25, recency, importance, pin, link."),
 				}, "id", "project_id", "kind", "title", "snippet")),
+				"compact":  boolProp("Whether bodies were withheld from the hits."),
+				"expanded": arrayProp("Records returned in full, when expand, expand_ids or compact=false asked for them.", objectProp("One expanded record: its detail fields plus truncated and tokens.")),
 			}), "hits", "page", "page_size", "has_more"),
 			Limits: limitsOf(pageLimitsFor("brain_search")),
 			run:    s.search,
@@ -374,6 +390,12 @@ func (s *Server) search(ctx context.Context, raw json.RawMessage) (toolResult, e
 		Kinds        []string `json:"kinds"`
 		IncludeDumps bool     `json:"include_dumps"`
 		Since        string   `json:"since"`
+		// Compact is a pointer so an omitted flag keeps the preview-only
+		// default instead of reading as false.
+		Compact   *bool    `json:"compact"`
+		Expand    bool     `json:"expand"`
+		ExpandIDs []string `json:"expand_ids"`
+		MaxTokens int      `json:"max_tokens"`
 	}
 	if err := decodeArgs(raw, &args); err != nil {
 		return toolResult{}, err
@@ -381,6 +403,12 @@ func (s *Server) search(ctx context.Context, raw json.RawMessage) (toolResult, e
 	query, err := requireText("query", args.Query)
 	if err != nil {
 		return toolResult{}, err
+	}
+	if len(args.ExpandIDs) > ExpandMaxRecords {
+		return toolResult{}, refusalInvalidf("expand_ids holds %d ids; the limit is %d", len(args.ExpandIDs), ExpandMaxRecords)
+	}
+	if args.MaxTokens < 0 || args.MaxTokens > ExpandMaxTokens {
+		return toolResult{}, refusalInvalidf("max_tokens must be between 0 and %d", ExpandMaxTokens)
 	}
 	projectID, err := s.optionalProject(ctx, args.Project)
 	if err != nil {
@@ -409,6 +437,20 @@ func (s *Server) search(ctx context.Context, raw json.RawMessage) (toolResult, e
 	if pageHits == nil {
 		pageHits = []Hit{}
 	}
+	compact := args.Compact == nil || *args.Compact
+	var expanded []ExpandedHit
+	switch {
+	case len(args.ExpandIDs) > 0:
+		expanded, err = s.expandSearchRecords(ctx, pageHits, args.ExpandIDs, args.MaxTokens)
+	case args.Expand || !compact:
+		expanded, err = s.expandSearchRecords(ctx, pageHits, expandPageIDs(pageHits), args.MaxTokens)
+	}
+	if err != nil {
+		return toolResult{}, err
+	}
+	if expanded == nil {
+		expanded = []ExpandedHit{}
+	}
 	var text strings.Builder
 	if len(pageHits) == 0 {
 		text.WriteString("no matches")
@@ -423,12 +465,18 @@ func (s *Server) search(ctx context.Context, raw json.RawMessage) (toolResult, e
 	if footer := pageFooter(page); footer != "" {
 		text.WriteString(footer)
 	}
+	if len(expanded) > 0 {
+		text.WriteString("\n\n")
+		text.WriteString(expandedText(expanded))
+	}
 	return toolResult{
 		Text: strings.TrimRight(text.String(), "\n"),
 		Structured: struct {
 			Hits []Hit `json:"hits"`
 			Page
-		}{Hits: pageHits, Page: page},
+			Compact  bool          `json:"compact"`
+			Expanded []ExpandedHit `json:"expanded"`
+		}{Hits: pageHits, Page: page, Compact: compact, Expanded: expanded},
 	}, nil
 }
 
@@ -775,6 +823,10 @@ func stringArrayProp(description string) map[string]any {
 
 func intProp(description string, minimum int) map[string]any {
 	return map[string]any{"type": "integer", "description": description, "minimum": minimum}
+}
+
+func numberProp(description string) map[string]any {
+	return map[string]any{"type": "number", "description": description}
 }
 
 func boolProp(description string) map[string]any {

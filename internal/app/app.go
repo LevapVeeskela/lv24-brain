@@ -177,6 +177,10 @@ type NoteInput struct {
 	// CreateProject registers ProjectID when no project, alias or path
 	// matches; without it an unknown project is an error.
 	CreateProject bool
+	// AllowProtected overrides the limits.protected_projects and
+	// limits.protected_globs refusal. It is the explicit CLI flag; MCP never
+	// sets it.
+	AllowProtected bool
 }
 
 // NoteResult identifies the appended note.
@@ -211,6 +215,8 @@ type DecisionInput struct {
 	// CreateProject registers ProjectID when no project, alias or path
 	// matches; without it an unknown project is an error.
 	CreateProject bool
+	// AllowProtected overrides the protected project and glob refusal.
+	AllowProtected bool
 }
 
 // DecisionResult identifies the appended decision.
@@ -241,6 +247,8 @@ type AttemptInput struct {
 	// CreateProject registers ProjectID when no project, alias or path
 	// matches; without it an unknown project is an error.
 	CreateProject bool
+	// AllowProtected overrides the protected project and glob refusal.
+	AllowProtected bool
 }
 
 // AttemptResult identifies the appended attempt.
@@ -266,6 +274,8 @@ type HandoffInput struct {
 	// CreateProject registers ProjectID when no project, alias or path
 	// matches; without it an unknown project is an error.
 	CreateProject bool
+	// AllowProtected overrides the protected project and glob refusal.
+	AllowProtected bool
 }
 
 // HandoffResult identifies the appended handoff.

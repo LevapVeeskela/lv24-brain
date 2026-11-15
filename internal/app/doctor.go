@@ -33,6 +33,7 @@ func (a *App) Doctor(ctx context.Context, opts DoctorOptions) (DoctorReport, err
 	}
 	checks := make([]DoctorCheck, 0, 6)
 	checks = append(checks, a.doctorConfig(opts.ConfigPath))
+	checks = append(checks, a.doctorLimits())
 	if a.cfg.Mode == config.ModeServer {
 		checks = append(checks, a.doctorServer(ctx))
 	}
@@ -41,6 +42,7 @@ func (a *App) Doctor(ctx context.Context, opts DoctorOptions) (DoctorReport, err
 	checks = append(checks, a.doctorSchema())
 	checks = append(checks, a.doctorIndex(ctx))
 	checks = append(checks, a.doctorRecords(ctx))
+	checks = append(checks, a.doctorRecordLimits(ctx))
 	checks = append(checks, a.doctorJournal(ctx))
 	checks = append(checks, a.doctorIDs(ctx))
 	checks = append(checks, a.doctorQuarantine(ctx))
@@ -326,6 +328,95 @@ func (a *App) doctorJournal(ctx context.Context) DoctorCheck {
 
 // maxListedProblems bounds the paths named in the records check.
 const maxListedProblems = 3
+
+// doctorLimits reports the effective write limits. A limit below the
+// compatibility floor is valid but rejects ordinary writes, so it is a
+// warning: the operator asked for something that will block day-to-day work.
+func (a *App) doctorLimits() DoctorCheck {
+	limits := a.cfg.EffectiveLimits()
+	message := fmt.Sprintf("body %d bytes, title %d chars, metadata %d bytes, %d protected projects, %d protected globs",
+		limits.MaxBodyBytes, limits.MaxTitleChars, limits.MaxMetadataBytes,
+		len(limits.ProtectedProjects), len(limits.ProtectedGlobs))
+	var small []string
+	if limits.MaxBodyBytes < limitsWarnBodyBytes {
+		small = append(small, fmt.Sprintf("max_body_bytes %d < %d", limits.MaxBodyBytes, limitsWarnBodyBytes))
+	}
+	if limits.MaxTitleChars < limitsWarnTitleChars {
+		small = append(small, fmt.Sprintf("max_title_chars %d < %d", limits.MaxTitleChars, limitsWarnTitleChars))
+	}
+	if limits.MaxMetadataBytes < limitsWarnMetadataBytes {
+		small = append(small, fmt.Sprintf("max_metadata_bytes %d < %d", limits.MaxMetadataBytes, limitsWarnMetadataBytes))
+	}
+	if len(small) > 0 {
+		return DoctorCheck{
+			Name:    "limits",
+			Status:  doctorWarn,
+			Code:    "limits-small",
+			Message: message + "; very small limits reject ordinary writes: " + strings.Join(small, ", "),
+		}
+	}
+	return DoctorCheck{Name: "limits", Status: doctorOK, Message: message}
+}
+
+// Compatibility floors of doctor's limits check: below them a limit is valid
+// but likely to reject a normal note or decision.
+const (
+	limitsWarnBodyBytes     = 1024
+	limitsWarnTitleChars    = 16
+	limitsWarnMetadataBytes = 128
+)
+
+// doctorRecordLimits reports legacy records that exceed the configured limits.
+// It is report-only: doctor never rewrites a record body, and --fix leaves
+// these findings untouched. The owner either shrinks the record by hand or
+// raises the limit in brain.yaml.
+func (a *App) doctorRecordLimits(ctx context.Context) DoctorCheck {
+	if a.deps.Store == nil || a.cfg.Mode == config.ModeServer {
+		return DoctorCheck{Name: "record-limits", Status: doctorOK, Message: "not checked in this mode"}
+	}
+	projects, err := a.deps.Store.ListProjects(ctx)
+	if err != nil {
+		return DoctorCheck{Name: "record-limits", Status: doctorFail, Message: err.Error()}
+	}
+	limits := a.cfg.EffectiveLimits()
+	checked, oversized := 0, 0
+	listed := make([]string, 0, maxListedProblems)
+	for _, project := range projects {
+		records, err := a.projectRecords(ctx, project.ID)
+		if err != nil {
+			return DoctorCheck{Name: "record-limits", Status: doctorFail, Message: project.ID + ": " + err.Error()}
+		}
+		for _, record := range records {
+			checked++
+			violations := limitViolations(limits, recordWriteContent(record))
+			if len(violations) == 0 {
+				continue
+			}
+			oversized++
+			if len(listed) < maxListedProblems {
+				details := make([]string, 0, len(violations))
+				for _, violation := range violations {
+					details = append(details, violation.Error())
+				}
+				listed = append(listed, project.ID+"/"+record.Summary().ID+": "+strings.Join(details, "; "))
+			}
+		}
+	}
+	if oversized == 0 {
+		return DoctorCheck{Name: "record-limits", Status: doctorOK, Message: fmt.Sprintf("%d records fit the configured limits", checked)}
+	}
+	more := ""
+	if oversized > len(listed) {
+		more = fmt.Sprintf(", … %d more", oversized-len(listed))
+	}
+	return DoctorCheck{
+		Name:   "record-limits",
+		Status: doctorWarn,
+		Code:   "record-limits",
+		Message: fmt.Sprintf("%d of %d records exceed the configured limits (legacy data, report only; doctor rewrites nothing): %s%s; shrink the record by hand or raise the limit in brain.yaml",
+			oversized, checked, strings.Join(listed, "; "), more),
+	}
+}
 
 // doctorRecords reports record files that listing skips (damaged, empty or
 // quarantined), which would otherwise be invisible to every command.

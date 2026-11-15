@@ -34,9 +34,19 @@ func TestSearchCallsServerEndpoint(t *testing.T) {
 		t.Fatalf("Search: %v", err)
 	}
 	want := []ports.Hit{{ID: "note-1", ProjectID: "demo", Kind: "note", Title: "Release", Snippet: "ship it", Score: 1.25}}
-	if len(hits) != len(want) || hits[0] != want[0] {
+	if len(hits) != len(want) || !equalHits(hits[0], want[0]) {
 		t.Fatalf("hits = %+v, want %+v", hits, want)
 	}
+}
+
+// equalHits compares hits field by field: ports.Hit carries slices and cannot
+// be compared with == any more.
+func equalHits(got, want ports.Hit) bool {
+	if got.ID != want.ID || got.ProjectID != want.ProjectID || got.Kind != want.Kind ||
+		got.Title != want.Title || got.Snippet != want.Snippet || got.Score != want.Score {
+		return false
+	}
+	return len(got.MatchReasons) == len(want.MatchReasons)
 }
 
 func TestSearchOmitsEmptyOptionalParameters(t *testing.T) {

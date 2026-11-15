@@ -56,6 +56,7 @@ func runPromote(args []string, stdout, stderr io.Writer) int {
 	dismiss := fs.Bool("dismiss", false, "dismiss the proposal instead of promoting it")
 	force := fs.Bool("force", false, "promote a stale or orphaned proposal anyway")
 	yes := fs.Bool("yes", false, "confirm promotion from a local-only source")
+	allowProtected := fs.Bool("allow-protected", false, "write even though limits.protected_projects or limits.protected_globs protect the project")
 	dryRun := fs.Bool("dry-run", false, "show what would happen without writing")
 	asJSON := fs.Bool("json", false, "print JSON")
 	cfgPath := configFlag(fs)
@@ -101,15 +102,16 @@ func runPromote(args []string, stdout, stderr io.Writer) int {
 	defer func() { _ = runtime.Close() }()
 
 	result, err := runtime.App.Promote(context.Background(), app.PromoteOptions{
-		ProposalID: proposalID,
-		ProjectID:  strings.TrimSpace(*project),
-		As:         domain.ProposalKind(strings.TrimSpace(*as)),
-		Status:     domain.DecisionStatus(strings.TrimSpace(*status)),
-		Title:      *title,
-		Dismiss:    *dismiss,
-		Force:      *force,
-		Yes:        *yes,
-		DryRun:     *dryRun,
+		ProposalID:     proposalID,
+		ProjectID:      strings.TrimSpace(*project),
+		As:             domain.ProposalKind(strings.TrimSpace(*as)),
+		Status:         domain.DecisionStatus(strings.TrimSpace(*status)),
+		Title:          *title,
+		Dismiss:        *dismiss,
+		Force:          *force,
+		Yes:            *yes,
+		AllowProtected: *allowProtected,
+		DryRun:         *dryRun,
 	})
 	if err != nil {
 		if errors.Is(err, domain.ErrValidation) {

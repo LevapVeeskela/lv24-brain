@@ -32,6 +32,9 @@ type PromoteOptions struct {
 	Force bool
 	// Yes confirms promotion from a local-only source.
 	Yes bool
+	// AllowProtected overrides the protected project and glob refusal. A
+	// protected project can still be dismissed: dismissal writes no record.
+	AllowProtected bool
 	// DryRun reports what would happen without writing a record or status.
 	DryRun bool
 }
@@ -215,13 +218,14 @@ func (a *App) promoteLocked(ctx context.Context, opts PromoteOptions, proposal d
 	switch targetKind {
 	case domain.ProposalDecision:
 		result, err := a.Decision(ctx, DecisionInput{
-			ProjectID:  proposal.ProjectID,
-			Title:      title,
-			Status:     status,
-			Context:    promoteDecisionContext(proposal),
-			Evidence:   promoteEvidence(proposal),
-			Source:     source,
-			Provenance: provenance,
+			ProjectID:      proposal.ProjectID,
+			Title:          title,
+			Status:         status,
+			Context:        promoteDecisionContext(proposal),
+			Evidence:       promoteEvidence(proposal),
+			Source:         source,
+			Provenance:     provenance,
+			AllowProtected: opts.AllowProtected,
 		})
 		if err != nil {
 			return PromoteResult{}, fmt.Errorf("create decision from proposal %s: %w", proposal.ID, err)
@@ -229,13 +233,14 @@ func (a *App) promoteLocked(ctx context.Context, opts PromoteOptions, proposal d
 		planned = PromoteRecord{Kind: targetKind, ID: result.Decision.ID, Title: result.Decision.Title}
 	case domain.ProposalAttempt:
 		result, err := a.Attempt(ctx, AttemptInput{
-			ProjectID:  proposal.ProjectID,
-			Title:      title,
-			Hypothesis: promoteAttemptHypothesis(proposal),
-			Result:     proposalSection(proposal, "Result"),
-			Reason:     promoteAttemptReason(proposal),
-			Source:     source,
-			Provenance: provenance,
+			ProjectID:      proposal.ProjectID,
+			Title:          title,
+			Hypothesis:     promoteAttemptHypothesis(proposal),
+			Result:         proposalSection(proposal, "Result"),
+			Reason:         promoteAttemptReason(proposal),
+			Source:         source,
+			Provenance:     provenance,
+			AllowProtected: opts.AllowProtected,
 		})
 		if err != nil {
 			return PromoteResult{}, fmt.Errorf("create attempt from proposal %s: %w", proposal.ID, err)
@@ -247,11 +252,12 @@ func (a *App) promoteLocked(ctx context.Context, opts PromoteOptions, proposal d
 			body = title
 		}
 		result, err := a.Note(ctx, NoteInput{
-			ProjectID:  proposal.ProjectID,
-			Title:      title,
-			Body:       body,
-			Source:     source,
-			Provenance: provenance,
+			ProjectID:      proposal.ProjectID,
+			Title:          title,
+			Body:           body,
+			Source:         source,
+			Provenance:     provenance,
+			AllowProtected: opts.AllowProtected,
 		})
 		if err != nil {
 			return PromoteResult{}, fmt.Errorf("create note from proposal %s: %w", proposal.ID, err)

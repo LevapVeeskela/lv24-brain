@@ -273,6 +273,9 @@ func (a *App) updateDecision(ctx context.Context, projectID, id string, change f
 	if err := change(&decision); err != nil {
 		return domain.Decision{}, err
 	}
+	if err := a.enforceUpdateLimits(decision.ProjectID, ports.RecordDecision, decision.ID, decisionWriteContent(decision)); err != nil {
+		return domain.Decision{}, err
+	}
 	decision.UpdatedAt = a.now().UTC()
 	if err := editor.UpdateDecision(ctx, decision); err != nil {
 		return domain.Decision{}, err
