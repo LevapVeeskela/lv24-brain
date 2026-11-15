@@ -239,16 +239,21 @@ func parseNotesBody(body string, defaultDate time.Time) ([]domain.Note, error) {
 			if err != nil {
 				return nil, err
 			}
+			review, err := reviewFromFrontmatter(metadata.reviewFrontmatter)
+			if err != nil {
+				return nil, err
+			}
 			notes = append(notes, domain.Note{
-				ID:         id,
-				Title:      title,
-				Body:       strings.TrimRight(strings.Join(lines[start:i], "\n"), "\n"),
-				Tags:       nonNilStrings(metadata.Tags),
-				Permalink:  metadata.Permalink,
-				Source:     metadata.Source,
-				Provenance: provenanceFromFrontmatter(metadata.provenanceFrontmatter),
-				Validity:   validity,
-				CreatedAt:  metadata.CreatedAt.UTC(),
+				ID:             id,
+				Title:          title,
+				Body:           strings.TrimRight(strings.Join(lines[start:i], "\n"), "\n"),
+				Tags:           nonNilStrings(metadata.Tags),
+				Permalink:      metadata.Permalink,
+				Source:         metadata.Source,
+				Provenance:     provenanceFromFrontmatter(metadata.provenanceFrontmatter),
+				Validity:       validity,
+				ReviewSchedule: review,
+				CreatedAt:      metadata.CreatedAt.UTC(),
 			})
 			continue
 		}
@@ -355,22 +360,27 @@ func readDecisionFile(path string) (domain.Decision, error) {
 	if err != nil {
 		return domain.Decision{}, fmt.Errorf("parse %s: %w", path, err)
 	}
+	review, err := reviewFromFrontmatter(frontmatter.reviewFrontmatter)
+	if err != nil {
+		return domain.Decision{}, fmt.Errorf("parse %s: %w", path, err)
+	}
 	return domain.Decision{
-		ID:           frontmatter.ID,
-		ProjectID:    frontmatter.ProjectID,
-		Title:        title,
-		Status:       status,
-		Context:      contextText,
-		Alternatives: alternatives,
-		Consequences: consequences,
-		Evidence:     evidence,
-		Paths:        paths,
-		Permalink:    frontmatter.Permalink,
-		Source:       source,
-		Provenance:   provenanceFromFrontmatter(frontmatter.provenanceFrontmatter),
-		Validity:     validity,
-		CreatedAt:    frontmatter.CreatedAt.UTC(),
-		UpdatedAt:    frontmatter.UpdatedAt.UTC(),
+		ID:             frontmatter.ID,
+		ProjectID:      frontmatter.ProjectID,
+		Title:          title,
+		Status:         status,
+		Context:        contextText,
+		Alternatives:   alternatives,
+		Consequences:   consequences,
+		Evidence:       evidence,
+		Paths:          paths,
+		Permalink:      frontmatter.Permalink,
+		Source:         source,
+		Provenance:     provenanceFromFrontmatter(frontmatter.provenanceFrontmatter),
+		Validity:       validity,
+		ReviewSchedule: review,
+		CreatedAt:      frontmatter.CreatedAt.UTC(),
+		UpdatedAt:      frontmatter.UpdatedAt.UTC(),
 	}, nil
 }
 
@@ -402,19 +412,24 @@ func readAttemptFile(path string) (domain.Attempt, error) {
 	if err != nil {
 		return domain.Attempt{}, fmt.Errorf("parse %s: %w", path, err)
 	}
+	review, err := reviewFromFrontmatter(frontmatter.reviewFrontmatter)
+	if err != nil {
+		return domain.Attempt{}, fmt.Errorf("parse %s: %w", path, err)
+	}
 	return domain.Attempt{
-		ID:         frontmatter.ID,
-		ProjectID:  frontmatter.ProjectID,
-		Title:      title,
-		Hypothesis: hypothesis,
-		Result:     result,
-		Reason:     reason,
-		Permalink:  frontmatter.Permalink,
-		Source:     source,
-		Provenance: provenanceFromFrontmatter(frontmatter.provenanceFrontmatter),
-		Validity:   validity,
-		CreatedAt:  frontmatter.CreatedAt.UTC(),
-		UpdatedAt:  frontmatter.UpdatedAt.UTC(),
+		ID:             frontmatter.ID,
+		ProjectID:      frontmatter.ProjectID,
+		Title:          title,
+		Hypothesis:     hypothesis,
+		Result:         result,
+		Reason:         reason,
+		Permalink:      frontmatter.Permalink,
+		Source:         source,
+		Provenance:     provenanceFromFrontmatter(frontmatter.provenanceFrontmatter),
+		Validity:       validity,
+		ReviewSchedule: review,
+		CreatedAt:      frontmatter.CreatedAt.UTC(),
+		UpdatedAt:      frontmatter.UpdatedAt.UTC(),
 	}, nil
 }
 
@@ -436,15 +451,20 @@ func readHandoffFile(path string) (domain.Handoff, error) {
 	if err != nil {
 		return domain.Handoff{}, fmt.Errorf("parse %s: %w", path, err)
 	}
+	review, err := reviewFromFrontmatter(frontmatter.reviewFrontmatter)
+	if err != nil {
+		return domain.Handoff{}, fmt.Errorf("parse %s: %w", path, err)
+	}
 	return domain.Handoff{
-		ID:         frontmatter.ID,
-		ProjectID:  frontmatter.ProjectID,
-		Summary:    summary,
-		GitContext: gitContext,
-		NextAction: nextAction,
-		Permalink:  frontmatter.Permalink,
-		Provenance: provenanceFromFrontmatter(frontmatter.provenanceFrontmatter),
-		Validity:   validity,
-		CreatedAt:  frontmatter.CreatedAt.UTC(),
+		ID:             frontmatter.ID,
+		ProjectID:      frontmatter.ProjectID,
+		Summary:        summary,
+		GitContext:     gitContext,
+		NextAction:     nextAction,
+		Permalink:      frontmatter.Permalink,
+		Provenance:     provenanceFromFrontmatter(frontmatter.provenanceFrontmatter),
+		Validity:       validity,
+		ReviewSchedule: review,
+		CreatedAt:      frontmatter.CreatedAt.UTC(),
 	}, nil
 }

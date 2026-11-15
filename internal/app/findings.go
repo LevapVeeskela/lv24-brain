@@ -19,6 +19,31 @@ import (
 // FindingKind names one review heuristic.
 type FindingKind string
 
+// Severity ranks how much a finding needs attention. It is the only ordering a
+// caller may branch on: error findings describe knowledge that may be wrong,
+// warn findings describe knowledge that may be stale, and info findings are
+// curation hints.
+type Severity string
+
+const (
+	// SeverityError marks a finding that can make context wrong.
+	SeverityError Severity = "error"
+	// SeverityWarn marks a finding that can make context stale.
+	SeverityWarn Severity = "warn"
+	// SeverityInfo marks a curation hint.
+	SeverityInfo Severity = "info"
+)
+
+// Valid reports whether s is a documented severity.
+func (s Severity) Valid() bool {
+	switch s {
+	case SeverityError, SeverityWarn, SeverityInfo:
+		return true
+	default:
+		return false
+	}
+}
+
 // Review heuristics. Only next-behind-handoff and question-answered carry a
 // fix; the others need a human or agent decision.
 const (
@@ -30,6 +55,7 @@ const (
 	FindingStateBehindCommits   FindingKind = "state-behind-commits"
 	FindingDecisionCodeChanged  FindingKind = "decision-code-changed"
 	FindingQuarantined          FindingKind = "quarantined"
+	FindingReviewOverdue        FindingKind = "review-overdue"
 )
 
 var findingKinds = []FindingKind{
@@ -37,6 +63,121 @@ var findingKinds = []FindingKind{
 	FindingDecisionContradicted, FindingStateExpired, FindingStateBehindCommits,
 	FindingDecisionCodeChanged, FindingBrokenLink, FindingNearDuplicate,
 	FindingQuarantined, FindingSupersessionGap, FindingStaleSuperseded,
+	FindingProposalStale, FindingProposalOrphan, FindingProposalContradicted,
+	FindingReviewOverdue,
+}
+
+// findingSpec is the review metadata of one finding kind: how much it matters,
+// why it matters and what to do about it. It is shared by every producer of the
+// kind, so a finding always explains itself even when the producer only knows
+// the ids.
+type findingSpec struct {
+	Severity Severity
+	// Why is one sentence about the risk of leaving the finding alone.
+	Why string
+	// Next is the safe next action for a person or agent.
+	Next string
+	// Confirm is what the reviewer must verify before acting.
+	Confirm string
+}
+
+var findingSpecs = map[FindingKind]findingSpec{
+	FindingQuarantined: {
+		Severity: SeverityError,
+		Why:      "unreviewed external text is excluded from trusted context, so the brain cannot use what it already stores.",
+		Next:     "read the record, then clear it with `brain record review <id>` (or `brain record review --all`).",
+		Confirm:  "the record says what its source says and is safe to include in context.",
+	},
+	FindingStateExpired: {
+		Severity: SeverityWarn,
+		Why:      "the project state stopped being declared current, so its goal and next action may describe an older situation.",
+		Next:     "confirm the state, then extend it with `brain state set --fresh-for 14d`.",
+		Confirm:  "the goal, blockers and next action still match the work.",
+	},
+	FindingStateBehindCommits: {
+		Severity: SeverityWarn,
+		Why:      "commits landed after the last state update, so the state may not describe HEAD.",
+		Next:     "update it with `brain state set --goal ... --next ...`.",
+		Confirm:  "the goal and next action still describe the latest commits.",
+	},
+	FindingNextBehindHandoff: {
+		Severity: SeverityWarn,
+		Why:      "a later handoff names a different next action, so the state points at older work.",
+		Next:     "run `brain review --fix` to adopt the handoff's next action.",
+		Confirm:  "the handoff's next action is the work that should continue.",
+	},
+	FindingNextMaybeDone: {
+		Severity: SeverityInfo,
+		Why:      "a commit message matches the next action, so the state may already be done.",
+		Next:     "confirm the work landed, then set the following step with `brain state set --next ...`.",
+		Confirm:  "the commit completes the next action rather than part of it.",
+	},
+	FindingQuestionAnswered: {
+		Severity: SeverityInfo,
+		Why:      "a decision or a later note covers the open question, so the question list is stale.",
+		Next:     "run `brain review --fix` to remove the question (kept in a review note).",
+		Confirm:  "the evidence answers the whole question.",
+	},
+	FindingDecisionContradicted: {
+		Severity: SeverityError,
+		Why:      "a later failed attempt covers the same ground, so the decision may no longer hold.",
+		Next:     "supersede it with `brain record supersede <old> --by <new>` or reaffirm it.",
+		Confirm:  "the attempt's failure applies to this decision.",
+	},
+	FindingDecisionCodeChanged: {
+		Severity: SeverityWarn,
+		Why:      "files the decision governs changed, so the decision may describe code that no longer exists.",
+		Next:     "re-read the decision and supersede or reaffirm it.",
+		Confirm:  "the rule still holds for the changed files.",
+	},
+	FindingBrokenLink: {
+		Severity: SeverityInfo,
+		Why:      "a [[id]] reference names a record that does not exist, so the link is dead.",
+		Next:     "fix the [[id]] text or restore the referenced record.",
+		Confirm:  "the intended target id.",
+	},
+	FindingNearDuplicate: {
+		Severity: SeverityWarn,
+		Why:      "two records describe the same thing, so search and context show it twice and the copies can diverge.",
+		Next:     "keep one: `brain record trash <older> --yes` (reversible) or supersede it.",
+		Confirm:  "which record is authoritative.",
+	},
+	FindingSupersessionGap: {
+		Severity: SeverityInfo,
+		Why:      "a newer record reads like a replacement but is not linked, so both look current.",
+		Next:     "if the newer one replaces it, run `brain record supersede <older> --by <newer>`.",
+		Confirm:  "the newer record really replaces the older claim.",
+	},
+	FindingStaleSuperseded: {
+		Severity: SeverityWarn,
+		Why:      "a record expired without naming a replacement, so nothing current covers the claim.",
+		Next:     "supersede it or clear its valid_to.",
+		Confirm:  "whether a replacement exists.",
+	},
+	FindingProposalStale: {
+		Severity: SeverityInfo,
+		Why:      "the proposal no longer matches its source, so promoting it would record outdated text.",
+		Next:     "confirm it with `brain promote <id> --force` or dismiss it.",
+		Confirm:  "the source still supports the candidate.",
+	},
+	FindingProposalOrphan: {
+		Severity: SeverityWarn,
+		Why:      "the proposal's source is gone, so its evidence cannot be checked.",
+		Next:     "dismiss it with `brain promote <id> --dismiss`.",
+		Confirm:  "whether the claim stands without the source.",
+	},
+	FindingProposalContradicted: {
+		Severity: SeverityWarn,
+		Why:      "a later decision or failed attempt covers the candidate, so promoting it may add a stale claim.",
+		Next:     "confirm it with `brain promote <id> --force` or dismiss it.",
+		Confirm:  "the candidate still adds something the later record does not.",
+	},
+	FindingReviewOverdue: {
+		Severity: SeverityWarn,
+		Why:      "a review date is a prompt to re-check, and these claims have not been re-checked since it passed.",
+		Next:     "run `brain review --due`, then `brain record review <id> --review-after 90d` or supersede the record.",
+		Confirm:  "each listed record still states what the project believes.",
+	},
 }
 
 const (
@@ -54,15 +195,86 @@ const (
 
 // Finding is one piece of the brain that looks stale or contradictory.
 type Finding struct {
-	Kind     FindingKind
-	Message  string
+	Kind FindingKind
+	// Severity is error, warn or info; see the type documentation.
+	Severity Severity
+	// Message describes what was observed, with the ids a caller needs.
+	Message string
+	// Why is one sentence about the risk of leaving it alone.
+	Why string
+	// Next is the safe next action for a person or agent.
+	Next string
+	// Confirm is what the reviewer must verify before acting.
+	Confirm string
+	// Evidence is the record id, commit or text that supports the finding.
 	Evidence string
-	Fixable  bool
-	Fix      string
+	// Fixable reports whether `brain review --fix` repairs the finding.
+	Fixable bool
+	// Fix describes that repair.
+	Fix string
 
 	// Applied by FixFindings.
 	nextAction   *string
 	dropQuestion string
+}
+
+// newFinding builds a finding with the review metadata of its kind.
+func newFinding(kind FindingKind, message, evidence string) Finding {
+	spec := findingSpecs[kind]
+	return Finding{
+		Kind: kind, Severity: spec.Severity, Message: message,
+		Why: spec.Why, Next: spec.Next, Confirm: spec.Confirm, Evidence: evidence,
+	}
+}
+
+// withFix marks a finding as repairable by `brain review --fix`.
+func (f Finding) withFix(fix string) Finding {
+	f.Fixable = true
+	f.Fix = fix
+	return f
+}
+
+// withFixHint records the suggested repair without claiming `brain review
+// --fix` applies it; the suggestion needs a person or agent.
+func (f Finding) withFixHint(fix string) Finding {
+	f.Fix = fix
+	return f
+}
+
+// withSeverity overrides the kind's default severity, for findings whose
+// urgency depends on their age.
+func (f Finding) withSeverity(severity Severity) Finding {
+	f.Severity = severity
+	return f
+}
+
+// finalizeFinding fills review metadata a producer left empty, so no caller has
+// to branch on an empty why or next.
+func finalizeFinding(f Finding) Finding {
+	spec := findingSpecs[f.Kind]
+	if !f.Severity.Valid() {
+		f.Severity = spec.Severity
+	}
+	if !f.Severity.Valid() {
+		f.Severity = SeverityWarn
+	}
+	if f.Why == "" {
+		f.Why = spec.Why
+	}
+	if f.Next == "" {
+		f.Next = spec.Next
+	}
+	if f.Confirm == "" {
+		f.Confirm = spec.Confirm
+	}
+	return f
+}
+
+func finalizeFindings(findings []Finding) []Finding {
+	for i, finding := range findings {
+		findings[i] = finalizeFinding(finding)
+	}
+	return findings
 }
 
 // FixResult lists the applied fixes and the resulting state.
@@ -131,10 +343,11 @@ func (a *App) Findings(ctx context.Context, projectID string) ([]Finding, error)
 	findings = append(findings, a.linkFindings(ctx, in)...)
 	findings = append(findings, supersessionGapFindings(in)...)
 	findings = append(findings, staleSupersededFindings(in, now)...)
+	findings = append(findings, a.reviewOverdueFindings(in, now)...)
 	// Last, so the shorter lists (context, session start) show the state
 	// findings first.
 	findings = append(findings, nearDuplicateFindings(in)...)
-	return findings, nil
+	return finalizeFindings(findings), nil
 }
 
 // FixFindings recomputes the findings and applies the fixable ones (kinds
@@ -214,6 +427,9 @@ func (a *App) reviewInputs(ctx context.Context, projectID string) (reviewInputs,
 	if in.state, err = a.deps.Store.GetState(ctx, project.ID); err != nil && !errors.Is(err, domain.ErrNotFound) {
 		return reviewInputs{}, err
 	}
+	// A project without a state file still reviews: the id anchors the state
+	// section and the proposal lookup.
+	in.state.ProjectID = project.ID
 	if in.handoffs, err = a.listHandoffs(ctx, project.ID); err != nil {
 		return reviewInputs{}, err
 	}
@@ -242,11 +458,9 @@ func quarantinedFindings(in reviewInputs) []Finding {
 	if len(ids) == 0 {
 		return nil
 	}
-	return []Finding{{
-		Kind:     FindingQuarantined,
-		Message:  fmt.Sprintf("%d quarantined records are excluded from context until reviewed: %s; clear one with `brain record review <id>` or all with `brain record review --all`", len(ids), quarantineIDSample(ids)),
-		Evidence: strings.Join(ids, ", "),
-	}}
+	return []Finding{newFinding(FindingQuarantined,
+		fmt.Sprintf("%d quarantined records are excluded from context until reviewed: %s; clear one with `brain record review <id>` or all with `brain record review --all`", len(ids), quarantineIDSample(ids)),
+		strings.Join(ids, ", "))}
 }
 
 // quarantineIDSample lists at most maxListedItems ids in a finding message; the
@@ -261,17 +475,13 @@ func quarantineIDSample(ids []string) string {
 func stateFindings(in reviewInputs, now time.Time) []Finding {
 	var findings []Finding
 	if !in.state.FreshUntil.IsZero() && in.state.FreshUntil.Before(now) {
-		findings = append(findings, Finding{
-			Kind:    FindingStateExpired,
-			Message: fmt.Sprintf("state was marked current until %s; confirm it with `brain state set --fresh-for`", in.state.FreshUntil.UTC().Format(time.RFC3339)),
-		})
+		findings = append(findings, newFinding(FindingStateExpired,
+			fmt.Sprintf("state was marked current until %s; confirm it with `brain state set --fresh-for`", in.state.FreshUntil.UTC().Format(time.RFC3339)), ""))
 	}
 	if len(in.commits) >= staleCommitThreshold {
-		findings = append(findings, Finding{
-			Kind:     FindingStateBehindCommits,
-			Message:  fmt.Sprintf("%d commits since the last state update; goal, active and next action may be behind", len(in.commits)),
-			Evidence: "commit " + in.commits[0].Fields["head"],
-		})
+		findings = append(findings, newFinding(FindingStateBehindCommits,
+			fmt.Sprintf("%d commits since the last state update; goal, active and next action may be behind", len(in.commits)),
+			"commit "+in.commits[0].Fields["head"]))
 	}
 	return findings
 }
@@ -287,14 +497,11 @@ func nextActionFindings(in reviewInputs) []Finding {
 		if handoffNext == "" || strings.EqualFold(handoffNext, next) {
 			continue
 		}
-		findings = append(findings, Finding{
-			Kind:       FindingNextBehindHandoff,
-			Message:    fmt.Sprintf("a later handoff names a different next action: %q", SummarizeLine(handoffNext, 120)),
-			Evidence:   handoff.ID,
-			Fixable:    true,
-			Fix:        "set next_action to " + quote(SummarizeLine(handoffNext, 120)),
-			nextAction: &handoffNext,
-		})
+		finding := newFinding(FindingNextBehindHandoff,
+			fmt.Sprintf("a later handoff names a different next action: %q", SummarizeLine(handoffNext, 120)),
+			handoff.ID).withFix("set next_action to " + quote(SummarizeLine(handoffNext, 120)))
+		finding.nextAction = &handoffNext
+		findings = append(findings, finding)
 		break
 	}
 	if next == "" {
@@ -303,11 +510,9 @@ func nextActionFindings(in reviewInputs) []Finding {
 	for _, commit := range in.commits {
 		subject := commit.Fields["subject"]
 		if similar(next, subject) {
-			findings = append(findings, Finding{
-				Kind:     FindingNextMaybeDone,
-				Message:  fmt.Sprintf("next action looks done by commit %q", SummarizeLine(subject, 100)),
-				Evidence: "commit " + commit.Fields["head"],
-			})
+			findings = append(findings, newFinding(FindingNextMaybeDone,
+				fmt.Sprintf("next action looks done by commit %q", SummarizeLine(subject, 100)),
+				"commit "+commit.Fields["head"]))
 			return findings
 		}
 	}
@@ -318,14 +523,11 @@ func questionFindings(in reviewInputs) []Finding {
 	var findings []Finding
 	for _, question := range in.state.OpenQuestions {
 		if evidence, ok := answerFor(question, in); ok {
-			findings = append(findings, Finding{
-				Kind:         FindingQuestionAnswered,
-				Message:      fmt.Sprintf("open question %q looks answered", SummarizeLine(question, 100)),
-				Evidence:     evidence,
-				Fixable:      true,
-				Fix:          "remove the open question (kept in a review note)",
-				dropQuestion: question,
-			})
+			finding := newFinding(FindingQuestionAnswered,
+				fmt.Sprintf("open question %q looks answered", SummarizeLine(question, 100)),
+				evidence).withFix("remove the open question (kept in a review note)")
+			finding.dropQuestion = question
+			findings = append(findings, finding)
 		}
 	}
 	return findings
@@ -360,11 +562,9 @@ func decisionFindings(in reviewInputs) []Finding {
 			if !attempt.CreatedAt.After(decision.CreatedAt) || !similar(decision.Title, attempt.Title+" "+attempt.Hypothesis) {
 				continue
 			}
-			findings = append(findings, Finding{
-				Kind:     FindingDecisionContradicted,
-				Message:  fmt.Sprintf("decision %q has a later failed attempt %q; supersede or confirm it", SummarizeLine(decision.Title, 80), SummarizeLine(attempt.Title, 80)),
-				Evidence: attempt.ID,
-			})
+			findings = append(findings, newFinding(FindingDecisionContradicted,
+				fmt.Sprintf("decision %q has a later failed attempt %q; supersede or confirm it", SummarizeLine(decision.Title, 80), SummarizeLine(attempt.Title, 80)),
+				attempt.ID))
 			break
 		}
 	}
@@ -392,12 +592,10 @@ func decisionCodeFindings(ctx context.Context, in reviewInputs) []Finding {
 			// Not a git checkout, git missing or timed out: nothing to report.
 			continue
 		}
-		findings = append(findings, Finding{
-			Kind: FindingDecisionCodeChanged,
-			Message: fmt.Sprintf("decision %q governs %s; %d commits changed them since %s — confirm it still holds or supersede it",
+		findings = append(findings, newFinding(FindingDecisionCodeChanged,
+			fmt.Sprintf("decision %q governs %s; %d commits changed them since %s — confirm it still holds or supersede it",
 				SummarizeLine(decision.Title, 80), strings.Join(decision.Paths, ", "), len(hashes), decision.UpdatedAt.UTC().Format("2006-01-02")),
-			Evidence: hashes[0],
-		})
+			hashes[0]))
 	}
 	return findings
 }

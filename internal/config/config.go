@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"time"
 
 	"github.com/levapveeskela/lv24-brain/internal/domain"
 	"gopkg.in/yaml.v3"
@@ -45,6 +46,9 @@ type BrainConfig struct {
 	// Omitted and zero values select the defaults; the effective values are
 	// never below one, so a cap cannot be disabled by setting zero.
 	Limits LimitsConfig `yaml:"limits,omitempty"`
+	// Review sets the per-kind review cadence. An omitted block keeps the
+	// documented defaults; nothing expires, a due record is only reported.
+	Review ReviewConfig `yaml:"review,omitempty"`
 	// RetiredPaths lists retired checkouts of this workspace. The engine ships
 	// no defaults: selection redirects to ReplacedBy and registration is
 	// refused, but nothing on disk is touched.
@@ -184,6 +188,126 @@ func normalizePatterns(values []string) []string {
 	return out
 }
 
+// ReviewConfig is the `review` block of brain.yaml: how long a record of each
+// kind stays confidently current before review lists it as due. Dates are
+// written to the record's frontmatter at write time; changing the block later
+// affects new records and the default applied to legacy records without one.
+type ReviewConfig struct {
+	Defaults ReviewDefaults `yaml:"defaults,omitempty"`
+}
+
+// ReviewDefaults holds one review window per record kind. Values accept a
+// whole number of days (90d), weeks (2w) or a Go duration (2160h). Empty
+// selects the documented default.
+type ReviewDefaults struct {
+	Decision string `yaml:"decision,omitempty"`
+	Attempt  string `yaml:"attempt,omitempty"`
+	Note     string `yaml:"note,omitempty"`
+	Handoff  string `yaml:"handoff,omitempty"`
+	State    string `yaml:"state,omitempty"`
+	Proposal string `yaml:"proposal,omitempty"`
+}
+
+// Default review windows, rendered as they appear in brain.yaml.
+const (
+	DefaultReviewDecision = "90d"
+	DefaultReviewAttempt  = "60d"
+	DefaultReviewNote     = "180d"
+	DefaultReviewHandoff  = "90d"
+	DefaultReviewState    = "14d"
+	DefaultReviewProposal = "14d"
+)
+
+// ReviewWindows is the parsed review cadence: one duration per kind. A zero
+// duration means that kind has no review date.
+type ReviewWindows struct {
+	Decision time.Duration
+	Attempt  time.Duration
+	Note     time.Duration
+	Handoff  time.Duration
+	State    time.Duration
+	Proposal time.Duration
+}
+
+// IsZero lets yaml omit a review block that was never configured.
+func (r ReviewConfig) IsZero() bool { return r.Defaults.IsZero() }
+
+// IsZero lets yaml omit a defaults block whose keys were never set.
+func (d ReviewDefaults) IsZero() bool {
+	return d.Decision == "" && d.Attempt == "" && d.Note == "" && d.Handoff == "" && d.State == "" && d.Proposal == ""
+}
+
+// Effective resolves omitted windows to the documented defaults.
+func (d ReviewDefaults) Effective() ReviewDefaults {
+	out := ReviewDefaults{
+		Decision: firstNonEmpty(d.Decision, DefaultReviewDecision),
+		Attempt:  firstNonEmpty(d.Attempt, DefaultReviewAttempt),
+		Note:     firstNonEmpty(d.Note, DefaultReviewNote),
+		Handoff:  firstNonEmpty(d.Handoff, DefaultReviewHandoff),
+		State:    firstNonEmpty(d.State, DefaultReviewState),
+		Proposal: firstNonEmpty(d.Proposal, DefaultReviewProposal),
+	}
+	return out
+}
+
+// Windows parses the effective review windows. Validation already rejected
+// malformed values; a store that skipped Validate still gets the defaults for
+// a value that does not parse, never a hard failure at write time.
+func (d ReviewDefaults) Windows() ReviewWindows {
+	effective := d.Effective()
+	parse := func(value string, fallback time.Duration) time.Duration {
+		window, err := domain.ParseReviewWindow(value)
+		if err != nil {
+			return fallback
+		}
+		return window
+	}
+	return ReviewWindows{
+		Decision: parse(effective.Decision, domain.DefaultReviewDecision),
+		Attempt:  parse(effective.Attempt, domain.DefaultReviewAttempt),
+		Note:     parse(effective.Note, domain.DefaultReviewNote),
+		Handoff:  parse(effective.Handoff, domain.DefaultReviewHandoff),
+		State:    parse(effective.State, domain.DefaultReviewState),
+		Proposal: parse(effective.Proposal, domain.DefaultReviewProposal),
+	}
+}
+
+// Validate rejects malformed or non-positive review windows and names the key.
+func (d ReviewDefaults) Validate() error {
+	entries := []struct {
+		key   string
+		value string
+	}{
+		{"decision", d.Decision},
+		{"attempt", d.Attempt},
+		{"note", d.Note},
+		{"handoff", d.Handoff},
+		{"state", d.State},
+		{"proposal", d.Proposal},
+	}
+	for _, entry := range entries {
+		if strings.TrimSpace(entry.value) == "" {
+			continue
+		}
+		if _, err := domain.ParseReviewWindow(entry.value); err != nil {
+			return domain.NewValidationError("config.review.defaults."+entry.key, err.Error())
+		}
+	}
+	return nil
+}
+
+// EffectiveReviewWindows returns the review windows the engine applies.
+func (c BrainConfig) EffectiveReviewWindows() ReviewWindows {
+	return c.Review.Defaults.Windows()
+}
+
+func firstNonEmpty(value, fallback string) string {
+	if strings.TrimSpace(value) == "" {
+		return fallback
+	}
+	return value
+}
+
 // SecurityConfig controls how untrusted writes are treated.
 type SecurityConfig struct {
 	// QuarantineAgent makes agent writes through MCP unreviewed, so their text
@@ -310,6 +434,9 @@ func (c BrainConfig) Validate() error {
 		return domain.NewValidationError("config.min_engine_version", "must look like 1.2.3")
 	}
 	if err := c.Limits.Validate(); err != nil {
+		return err
+	}
+	if err := c.Review.Defaults.Validate(); err != nil {
 		return err
 	}
 	for _, entry := range c.RetiredPaths {

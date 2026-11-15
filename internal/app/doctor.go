@@ -48,6 +48,7 @@ func (a *App) Doctor(ctx context.Context, opts DoctorOptions) (DoctorReport, err
 	checks = append(checks, a.doctorQuarantine(ctx))
 	checks = append(checks, a.doctorValidity(ctx))
 	checks = append(checks, a.doctorDuplicates(ctx))
+	checks = append(checks, a.doctorReviews(ctx))
 	checks = append(checks, a.doctorGit(ctx))
 	checks = append(checks, a.doctorMergeDrivers(ctx, opts.Fix))
 	checks = append(checks, a.doctorRawZone(ctx)...)

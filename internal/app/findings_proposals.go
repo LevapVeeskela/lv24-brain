@@ -237,29 +237,23 @@ func (a *App) ProposalFindings(ctx context.Context, projectID string) ([]Finding
 		}
 		switch {
 		case health.Orphan:
-			findings = append(findings, Finding{
-				Kind: FindingProposalOrphan,
-				Message: fmt.Sprintf("proposal %q has no usable source: %s; dismiss it with `brain promote %s --dismiss`",
+			findings = append(findings, newFinding(FindingProposalOrphan,
+				fmt.Sprintf("proposal %q has no usable source: %s; dismiss it with `brain promote %s --dismiss`",
 					SummarizeLine(proposal.Title, 80), health.Reason, proposal.ID),
-				Evidence: proposal.ID,
-			})
+				proposal.ID))
 			continue
 		case health.Stale:
-			findings = append(findings, Finding{
-				Kind: FindingProposalStale,
-				Message: fmt.Sprintf("proposal %q is stale (%s); confirm it with `brain promote %s --force` or dismiss it",
+			findings = append(findings, newFinding(FindingProposalStale,
+				fmt.Sprintf("proposal %q is stale (%s); confirm it with `brain promote %s --force` or dismiss it",
 					SummarizeLine(proposal.Title, 80), health.Reason, proposal.ID),
-				Evidence: proposal.ID,
-			})
+				proposal.ID))
 			continue
 		}
 		if evidence := proposalContradiction(proposal, decisions, attempts); evidence != "" {
-			findings = append(findings, Finding{
-				Kind: FindingProposalContradicted,
-				Message: fmt.Sprintf("proposal %q matches a later decision or failed attempt; confirm it or dismiss it",
+			findings = append(findings, newFinding(FindingProposalContradicted,
+				fmt.Sprintf("proposal %q matches a later decision or failed attempt; confirm it or dismiss it",
 					SummarizeLine(proposal.Title, 80)),
-				Evidence: evidence,
-			})
+				evidence))
 		}
 	}
 	return findings, nil

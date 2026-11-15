@@ -53,9 +53,16 @@ type dupRecord struct {
 	title     string // normalized
 	body      string // normalized
 	text      string // normalized title + body
+	display   string // original title, for reports
 	shingles  map[string]struct{}
 	bodyShing map[string]struct{}
 	auto      bool
+	// fingerprint is the SHA-256 of text: the exact-duplicate key.
+	fingerprint string
+	// simhash is the 64-bit sketch of text, for the near-duplicate listing.
+	simhash uint64
+	// words is the normalized word count of text.
+	words int
 }
 
 // nearDuplicateFindings compares the live records of each kind with each other
@@ -75,7 +82,9 @@ func nearDuplicateFindings(in reviewInputs) []Finding {
 func noteDupRecords(notes []domain.Note) []dupRecord {
 	records := make([]dupRecord, 0, len(notes))
 	for _, note := range notes {
-		records = append(records, newDupRecord(note.ID, note.CreatedAt, note.Title, note.Body, false))
+		record := newDupRecord(note.ID, note.CreatedAt, note.Title, note.Body, false)
+		record.display = note.Title
+		records = append(records, record)
 	}
 	return records
 }
@@ -87,7 +96,9 @@ func decisionDupRecords(decisions []domain.Decision) []dupRecord {
 			continue
 		}
 		body := strings.Join([]string{decision.Context, strings.Join(decision.Alternatives, " "), strings.Join(decision.Consequences, " ")}, " ")
-		records = append(records, newDupRecord(decision.ID, decision.CreatedAt, decision.Title, body, false))
+		record := newDupRecord(decision.ID, decision.CreatedAt, decision.Title, body, false)
+		record.display = decision.Title
+		records = append(records, record)
 	}
 	return records
 }
@@ -96,7 +107,9 @@ func attemptDupRecords(attempts []domain.Attempt) []dupRecord {
 	records := make([]dupRecord, 0, len(attempts))
 	for _, attempt := range attempts {
 		body := strings.Join([]string{attempt.Hypothesis, attempt.Result, attempt.Reason}, " ")
-		records = append(records, newDupRecord(attempt.ID, attempt.CreatedAt, attempt.Title, body, false))
+		record := newDupRecord(attempt.ID, attempt.CreatedAt, attempt.Title, body, false)
+		record.display = attempt.Title
+		records = append(records, record)
 	}
 	return records
 }
@@ -108,11 +121,14 @@ func handoffDupRecords(handoffs []domain.Handoff) []dupRecord {
 	records := make([]dupRecord, 0, len(handoffs))
 	for _, handoff := range handoffs {
 		summary := strings.TrimSpace(handoff.Summary)
+		var record dupRecord
 		if strings.HasPrefix(summary, duplicateAutoPrefix) {
-			records = append(records, newDupRecord(handoff.ID, handoff.CreatedAt, "", strings.TrimPrefix(summary, duplicateAutoPrefix), true))
-			continue
+			record = newDupRecord(handoff.ID, handoff.CreatedAt, "", strings.TrimPrefix(summary, duplicateAutoPrefix), true)
+		} else {
+			record = newDupRecord(handoff.ID, handoff.CreatedAt, "", summary+" "+handoff.NextAction, false)
 		}
-		records = append(records, newDupRecord(handoff.ID, handoff.CreatedAt, "", summary+" "+handoff.NextAction, false))
+		record.display = SummarizeLine(summary, 80)
+		records = append(records, record)
 	}
 	return records
 }
@@ -123,6 +139,9 @@ func newDupRecord(id string, created time.Time, title, body string, auto bool) d
 	return dupRecord{
 		id: id, created: created, title: normTitle, body: normBody, text: text,
 		shingles: wordShingles(text), bodyShing: wordShingles(normBody), auto: auto,
+		fingerprint: domain.BodyFingerprint(text),
+		simhash:     domain.Simhash64(text),
+		words:       len(strings.Fields(text)),
 	}
 }
 
@@ -300,16 +319,14 @@ func duplicateFinding(kind string, older, newer dupRecord, score float64) Findin
 		fix = fmt.Sprintf("`brain record supersede %s --by %s`", older.id, newer.id)
 	}
 	percent := int(math.Floor(score * 100))
-	return Finding{
-		Kind:     FindingNearDuplicate,
-		Message:  fmt.Sprintf("%s %s and %s look like near-duplicates (%d%% similar)", kind, older.id, newer.id, percent),
-		Evidence: quote(SummarizeLine(newer.text, 80)),
-		Fix:      fix,
-	}
+	return newFinding(FindingNearDuplicate,
+		fmt.Sprintf("%s %s and %s look like near-duplicates (%d%% similar)", kind, older.id, newer.id, percent),
+		older.id+" and "+newer.id+": "+quote(SummarizeLine(newer.text, 80))).withFixHint(fix)
 }
 
-// doctorDuplicates counts near-duplicate records per project. It warns, never
-// fails: duplicates are a curation task (`brain review`), not damage.
+// doctorDuplicates counts exact and near-duplicate records per project. It
+// warns, never fails: duplicates are a curation task (`brain review`,
+// `brain duplicates`), not damage.
 func (a *App) doctorDuplicates(ctx context.Context) DoctorCheck {
 	if a.deps.Store == nil || a.cfg.Mode == config.ModeServer {
 		return DoctorCheck{Name: "duplicates", Status: doctorOK, Message: "not checked in this mode"}
@@ -319,24 +336,36 @@ func (a *App) doctorDuplicates(ctx context.Context) DoctorCheck {
 		return DoctorCheck{Name: "duplicates", Status: doctorFail, Message: err.Error()}
 	}
 	var counts []string
-	total := 0
+	exactRecords, nearRecords, clusters := 0, 0, 0
 	for _, project := range projects {
 		in, err := a.duplicateInputs(ctx, project.ID)
 		if err != nil {
 			return DoctorCheck{Name: "duplicates", Status: doctorFail, Message: project.ID + ": " + err.Error()}
 		}
-		if found := len(nearDuplicateFindings(in)); found > 0 {
-			counts = append(counts, fmt.Sprintf("%s %d", project.ID, found))
-			total += found
+		found := duplicatesOfProject(project.ID, in)
+		projectClusters := 0
+		for _, cluster := range found {
+			projectClusters++
+			if cluster.Reason == DuplicateReasonExact {
+				exactRecords += len(cluster.Members)
+				continue
+			}
+			nearRecords += len(cluster.Members)
+		}
+		if projectClusters > 0 {
+			counts = append(counts, fmt.Sprintf("%s %d", project.ID, projectClusters))
+			clusters += projectClusters
 		}
 	}
-	if total == 0 {
-		return DoctorCheck{Name: "duplicates", Status: doctorOK, Message: fmt.Sprintf("no near-duplicate records (%d projects)", len(projects))}
+	if clusters == 0 {
+		return DoctorCheck{Name: "duplicates", Status: doctorOK, Message: fmt.Sprintf("no exact or near-duplicate records (%d projects)", len(projects))}
 	}
 	return DoctorCheck{
-		Name:    "duplicates",
-		Status:  doctorWarn,
-		Message: fmt.Sprintf("%d near-duplicate records (%s); see brain review --project <id>", total, strings.Join(counts, ", ")),
+		Name:   "duplicates",
+		Status: doctorWarn,
+		Code:   string(FindingNearDuplicate),
+		Message: fmt.Sprintf("%d exact and %d near-duplicate records in %d clusters (%s); see brain duplicates and brain review",
+			exactRecords, nearRecords, clusters, strings.Join(counts, ", ")),
 	}
 }
 

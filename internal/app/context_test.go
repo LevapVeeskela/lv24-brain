@@ -3,6 +3,7 @@ package app_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sort"
 	"strings"
 	"testing"
@@ -256,7 +257,7 @@ func TestContextBudgetTruncatesSummary(t *testing.T) {
 	ctx := context.Background()
 	f := newContextFixture(t, true)
 	for i := 0; i < 6; i++ {
-		f.decision(t, "Budget decision with a long title", strings.Repeat("budget context ", 20))
+		f.decision(t, fmt.Sprintf("Budget decision %d with a long title", i), strings.Repeat("budget context ", 20))
 	}
 
 	// Act
@@ -324,7 +325,7 @@ func TestContextIncludesStateHandoffAndFindings(t *testing.T) {
 	if len(result.Findings) == 0 || result.Findings[0].Kind != app.FindingNextBehindHandoff {
 		t.Fatalf("findings = %+v", result.Findings)
 	}
-	for _, want := range []string{"next_action: write the parser", "[next-behind-handoff]", "next: ship the release"} {
+	for _, want := range []string{"next_action: write the parser", "[warn] next-behind-handoff:", "next: ship the release"} {
 		if !strings.Contains(result.Summary, want) {
 			t.Fatalf("summary lacks %q:\n%s", want, result.Summary)
 		}

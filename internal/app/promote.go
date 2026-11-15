@@ -35,6 +35,9 @@ type PromoteOptions struct {
 	// AllowProtected overrides the protected project and glob refusal. A
 	// protected project can still be dismissed: dismissal writes no record.
 	AllowProtected bool
+	// AllowDuplicate promotes even though a curated record already holds the
+	// same normalized text. It is the explicit CLI override.
+	AllowDuplicate bool
 	// DryRun reports what would happen without writing a record or status.
 	DryRun bool
 }
@@ -226,6 +229,7 @@ func (a *App) promoteLocked(ctx context.Context, opts PromoteOptions, proposal d
 			Source:         source,
 			Provenance:     provenance,
 			AllowProtected: opts.AllowProtected,
+			AllowDuplicate: opts.AllowDuplicate,
 		})
 		if err != nil {
 			return PromoteResult{}, fmt.Errorf("create decision from proposal %s: %w", proposal.ID, err)
@@ -241,6 +245,7 @@ func (a *App) promoteLocked(ctx context.Context, opts PromoteOptions, proposal d
 			Source:         source,
 			Provenance:     provenance,
 			AllowProtected: opts.AllowProtected,
+			AllowDuplicate: opts.AllowDuplicate,
 		})
 		if err != nil {
 			return PromoteResult{}, fmt.Errorf("create attempt from proposal %s: %w", proposal.ID, err)
@@ -258,6 +263,7 @@ func (a *App) promoteLocked(ctx context.Context, opts PromoteOptions, proposal d
 			Source:         source,
 			Provenance:     provenance,
 			AllowProtected: opts.AllowProtected,
+			AllowDuplicate: opts.AllowDuplicate,
 		})
 		if err != nil {
 			return PromoteResult{}, fmt.Errorf("create note from proposal %s: %w", proposal.ID, err)

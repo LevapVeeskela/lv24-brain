@@ -57,6 +57,7 @@ func runPromote(args []string, stdout, stderr io.Writer) int {
 	force := fs.Bool("force", false, "promote a stale or orphaned proposal anyway")
 	yes := fs.Bool("yes", false, "confirm promotion from a local-only source")
 	allowProtected := fs.Bool("allow-protected", false, "write even though limits.protected_projects or limits.protected_globs protect the project")
+	allowDuplicate := fs.Bool("allow-duplicate", false, "promote even though an existing record holds the same normalized text")
 	dryRun := fs.Bool("dry-run", false, "show what would happen without writing")
 	asJSON := fs.Bool("json", false, "print JSON")
 	cfgPath := configFlag(fs)
@@ -111,6 +112,7 @@ func runPromote(args []string, stdout, stderr io.Writer) int {
 		Force:          *force,
 		Yes:            *yes,
 		AllowProtected: *allowProtected,
+		AllowDuplicate: *allowDuplicate,
 		DryRun:         *dryRun,
 	})
 	if err != nil {

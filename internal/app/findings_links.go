@@ -21,12 +21,10 @@ func (a *App) linkFindings(ctx context.Context, in reviewInputs) []Finding {
 	projectID := records[0].Summary().ProjectID
 	var findings []Finding
 	for _, broken := range brokenLinksIn(ctx, a, projectID, records) {
-		findings = append(findings, Finding{
-			Kind: FindingBrokenLink,
-			Message: fmt.Sprintf("%s %q links to [[%s]] in %s: %s", broken.Source.Kind,
+		findings = append(findings, newFinding(FindingBrokenLink,
+			fmt.Sprintf("%s %q links to [[%s]] in %s: %s", broken.Source.Kind,
 				SummarizeLine(broken.Source.Title, 80), broken.Link.Ref, broken.Link.Field, broken.Link.Detail),
-			Evidence: broken.Source.ID,
-		})
+			broken.Source.ID))
 	}
 	return findings
 }

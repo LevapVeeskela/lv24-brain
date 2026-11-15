@@ -2,6 +2,7 @@ package ports
 
 import (
 	"context"
+	"time"
 
 	"github.com/levapveeskela/lv24-brain/internal/domain"
 )
@@ -45,6 +46,14 @@ type RecordEditor interface {
 // repeat of a review that changes nothing.
 type RecordReviewer interface {
 	ReviewRecord(ctx context.Context, projectID, kind, id string, trust domain.Trust) (changed bool, err error)
+}
+
+// RecordScheduler is implemented by stores that can move the review date of one
+// stored record without touching its text. It is optional like RecordReviewer:
+// a store without it reports that scheduling is unavailable. A zero date clears
+// review_after; reviewed_at records that the review happened.
+type RecordScheduler interface {
+	SetReviewAfter(ctx context.Context, projectID, kind, id string, at time.Time) (changed bool, err error)
 }
 
 // RecordValiditySetter is implemented by stores that can rewrite the validity

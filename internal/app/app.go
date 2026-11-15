@@ -174,6 +174,10 @@ type NoteInput struct {
 	SupersededBy string
 	// Confidence is an optional 0..1 author confidence; zero is unset.
 	Confidence float64
+	// AllowDuplicate writes even though another record of the same kind
+	// already holds the same normalized text. It is the explicit CLI override;
+	// MCP writes never set it.
+	AllowDuplicate bool
 	// CreateProject registers ProjectID when no project, alias or path
 	// matches; without it an unknown project is an error.
 	CreateProject bool
@@ -212,6 +216,9 @@ type DecisionInput struct {
 	SupersededBy string
 	// Confidence is an optional 0..1 author confidence; zero is unset.
 	Confidence float64
+	// AllowDuplicate writes even though another decision already holds the
+	// same normalized text.
+	AllowDuplicate bool
 	// CreateProject registers ProjectID when no project, alias or path
 	// matches; without it an unknown project is an error.
 	CreateProject bool
@@ -244,6 +251,9 @@ type AttemptInput struct {
 	SupersededBy string
 	// Confidence is an optional 0..1 author confidence; zero is unset.
 	Confidence float64
+	// AllowDuplicate writes even though another attempt already holds the
+	// same normalized text.
+	AllowDuplicate bool
 	// CreateProject registers ProjectID when no project, alias or path
 	// matches; without it an unknown project is an error.
 	CreateProject bool
@@ -271,6 +281,9 @@ type HandoffInput struct {
 	SupersededBy string
 	// Confidence is an optional 0..1 author confidence; zero is unset.
 	Confidence float64
+	// AllowDuplicate writes even though another handoff already holds the
+	// same summary and next action.
+	AllowDuplicate bool
 	// CreateProject registers ProjectID when no project, alias or path
 	// matches; without it an unknown project is an error.
 	CreateProject bool

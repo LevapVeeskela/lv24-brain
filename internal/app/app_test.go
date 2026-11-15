@@ -3,6 +3,7 @@ package app_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -312,7 +313,7 @@ func TestBootstrapBudgetTruncates(t *testing.T) {
 		if _, err := runtime.App.Decision(ctx, app.DecisionInput{
 			ProjectID:     "demo",
 			CreateProject: true,
-			Title:         "Decision with a deliberately long title for budget testing",
+			Title:         fmt.Sprintf("Decision %d with a deliberately long title for budget testing", i),
 			Context:       strings.Repeat("long context ", 20),
 		}); err != nil {
 			t.Fatalf("Decision %d: %v", i, err)

@@ -25,6 +25,11 @@ var (
 	// already exists. It is never resolved with a numeric suffix: the caller
 	// must surface the conflict and name the existing record.
 	ErrTargetExists = errors.New("target exists")
+	// ErrDuplicate marks a write refused because another record of the same
+	// project and kind already holds the same normalized text. The write is
+	// never merged silently: the caller names the existing record and the
+	// author decides whether to reuse it or pass the explicit override.
+	ErrDuplicate = errors.New("duplicate record")
 )
 
 // ValidationError describes one invalid field.
@@ -142,3 +147,18 @@ func (e *TargetExistsError) Is(target error) bool { return target == ErrConflict
 func NewTargetExistsError(kind, id, path string) error {
 	return &TargetExistsError{Kind: kind, ID: id, Path: path}
 }
+
+// DuplicateError reports a write whose normalized text already exists in the
+// same project and kind. ID names the existing record, so the author can read
+// it, supersede it, or repeat the write with the explicit override.
+type DuplicateError struct {
+	Kind      string
+	ID        string
+	ProjectID string
+}
+
+func (e *DuplicateError) Error() string {
+	return fmt.Sprintf("%s %q already records the same text: %v", e.Kind, e.ID, ErrDuplicate)
+}
+
+func (e *DuplicateError) Unwrap() error { return ErrDuplicate }

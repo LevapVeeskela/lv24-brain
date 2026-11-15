@@ -117,8 +117,9 @@ func toMCPContext(result app.ContextResult) mcpserver.TaskContext {
 		FailedAttempts: mapAll(result.FailedAttempts, toMCPContextRecord),
 		Findings: mapAll(result.Findings, func(finding app.Finding) mcpserver.ReviewFinding {
 			return mcpserver.ReviewFinding{
-				Kind: string(finding.Kind), Message: finding.Message, Evidence: finding.Evidence,
-				Fixable: finding.Fixable, Fix: finding.Fix,
+				Kind: string(finding.Kind), Severity: string(finding.Severity),
+				Message: finding.Message, Why: finding.Why, Next: finding.Next, Confirm: finding.Confirm,
+				Evidence: finding.Evidence, Fixable: finding.Fixable, Fix: finding.Fix,
 			}
 		}),
 		RawExcerpts: mapAll(result.RawExcerpts, toMCPContextExcerpt),

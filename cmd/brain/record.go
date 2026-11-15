@@ -27,7 +27,8 @@ func runRecord(args []string, stdout, stderr io.Writer) int {
   brain record show <id> [--project p] [--history] [--as-of <time|date>] [--json]
   brain record status <id> <proposed|accepted|rejected|superseded> [--project p]
   brain record supersede <old-id> --by <new-id> [--project p]
-  brain record review <id> [--trust verified|stated|inferred] [--project p]
+  brain record review <id> [--trust verified|stated|inferred] [--review-after 90d|2027-02-05] [--project p]
+  brain record review <id> --clear-review-after [--project p]
   brain record review --all [--trust verified|stated|inferred] [--project p]
   brain record trash <id> --yes [--project p]
   brain record restore <id> [--project p]
@@ -260,12 +261,14 @@ func runRecordSupersede(args []string, stdout, stderr io.Writer) int {
 }
 
 // runRecordReview clears the quarantine of one record or of every unreviewed
-// record of the project.
+// record of the project, and optionally moves the record's review date.
 func runRecordReview(args []string, stdout, stderr io.Writer) int {
 	fs := newFlagSet("record review", stderr)
 	project := fs.String("project", "", "project id or alias")
 	all := fs.Bool("all", false, "review every unreviewed record of the project")
 	trust := fs.String("trust", "", "set the trust level: verified, stated or inferred")
+	reviewAfter := fs.String("review-after", "", "set the next review date: a duration (90d, 30d) or a date (2027-02-05)")
+	clearReviewAfter := fs.Bool("clear-review-after", false, "remove the review date")
 	cfgPath := configFlag(fs)
 	positional, err := parseInterspersed(fs, args)
 	if err != nil {
@@ -275,13 +278,30 @@ func runRecordReview(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "brain record review: pass either a record id or --all, not both")
 		return 2
 	}
-	if !*all && !expectArgs("record review", positional, 1, "<id> [--trust verified|stated|inferred]", stderr) {
+	if !*all && !expectArgs("record review", positional, 1, "<id> [--trust verified|stated|inferred] [--review-after 90d]", stderr) {
+		return 2
+	}
+	if *reviewAfter != "" && *clearReviewAfter {
+		fmt.Fprintln(stderr, "brain record review: pass either --review-after or --clear-review-after, not both")
+		return 2
+	}
+	if *all && (*reviewAfter != "" || *clearReviewAfter) {
+		fmt.Fprintln(stderr, "brain record review: a review date applies to one record; pass its id instead of --all")
 		return 2
 	}
 	trustValue := domain.Trust(strings.TrimSpace(*trust))
 	if trustValue != "" && !trustValue.Valid() {
 		fmt.Fprintf(stderr, "brain record review: unknown trust %q (verified, stated, inferred)\n", *trust)
 		return 2
+	}
+	var reviewDate *time.Time
+	if *reviewAfter != "" {
+		parsed, err := domain.ParseReviewAfter(*reviewAfter, time.Now())
+		if err != nil {
+			fmt.Fprintf(stderr, "brain record review: %v\n", err)
+			return 2
+		}
+		reviewDate = &parsed
 	}
 	id := ""
 	if len(positional) == 1 {
@@ -294,10 +314,12 @@ func runRecordReview(args []string, stdout, stderr io.Writer) int {
 	}
 	defer func() { _ = runtime.Close() }()
 	result, err := runtime.App.ReviewRecords(ctx, app.ReviewRecordOptions{
-		ProjectID: target.Project.ID,
-		ID:        id,
-		All:       *all,
-		Trust:     trustValue,
+		ProjectID:        target.Project.ID,
+		ID:               id,
+		All:              *all,
+		Trust:            trustValue,
+		ReviewAfter:      reviewDate,
+		ClearReviewAfter: *clearReviewAfter,
 	})
 	if err != nil {
 		return reportError(stderr, "record review", err)
@@ -308,6 +330,12 @@ func runRecordReview(args []string, stdout, stderr io.Writer) int {
 	}
 	for _, record := range result.Reviewed {
 		fmt.Fprintf(stdout, "reviewed %s %s\n", record.Kind, record.ID)
+	}
+	if reviewDate != nil {
+		fmt.Fprintf(stdout, "next review: %s\n", reviewDate.UTC().Format("2006-01-02"))
+	}
+	if *clearReviewAfter {
+		fmt.Fprintln(stdout, "review date cleared")
 	}
 	return 0
 }

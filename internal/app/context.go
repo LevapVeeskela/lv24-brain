@@ -548,7 +548,7 @@ func writeContextFindings(out *strings.Builder, findings []Finding) {
 			fmt.Fprintf(out, "- … %d more (brain review)\n", len(findings)-i)
 			break
 		}
-		fmt.Fprintf(out, "- [%s] %s\n", finding.Kind, SummarizeLine(finding.Message, promptLineRunes))
+		fmt.Fprintf(out, "- [%s] %s: %s\n", finding.Severity, finding.Kind, SummarizeLine(finding.Message, promptLineRunes))
 	}
 }
 

@@ -29,7 +29,10 @@ func TestReviewFixCLI(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("review exit %d: %s", code, stderr)
 	}
-	if !strings.Contains(stdout, "[next-behind-handoff]") || !strings.Contains(stdout, "run `brain review --fix` to apply the fixable findings") {
+	if !strings.Contains(stdout, "[warn] next-behind-handoff:") ||
+		!strings.Contains(stdout, "-> run `brain review --fix`") ||
+		!strings.Contains(stdout, "found:") || !strings.Contains(stdout, "confirm:") ||
+		!strings.Contains(stdout, "run `brain review --fix` to apply the fixable findings") {
 		t.Fatalf("review stdout = %q", stdout)
 	}
 
@@ -41,6 +44,9 @@ func TestReviewFixCLI(t *testing.T) {
 	first := findings[0].(map[string]any)
 	if first["kind"] != "next-behind-handoff" || first["fixable"] != true {
 		t.Fatalf("first finding = %+v", first)
+	}
+	if first["severity"] != "warn" || first["why"] == "" || first["next"] == "" || first["confirm"] == "" {
+		t.Fatalf("first finding lacks review metadata: %+v", first)
 	}
 
 	code, stdout, stderr = runForTest(t, "review", "demo", "--fix", "--config", cfg)

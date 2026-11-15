@@ -24,7 +24,11 @@ func TestMCPServerReviewTool(t *testing.T) {
 		Summary: "# Review — Alpha\nnext_action: old step",
 		Findings: []ReviewFinding{{
 			Kind:     "next-behind-handoff",
+			Severity: "warn",
 			Message:  "next action is behind the latest handoff",
+			Why:      "a later handoff names a different next action",
+			Next:     "run brain review --fix",
+			Confirm:  "the handoff's next action is the work that continues",
 			Evidence: "handoff-1",
 			Fixable:  true,
 			Fix:      "set next action to the handoff's next step",
@@ -39,7 +43,12 @@ func TestMCPServerReviewTool(t *testing.T) {
 		t.Fatalf("review called with project %q", backend.gotProject)
 	}
 	text := got["content"].([]any)[0].(map[string]any)["text"].(string)
-	for _, want := range []string{"# Review", "## Findings", "[next-behind-handoff]", "(evidence: handoff-1)", "-> fix: set next action"} {
+	for _, want := range []string{
+		"# Review", "## Findings",
+		"[warn] next-behind-handoff: a later handoff names a different next action",
+		"-> run brain review --fix",
+		"evidence: handoff-1", "confirm: the handoff's next action",
+	} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("text missing %q:\n%s", want, text)
 		}
@@ -47,6 +56,10 @@ func TestMCPServerReviewTool(t *testing.T) {
 	structured := got["structuredContent"].(map[string]any)
 	if structured["project_id"] != "alpha" || len(structured["findings"].([]any)) != 1 {
 		t.Fatalf("structured = %+v", structured)
+	}
+	finding := structured["findings"].([]any)[0].(map[string]any)
+	if finding["severity"] != "warn" || finding["why"] == "" || finding["next"] == "" || finding["confirm"] == "" {
+		t.Fatalf("finding = %+v, want severity/why/next/confirm", finding)
 	}
 }
 

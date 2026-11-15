@@ -33,7 +33,7 @@ func TestReviewReportsNearDuplicateNotesAndFixLeavesThem(t *testing.T) {
 		t.Fatal(err)
 	}
 	f.tick()
-	second, err := f.app.Note(ctx, app.NoteInput{ProjectID: "p", Title: "**Пересборка индекса**", Body: "- " + strings.ReplaceAll(body, "ё", "е") + "!"})
+	second, err := f.app.Note(ctx, app.NoteInput{ProjectID: "p", Title: "**Пересборка индекса**", Body: "- " + strings.ReplaceAll(body, "ё", "е") + "!", AllowDuplicate: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -72,6 +72,7 @@ func TestReviewIgnoresTrashedDuplicate(t *testing.T) {
 		t.Fatal(err)
 	}
 	f.pastRetryWindow()
+	input.AllowDuplicate = true
 	copied, err := f.app.Attempt(ctx, input)
 	if err != nil {
 		t.Fatal(err)
@@ -106,6 +107,7 @@ func TestDoctorWarnsAboutNearDuplicates(t *testing.T) {
 		t.Fatal(err)
 	}
 	f.pastRetryWindow()
+	input.AllowDuplicate = true
 	if _, err := f.app.Decision(ctx, input); err != nil {
 		t.Fatal(err)
 	}

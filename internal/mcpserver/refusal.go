@@ -18,6 +18,10 @@ const (
 	RefusalNotFound = "NOT_FOUND"
 	// RefusalConflict marks a write that collides with existing data.
 	RefusalConflict = "CONFLICT"
+	// RefusalDuplicate marks a write whose normalized text already exists in
+	// the same project and kind. try_instead names the existing record; an
+	// identical retry cannot succeed.
+	RefusalDuplicate = "DUPLICATE"
 	// RefusalUnsupported marks a request the engine or the call window does not
 	// serve, for example a page past the searchable window.
 	RefusalUnsupported = "UNSUPPORTED"
@@ -83,6 +87,14 @@ func refusalFrom(err error) Refusal {
 	var refused *RefusalError
 	if errors.As(err, &refused) {
 		return refused.Refusal
+	}
+	var duplicate *domain.DuplicateError
+	if errors.As(err, &duplicate) {
+		return Refusal{
+			Code:       RefusalDuplicate,
+			Message:    err.Error(),
+			TryInstead: fmt.Sprintf("read the existing %s with brain_record id=%s, or write different content", duplicate.Kind, duplicate.ID),
+		}
 	}
 	switch {
 	case errors.Is(err, domain.ErrValidation):

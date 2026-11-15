@@ -432,7 +432,7 @@ func TestPromoteIdenticalTitlesStaySeparate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	second, err := fixture.app.Promote(ctx, app.PromoteOptions{ProposalID: domain.ProposalID("demo", "gh", "issue-b")})
+	second, err := fixture.app.Promote(ctx, app.PromoteOptions{ProposalID: domain.ProposalID("demo", "gh", "issue-b"), AllowDuplicate: true})
 	if err != nil {
 		t.Fatal(err)
 	}

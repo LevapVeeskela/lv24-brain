@@ -457,13 +457,15 @@ type jsonStatus struct {
 }
 
 // jsonReview is `brain review --json`: the review text, its items, the
-// findings that remain and the ones --fix applied.
+// findings that remain, the ones --fix applied and, with --due, the queue.
 type jsonReview struct {
 	Summary   string               `json:"summary"`
 	Items     []string             `json:"items"`
 	Findings  []jsonFinding        `json:"findings"`
 	Applied   []jsonFinding        `json:"applied"`
 	Proposals []jsonReviewProposal `json:"proposals"`
+	// Due is present only with --due; an empty list means nothing is due.
+	Due *[]jsonDueReview `json:"due,omitempty"`
 }
 
 // jsonReviewProposal is one pending candidate in `brain review --json`.
@@ -500,10 +502,78 @@ func toJSONReviewProposals(proposals []app.ProposalListItem) []jsonReviewProposa
 // jsonFinding is one stale or contradictory finding in `brain review --json`.
 type jsonFinding struct {
 	Kind     string `json:"kind"`
+	Severity string `json:"severity"`
 	Message  string `json:"message"`
+	Why      string `json:"why"`
+	Next     string `json:"next"`
+	Confirm  string `json:"confirm"`
 	Evidence string `json:"evidence"`
 	Fixable  bool   `json:"fixable"`
 	Fix      string `json:"fix"`
+}
+
+// jsonDueReview is one record, state or proposal past its review date.
+type jsonDueReview struct {
+	Kind        string  `json:"kind"`
+	ID          string  `json:"id"`
+	Title       string  `json:"title"`
+	ReviewAfter *string `json:"review_after"`
+	OverdueDays int     `json:"overdue_days"`
+	Source      string  `json:"source"`
+}
+
+func toJSONDueReviews(due []app.DueReview) []jsonDueReview {
+	out := make([]jsonDueReview, 0, len(due))
+	for _, review := range due {
+		out = append(out, jsonDueReview{
+			Kind: review.Kind, ID: review.ID, Title: review.Title,
+			ReviewAfter: jsonTime(review.ReviewAfter),
+			OverdueDays: int(review.Overdue.Hours() / 24),
+			Source:      review.Source,
+		})
+	}
+	return out
+}
+
+// jsonDuplicates is `brain duplicates --json`.
+type jsonDuplicates struct {
+	Scan     bool                   `json:"scan"`
+	Projects int                    `json:"projects"`
+	Exact    int                    `json:"exact"`
+	Near     int                    `json:"near"`
+	Clusters []jsonDuplicateCluster `json:"clusters"`
+}
+
+// jsonDuplicateCluster is one group of records that say the same thing.
+type jsonDuplicateCluster struct {
+	ProjectID  string                `json:"project_id"`
+	Kind       string                `json:"kind"`
+	Reason     string                `json:"reason"`
+	Similarity float64               `json:"similarity"`
+	Members    []jsonDuplicateMember `json:"members"`
+}
+
+// jsonDuplicateMember is one record of a duplicate cluster.
+type jsonDuplicateMember struct {
+	ID        string  `json:"id"`
+	Title     string  `json:"title"`
+	CreatedAt *string `json:"created_at"`
+}
+
+func toJSONDuplicates(report app.DuplicateReport, scan bool) jsonDuplicates {
+	out := jsonDuplicates{Scan: scan, Projects: report.Projects, Exact: report.Exact, Near: report.Near,
+		Clusters: make([]jsonDuplicateCluster, 0, len(report.Clusters))}
+	for _, cluster := range report.Clusters {
+		members := make([]jsonDuplicateMember, 0, len(cluster.Members))
+		for _, member := range cluster.Members {
+			members = append(members, jsonDuplicateMember{ID: member.ID, Title: member.Title, CreatedAt: jsonTime(member.CreatedAt)})
+		}
+		out.Clusters = append(out.Clusters, jsonDuplicateCluster{
+			ProjectID: cluster.ProjectID, Kind: cluster.Kind, Reason: cluster.Reason,
+			Similarity: cluster.Similarity, Members: members,
+		})
+	}
+	return out
 }
 
 // jsonDoctorCheck is one compatibility probe. OK is false only for a failed

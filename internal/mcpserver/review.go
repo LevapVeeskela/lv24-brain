@@ -16,8 +16,18 @@ type Review struct {
 
 // ReviewFinding is one piece of the brain that looks stale or contradictory.
 type ReviewFinding struct {
-	Kind     string `json:"kind"`
-	Message  string `json:"message"`
+	Kind string `json:"kind"`
+	// Severity is error (context may be wrong), warn (may be stale) or info
+	// (curation hint).
+	Severity string `json:"severity"`
+	// Message describes what was observed, with the ids involved.
+	Message string `json:"message"`
+	// Why is one sentence about the risk of leaving it alone.
+	Why string `json:"why"`
+	// Next is the safe next action for the caller.
+	Next string `json:"next"`
+	// Confirm is what must be verified before acting.
+	Confirm  string `json:"confirm"`
 	Evidence string `json:"evidence"`
 	Fixable  bool   `json:"fixable"`
 	Fix      string `json:"fix"`
@@ -48,11 +58,15 @@ func (s *Server) reviewTools() []tool {
 			"summary":    stringProp("Rendered review summary, the text content of the result."),
 			"findings": arrayProp("Findings that still apply.", outputObject(map[string]any{
 				"kind":     stringProp("Finding kind."),
-				"message":  stringProp("What looks stale or contradictory."),
+				"severity": enumProp("error (context may be wrong), warn (may be stale) or info (curation hint).", findingSeverities),
+				"message":  stringProp("What looks stale or contradictory, with the ids involved."),
+				"why":      stringProp("One sentence about the risk of leaving the finding alone."),
+				"next":     stringProp("The safe next action for the caller."),
+				"confirm":  stringProp("What to verify before acting on the finding."),
 				"evidence": stringProp("The record or commit that supports the finding."),
 				"fixable":  boolProp("Whether `brain review --fix` repairs it."),
 				"fix":      stringProp("The fix that applies."),
-			}, "kind", "message", "evidence", "fixable", "fix")),
+			}, "kind", "severity", "message", "why", "next", "confirm", "evidence", "fixable", "fix")),
 		}, "project_id", "summary", "findings"),
 		run: s.review,
 	}}
@@ -87,14 +101,31 @@ func reviewText(review Review) string {
 		b.WriteString("- none\n")
 	}
 	for _, finding := range review.Findings {
-		fmt.Fprintf(&b, "- [%s] %s", finding.Kind, finding.Message)
-		if finding.Evidence != "" {
-			fmt.Fprintf(&b, " (evidence: %s)", finding.Evidence)
+		prefix := ""
+		if finding.Severity != "" {
+			prefix = "[" + finding.Severity + "] "
 		}
-		if finding.Fix != "" {
-			fmt.Fprintf(&b, " -> fix: %s", finding.Fix)
+		why := finding.Why
+		if why == "" {
+			why = finding.Message
+		}
+		fmt.Fprintf(&b, "- %s%s: %s", prefix, finding.Kind, strings.TrimSuffix(why, "."))
+		if finding.Next != "" {
+			fmt.Fprintf(&b, " -> %s", finding.Next)
 		}
 		b.WriteString("\n")
+		if finding.Why != "" && finding.Message != "" {
+			fmt.Fprintf(&b, "  found: %s\n", finding.Message)
+		}
+		if finding.Evidence != "" {
+			fmt.Fprintf(&b, "  evidence: %s\n", finding.Evidence)
+		}
+		if finding.Confirm != "" {
+			fmt.Fprintf(&b, "  confirm: %s\n", finding.Confirm)
+		}
 	}
 	return strings.TrimRight(b.String(), "\n")
 }
+
+// findingSeverities is the closed severity set of a review finding.
+var findingSeverities = []string{"error", "warn", "info"}

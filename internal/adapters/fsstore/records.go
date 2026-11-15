@@ -66,6 +66,7 @@ func provenanceFromFrontmatter(provenance provenanceFrontmatter) domain.Provenan
 type noteMetadata struct {
 	provenanceFrontmatter
 	validityFrontmatter
+	reviewFrontmatter
 	ID        string            `json:"id"`
 	Title     string            `json:"title"`
 	Tags      []string          `json:"tags,omitempty"`
@@ -78,6 +79,7 @@ type decisionFrontmatter struct {
 	markdown.Frontmatter  `yaml:",inline"`
 	provenanceFrontmatter `yaml:",inline"`
 	validityFrontmatter   `yaml:",inline"`
+	reviewFrontmatter     `yaml:",inline"`
 	ID                    string                `yaml:"id,omitempty"`
 	Title                 string                `yaml:"title,omitempty"`
 	Status                domain.DecisionStatus `yaml:"status,omitempty"`
@@ -89,6 +91,7 @@ type attemptFrontmatter struct {
 	markdown.Frontmatter  `yaml:",inline"`
 	provenanceFrontmatter `yaml:",inline"`
 	validityFrontmatter   `yaml:",inline"`
+	reviewFrontmatter     `yaml:",inline"`
 	ID                    string                `yaml:"id,omitempty"`
 	Title                 string                `yaml:"title,omitempty"`
 	Source                *sourceRefFrontmatter `yaml:"source,omitempty"`
@@ -157,6 +160,36 @@ func parseValidityTime(field, raw string) (time.Time, error) {
 		return time.Time{}, domain.NewValidationError(field, fmt.Sprintf("%q is not a timestamp", raw))
 	}
 	return at, nil
+}
+
+// reviewFrontmatter is the on-disk form of domain.ReviewSchedule. Times are
+// RFC 3339 strings so an unset date is omitted instead of encoded as year 1;
+// the note marker uses the same JSON keys.
+type reviewFrontmatter struct {
+	ReviewAfter string `yaml:"review_after,omitempty" json:"review_after,omitempty"`
+	ReviewedAt  string `yaml:"reviewed_at,omitempty" json:"reviewed_at,omitempty"`
+}
+
+func reviewToFrontmatter(schedule domain.ReviewSchedule) reviewFrontmatter {
+	out := reviewFrontmatter{
+		ReviewAfter: formatItemTime(schedule.ReviewAfter),
+		ReviewedAt:  formatItemTime(schedule.ReviewedAt),
+	}
+	return out
+}
+
+// reviewFromFrontmatter reads the review dates. A present but unparseable date
+// is an error: defaulting it would make an overdue record look fresh.
+func reviewFromFrontmatter(review reviewFrontmatter) (domain.ReviewSchedule, error) {
+	after, err := parseValidityTime("review_after", review.ReviewAfter)
+	if err != nil {
+		return domain.ReviewSchedule{}, err
+	}
+	reviewed, err := parseValidityTime("reviewed_at", review.ReviewedAt)
+	if err != nil {
+		return domain.ReviewSchedule{}, err
+	}
+	return domain.ReviewSchedule{ReviewAfter: after, ReviewedAt: reviewed}, nil
 }
 
 // sourceRefFrontmatter is the on-disk form of domain.SourceRef. Times are
@@ -228,6 +261,7 @@ type handoffFrontmatter struct {
 	markdown.Frontmatter  `yaml:",inline"`
 	provenanceFrontmatter `yaml:",inline"`
 	validityFrontmatter   `yaml:",inline"`
+	reviewFrontmatter     `yaml:",inline"`
 	ID                    string    `yaml:"id,omitempty"`
 	CreatedAt             time.Time `yaml:"created_at,omitempty"`
 }
@@ -357,6 +391,7 @@ func appendNoteLocked(path string, note domain.Note, date string, createdAt, upd
 	entry := renderNoteEntry(noteMetadata{
 		provenanceFrontmatter: provenanceToFrontmatter(note.Provenance),
 		validityFrontmatter:   validityToFrontmatter(note.Validity, createdAt),
+		reviewFrontmatter:     reviewToFrontmatter(note.ReviewSchedule),
 		ID:                    id,
 		Title:                 note.Title,
 		Tags:                  nonNilStrings(note.Tags),
@@ -425,6 +460,7 @@ func (s *Store) AppendDecision(ctx context.Context, decision domain.Decision) (d
 				},
 				provenanceFrontmatter: provenanceToFrontmatter(decision.Provenance),
 				validityFrontmatter:   validityToFrontmatter(decision.Validity, createdAt),
+				reviewFrontmatter:     reviewToFrontmatter(decision.ReviewSchedule),
 				ID:                    id,
 				Title:                 decision.Title,
 				Status:                decision.Status,
@@ -482,6 +518,7 @@ func (s *Store) AppendAttempt(ctx context.Context, attempt domain.Attempt) (doma
 				},
 				provenanceFrontmatter: provenanceToFrontmatter(attempt.Provenance),
 				validityFrontmatter:   validityToFrontmatter(attempt.Validity, createdAt),
+				reviewFrontmatter:     reviewToFrontmatter(attempt.ReviewSchedule),
 				ID:                    id,
 				Title:                 attempt.Title,
 				Source:                sourceRefToFrontmatter(attempt.Source),
@@ -537,6 +574,7 @@ func (s *Store) AppendHandoff(ctx context.Context, handoff domain.Handoff) (doma
 				},
 				provenanceFrontmatter: provenanceToFrontmatter(handoff.Provenance),
 				validityFrontmatter:   validityToFrontmatter(handoff.Validity, createdAt),
+				reviewFrontmatter:     reviewToFrontmatter(handoff.ReviewSchedule),
 				ID:                    id,
 				CreatedAt:             createdAt,
 			}

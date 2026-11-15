@@ -89,15 +89,16 @@ func (a *App) Note(ctx context.Context, input NoteInput) (NoteResult, error) {
 		return NoteResult{}, err
 	}
 	note := domain.Note{
-		ProjectID:  project.ID,
-		Title:      title,
-		Body:       input.Body,
-		Tags:       input.Tags,
-		Source:     input.Source,
-		Provenance: input.Provenance.Normalized(),
-		Validity:   validity,
-		CreatedAt:  now,
-		UpdatedAt:  now,
+		ProjectID:      project.ID,
+		Title:          title,
+		Body:           input.Body,
+		Tags:           input.Tags,
+		Source:         input.Source,
+		Provenance:     input.Provenance.Normalized(),
+		Validity:       validity,
+		ReviewSchedule: a.newWriteSchedule(ports.RecordNote, validity, now),
+		CreatedAt:      now,
+		UpdatedAt:      now,
 	}
 	if err := note.Validate(); err != nil {
 		return NoteResult{}, err
@@ -113,6 +114,10 @@ func (a *App) Note(ctx context.Context, input NoteInput) (NoteResult, error) {
 		if prior.Title == note.Title && prior.Body == note.Body && sameRecordSource(prior.Source, note.Source) && a.isRetry(prior.CreatedAt) {
 			return NoteResult{Note: prior}, a.afterWrite(ctx, JournalNote, prior.ProjectID, prior.ID, prior.Title, noteDocument(prior))
 		}
+	}
+	if err := a.refuseDuplicate(input.AllowDuplicate, validity, ports.RecordNote, project.ID,
+		noteDuplicateCandidates(existing), recordDedupText(note.Title, note.Body)); err != nil {
+		return NoteResult{}, err
 	}
 	slug := domain.Slugify(note.Title)
 	for try := 0; try < maxRecordIDAttempts; try++ {
@@ -172,19 +177,20 @@ func (a *App) Decision(ctx context.Context, input DecisionInput) (DecisionResult
 		status = domain.DecisionSuperseded
 	}
 	decision := domain.Decision{
-		ProjectID:    project.ID,
-		Title:        strings.TrimSpace(input.Title),
-		Status:       status,
-		Context:      input.Context,
-		Alternatives: input.Alternatives,
-		Consequences: input.Consequences,
-		Evidence:     input.Evidence,
-		Paths:        paths,
-		Source:       input.Source,
-		Provenance:   input.Provenance.Normalized(),
-		Validity:     validity,
-		CreatedAt:    now,
-		UpdatedAt:    now,
+		ProjectID:      project.ID,
+		Title:          strings.TrimSpace(input.Title),
+		Status:         status,
+		Context:        input.Context,
+		Alternatives:   input.Alternatives,
+		Consequences:   input.Consequences,
+		Evidence:       input.Evidence,
+		Paths:          paths,
+		Source:         input.Source,
+		Provenance:     input.Provenance.Normalized(),
+		Validity:       validity,
+		ReviewSchedule: a.newWriteSchedule(ports.RecordDecision, validity, now),
+		CreatedAt:      now,
+		UpdatedAt:      now,
 	}
 	if err := decision.Validate(); err != nil {
 		return DecisionResult{}, err
@@ -200,6 +206,10 @@ func (a *App) Decision(ctx context.Context, input DecisionInput) (DecisionResult
 		if prior.Title == decision.Title && prior.Context == decision.Context && sameRecordSource(prior.Source, decision.Source) && a.isRetry(prior.CreatedAt) {
 			return DecisionResult{Decision: prior}, a.afterWrite(ctx, JournalDecision, prior.ProjectID, prior.ID, prior.Title, decisionDocument(prior))
 		}
+	}
+	if err := a.refuseDuplicate(input.AllowDuplicate, validity, ports.RecordDecision, project.ID,
+		decisionDuplicateCandidates(existing), decisionDedupText(decision)); err != nil {
+		return DecisionResult{}, err
 	}
 	slug := domain.Slugify(decision.Title)
 	for try := 0; try < maxRecordIDAttempts; try++ {
@@ -242,16 +252,17 @@ func (a *App) Attempt(ctx context.Context, input AttemptInput) (AttemptResult, e
 		return AttemptResult{}, err
 	}
 	attempt := domain.Attempt{
-		ProjectID:  project.ID,
-		Title:      strings.TrimSpace(input.Title),
-		Hypothesis: input.Hypothesis,
-		Result:     input.Result,
-		Reason:     input.Reason,
-		Source:     input.Source,
-		Provenance: input.Provenance.Normalized(),
-		Validity:   validity,
-		CreatedAt:  now,
-		UpdatedAt:  now,
+		ProjectID:      project.ID,
+		Title:          strings.TrimSpace(input.Title),
+		Hypothesis:     input.Hypothesis,
+		Result:         input.Result,
+		Reason:         input.Reason,
+		Source:         input.Source,
+		Provenance:     input.Provenance.Normalized(),
+		Validity:       validity,
+		ReviewSchedule: a.newWriteSchedule(ports.RecordAttempt, validity, now),
+		CreatedAt:      now,
+		UpdatedAt:      now,
 	}
 	if err := attempt.Validate(); err != nil {
 		return AttemptResult{}, err
@@ -268,6 +279,10 @@ func (a *App) Attempt(ctx context.Context, input AttemptInput) (AttemptResult, e
 			prior.Reason == attempt.Reason && sameRecordSource(prior.Source, attempt.Source) && a.isRetry(prior.CreatedAt) {
 			return AttemptResult{Attempt: prior}, a.afterWrite(ctx, JournalAttempt, prior.ProjectID, prior.ID, prior.Title, attemptDocument(prior))
 		}
+	}
+	if err := a.refuseDuplicate(input.AllowDuplicate, validity, ports.RecordAttempt, project.ID,
+		attemptDuplicateCandidates(existing), attemptDedupText(attempt)); err != nil {
+		return AttemptResult{}, err
 	}
 	slug := domain.Slugify(attempt.Title)
 	for try := 0; try < maxRecordIDAttempts; try++ {
@@ -310,13 +325,14 @@ func (a *App) Handoff(ctx context.Context, input HandoffInput) (HandoffResult, e
 		return HandoffResult{}, err
 	}
 	handoff := domain.Handoff{
-		ProjectID:  project.ID,
-		Summary:    input.Summary,
-		GitContext: input.GitContext,
-		NextAction: input.NextAction,
-		Provenance: input.Provenance.Normalized(),
-		Validity:   validity,
-		CreatedAt:  now,
+		ProjectID:      project.ID,
+		Summary:        input.Summary,
+		GitContext:     input.GitContext,
+		NextAction:     input.NextAction,
+		Provenance:     input.Provenance.Normalized(),
+		Validity:       validity,
+		ReviewSchedule: a.newWriteSchedule(ports.RecordHandoff, validity, now),
+		CreatedAt:      now,
 	}
 	if err := handoff.Validate(); err != nil {
 		return HandoffResult{}, err
@@ -332,6 +348,10 @@ func (a *App) Handoff(ctx context.Context, input HandoffInput) (HandoffResult, e
 		if prior.Summary == handoff.Summary && prior.NextAction == handoff.NextAction && a.isRetry(prior.CreatedAt) {
 			return HandoffResult{Handoff: prior}, a.afterWrite(ctx, JournalHandoff, prior.ProjectID, prior.ID, prior.Summary, handoffDocument(prior))
 		}
+	}
+	if err := a.refuseDuplicate(input.AllowDuplicate, validity, ports.RecordHandoff, project.ID,
+		handoffDuplicateCandidates(existing), handoffDedupText(handoff)); err != nil {
+		return HandoffResult{}, err
 	}
 	// A handoff has no title, so its id keeps the human readable time segment
 	// (<date>-<HHMMSS>) that older handoff ids and file names used.
@@ -355,6 +375,20 @@ func (a *App) Handoff(ctx context.Context, input HandoffInput) (HandoffResult, e
 		}
 	}
 	return HandoffResult{}, fmt.Errorf("handoff: %w: no free record id", domain.ErrConflict)
+}
+
+// refuseDuplicate stops a write whose normalized text already exists in the
+// same project and kind. A deliberate history write through supersede, or the
+// explicit AllowDuplicate override, passes. The error names the existing
+// record, so the author can read it instead of writing a copy.
+func (a *App) refuseDuplicate(allowDuplicate bool, validity domain.Validity, kind, projectID string, candidates []duplicateCandidate, text string) error {
+	if allowDuplicate || validity.Supersedes != "" || validity.SupersededBy != "" {
+		return nil
+	}
+	if existing, ok := findExactDuplicate(candidates, text); ok {
+		return &domain.DuplicateError{Kind: kind, ID: existing.id, ProjectID: projectID}
+	}
+	return nil
 }
 
 // sameRecordSource scopes the retry heuristic. A plain user write has no

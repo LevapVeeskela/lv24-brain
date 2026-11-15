@@ -129,6 +129,8 @@ func runCommand(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return runStatus(rest, stdout, stderr)
 	case "review":
 		return runReview(rest, stdout, stderr)
+	case "duplicates":
+		return runDuplicates(rest, stdout, stderr)
 	case "promote":
 		return runPromote(rest, stdout, stderr)
 	case "sync":
@@ -232,6 +234,7 @@ Commands:
   handoff    Append a session handoff
   status     Show the configured instance
   review     Build a review report; --fix applies the safe fixes
+  duplicates List exact and near-duplicate records (--scan every project)
   promote    Promote or dismiss a proposal candidate
   sync       Pull, commit, and push brain data (exit 3 on conflict)
   index      Rebuild or refresh the local search index
@@ -1040,6 +1043,7 @@ func runNote(args []string, stdout, stderr io.Writer) int {
 	confidence := fs.Float64("confidence", 0, "author confidence between 0 and 1")
 	create := fs.Bool("create", false, "register --project first if it does not exist yet")
 	allowProtected := fs.Bool("allow-protected", false, "write even though limits.protected_projects or limits.protected_globs protect the project or path")
+	allowDuplicate := fs.Bool("allow-duplicate", false, "write even though an existing note holds the same normalized text")
 	cfgPath := configFlag(fs)
 	positional, err := parseInterspersed(fs, args)
 	if err != nil {
@@ -1074,6 +1078,7 @@ func runNote(args []string, stdout, stderr io.Writer) int {
 		SupersededBy:   *supersededBy,
 		Confidence:     *confidence,
 		AllowProtected: *allowProtected,
+		AllowDuplicate: *allowDuplicate,
 	})
 	if err != nil {
 		return reportError(stderr, "note", err)
@@ -1097,6 +1102,7 @@ func runDecision(args []string, stdout, stderr io.Writer) int {
 	confidence := fs.Float64("confidence", 0, "author confidence between 0 and 1")
 	create := fs.Bool("create", false, "register --project first if it does not exist yet")
 	allowProtected := fs.Bool("allow-protected", false, "write even though limits.protected_projects or limits.protected_globs protect the project or path")
+	allowDuplicate := fs.Bool("allow-duplicate", false, "write even though an existing decision holds the same normalized text")
 	cfgPath := configFlag(fs)
 	positional, err := parseInterspersed(fs, args)
 	if err != nil {
@@ -1132,6 +1138,7 @@ func runDecision(args []string, stdout, stderr io.Writer) int {
 		SupersededBy:   *supersededBy,
 		Confidence:     *confidence,
 		AllowProtected: *allowProtected,
+		AllowDuplicate: *allowDuplicate,
 	})
 	if err != nil {
 		return reportError(stderr, "decision", err)
@@ -1152,6 +1159,7 @@ func runAttempt(args []string, stdout, stderr io.Writer) int {
 	confidence := fs.Float64("confidence", 0, "author confidence between 0 and 1")
 	create := fs.Bool("create", false, "register --project first if it does not exist yet")
 	allowProtected := fs.Bool("allow-protected", false, "write even though limits.protected_projects or limits.protected_globs protect the project or path")
+	allowDuplicate := fs.Bool("allow-duplicate", false, "write even though an existing attempt holds the same normalized text")
 	cfgPath := configFlag(fs)
 	positional, err := parseInterspersed(fs, args)
 	if err != nil {
@@ -1184,6 +1192,7 @@ func runAttempt(args []string, stdout, stderr io.Writer) int {
 		SupersededBy:   *supersededBy,
 		Confidence:     *confidence,
 		AllowProtected: *allowProtected,
+		AllowDuplicate: *allowDuplicate,
 	})
 	if err != nil {
 		return reportError(stderr, "attempt", err)
@@ -1204,6 +1213,7 @@ func runHandoff(args []string, stdout, stderr io.Writer) int {
 	confidence := fs.Float64("confidence", 0, "author confidence between 0 and 1")
 	create := fs.Bool("create", false, "register --project first if it does not exist yet")
 	allowProtected := fs.Bool("allow-protected", false, "write even though limits.protected_projects or limits.protected_globs protect the project or path")
+	allowDuplicate := fs.Bool("allow-duplicate", false, "write even though an existing handoff holds the same summary and next action")
 	cfgPath := configFlag(fs)
 	positional, err := parseInterspersed(fs, args)
 	if err != nil {
@@ -1248,6 +1258,7 @@ func runHandoff(args []string, stdout, stderr io.Writer) int {
 		SupersededBy:   *supersededBy,
 		Confidence:     *confidence,
 		AllowProtected: *allowProtected,
+		AllowDuplicate: *allowDuplicate,
 	})
 	if err != nil {
 		return reportError(stderr, "handoff", err)
@@ -1297,6 +1308,7 @@ func runReview(args []string, stdout, stderr io.Writer) int {
 	fs := newFlagSet("review", stderr)
 	project := fs.String("project", "", "project id or alias")
 	since := fs.String("since", "", "review window, for example 7d")
+	due := fs.Bool("due", false, "list the records, state and proposals that are past their review date")
 	fix := fs.Bool("fix", false, "apply the fixable findings")
 	fixKind := fs.String("fix-kind", "", "comma-separated finding kinds to fix (implies --fix)")
 	asJSON := fs.Bool("json", false, "print JSON")
@@ -1342,18 +1354,30 @@ func runReview(args []string, stdout, stderr io.Writer) int {
 	if err != nil {
 		return reportError(stderr, "review", err)
 	}
+	var dueReviews []app.DueReview
+	if *due {
+		dueReviews, err = runtime.App.DueReviews(ctx, projectID)
+		if err != nil {
+			return reportError(stderr, "review", err)
+		}
+	}
 	if *asJSON {
 		items := result.Items
 		if items == nil {
 			items = []string{}
 		}
-		return writeJSONReport(stdout, stderr, "review", jsonReview{
+		payload := jsonReview{
 			Summary:   result.Summary,
 			Items:     items,
 			Findings:  toJSONFindings(findings),
 			Applied:   toJSONFindings(applied),
 			Proposals: toJSONReviewProposals(result.Proposals),
-		})
+		}
+		if *due {
+			list := toJSONDueReviews(dueReviews)
+			payload.Due = &list
+		}
+		return writeJSONReport(stdout, stderr, "review", payload)
 	}
 	printSummary(stdout, result.Summary)
 	if len(applied) > 0 {
@@ -1363,12 +1387,18 @@ func runReview(args []string, stdout, stderr io.Writer) int {
 		}
 	}
 	printFindings(stdout, findings)
+	if *due {
+		printDueReviews(stdout, dueReviews)
+	}
 	if !fixing && anyFixable(findings) {
 		fmt.Fprintln(stdout, "run `brain review --fix` to apply the fixable findings")
 	}
 	return 0
 }
 
+// printFindings renders one finding per block: the review line the contract
+// documents ([severity] kind: why -> next), then what was found, what to
+// confirm and the suggested repair.
 func printFindings(w io.Writer, findings []app.Finding) {
 	fmt.Fprintln(w, "## Findings")
 	if len(findings) == 0 {
@@ -1376,15 +1406,47 @@ func printFindings(w io.Writer, findings []app.Finding) {
 		return
 	}
 	for _, finding := range findings {
-		fmt.Fprintf(w, "- [%s] %s", finding.Kind, finding.Message)
+		fmt.Fprintf(w, "- [%s] %s: %s -> %s\n", finding.Severity, finding.Kind,
+			strings.TrimSuffix(finding.Why, "."), finding.Next)
+		fmt.Fprintf(w, "  found: %s", finding.Message)
 		if finding.Evidence != "" {
 			fmt.Fprintf(w, " (evidence: %s)", finding.Evidence)
 		}
-		if finding.Fix != "" {
-			fmt.Fprintf(w, " -> fix: %s", finding.Fix)
-		}
 		fmt.Fprintln(w)
+		if finding.Confirm != "" {
+			fmt.Fprintf(w, "  confirm: %s\n", finding.Confirm)
+		}
+		if finding.Fix != "" {
+			label := "suggestion"
+			if finding.Fixable {
+				label = "fix (brain review --fix)"
+			}
+			fmt.Fprintf(w, "  %s: %s\n", label, finding.Fix)
+		}
 	}
+}
+
+// printDueReviews lists the records review lists as due, oldest first.
+func printDueReviews(w io.Writer, due []app.DueReview) {
+	fmt.Fprintln(w, "## Due")
+	if len(due) == 0 {
+		fmt.Fprintln(w, "- none")
+		return
+	}
+	for _, review := range due {
+		fmt.Fprintf(w, "- %s: %s %q is %s overdue (due %s, %s)\n",
+			review.Kind, review.ID, review.Title, formatOverdue(review.Overdue),
+			review.ReviewAfter.UTC().Format("2006-01-02"), review.Source)
+	}
+	fmt.Fprintln(w, "review one with `brain record review <id> --review-after 90d`, or supersede it")
+}
+
+// formatOverdue renders a duration as whole days, then hours for the first day.
+func formatOverdue(overdue time.Duration) string {
+	if overdue >= 24*time.Hour {
+		return fmt.Sprintf("%d days", int(overdue.Hours()/24))
+	}
+	return fmt.Sprintf("%d hours", int(overdue.Hours()))
 }
 
 func anyFixable(findings []app.Finding) bool {
@@ -1399,8 +1461,9 @@ func anyFixable(findings []app.Finding) bool {
 func toJSONFindings(findings []app.Finding) []jsonFinding {
 	return mapAll(findings, func(finding app.Finding) jsonFinding {
 		return jsonFinding{
-			Kind: string(finding.Kind), Message: finding.Message, Evidence: finding.Evidence,
-			Fixable: finding.Fixable, Fix: finding.Fix,
+			Kind: string(finding.Kind), Severity: string(finding.Severity),
+			Message: finding.Message, Why: finding.Why, Next: finding.Next, Confirm: finding.Confirm,
+			Evidence: finding.Evidence, Fixable: finding.Fixable, Fix: finding.Fix,
 		}
 	})
 }

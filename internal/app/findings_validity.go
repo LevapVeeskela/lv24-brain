@@ -101,13 +101,11 @@ func supersessionGaps(kind string, records []supersedeCheckRecord) []Finding {
 			if !similarWith(records[older].title, records[newer].title, minSharedTokens) {
 				continue
 			}
-			findings = append(findings, Finding{
-				Kind: FindingSupersessionGap,
-				Message: fmt.Sprintf("%s %q looks replaced by newer %q but is not marked superseded; confirm with `brain record supersede %s --by %s`",
+			findings = append(findings, newFinding(FindingSupersessionGap,
+				fmt.Sprintf("%s %q looks replaced by newer %q but is not marked superseded; confirm with `brain record supersede %s --by %s`",
 					kind, SummarizeLine(records[older].title, 80), SummarizeLine(records[newer].title, 80),
 					records[older].id, records[newer].id),
-				Evidence: records[older].id + " -> " + records[newer].id,
-			})
+				records[older].id+" -> "+records[newer].id))
 			break
 		}
 	}
@@ -138,12 +136,10 @@ func staleSupersededFindings(in reviewInputs, now time.Time) []Finding {
 			if record.validity.IsCurrent() || !record.validity.EndedAt(now) || strings.TrimSpace(record.validity.SupersededBy) != "" {
 				continue
 			}
-			findings = append(findings, Finding{
-				Kind: FindingStaleSuperseded,
-				Message: fmt.Sprintf("%s %q expired at %s and names no replacement; supersede it or clear its valid_to",
+			findings = append(findings, newFinding(FindingStaleSuperseded,
+				fmt.Sprintf("%s %q expired at %s and names no replacement; supersede it or clear its valid_to",
 					record.kind, SummarizeLine(record.title, 80), record.validity.ValidTo.UTC().Format(time.RFC3339)),
-				Evidence: record.id,
-			})
+				record.id))
 		}
 	}
 	check(noteSupersedeRecords(in.notes))

@@ -5,13 +5,14 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/levapveeskela/lv24-brain/internal/domain"
 	"github.com/levapveeskela/lv24-brain/internal/ports"
 )
 
-// ReviewRecordOptions selects records whose quarantine to clear. Exactly one of
-// ID and All is required.
+// ReviewRecordOptions selects records whose quarantine to clear and, optionally,
+// moves their review date. Exactly one of ID and All is required.
 type ReviewRecordOptions struct {
 	ProjectID string
 	// ID reviews one record.
@@ -23,6 +24,12 @@ type ReviewRecordOptions struct {
 	// Trust optionally replaces the trust level of the reviewed records.
 	// Empty keeps the stored one.
 	Trust domain.Trust
+	// ReviewAfter sets the next review date of the record. Nil keeps the
+	// stored date.
+	ReviewAfter *time.Time
+	// ClearReviewAfter removes the review date. It cannot be combined with
+	// ReviewAfter.
+	ClearReviewAfter bool
 }
 
 // ReviewRecordResult lists the records a review now covers.
@@ -49,9 +56,24 @@ func (a *App) ReviewRecords(ctx context.Context, opts ReviewRecordOptions) (Revi
 		return ReviewRecordResult{}, domain.NewValidationError("trust",
 			fmt.Sprintf("unknown trust %q (verified, stated, inferred)", opts.Trust))
 	}
+	if opts.ReviewAfter != nil && opts.ClearReviewAfter {
+		return ReviewRecordResult{}, domain.NewValidationError("review-after",
+			"pass either --review-after or --clear-review-after, not both")
+	}
+	if (opts.ReviewAfter != nil || opts.ClearReviewAfter) && id == "" {
+		return ReviewRecordResult{}, domain.NewValidationError("review-after",
+			"a review date applies to one record; pass its id instead of --all")
+	}
 	reviewer, ok := a.deps.Store.(ports.RecordReviewer)
 	if !ok {
 		return ReviewRecordResult{}, fmt.Errorf("%w: reviewing records is not supported by this store", domain.ErrUnsupported)
+	}
+	var scheduler ports.RecordScheduler
+	if opts.ReviewAfter != nil || opts.ClearReviewAfter {
+		scheduler, ok = a.deps.Store.(ports.RecordScheduler)
+		if !ok {
+			return ReviewRecordResult{}, fmt.Errorf("%w: scheduling a review is not supported by this store", domain.ErrUnsupported)
+		}
 	}
 	project, err := a.ensureProject(ctx, opts.ProjectID, false)
 	if err != nil {
@@ -69,6 +91,13 @@ func (a *App) ReviewRecords(ctx context.Context, opts ReviewRecordOptions) (Revi
 		if err != nil {
 			return result, err
 		}
+		if scheduler != nil {
+			scheduled, err := scheduler.SetReviewAfter(ctx, project.ID, summary.Kind, summary.ID, reviewAfterValue(opts))
+			if err != nil {
+				return result, err
+			}
+			changed = changed || scheduled
+		}
 		result.Reviewed = append(result.Reviewed, summary)
 		if !changed {
 			continue
@@ -79,6 +108,14 @@ func (a *App) ReviewRecords(ctx context.Context, opts ReviewRecordOptions) (Revi
 		}
 	}
 	return result, nil
+}
+
+// reviewAfterValue is the date the schedule editor writes: zero clears it.
+func reviewAfterValue(opts ReviewRecordOptions) time.Time {
+	if opts.ReviewAfter == nil {
+		return time.Time{}
+	}
+	return *opts.ReviewAfter
 }
 
 // reviewTargets loads the records a review call covers, in deterministic

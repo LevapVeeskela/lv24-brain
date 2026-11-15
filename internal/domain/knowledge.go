@@ -92,6 +92,7 @@ type Note struct {
 	Source    *SourceRef `json:"source,omitempty"`
 	Provenance
 	Validity
+	ReviewSchedule
 	CreatedAt time.Time `json:"createdAt"`
 	UpdatedAt time.Time `json:"updatedAt"`
 }
@@ -148,6 +149,7 @@ type Decision struct {
 	Source    *SourceRef `json:"source,omitempty"`
 	Provenance
 	Validity
+	ReviewSchedule
 	CreatedAt time.Time `json:"createdAt"`
 	UpdatedAt time.Time `json:"updatedAt"`
 }
@@ -210,6 +212,7 @@ type Attempt struct {
 	Source     *SourceRef `json:"source,omitempty"`
 	Provenance
 	Validity
+	ReviewSchedule
 	CreatedAt time.Time `json:"createdAt"`
 	UpdatedAt time.Time `json:"updatedAt"`
 }
@@ -241,6 +244,7 @@ type Handoff struct {
 	Permalink  string `json:"permalink,omitempty"`
 	Provenance
 	Validity
+	ReviewSchedule
 	CreatedAt time.Time `json:"createdAt"`
 }
 

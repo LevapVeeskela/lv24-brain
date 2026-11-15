@@ -275,6 +275,15 @@ func sessionEnd(ctx context.Context, opts sessionOptions, stdout io.Writer) erro
 		Provenance: a.AutoCaptureProvenance(),
 	})
 	if err != nil {
+		var duplicate *domain.DuplicateError
+		if errors.As(err, &duplicate) {
+			// The session added nothing new: an identical automatic handoff is
+			// already stored. That is not a failure of the hook.
+			if opts.hook == "" {
+				fmt.Fprintf(stdout, "handoff already recorded as %s\n", duplicate.ID)
+			}
+			return nil
+		}
 		return err
 	}
 	if opts.hook == "" {
