@@ -58,7 +58,7 @@ Flags:
 	if *asJSON {
 		return writeJSONReport(stdout, stderr, "links", out)
 	}
-	fmt.Fprintln(stdout, recordListLine(summary))
+	fmt.Fprintln(stdout, recordSummaryLine(links.Record.Summary()))
 	printLinkSections(stdout, out.Links, out.Backlinks)
 	return 0
 }

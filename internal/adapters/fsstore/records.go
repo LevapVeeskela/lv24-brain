@@ -65,6 +65,7 @@ func provenanceFromFrontmatter(provenance provenanceFrontmatter) domain.Provenan
 
 type noteMetadata struct {
 	provenanceFrontmatter
+	validityFrontmatter
 	ID        string            `json:"id"`
 	Title     string            `json:"title"`
 	Tags      []string          `json:"tags,omitempty"`
@@ -76,6 +77,7 @@ type noteMetadata struct {
 type decisionFrontmatter struct {
 	markdown.Frontmatter  `yaml:",inline"`
 	provenanceFrontmatter `yaml:",inline"`
+	validityFrontmatter   `yaml:",inline"`
 	ID                    string                `yaml:"id,omitempty"`
 	Title                 string                `yaml:"title,omitempty"`
 	Status                domain.DecisionStatus `yaml:"status,omitempty"`
@@ -86,10 +88,75 @@ type decisionFrontmatter struct {
 type attemptFrontmatter struct {
 	markdown.Frontmatter  `yaml:",inline"`
 	provenanceFrontmatter `yaml:",inline"`
+	validityFrontmatter   `yaml:",inline"`
 	ID                    string                `yaml:"id,omitempty"`
 	Title                 string                `yaml:"title,omitempty"`
 	Source                *sourceRefFrontmatter `yaml:"source,omitempty"`
 	CreatedAt             time.Time             `yaml:"created_at,omitempty"`
+}
+
+// validityFrontmatter is the on-disk form of domain.Validity. Times are RFC
+// 3339 strings so an unset time is omitted instead of encoded as year 1. Only
+// non-default values are written, so a record that became current at its
+// created_at keeps a clean frontmatter and old files stay readable.
+type validityFrontmatter struct {
+	ValidFrom    string  `yaml:"valid_from,omitempty" json:"valid_from,omitempty"`
+	ValidTo      string  `yaml:"valid_to,omitempty" json:"valid_to,omitempty"`
+	SupersededBy string  `yaml:"superseded_by,omitempty" json:"superseded_by,omitempty"`
+	Supersedes   string  `yaml:"supersedes,omitempty" json:"supersedes,omitempty"`
+	Confidence   float64 `yaml:"confidence,omitempty" json:"confidence,omitempty"`
+}
+
+func validityToFrontmatter(validity domain.Validity, createdAt time.Time) validityFrontmatter {
+	out := validityFrontmatter{
+		SupersededBy: strings.TrimSpace(validity.SupersededBy),
+		Supersedes:   strings.TrimSpace(validity.Supersedes),
+		Confidence:   validity.Confidence,
+	}
+	from := validity.EffectiveFrom(createdAt)
+	if !from.IsZero() && !from.Equal(createdAt) {
+		out.ValidFrom = formatItemTime(from)
+	}
+	if !validity.ValidTo.IsZero() {
+		out.ValidTo = formatItemTime(validity.ValidTo)
+	}
+	return out
+}
+
+// validityFromFrontmatter reads the validity fields. A missing valid_from
+// defaults to created_at, which is the behavior of every record written before
+// validity existed. A present but unparseable timestamp is an error: silently
+// defaulting it could make a superseded record look current.
+func validityFromFrontmatter(validity validityFrontmatter, createdAt time.Time) (domain.Validity, error) {
+	from, err := parseValidityTime("valid_from", validity.ValidFrom)
+	if err != nil {
+		return domain.Validity{}, err
+	}
+	if from.IsZero() {
+		from = createdAt
+	}
+	to, err := parseValidityTime("valid_to", validity.ValidTo)
+	if err != nil {
+		return domain.Validity{}, err
+	}
+	return domain.Validity{
+		ValidFrom:    from,
+		ValidTo:      to,
+		SupersededBy: strings.TrimSpace(validity.SupersededBy),
+		Supersedes:   strings.TrimSpace(validity.Supersedes),
+		Confidence:   validity.Confidence,
+	}, nil
+}
+
+func parseValidityTime(field, raw string) (time.Time, error) {
+	if strings.TrimSpace(raw) == "" {
+		return time.Time{}, nil
+	}
+	at := parseOptionalTime(raw)
+	if at.IsZero() {
+		return time.Time{}, domain.NewValidationError(field, fmt.Sprintf("%q is not a timestamp", raw))
+	}
+	return at, nil
 }
 
 // sourceRefFrontmatter is the on-disk form of domain.SourceRef. Times are
@@ -160,6 +227,7 @@ func validateRecordSourceRef(source *domain.SourceRef, projectID string) error {
 type handoffFrontmatter struct {
 	markdown.Frontmatter  `yaml:",inline"`
 	provenanceFrontmatter `yaml:",inline"`
+	validityFrontmatter   `yaml:",inline"`
 	ID                    string    `yaml:"id,omitempty"`
 	CreatedAt             time.Time `yaml:"created_at,omitempty"`
 }
@@ -288,6 +356,7 @@ func appendNoteLocked(path string, note domain.Note, date string, createdAt, upd
 
 	entry := renderNoteEntry(noteMetadata{
 		provenanceFrontmatter: provenanceToFrontmatter(note.Provenance),
+		validityFrontmatter:   validityToFrontmatter(note.Validity, createdAt),
 		ID:                    id,
 		Title:                 note.Title,
 		Tags:                  nonNilStrings(note.Tags),
@@ -355,6 +424,7 @@ func (s *Store) AppendDecision(ctx context.Context, decision domain.Decision) (d
 					Permalink:     decision.Permalink,
 				},
 				provenanceFrontmatter: provenanceToFrontmatter(decision.Provenance),
+				validityFrontmatter:   validityToFrontmatter(decision.Validity, createdAt),
 				ID:                    id,
 				Title:                 decision.Title,
 				Status:                decision.Status,
@@ -411,6 +481,7 @@ func (s *Store) AppendAttempt(ctx context.Context, attempt domain.Attempt) (doma
 					Permalink:     attempt.Permalink,
 				},
 				provenanceFrontmatter: provenanceToFrontmatter(attempt.Provenance),
+				validityFrontmatter:   validityToFrontmatter(attempt.Validity, createdAt),
 				ID:                    id,
 				Title:                 attempt.Title,
 				Source:                sourceRefToFrontmatter(attempt.Source),
@@ -465,6 +536,7 @@ func (s *Store) AppendHandoff(ctx context.Context, handoff domain.Handoff) (doma
 					Permalink:     handoff.Permalink,
 				},
 				provenanceFrontmatter: provenanceToFrontmatter(handoff.Provenance),
+				validityFrontmatter:   validityToFrontmatter(handoff.Validity, createdAt),
 				ID:                    id,
 				CreatedAt:             createdAt,
 			}

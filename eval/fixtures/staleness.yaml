@@ -1,0 +1,340 @@
+version: 1
+project: lv24-brain-stale
+notes: |
+  Staleness corpus: every task asks for current state, names the accepted
+  record as expected and the superseded record as forbidden. Until temporal
+  validity filters superseded records out of current queries, the forbidden
+  row is expected to appear and the leak rate records the gap.
+
+records:
+  - id: decision-2026-03-02-cron-sync
+    kind: decision
+    title: "Pull with a cron loop every five minutes"
+    status: superseded
+    created_at: 2026-03-02T08:00:00Z
+    valid_to: 2026-09-12T10:00:00Z
+    superseded_by: decision-2026-09-12-bounded-rebase
+    context: |
+      A cron job pulls remote changes every five minutes; a failed pull is
+      retried by the next tick.
+    consequences:
+      - "Remote changes arrive within five minutes"
+
+  - id: decision-2026-09-12-bounded-rebase
+    kind: decision
+    title: "Pull on demand with a bounded rebase"
+    status: accepted
+    created_at: 2026-09-12T10:00:00Z
+    supersedes: decision-2026-03-02-cron-sync
+    context: |
+      brain sync pulls remote changes on demand with a bounded rebase, aborts
+      on conflict and never forces. The cron loop is gone.
+    consequences:
+      - "A conflict is visible immediately"
+
+  - id: decision-2026-02-10-sqlite-only
+    kind: decision
+    title: "Use SQLite only, no server mode"
+    status: superseded
+    created_at: 2026-02-10T09:00:00Z
+    valid_to: 2026-05-20T14:00:00Z
+    superseded_by: decision-2026-05-20-server-mode
+    context: |
+      One SQLite database per brain; a team shares a data repository, not a
+      server.
+    consequences:
+      - "No PostgreSQL dependency"
+
+  - id: decision-2026-05-20-server-mode
+    kind: decision
+    title: "Add a server mode with PostgreSQL"
+    status: accepted
+    created_at: 2026-05-20T14:00:00Z
+    supersedes: decision-2026-02-10-sqlite-only
+    context: |
+      A server mode with PostgreSQL lets a team share one brain over HTTP;
+      SQLite remains for local and git modes.
+    consequences:
+      - "Team sharing no longer needs a shared checkout"
+
+  - id: decision-2026-04-04-jsonl-fixtures
+    kind: decision
+    title: "Store eval fixtures as JSONL"
+    status: superseded
+    created_at: 2026-04-04T11:00:00Z
+    valid_to: 2026-10-01T09:30:00Z
+    superseded_by: decision-2026-10-01-yaml-fixtures
+    context: |
+      eval fixtures are one JSONL file per project; tasks and records share
+      the file.
+    consequences:
+      - "One line per record"
+
+  - id: decision-2026-10-01-yaml-fixtures
+    kind: decision
+    title: "Store eval fixtures as YAML"
+    status: accepted
+    created_at: 2026-10-01T09:30:00Z
+    supersedes: decision-2026-04-04-jsonl-fixtures
+    context: |
+      eval fixtures are YAML so records and tasks stay readable in review and
+      comments are allowed.
+    consequences:
+      - "Labels are reviewed like code"
+
+  - id: decision-2026-01-15-global-lock
+    kind: decision
+    title: "One global lock file for all projects"
+    status: superseded
+    created_at: 2026-01-15T10:00:00Z
+    valid_to: 2026-06-05T13:20:00Z
+    superseded_by: decision-2026-06-05-per-file-lock
+    context: |
+      Every write takes one global lock file at the data directory root, so
+      concurrent writes are serialized across all projects.
+    consequences:
+      - "Simple ownership check"
+
+  - id: decision-2026-06-05-per-file-lock
+    kind: decision
+    title: "Lock per record file"
+    status: accepted
+    created_at: 2026-06-05T13:20:00Z
+    supersedes: decision-2026-01-15-global-lock
+    context: |
+      Writes lock the record file or the daily notes file, so two projects
+      never wait on one global lock.
+    consequences:
+      - "Independent projects write in parallel"
+
+  - id: decision-2026-03-18-embeddings
+    kind: decision
+    title: "Ship local embeddings in 0.15"
+    status: superseded
+    created_at: 2026-03-18T12:00:00Z
+    valid_to: 2026-10-14T15:00:00Z
+    superseded_by: decision-2026-10-14-defer-embeddings
+    context: |
+      Search gains local bge-m3 embeddings in 0.15 to improve paraphrase
+      recall.
+    consequences:
+      - "A vector table next to the FTS index"
+
+  - id: decision-2026-10-14-defer-embeddings
+    kind: decision
+    title: "Defer embeddings until golden recall justifies them"
+    status: accepted
+    created_at: 2026-10-14T15:00:00Z
+    supersedes: decision-2026-03-18-embeddings
+    context: |
+      Local embeddings are deferred; FTS5 remains the search backend until
+      golden recall shows paraphrase misses worth the cost.
+    consequences:
+      - "No vectors in 0.16"
+
+  - id: decision-2026-02-22-auto-merge
+    kind: decision
+    title: "Auto-merge near-duplicate records"
+    status: superseded
+    created_at: 2026-02-22T08:30:00Z
+    valid_to: 2026-08-30T10:10:00Z
+    superseded_by: decision-2026-08-30-flag-duplicates
+    context: |
+      Near-duplicate records are merged automatically to keep the corpus
+      small.
+    consequences:
+      - "Fewer visible records"
+
+  - id: decision-2026-08-30-flag-duplicates
+    kind: decision
+    title: "Flag duplicates and never auto-merge"
+    status: accepted
+    created_at: 2026-08-30T10:10:00Z
+    supersedes: decision-2026-02-22-auto-merge
+    context: |
+      Duplicate records are flagged in review and never merged automatically;
+      the owner decides.
+    consequences:
+      - "No silent data loss"
+
+  - id: decision-2026-04-28-raw-in-git
+    kind: decision
+    title: "Commit raw connector items to git"
+    status: superseded
+    created_at: 2026-04-28T09:45:00Z
+    valid_to: 2026-09-03T11:00:00Z
+    superseded_by: decision-2026-09-03-raw-local
+    context: |
+      Raw connector items are committed to git so every machine sees the same
+      mail and issue text.
+    consequences:
+      - "Large repositories"
+
+  - id: decision-2026-09-03-raw-local
+    kind: decision
+    title: "Keep raw items machine local"
+    status: accepted
+    created_at: 2026-09-03T11:00:00Z
+    supersedes: decision-2026-04-28-raw-in-git
+    context: |
+      Raw connector items stay machine local; only connections.json is
+      committed to git.
+    consequences:
+      - "No payload conflicts on sync"
+
+  - id: decision-2026-05-05-mcp-2025
+    kind: decision
+    title: "Target MCP 2025-06-18 only"
+    status: superseded
+    created_at: 2026-05-05T10:00:00Z
+    valid_to: 2026-08-20T13:00:00Z
+    superseded_by: decision-2026-08-20-mcp-2026
+    context: |
+      The MCP server targets the 2025-06-18 revision only.
+    consequences:
+      - "No version negotiation"
+
+  - id: decision-2026-08-20-mcp-2026
+    kind: decision
+    title: "Adopt MCP 2026-07-28"
+    status: accepted
+    created_at: 2026-08-20T13:00:00Z
+    supersedes: decision-2026-05-05-mcp-2025
+    context: |
+      The MCP server negotiates versions and targets 2026-07-28 while old
+      2025-06-18 clients keep working.
+    consequences:
+      - "One server serves both revisions"
+
+  - id: decision-2026-03-30-full-bodies
+    kind: decision
+    title: "Search returns full record bodies"
+    status: superseded
+    created_at: 2026-03-30T14:00:00Z
+    valid_to: 2026-10-20T10:00:00Z
+    superseded_by: decision-2026-10-20-previews
+    context: |
+      Search results include the full record body so the agent never needs a
+      second call.
+    consequences:
+      - "Large search responses"
+
+  - id: decision-2026-10-20-previews
+    kind: decision
+    title: "Search returns 160 character previews"
+    status: accepted
+    created_at: 2026-10-20T10:00:00Z
+    supersedes: decision-2026-03-30-full-bodies
+    context: |
+      Search returns a 160 character preview with id, kind and path; the agent
+      fetches the body only when needed.
+    consequences:
+      - "Fewer tokens per search"
+
+  - id: decision-2026-06-12-english-only
+    kind: decision
+    title: "Keep the interface English only"
+    status: superseded
+    created_at: 2026-06-12T09:00:00Z
+    valid_to: 2026-09-30T16:30:00Z
+    superseded_by: decision-2026-09-30-localized-docs
+    context: |
+      The interface and documentation stay English only in every release.
+    consequences:
+      - "One documentation language"
+
+  - id: decision-2026-09-30-localized-docs
+    kind: decision
+    title: "Ship Russian and Chinese documentation"
+    status: accepted
+    created_at: 2026-09-30T16:30:00Z
+    supersedes: decision-2026-06-12-english-only
+    context: |
+      Documentation ships in English, Russian and Chinese; commands and code
+      stay identical across languages.
+    consequences:
+      - "Three translation trees to review"
+
+tasks:
+  - id: st-sync-pull
+    query: "how does sync pull remote changes"
+    category: staleness
+    expected: [decision-2026-09-12-bounded-rebase]
+    forbidden: [decision-2026-03-02-cron-sync]
+    notes: "Current state only; the cron decision is obsolete."
+
+  - id: st-team-sharing
+    query: "can a team share one brain"
+    category: staleness
+    expected: [decision-2026-05-20-server-mode]
+    forbidden: [decision-2026-02-10-sqlite-only]
+
+  - id: st-fixture-format
+    query: "eval fixture file format"
+    category: staleness
+    expected: [decision-2026-10-01-yaml-fixtures]
+    forbidden: [decision-2026-04-04-jsonl-fixtures]
+
+  - id: st-write-lock
+    query: "how are concurrent writes locked"
+    category: staleness
+    expected: [decision-2026-06-05-per-file-lock]
+    forbidden: [decision-2026-01-15-global-lock]
+
+  - id: st-embeddings
+    query: "are embeddings part of search now"
+    category: staleness
+    expected: [decision-2026-10-14-defer-embeddings]
+    forbidden: [decision-2026-03-18-embeddings]
+
+  - id: st-duplicates
+    query: "what happens to duplicate records"
+    category: staleness
+    expected: [decision-2026-08-30-flag-duplicates]
+    forbidden: [decision-2026-02-22-auto-merge]
+
+  - id: st-raw-git
+    query: "are raw connector items in git"
+    category: staleness
+    expected: [decision-2026-09-03-raw-local]
+    forbidden: [decision-2026-04-28-raw-in-git]
+
+  - id: st-mcp-revision
+    query: "which MCP revision does the server target"
+    category: staleness
+    expected: [decision-2026-08-20-mcp-2026]
+    forbidden: [decision-2026-05-05-mcp-2025]
+
+  - id: st-search-bodies
+    query: "does search return full record bodies"
+    category: staleness
+    expected: [decision-2026-10-20-previews]
+    forbidden: [decision-2026-03-30-full-bodies]
+
+  - id: st-doc-languages
+    query: "which languages does the documentation support"
+    category: staleness
+    expected: [decision-2026-09-30-localized-docs]
+    forbidden: [decision-2026-06-12-english-only]
+
+  - id: st-asof-sync-june
+    query: "how does sync pull remote changes"
+    category: as_of
+    as_of: 2026-06-01T00:00:00Z
+    expected: [decision-2026-03-02-cron-sync]
+    forbidden: [decision-2026-09-12-bounded-rebase]
+    notes: "At that instant the cron pull was current; the rebase decision did not exist yet."
+
+  - id: st-asof-storage-april
+    query: "can a team share one brain"
+    category: as_of
+    as_of: 2026-04-15T00:00:00Z
+    expected: [decision-2026-02-10-sqlite-only]
+    forbidden: [decision-2026-05-20-server-mode]
+
+  - id: st-asof-fixtures-august
+    query: "eval fixture file format"
+    category: as_of
+    as_of: 2026-08-01T00:00:00Z
+    expected: [decision-2026-04-04-jsonl-fixtures]
+    forbidden: [decision-2026-10-01-yaml-fixtures]

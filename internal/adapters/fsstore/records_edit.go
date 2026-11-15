@@ -90,6 +90,7 @@ func (s *Store) UpdateDecision(ctx context.Context, decision domain.Decision) er
 			// Provenance is immutable: an edit must not drop the source or the
 			// review state.
 			provenanceFrontmatter: provenanceToFrontmatter(current.Provenance),
+			validityFrontmatter:   validityToFrontmatter(decision.Validity, current.CreatedAt),
 			ID:                    current.ID,
 			Title:                 decision.Title,
 			Status:                decision.Status,

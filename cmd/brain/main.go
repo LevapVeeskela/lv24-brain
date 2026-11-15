@@ -139,6 +139,8 @@ func runCommand(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return runIndex(rest, stdout, stderr)
 	case "search":
 		return runSearch(rest, stdout, stderr)
+	case "eval":
+		return runEval(rest, stdout, stderr)
 	case "journal":
 		return runJournal(rest, stdout, stderr)
 	case "event":
@@ -230,6 +232,7 @@ Commands:
   sync       Pull, commit, and push brain data (exit 3 on conflict)
   index      Rebuild or refresh the local search index
   search     Search notes, decisions, attempts and handoffs (--dumps adds connector dumps)
+  eval       Score retrieval fixtures and compare with a baseline (exit 1 on regression)
   journal    Show the per-user activity journal (local/git)
   event      Record an external event, e.g. "event commit" from a git hook
   hooks      Install, remove or inspect the git post-commit journal hook
@@ -477,6 +480,7 @@ func runOpen(args []string, stdout, stderr io.Writer) int {
 	budget := fs.Int("budget", app.DefaultBootstrapBudget, "summary size budget in runes")
 	brief := fs.Bool("brief", false, "print only the project and state fields")
 	includeUnreviewed := fs.Bool("include-unreviewed", false, "include quarantined records (unreviewed agent, connector or import writes)")
+	validity := addValidityFlags(fs)
 	asJSON := fs.Bool("json", false, "print JSON")
 	cfgPath := configFlag(fs)
 	positional, err := parseInterspersed(fs, args)
@@ -485,6 +489,11 @@ func runOpen(args []string, stdout, stderr io.Writer) int {
 	}
 	if len(positional) > 1 {
 		fmt.Fprintf(stderr, "brain open: unexpected arguments: %s\n", strings.Join(positional[1:], " "))
+		return 2
+	}
+	asOf, includeSuperseded, err := validity.parse()
+	if err != nil {
+		fmt.Fprintf(stderr, "brain open: %v\n", err)
 		return 2
 	}
 	selector := ""
@@ -530,6 +539,7 @@ func runOpen(args []string, stdout, stderr io.Writer) int {
 	}
 	result, err := useCase.App.Bootstrap(ctx, app.BootstrapOptions{
 		ProjectID: target.Project.ID, Budget: *budget, IncludeUnreviewed: *includeUnreviewed,
+		AsOf: asOf, IncludeSuperseded: includeSuperseded,
 	})
 	if err != nil {
 		return reportError(stderr, "open", err)
@@ -539,7 +549,7 @@ func runOpen(args []string, stdout, stderr io.Writer) int {
 		if err != nil {
 			return reportError(stderr, "open", err)
 		}
-		decisions, attempts, handoffs, err := useCase.App.RecentRecords(ctx, target.Project.ID, 5)
+		decisions, attempts, handoffs, err := useCase.App.RecentRecordsAt(ctx, target.Project.ID, 5, asOf, includeSuperseded)
 		if err != nil {
 			return reportError(stderr, "open", err)
 		}
@@ -939,6 +949,7 @@ func runBootstrap(args []string, stdout, stderr io.Writer) int {
 	project := fs.String("project", "", "project id or alias")
 	budget := fs.Int("budget", app.DefaultBootstrapBudget, "summary size budget in runes")
 	includeUnreviewed := fs.Bool("include-unreviewed", false, "include quarantined records (unreviewed agent, connector or import writes)")
+	validity := addValidityFlags(fs)
 	asJSON := fs.Bool("json", false, "print JSON")
 	cfgPath := configFlag(fs)
 	positional, err := parseInterspersed(fs, args)
@@ -947,6 +958,11 @@ func runBootstrap(args []string, stdout, stderr io.Writer) int {
 	}
 	if len(positional) > 1 {
 		fmt.Fprintf(stderr, "brain bootstrap: unexpected arguments: %s\n", strings.Join(positional[1:], " "))
+		return 2
+	}
+	asOf, includeSuperseded, err := validity.parse()
+	if err != nil {
+		fmt.Fprintf(stderr, "brain bootstrap: %v\n", err)
 		return 2
 	}
 	cfg, err := loadRequiredConfig(*cfgPath)
@@ -970,6 +986,8 @@ func runBootstrap(args []string, stdout, stderr io.Writer) int {
 		ProjectID:         target.Project.ID,
 		Budget:            *budget,
 		IncludeUnreviewed: *includeUnreviewed,
+		AsOf:              asOf,
+		IncludeSuperseded: includeSuperseded,
 	})
 	if err != nil {
 		return reportError(stderr, "bootstrap", err)
@@ -1011,6 +1029,9 @@ func runNote(args []string, stdout, stderr io.Writer) int {
 	title := fs.String("title", "", "note title")
 	body := fs.String("body", "", "note body in Markdown")
 	tags := fs.String("tags", "", "comma-separated tags")
+	supersedes := fs.String("supersedes", "", "id of the note this one replaces; the old note is marked superseded")
+	supersededBy := fs.String("superseded-by", "", "id of the note that already replaced this one (repair)")
+	confidence := fs.Float64("confidence", 0, "author confidence between 0 and 1")
 	create := fs.Bool("create", false, "register --project first if it does not exist yet")
 	cfgPath := configFlag(fs)
 	positional, err := parseInterspersed(fs, args)
@@ -1042,6 +1063,9 @@ func runNote(args []string, stdout, stderr io.Writer) int {
 		Title:         *title,
 		Body:          *body,
 		Tags:          splitList(*tags),
+		Supersedes:    *supersedes,
+		SupersededBy:  *supersededBy,
+		Confidence:    *confidence,
 	})
 	if err != nil {
 		return reportError(stderr, "note", err)
@@ -1060,6 +1084,9 @@ func runDecision(args []string, stdout, stderr io.Writer) int {
 	consequences := fs.String("consequences", "", "consequences")
 	evidence := fs.String("evidence", "", "supporting evidence")
 	paths := fs.String("paths", "", "repo-relative files or directories this decision governs, comma-separated")
+	supersedes := fs.String("supersedes", "", "id of the decision this one replaces; the old one is marked superseded")
+	supersededBy := fs.String("superseded-by", "", "id of the decision that already replaced this one (repair)")
+	confidence := fs.Float64("confidence", 0, "author confidence between 0 and 1")
 	create := fs.Bool("create", false, "register --project first if it does not exist yet")
 	cfgPath := configFlag(fs)
 	positional, err := parseInterspersed(fs, args)
@@ -1092,6 +1119,9 @@ func runDecision(args []string, stdout, stderr io.Writer) int {
 		Consequences:  splitList(*consequences),
 		Evidence:      splitList(*evidence),
 		Paths:         splitList(*paths),
+		Supersedes:    *supersedes,
+		SupersededBy:  *supersededBy,
+		Confidence:    *confidence,
 	})
 	if err != nil {
 		return reportError(stderr, "decision", err)
@@ -1107,6 +1137,9 @@ func runAttempt(args []string, stdout, stderr io.Writer) int {
 	hypothesis := fs.String("hypothesis", "", "what was expected")
 	resultText := fs.String("result", "", "what happened")
 	reason := fs.String("reason", "", "why it failed")
+	supersedes := fs.String("supersedes", "", "id of the attempt this one replaces; the old one is marked superseded")
+	supersededBy := fs.String("superseded-by", "", "id of the attempt that already replaced this one (repair)")
+	confidence := fs.Float64("confidence", 0, "author confidence between 0 and 1")
 	create := fs.Bool("create", false, "register --project first if it does not exist yet")
 	cfgPath := configFlag(fs)
 	positional, err := parseInterspersed(fs, args)
@@ -1136,6 +1169,9 @@ func runAttempt(args []string, stdout, stderr io.Writer) int {
 		Hypothesis:    *hypothesis,
 		Result:        *resultText,
 		Reason:        *reason,
+		Supersedes:    *supersedes,
+		SupersededBy:  *supersededBy,
+		Confidence:    *confidence,
 	})
 	if err != nil {
 		return reportError(stderr, "attempt", err)
@@ -1151,6 +1187,9 @@ func runHandoff(args []string, stdout, stderr io.Writer) int {
 	next := fs.String("next", "", "next action")
 	gitContext := fs.String("git-context", "", "git context for the handoff (default: read from the project checkout)")
 	noGit := fs.Bool("no-git", false, "do not record git context")
+	supersedes := fs.String("supersedes", "", "id of the handoff this one replaces; the old one is marked superseded")
+	supersededBy := fs.String("superseded-by", "", "id of the handoff that already replaced this one (repair)")
+	confidence := fs.Float64("confidence", 0, "author confidence between 0 and 1")
 	create := fs.Bool("create", false, "register --project first if it does not exist yet")
 	cfgPath := configFlag(fs)
 	positional, err := parseInterspersed(fs, args)
@@ -1192,6 +1231,9 @@ func runHandoff(args []string, stdout, stderr io.Writer) int {
 		Summary:       *summary,
 		GitContext:    *gitContext,
 		NextAction:    *next,
+		Supersedes:    *supersedes,
+		SupersededBy:  *supersededBy,
+		Confidence:    *confidence,
 	})
 	if err != nil {
 		return reportError(stderr, "handoff", err)
@@ -1511,6 +1553,7 @@ func runSearch(args []string, stdout, stderr io.Writer) int {
 	kinds := fs.String("kind", "", "comma-separated kinds to keep: note, decision, attempt, handoff, dump, item (raw-zone external items; excluded by default)")
 	dumps := fs.Bool("dumps", false, "include connector dumps (mail, GitHub/GitLab issues and PRs)")
 	since := fs.String("since", "", "only documents updated since: duration (24h, 7d), date (2026-11-01) or RFC3339 time")
+	validity := addValidityFlags(fs)
 	asJSON := fs.Bool("json", false, "print JSON")
 	cfgPath := configFlag(fs)
 	flagArgs, queryParts := splitValueFlags(args, map[string]bool{
@@ -1518,6 +1561,7 @@ func runSearch(args []string, stdout, stderr io.Writer) int {
 		"limit":   true,
 		"kind":    true,
 		"since":   true,
+		"as-of":   true,
 		"config":  true,
 	})
 	if err := fs.Parse(flagArgs); err != nil {
@@ -1536,6 +1580,11 @@ func runSearch(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "brain search: --%v\n", err)
 		return 2
 	}
+	asOf, includeSuperseded, err := validity.parse()
+	if err != nil {
+		fmt.Fprintf(stderr, "brain search: %v\n", err)
+		return 2
+	}
 	query := strings.TrimSpace(strings.Join(queryParts, " "))
 	if query == "" {
 		fmt.Fprintln(stderr, "brain search: query is required")
@@ -1551,12 +1600,14 @@ func runSearch(args []string, stdout, stderr io.Writer) int {
 	}
 	defer func() { _ = runtime.Close() }()
 	hits, notice, err := runtime.App.SearchWithNotice(context.Background(), app.SearchOptions{
-		Text:         query,
-		ProjectID:    *project,
-		Limit:        *limit,
-		Kinds:        splitList(*kinds),
-		IncludeDumps: *dumps,
-		Since:        sinceTime,
+		Text:              query,
+		ProjectID:         *project,
+		Limit:             *limit,
+		Kinds:             splitList(*kinds),
+		IncludeDumps:      *dumps,
+		Since:             sinceTime,
+		AsOf:              asOf,
+		IncludeSuperseded: includeSuperseded,
 	})
 	if err != nil {
 		return reportError(stderr, "search", err)

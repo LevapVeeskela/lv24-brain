@@ -1,0 +1,426 @@
+version: 1
+project: lv24-brain
+notes: |
+  Authored retrieval corpus for the engine repository. Records are synthetic
+  but follow the real decision, attempt and note shapes. Every task and label
+  is written for this project; no third-party benchmark data is copied.
+
+records:
+  - id: decision-2026-04-12-ulid-record-ids
+    kind: decision
+    title: "Allocate record ids with ULIDs"
+    status: accepted
+    created_at: 2026-04-12T09:00:00Z
+    context: |
+      Concurrent writes produced duplicate ids and one record became
+      unreachable by id. internal/app/write.go now allocates one ULID per
+      record, and the file name keeps the date and slug prefix.
+    alternatives:
+      - "Listing-based ids with a numeric suffix"
+      - "UUIDv4 in frontmatter only"
+    consequences:
+      - "The duplicate-id finding disappears"
+      - "Old date-slug ids stay readable"
+    evidence:
+      - "recordid_concurrency_test.go"
+    paths:
+      - "internal/app/write.go"
+      - "internal/domain/recordid.go"
+
+  - id: decision-2026-06-08-merge-drivers
+    kind: decision
+    title: "Use git merge drivers for state and notes"
+    status: accepted
+    created_at: 2026-06-08T11:30:00Z
+    context: |
+      Two machines rewriting projects/*/state.md conflicted on every sync.
+      Field-level merge in brain merge-driver keeps state fields and unions
+      notes; .gitattributes registers merge=lv24-state.
+    alternatives:
+      - "Commit only on one machine"
+      - "CRDT documents"
+    consequences:
+      - "Conflicts become visible conflict files"
+      - "The registry merge is a union of projects"
+    paths:
+      - "projects/demo/state.md"
+      - ".gitattributes"
+
+  - id: decision-2026-07-01-bounded-sync
+    kind: decision
+    title: "Bounded recoverable sync with rebase"
+    status: accepted
+    created_at: 2026-07-01T08:15:00Z
+    context: |
+      brain sync now takes a process lock, autostashes a dirty tree, pulls
+      with rebase and aborts on conflict, retries push three times and never
+      forces. A conflict exits with code 3 and lists the unmerged paths.
+    alternatives:
+      - "Force push"
+      - "Merge commits on every sync"
+    consequences:
+      - "Exit code 3 is part of the CLI contract"
+      - "An interrupted rebase is repaired by the next sync"
+
+  - id: decision-2026-08-20-mcp-2026
+    kind: decision
+    title: "Adopt MCP revision 2026-07-28"
+    status: accepted
+    created_at: 2026-08-20T13:00:00Z
+    context: |
+      The MCP server negotiates supportedVersions, returns resultType complete
+      or input_required, and annotates every tool. Old 2025-06-18 clients keep
+      working through version negotiation.
+    alternatives:
+      - "Stay on the 2025-06-18 revision only"
+    consequences:
+      - "A typed refusal shape with try_instead and retryable"
+      - "Cursor pagination on records, search and links"
+
+  - id: decision-2026-09-03-raw-zone-local
+    kind: decision
+    title: "Keep connector raw items machine-local"
+    status: accepted
+    created_at: 2026-09-03T10:45:00Z
+    context: |
+      Raw mail, GitHub and GitLab items and their checkpoints stay out of git
+      by default. Only connections.json is shared; a connection with publish
+      shared opts in explicitly.
+    alternatives:
+      - "Commit every raw item"
+      - "One shared raw repository"
+    consequences:
+      - "Two machines no longer conflict on observed_at bytes"
+      - "Migration uses git rm --cached connectors/<id>"
+
+  - id: decision-2026-10-14-fts5-search
+    kind: decision
+    title: "Keep SQLite FTS5 as the only retrieval backend"
+    status: accepted
+    created_at: 2026-10-14T09:20:00Z
+    context: |
+      In October 2026 the decision was to keep SQLite FTS5 bm25 with prefix
+      word forms for the local index. The adapter lives in
+      internal/adapters/sqliteindex. No embeddings, vectors or external search
+      service until paraphrase recall on the golden set justifies them.
+    alternatives:
+      - "Local bge-m3 embeddings"
+      - "Server-side PostgreSQL full text"
+    consequences:
+      - "p95 search stays under 50 ms"
+      - "Golden fixtures are the gate for search v2"
+
+  - id: decision-2026-10-28-layered-context
+    kind: decision
+    title: "Pack context in layers with per-section budgets"
+    status: accepted
+    created_at: 2026-10-28T16:05:00Z
+    context: |
+      In October 2026 the decision was a layered context budget: state and
+      handoff capped at 1200 tokens, pinned decisions 1500, recent attempts
+      1000, query hits 1500 and one-hop links 800, within a 6000 token budget.
+    alternatives:
+      - "One flat search list"
+      - "No budget at all"
+    consequences:
+      - "Sections report their token counts"
+      - "State is never dropped"
+
+  - id: attempt-2026-07-15-detached-cmd-update
+    kind: attempt
+    title: "Windows self-update through a detached cmd helper"
+    created_at: 2026-07-15T12:10:00Z
+    hypothesis: "A running exe can be overwritten in place."
+    result: "Failed with a sharing violation while the image was running."
+    reason: |
+      Windows can rename a running image but not overwrite it, so the updater
+      renames the old binary aside and starts a detached cmd helper that waits
+      for the image to be released.
+
+  - id: attempt-2026-08-02-apdata-fallback
+    kind: attempt
+    title: "APPDATA fallback for the desktop config"
+    created_at: 2026-08-02T07:40:00Z
+    hypothesis: "The packaged app can read config from APPDATA like an unpackaged build."
+    result: "Failed: the MSIX child process saw a virtualized AppData directory."
+    reason: |
+      Fixed in v0.3.4 with a second pointer in ~/.config/lv24-brain.
+
+  - id: attempt-2026-09-19-journal-default-limit
+    kind: attempt
+    title: "Journal gap detection with the default read limit"
+    created_at: 2026-09-19T18:25:00Z
+    hypothesis: "Reading the journal with its default limit is enough to detect gaps."
+    result: "Missed activity beyond the newest 50 entries."
+    reason: |
+      The default read limit was 50; per-project reads are now capped at 1000
+      and skip on cap.
+
+  - id: attempt-2026-06-21-lock-age-break
+    kind: attempt
+    title: "Break stale locks by age only"
+    created_at: 2026-06-21T15:00:00Z
+    hypothesis: "A lock older than its TTL is always stale."
+    result: "It deleted a live writer's lock and two processes wrote the same file."
+    reason: |
+      A lock is stale only when its owner pid is dead and the age exceeds the
+      TTL; release checks the owner fields.
+
+  - id: note-2026-09-28-doctor-findings
+    kind: note
+    title: "Doctor findings: duplicate id and raw zone"
+    created_at: 2026-09-28T10:00:00Z
+    body: |
+      brain doctor reports duplicate-id when two files share a frontmatter id,
+      and warns when raw-zone items are tracked in git. Both findings link to
+      the repair command.
+    tags:
+      - "doctor"
+      - "repair"
+
+  - id: note-2026-10-05-russian-terminology
+    kind: note
+    title: "Russian terminology for memory records"
+    created_at: 2026-10-05T09:30:00Z
+    body: |
+      В русском интерфейсе решение, попытка и заметка обозначают decision,
+      attempt и note. Блокировка записи и синхронизация данных остаются
+      техническими терминами.
+    tags:
+      - "docs"
+      - "ru"
+
+  - id: note-2026-10-22-desktop-terminal
+    kind: note
+    title: "Desktop terminal panel reads the engine config"
+    created_at: 2026-10-22T14:20:00Z
+    body: |
+      The desktop terminal panel resolves brain.yaml through the same pointer
+      as the CLI, with a fallback in the user config directory.
+
+  - id: decision-2026-05-30-lock-owner
+    kind: decision
+    title: "Locks carry pid, boot id and ttl"
+    status: accepted
+    created_at: 2026-05-30T09:10:00Z
+    context: |
+      A lock file records pid, boot id, host, created_at and ttl. It is stale
+      only when the pid is dead and the age exceeds ttl; release removes only a
+      lock owned by this process.
+    alternatives:
+      - "Age-only stale detection"
+    consequences:
+      - "A pulled lock file never blocks a writer"
+      - "break-lock is an explicit command"
+
+  - id: attempt-2026-05-18-crdt-merge
+    kind: attempt
+    title: "CRDT merge for note files"
+    created_at: 2026-05-18T11:00:00Z
+    hypothesis: "A CRDT removes merge conflicts without a merge driver."
+    result: "Rejected: the note format became opaque and the review diff lost its audit trail."
+    reason: |
+      Git merge drivers keep plaintext records and visible conflicts; a CRDT
+      is deferred until a measured need appears.
+
+  - id: note-2026-06-30-sync-status-json
+    kind: note
+    title: "Sync status JSON"
+    created_at: 2026-06-30T17:45:00Z
+    body: |
+      brain sync --status --json prints ahead, behind, unmerged paths and the
+      last synced revision for scripts and hooks.
+
+  - id: decision-2026-11-02-eval-harness
+    kind: decision
+    title: "Golden retrieval fixtures gate search changes"
+    status: proposed
+    created_at: 2026-11-02T08:00:00Z
+    context: |
+      Every search ranking change runs brain eval against eval/fixtures and
+      compares recall@5, MRR, superseded leak and tokens per answer with the
+      committed baseline.
+    alternatives:
+      - "Ad hoc manual queries"
+    consequences:
+      - "A baseline regression exits 1"
+      - "Fixtures are authored offline with no network"
+
+  - id: note-2026-09-08-runbook
+    kind: note
+    title: "Runbook incident checklists"
+    created_at: 2026-09-08T09:00:00Z
+    body: |
+      docs/runbook.md lists incident checklists for a leaked API token, a
+      conflicted data repository and a suspected signing-key leak.
+
+  - id: note-2026-10-30-sync-conflicts-ru
+    kind: note
+    title: "Конфликты синхронизации"
+    created_at: 2026-10-30T12:00:00Z
+    body: |
+      Если синхронизация падает с конфликтом, brain sync показывает
+      несмёрженные пути и завершается с кодом 3. Повторный запуск
+      восстанавливает прерванный rebase.
+
+tasks:
+  - id: q-ulid-ids
+    query: "ULID record ids duplicate"
+    category: identifier
+    expected: [decision-2026-04-12-ulid-record-ids]
+    notes: "Identifier query for the id allocator."
+
+  - id: q-write-path
+    query: "internal/app/write.go"
+    category: paths
+    expected: [decision-2026-04-12-ulid-record-ids]
+    notes: "A repo path must find the record that governs it."
+
+  - id: q-merge-drivers
+    query: "merge drivers state.md"
+    category: paths
+    expected: [decision-2026-06-08-merge-drivers]
+
+  - id: q-sync-conflict
+    query: "exit code 3 sync conflict"
+    category: identifier
+    expected: [decision-2026-07-01-bounded-sync]
+
+  - id: q-mcp-revision
+    query: "MCP 2026-07-28"
+    category: identifier
+    expected: [decision-2026-08-20-mcp-2026]
+
+  - id: q-raw-zone
+    query: "raw mail items must not be committed by default"
+    category: paraphrase
+    expected: [decision-2026-09-03-raw-zone-local]
+
+  - id: q-fts5
+    query: "sqliteindex FTS5 bm25"
+    category: identifier
+    expected: [decision-2026-10-14-fts5-search]
+
+  - id: q-context-layers
+    query: "how is the context pack budget split across sections"
+    category: paraphrase
+    expected: [decision-2026-10-28-layered-context]
+
+  - id: q-update-windows
+    query: "how does self-update replace a running binary on Windows"
+    category: paraphrase
+    expected: [attempt-2026-07-15-detached-cmd-update]
+
+  - id: q-appdata
+    query: "APPDATA MSIX virtualized config"
+    category: identifier
+    expected: [attempt-2026-08-02-apdata-fallback]
+
+  - id: q-journal
+    query: "journal limit 50 gaps"
+    category: identifier
+    expected: [attempt-2026-09-19-journal-default-limit]
+
+  - id: q-lock-age
+    query: "why can we not break a lock just because it is old"
+    category: paraphrase
+    expected: [attempt-2026-06-21-lock-age-break]
+
+  - id: q-doctor
+    query: "doctor reports two files with the same id"
+    category: paraphrase
+    expected: [note-2026-09-28-doctor-findings]
+
+  - id: q-ru-terminology
+    query: "термины решение попытка заметка"
+    category: morphology
+    expected: [note-2026-10-05-russian-terminology]
+    notes: "Russian word forms must share a prefix with the record body."
+
+  - id: q-ru-lock
+    query: "блокировка записи и синхронизация"
+    category: morphology
+    expected: [note-2026-10-05-russian-terminology]
+
+  - id: q-desktop-terminal
+    query: "desktop terminal panel config location"
+    category: paraphrase
+    expected: [note-2026-10-22-desktop-terminal]
+
+  - id: q-lock-owner
+    query: "lock pid boot id ttl"
+    category: identifier
+    expected: [decision-2026-05-30-lock-owner]
+
+  - id: q-crdt
+    query: "why was a CRDT rejected for note merging"
+    category: paraphrase
+    expected: [attempt-2026-05-18-crdt-merge]
+
+  - id: q-sync-json
+    query: "sync status json ahead behind"
+    category: identifier
+    expected: [note-2026-06-30-sync-status-json]
+
+  - id: q-eval-gate
+    query: "retrieval quality gate for search changes"
+    category: paraphrase
+    expected: [decision-2026-11-02-eval-harness]
+
+  - id: q-october-search
+    query: "what did we decide in October 2026 about search"
+    category: temporal
+    expected: [decision-2026-10-14-fts5-search]
+    notes: "Temporal language: the answer is the October decision."
+
+  - id: q-october-context
+    query: "October 2026 decision about the context budget"
+    category: temporal
+    expected: [decision-2026-10-28-layered-context]
+
+  - id: q-ru-sync-conflict
+    query: "почему синхронизация падает с конфликтом"
+    category: morphology
+    expected: [note-2026-10-30-sync-conflicts-ru]
+
+  - id: q-runbook-path
+    query: "docs/runbook.md incident checklist"
+    category: paths
+    expected: [note-2026-09-08-runbook]
+
+  - id: q-state-path
+    query: "projects/state.md merge driver"
+    category: paths
+    expected: [decision-2026-06-08-merge-drivers]
+
+  - id: q-ru-records
+    query: "какие термины используются для записей"
+    category: morphology
+    expected: [note-2026-10-05-russian-terminology]
+
+  # Known paraphrase gaps: the concept is right, but the query uses a synonym
+  # the record does not contain. They are labelled misses on purpose so search
+  # v2 has measurable headroom; do not "fix" them by editing the record text.
+  - id: q-mutex
+    query: "mutex ownership check"
+    category: paraphrase
+    expected: [decision-2026-05-30-lock-owner]
+    notes: "Known miss: the record says lock, the query says mutex."
+
+  - id: q-replay-commits
+    query: "replay local commits after a network outage"
+    category: paraphrase
+    expected: [decision-2026-07-01-bounded-sync]
+    notes: "Known miss: rebase/pull versus replay/network outage."
+
+  - id: q-overlapping-edits
+    query: "avoid overlapping edits on one decision"
+    category: paraphrase
+    expected: [decision-2026-06-08-merge-drivers]
+    notes: "Known miss: merge conflicts versus overlapping edits."
+
+  - id: q-two-sessions
+    query: "how do we stop two sessions writing one markdown file"
+    category: paraphrase
+    expected: [decision-2026-05-30-lock-owner]
+    notes: "Known miss: writers/processes versus sessions."

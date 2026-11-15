@@ -69,6 +69,11 @@ type ContextOptions struct {
 	// connector or import writes, or an unknown origin). They are excluded
 	// from trusted context by default.
 	IncludeUnreviewed bool
+	// AsOf gathers the context as it was valid at that instant instead of now.
+	AsOf time.Time
+	// IncludeSuperseded keeps records whose validity ended. An AsOf instant
+	// selects the point in time and takes precedence.
+	IncludeSuperseded bool
 }
 
 // ContextRecord is one record relevant to the task.
@@ -80,6 +85,9 @@ type ContextRecord struct {
 	Detail    string // first line of the context, reason or body
 	CreatedAt time.Time
 	Score     float64
+	// Validity is the record's temporal validity; the default context keeps
+	// current records only.
+	Validity domain.Validity
 	// Quarantined marks a record that is shown only because the caller asked
 	// for unreviewed records. Its text is not trusted.
 	Quarantined bool
@@ -155,6 +163,7 @@ func (a *App) Context(ctx context.Context, opts ContextOptions) (ContextResult, 
 	if err != nil {
 		return ContextResult{}, err
 	}
+	filter := validityFilter(opts.AsOf, opts.IncludeSuperseded)
 	project, err := a.resolveProject(ctx, opts.ProjectID)
 	if err != nil {
 		return ContextResult{}, err
@@ -178,7 +187,7 @@ func (a *App) Context(ctx context.Context, opts ContextOptions) (ContextResult, 
 		}
 	}
 	sort.Strings(quarantined)
-	handoff := latestHandoff(handoffs, since, opts.IncludeUnreviewed)
+	handoff := latestHandoff(filterHandoffs(handoffs, filter, now), since, opts.IncludeUnreviewed)
 
 	result := ContextResult{
 		Project: project, Mode: a.cfg.Mode, Query: query, Since: since,
@@ -188,9 +197,12 @@ func (a *App) Context(ctx context.Context, opts ContextOptions) (ContextResult, 
 	if result.Budget <= 0 {
 		result.Budget = DefaultBootstrapBudget
 	}
-	ranking := contextRanking{catalog: catalog, since: since, now: now, includeUnreviewed: opts.IncludeUnreviewed}
+	ranking := contextRanking{
+		catalog: catalog, since: since, now: now, includeUnreviewed: opts.IncludeUnreviewed,
+		filter: filter,
+	}
 
-	hits, err := a.contextSearch(ctx, query, project.ID, kinds, since)
+	hits, err := a.contextSearch(ctx, query, project.ID, kinds, since, opts)
 	if err != nil {
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return ContextResult{}, ctxErr
@@ -202,7 +214,7 @@ func (a *App) Context(ctx context.Context, opts ContextOptions) (ContextResult, 
 	// Failed attempts are listed whatever Kinds says: they warn against
 	// repeating an approach that already failed.
 	if err == nil {
-		attemptHits, attemptErr := a.contextSearch(ctx, query, project.ID, []string{ContextKindAttempt}, since)
+		attemptHits, attemptErr := a.contextSearch(ctx, query, project.ID, []string{ContextKindAttempt}, since, opts)
 		if attemptErr != nil {
 			result.Skipped = append(result.Skipped, "failed attempts: "+attemptErr.Error())
 		} else {
@@ -252,8 +264,11 @@ func (a *App) revision(ctx context.Context) string {
 	return revision.Value
 }
 
-func (a *App) contextSearch(ctx context.Context, query, projectID string, kinds []string, since time.Time) ([]ports.Hit, error) {
-	return a.SearchWith(ctx, SearchOptions{Text: query, ProjectID: projectID, Limit: contextSearchLimit, Kinds: kinds, Since: since})
+func (a *App) contextSearch(ctx context.Context, query, projectID string, kinds []string, since time.Time, opts ContextOptions) ([]ports.Hit, error) {
+	return a.SearchWith(ctx, SearchOptions{
+		Text: query, ProjectID: projectID, Limit: contextSearchLimit, Kinds: kinds, Since: since,
+		AsOf: opts.AsOf, IncludeSuperseded: opts.IncludeSuperseded,
+	})
 }
 
 // latestHandoff returns the newest handoff not older than since. Quarantined
@@ -296,7 +311,7 @@ func (a *App) contextCatalog(ctx context.Context, projectID string) (contextCata
 			catalog.records[decision.ID] = ContextRecord{
 				ID: decision.ID, Kind: ContextKindDecision, Title: decision.Title, Status: string(decision.Status),
 				Detail: SummarizeLine(decision.Context, promptLineRunes), CreatedAt: decision.CreatedAt,
-				Quarantined: decision.Quarantined(),
+				Validity: decision.Validity, Quarantined: decision.Quarantined(),
 			}
 			if decision.Quarantined() {
 				catalog.quarantined = append(catalog.quarantined, decision.ID)
@@ -313,7 +328,7 @@ func (a *App) contextCatalog(ctx context.Context, projectID string) (contextCata
 			catalog.records[attempt.ID] = ContextRecord{
 				ID: attempt.ID, Kind: ContextKindAttempt, Title: attempt.Title,
 				Detail: attemptDetail(attempt), CreatedAt: attempt.CreatedAt,
-				Quarantined: attempt.Quarantined(),
+				Validity: attempt.Validity, Quarantined: attempt.Quarantined(),
 			}
 			if attempt.Quarantined() {
 				catalog.quarantined = append(catalog.quarantined, attempt.ID)
@@ -330,7 +345,7 @@ func (a *App) contextCatalog(ctx context.Context, projectID string) (contextCata
 			catalog.records[note.ID] = ContextRecord{
 				ID: note.ID, Kind: ContextKindNote, Title: valueOr(note.Title, SummarizeLine(note.Body, 80)),
 				Detail: SummarizeLine(note.Body, promptLineRunes), CreatedAt: note.CreatedAt,
-				Quarantined: note.Quarantined(),
+				Validity: note.Validity, Quarantined: note.Quarantined(),
 			}
 			if note.Quarantined() {
 				catalog.quarantined = append(catalog.quarantined, note.ID)
@@ -366,6 +381,7 @@ type contextRanking struct {
 	since             time.Time
 	now               time.Time
 	includeUnreviewed bool
+	filter            domain.ValidityFilter
 }
 
 // candidates resolves hits to records in search order, dropping unknown
@@ -384,6 +400,9 @@ func (r contextRanking) candidates(hits []ports.Hit, exclude map[string]bool) []
 			continue
 		}
 		if record.Quarantined && !r.includeUnreviewed {
+			continue
+		}
+		if !r.filter.Allows(record.Validity, record.CreatedAt, r.now) {
 			continue
 		}
 		if !r.since.IsZero() && !record.CreatedAt.IsZero() && record.CreatedAt.Before(r.since) {

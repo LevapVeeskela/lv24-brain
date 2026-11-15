@@ -276,10 +276,39 @@ func (i *Index) Upsert(ctx context.Context, doc ports.Document) error {
 		doc.Title,
 		doc.Body,
 		doc.UpdatedAt.UnixNano(),
+		validFromNanos(doc),
+		nullableNanos(doc.ValidTo),
+		nullableString(doc.SupersededBy),
+		nullableString(doc.Supersedes),
 	); err != nil {
 		return fmt.Errorf("sqliteindex: upsert %q: %w", doc.ID, err)
 	}
 	return nil
+}
+
+// validFromNanos is the stored valid_from. A document without one became true
+// when it was last written, matching records created before validity existed.
+func validFromNanos(doc ports.Document) int64 {
+	if !doc.ValidFrom.IsZero() {
+		return doc.ValidFrom.UnixNano()
+	}
+	return doc.UpdatedAt.UnixNano()
+}
+
+// nullableNanos stores the zero time as SQL NULL: an empty valid_to is a
+// record that is still current.
+func nullableNanos(at time.Time) any {
+	if at.IsZero() {
+		return nil
+	}
+	return at.UnixNano()
+}
+
+func nullableString(value string) any {
+	if strings.TrimSpace(value) == "" {
+		return nil
+	}
+	return strings.TrimSpace(value)
 }
 
 func validateDocument(doc ports.Document) error {
@@ -347,16 +376,27 @@ func (i *Index) runSearch(ctx context.Context, query ports.Query, match string, 
 	hits := make([]ports.Hit, 0, limit)
 	for rows.Next() {
 		var (
-			hit     ports.Hit
-			snippet sql.NullString
-			rank    float64
+			hit          ports.Hit
+			snippet      sql.NullString
+			rank         float64
+			validFrom    int64
+			validTo      sql.NullInt64
+			supersededBy sql.NullString
 		)
-		if err := rows.Scan(&hit.ID, &hit.ProjectID, &hit.Kind, &hit.Title, &snippet, &rank); err != nil {
+		if err := rows.Scan(&hit.ID, &hit.ProjectID, &hit.Kind, &hit.Title, &snippet, &rank,
+			&validFrom, &validTo, &supersededBy); err != nil {
 			return nil, fmt.Errorf("sqliteindex: scan hit: %w", err)
 		}
 		hit.ID = recordID(hit.ProjectID, hit.ID)
 		hit.Snippet = snippet.String
 		hit.Score = -rank
+		if validFrom > 0 {
+			hit.ValidFrom = time.Unix(0, validFrom).UTC()
+		}
+		if validTo.Valid {
+			hit.ValidTo = time.Unix(0, validTo.Int64).UTC()
+		}
+		hit.SupersededBy = supersededBy.String
 		hits = append(hits, hit)
 	}
 	if err := rows.Err(); err != nil {
@@ -387,6 +427,21 @@ func buildSearchStatement(query ports.Query, match string, limit int) (string, [
 	if !query.Since.IsZero() {
 		builder.WriteString(" AND d.updated_at >= ?")
 		args = append(args, query.Since.UnixNano())
+	}
+	// The temporal filter mirrors domain.ValidityFilter: an as-of instant
+	// selects records valid then, otherwise a record that ended at or before
+	// now is hidden unless the caller asked for superseded ones.
+	switch {
+	case !query.AsOf.IsZero():
+		builder.WriteString(" AND d.valid_from <= ? AND (d.valid_to IS NULL OR d.valid_to > ?)")
+		args = append(args, query.AsOf.UnixNano(), query.AsOf.UnixNano())
+	case !query.IncludeSuperseded:
+		now := query.Now
+		if now.IsZero() {
+			now = time.Now()
+		}
+		builder.WriteString(" AND (d.valid_to IS NULL OR d.valid_to > ?)")
+		args = append(args, now.UnixNano())
 	}
 
 	builder.WriteString(searchOrderSQL)

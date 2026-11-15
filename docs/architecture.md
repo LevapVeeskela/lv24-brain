@@ -120,7 +120,10 @@ connectors/runs/<UTC timestamp>-<source>-<run-id>.md
 ```
 
 Every user-facing file carries YAML frontmatter with `project_id`, `kind`,
-`updated_at`, `schema_version`, and optional `permalink`. Writes are atomic
+`updated_at`, `schema_version`, and optional `permalink`. Records add optional
+validity keys (`valid_from`, `valid_to`, `superseded_by`, `supersedes`,
+`confidence`); a current record that became true at its creation time writes
+none of them. Writes are atomic
 (temp file + rename). The SQLite index lives under `index/brain.db` and is
 derived data: new writes upsert into it. `brain index` refreshes it from
 existing Markdown, and `brain index --rebuild` deletes the database and sidecar
@@ -153,25 +156,25 @@ only when non-empty, so existing raw items do not re-upsert.
 
 ```text
 brain init       create an instance and write brain.yaml
-brain open       [path|id] bootstrap pack + ## Git + ## Graphs (--brief: state only; --include-unreviewed adds quarantined records)
+brain open       [path|id] bootstrap pack + ## Git + ## Graphs (--brief: state only; --include-unreviewed adds quarantined records; --as-of reads a past instant)
 brain project    list, show, or set registry projects
-brain bootstrap  build bounded agent context
-brain context    [task] context for one task (--raw appends granted raw excerpts; --include-unreviewed adds quarantined records; local/git only)
-brain note       append a dated note
-brain decision   append a decision
-brain attempt    append an attempt
-brain handoff    append a session handoff
+brain bootstrap  build bounded agent context (--as-of, --include-superseded)
+brain context    [task] context for one task (--raw appends granted raw excerpts; --include-unreviewed adds quarantined records; --as-of/--include-superseded; local/git only)
+brain note       append a dated note (--supersedes, --superseded-by, --confidence)
+brain decision   append a decision (same validity flags)
+brain attempt    append an attempt (same validity flags)
+brain handoff    append a session handoff (same validity flags)
 brain status     show mode, paths, schema, engine version
 brain review     state age, questions, evidence, attempts + findings (stale/contradictory knowledge, pending proposals); --fix applies heuristic state fixes (see below)
 brain digest     cross-project morning summary; --source <conn> previews proposals from stored raw items (--write persists)
 brain promote    promote or dismiss one proposal; the only path into curated records
-brain catchup    what changed since the latest handoff (--include-unreviewed adds quarantined records)
-brain record     list|show records; status|supersede decisions; review provenance; trash|restore|trash-list (local/git)
+brain catchup    what changed since the latest handoff (--include-unreviewed adds quarantined; --as-of reads a past instant)
+brain record     list|show records (--as-of, --include-superseded/--all-time, show --history); status any record; supersede any record; review provenance; trash|restore|trash-list (local/git)
 brain session    start|end handlers for agent session hooks
 brain state      get|set the project state
 brain sync       commit, rebase, optional push, or --status (local/git only)
 brain index      refresh the local FTS5 index, or --rebuild it (local/git only)
-brain search     query the local FTS5 index (local/git), or GET /v1/search (server); --dumps adds connector dumps, --kind filters
+brain search     query the local FTS5 index (local/git), or GET /v1/search (server); --dumps adds connector dumps, --kind filters, --as-of/--include-superseded select validity
 brain journal    show journal/<user>.jsonl activity, newest first (local/git)
 brain event      record an external event; `event commit` reads git for a post-commit hook
 brain hooks      install|uninstall|status the post-commit journal hook
@@ -356,6 +359,50 @@ adds a review step between them:
   raw-item text does not enter it without `--raw` and a matching grant (see
   below). Proposals are not indexed in FTS5, so `brain search` stays
   curated-only.
+
+## Temporal validity and supersede (0.16)
+
+Notes, decisions, attempts and handoffs embed a `domain.Validity`:
+`ValidFrom`, `ValidTo`, `SupersededBy`, `Supersedes` and an optional
+`Confidence` (0..1). The zero value is backward compatible: a record is current
+from its `created_at` and never ends, which is exactly how every record written
+before 0.16 behaves.
+
+- **Storage.** Decisions, attempts and handoffs carry `valid_from`, `valid_to`,
+  `superseded_by`, `supersedes` and `confidence` in YAML frontmatter; notes
+  carry them in their `<!-- brain:note {…} -->` marker. Only non-default values
+  are written: a current record that became true at its `created_at` adds no
+  keys, so old files stay clean. `valid_from` defaults to `created_at` on read.
+  A present but unparseable timestamp is a parse error: the file is skipped and
+  reported (check `records`), never silently treated as current.
+- **Query semantics.** Every read surface — `brain search`, `brain context`,
+  `brain open`/`brain bootstrap`, `brain catchup`, `brain record list|show` and
+  their JSON forms — evaluates validity the same way:
+  - default: keep `valid_to` empty or later than now; a record that ended at or
+    before now is excluded;
+  - `--as-of <RFC3339|date>`: keep `valid_from <= t` and (`valid_to` empty or
+    `valid_to > t`), so a query returns the generation that was current at that
+    instant; a bare date means midnight UTC;
+  - `--include-superseded` (alias `--all-time`): keep ended records too. An
+    `--as-of` instant takes precedence.
+  The SQLite projection stores the same columns (schema version 3, with
+  `(kind, valid_to)` and `(superseded_by)` indexes) and applies the same filter
+  in SQL, so search and the record listing cannot disagree.
+- **Supersede.** `brain record supersede <old> --by <new>` (any two records of
+  one project) sets `valid_to = now` and `superseded_by = <new>` on the old
+  record, a decision also gets `status: superseded`, and `<new>` gets
+  `supersedes: <old>`. Both files stay in git: the chain is the audit log. The
+  command is idempotent; a conflicting chain, a link to a missing record, a
+  self-link and a cycle are validation errors. `brain decision|attempt|note|
+  handoff --supersedes <id>` performs the same link when the replacement is
+  written; `--superseded-by <id>` repairs history by writing a record that is
+  already ended. `brain record show <id> --history` prints the whole chain.
+- **Review and doctor.** `brain review` adds `supersession-gap` (a newer
+  current record that reads like a replacement of an older current record but
+  is not linked) and `stale-superseded` (a record whose `valid_to` passed and
+  names no replacement). `brain doctor` reports invalid windows, a
+  `superseded_by` without `valid_to`, and links to missing records (code
+  `invalid-validity`). All of them are report-only.
 
 ## Provenance and quarantine (0.15)
 

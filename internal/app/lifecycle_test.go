@@ -39,15 +39,17 @@ func TestRecordLifecycle(t *testing.T) {
 		t.Fatalf("accept = %+v, %v", accepted, err)
 	}
 	superseded, err := a.Supersede(ctx, "p", old.Decision.ID, replacement.Decision.ID)
-	if err != nil || superseded.Status != domain.DecisionSuperseded || len(superseded.Evidence) != 1 {
+	if err != nil || superseded.Old.Status != string(domain.DecisionSuperseded) ||
+		superseded.Old.SupersededBy != replacement.Decision.ID || superseded.New.Supersedes != old.Decision.ID {
 		t.Fatalf("supersede = %+v, %v", superseded, err)
 	}
 	reread, err := a.GetRecord(ctx, "p", old.Decision.ID)
 	if err != nil || reread.Decision == nil || reread.Decision.Status != domain.DecisionSuperseded {
 		t.Fatalf("reread = %+v, %v", reread, err)
 	}
-	if _, err := a.Supersede(ctx, "p", old.Decision.ID, note.Note.ID); err == nil {
-		t.Fatal("superseded by a note")
+	// A reversed link would close a supersede cycle.
+	if _, err := a.Supersede(ctx, "p", replacement.Decision.ID, old.Decision.ID); err == nil {
+		t.Fatal("supersede cycle accepted")
 	}
 	accepts, err := a.ListRecords(ctx, app.ListRecordsOptions{ProjectID: "p", Status: "accepted"})
 	if err != nil || len(accepts) != 1 || accepts[0].ID != replacement.Decision.ID {
@@ -77,7 +79,7 @@ func TestRecordLifecycle(t *testing.T) {
 	for _, entry := range entries {
 		events[entry.Event]++
 	}
-	if events[app.JournalStatus] != 2 || events[app.JournalTrash] != 1 || events[app.JournalRestore] != 1 {
+	if events[app.JournalStatus] != 3 || events[app.JournalTrash] != 1 || events[app.JournalRestore] != 1 {
 		t.Fatalf("journal events = %v", events)
 	}
 }

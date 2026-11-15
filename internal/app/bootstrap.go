@@ -24,6 +24,7 @@ func (a *App) Bootstrap(ctx context.Context, opts BootstrapOptions) (BootstrapRe
 	if err != nil {
 		return BootstrapResult{}, err
 	}
+	now := a.now()
 	decisions, err := a.listDecisions(ctx, project.ID)
 	if err != nil {
 		return BootstrapResult{}, err
@@ -46,8 +47,11 @@ func (a *App) Bootstrap(ctx context.Context, opts BootstrapOptions) (BootstrapRe
 		attempts = trustedAttempts(attempts)
 		handoffs = trustedHandoffs(handoffs)
 	}
+	filter := validityFilter(opts.AsOf, opts.IncludeSuperseded)
+	decisions = filterDecisions(decisions, filter, now)
+	attempts = filterAttempts(attempts, filter, now)
+	handoffs = filterHandoffs(handoffs, filter, now)
 
-	now := a.now()
 	var out strings.Builder
 	fmt.Fprintf(&out, "# %s — bootstrap\n", project.Name)
 	fmt.Fprintf(&out, "project_id: %s\n", project.ID)
@@ -57,6 +61,9 @@ func (a *App) Bootstrap(ctx context.Context, opts BootstrapOptions) (BootstrapRe
 	}
 	fmt.Fprintf(&out, "state_updated: %s (age %s)\n", formatTime(state.UpdatedAt), stateAge(now, state))
 	fmt.Fprintf(&out, "freshness: %s\n", freshness(now, state))
+	if !opts.AsOf.IsZero() {
+		fmt.Fprintf(&out, "as_of: %s\n", formatTime(opts.AsOf))
+	}
 	if line := quarantineLine(quarantined, opts.IncludeUnreviewed); line != "" {
 		out.WriteString(line + "\n")
 	}

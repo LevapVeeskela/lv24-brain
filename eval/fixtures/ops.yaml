@@ -1,0 +1,255 @@
+version: 1
+project: brain-server
+notes: |
+  Authored corpus for the server-mode operations repository. It covers
+  deployments, authentication, retention and migrations. Commands and concepts
+  match the engine documentation; the records are synthetic.
+
+records:
+  - id: decision-2026-05-12-postgres-search
+    kind: decision
+    title: "Server search uses PostgreSQL full text"
+    status: accepted
+    created_at: 2026-05-12T10:00:00Z
+    context: |
+      In server mode documents and a tsvector index live in PostgreSQL; local
+      and git modes keep SQLite FTS5. Search stays a derived projection in
+      both modes.
+    alternatives:
+      - "Embed a second search service"
+    consequences:
+      - "One query path per mode, same result shape"
+
+  - id: decision-2026-06-18-oidc
+    kind: decision
+    title: "OIDC login delegates to the identity provider"
+    status: accepted
+    created_at: 2026-06-18T09:30:00Z
+    context: |
+      Authorization code with PKCE, a discovery document and group mapping to
+      roles. The server never stores the identity provider password.
+    alternatives:
+      - "Local passwords only"
+    consequences:
+      - "Group claims map to admin, member and viewer"
+
+  - id: decision-2026-07-22-token-scopes
+    kind: decision
+    title: "API tokens carry read, write or admin scopes"
+    status: accepted
+    created_at: 2026-07-22T11:15:00Z
+    context: |
+      Each token has a project allow-list, an expiry and an audit entry. The
+      admin scope can mint other tokens; read and write scopes cannot.
+    alternatives:
+      - "One unrestricted token per user"
+    consequences:
+      - "A revoked token fails on the next request"
+
+  - id: decision-2026-08-15-retention
+    kind: decision
+    title: "Retention job prunes audit events after 180 days"
+    status: accepted
+    created_at: 2026-08-15T08:00:00Z
+    context: |
+      The retention job deletes audit events after 180 days and connector run
+      records after 90 days. Metrics stay aggregated, so dashboards keep their
+      history.
+    alternatives:
+      - "Keep every audit event forever"
+
+  - id: decision-2026-09-10-proxy-tls
+    kind: decision
+    title: "Require HTTPS behind a reverse proxy"
+    status: accepted
+    created_at: 2026-09-10T14:40:00Z
+    context: |
+      The server trusts X-Forwarded-Proto only from configured proxies, and
+      redirects plain HTTP requests. Rate limits apply per client IP so a
+      proxy must forward the real address.
+    alternatives:
+      - "Terminate TLS in the server process"
+    consequences:
+      - "A missing proxy header breaks secure cookies"
+
+  - id: attempt-2026-06-02-http2
+    kind: attempt
+    title: "HTTP/2 only listener"
+    created_at: 2026-06-02T13:00:00Z
+    hypothesis: "Serving only HTTP/2 simplifies health probes and clients."
+    result: "Kubernetes health probes spoke HTTP/1.1 and the pod never became ready."
+    reason: |
+      The listener now serves both protocols and the probe uses the shared
+      health endpoint.
+
+  - id: attempt-2026-07-08-bcrypt
+    kind: attempt
+    title: "Switching password hashing to bcrypt"
+    created_at: 2026-07-08T15:20:00Z
+    hypothesis: "bcrypt is simpler to operate than argon2id."
+    result: "Rejected; the server kept argon2id because its cost parameters and migration were already tested."
+    reason: |
+      A password hash change needs a transparent rehash on login, and there
+      was no measured problem with argon2id.
+
+  - id: note-2026-08-28-audit-fields
+    kind: note
+    title: "Audit log fields"
+    created_at: 2026-08-28T09:10:00Z
+    body: |
+      Every audit event stores actor, action, project, token id and result.
+      Secrets are redacted before the event is written.
+    tags:
+      - "security"
+      - "audit"
+
+  - id: note-2026-09-25-ru-deploy
+    kind: note
+    title: "Инструкция по развёртыванию"
+    created_at: 2026-09-25T10:30:00Z
+    body: |
+      Развёртывание сервера требует HTTPS, миграций базы данных и проверки
+      здоровья. После запуска проверьте журнал и метрики. This is the
+      September 2026 deployment checklist.
+    tags:
+      - "deploy"
+      - "ru"
+
+  - id: decision-2026-10-09-migrations
+    kind: decision
+    title: "Migrations run behind an upgrade gate"
+    status: accepted
+    created_at: 2026-10-09T12:00:00Z
+    context: |
+      In October 2026 we added an upgrade gate: the server refuses to start
+      when the database schema version is newer than the binary, and every
+      migration supports a dry-run.
+    alternatives:
+      - "Migrate automatically on start"
+    consequences:
+      - "A downgrade is refused instead of corrupting data"
+
+  - id: note-2026-10-30-metrics
+    kind: note
+    title: "Metrics endpoint"
+    created_at: 2026-10-30T11:00:00Z
+    body: |
+      Prometheus metrics expose request counts, latency histograms, database
+      pool saturation and queue depth. Failed logins have their own counter.
+    tags:
+      - "observability"
+
+  - id: decision-2026-11-05-rate-limit
+    kind: decision
+    title: "Rate limit login attempts"
+    status: accepted
+    created_at: 2026-11-05T09:45:00Z
+    context: |
+      Login attempts are limited per client IP and per account with a token
+      bucket. A locked account waits fifteen minutes; the audit log records
+      every refusal.
+    alternatives:
+      - "No limit, rely on the proxy"
+    consequences:
+      - "Repeated failures become an audit finding"
+
+tasks:
+  - id: s-postgres
+    query: "PostgreSQL tsvector server search"
+    category: identifier
+    expected: [decision-2026-05-12-postgres-search]
+
+  - id: s-oidc
+    query: "OIDC PKCE discovery document"
+    category: identifier
+    expected: [decision-2026-06-18-oidc]
+
+  - id: s-token-scopes
+    query: "token scopes admin read write"
+    category: identifier
+    expected: [decision-2026-07-22-token-scopes]
+
+  - id: s-retention
+    query: "retention 180 days audit"
+    category: identifier
+    expected: [decision-2026-08-15-retention]
+
+  - id: s-proxy-tls
+    query: "why must the server run behind TLS"
+    category: paraphrase
+    expected: [decision-2026-09-10-proxy-tls]
+
+  - id: s-http2
+    query: "HTTP/2 listener health probe failure"
+    category: paraphrase
+    expected: [attempt-2026-06-02-http2]
+
+  - id: s-bcrypt
+    query: "why argon2id instead of bcrypt"
+    category: paraphrase
+    expected: [attempt-2026-07-08-bcrypt]
+
+  - id: s-audit
+    query: "audit log actor action token"
+    category: identifier
+    expected: [note-2026-08-28-audit-fields]
+
+  - id: s-ru-deploy
+    query: "развёртывание сервера HTTPS миграции"
+    category: morphology
+    expected: [note-2026-09-25-ru-deploy]
+
+  - id: s-october-migrations
+    query: "what changed in October about migrations"
+    category: temporal
+    expected: [decision-2026-10-09-migrations]
+
+  - id: s-latency-metrics
+    query: "how do I see request latency metrics"
+    category: paraphrase
+    expected: [note-2026-10-30-metrics]
+
+  - id: s-rate-limit
+    query: "limit repeated login attempts"
+    category: paraphrase
+    expected: [decision-2026-11-05-rate-limit]
+
+  - id: s-token-check
+    query: "where are API token scopes checked"
+    category: natural
+    expected: [decision-2026-07-22-token-scopes]
+
+  - id: s-audit-kept
+    query: "how long are audit events kept"
+    category: natural
+    expected: [decision-2026-08-15-retention]
+
+  - id: s-schema-newer
+    query: "database schema newer than the binary"
+    category: natural
+    expected: [decision-2026-10-09-migrations]
+
+  - id: s-forwarded-proto
+    query: "X-Forwarded-Proto"
+    category: identifier
+    expected: [decision-2026-09-10-proxy-tls]
+
+  - id: s-ru-health
+    query: "проверка здоровья сервера"
+    category: morphology
+    expected: [note-2026-09-25-ru-deploy]
+
+  - id: s-september-deploy
+    query: "September 2026 deployment instructions"
+    category: temporal
+    expected: [note-2026-09-25-ru-deploy]
+
+  - id: s-argon2
+    query: "argon2id cost parameters"
+    category: identifier
+    expected: [attempt-2026-07-08-bcrypt]
+
+  - id: s-october-general
+    query: "what did we decide in October 2026"
+    category: temporal
+    expected: [decision-2026-10-09-migrations]

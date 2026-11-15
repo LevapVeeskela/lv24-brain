@@ -84,6 +84,15 @@ type Document struct {
 	Title     string
 	Body      string
 	UpdatedAt time.Time
+	// ValidFrom is the instant the record became true. Zero means UpdatedAt,
+	// matching records written before validity existed.
+	ValidFrom time.Time
+	// ValidTo is the instant the record stopped being true. Zero means
+	// current.
+	ValidTo time.Time
+	// SupersededBy and Supersedes are the ids of the supersede chain links.
+	SupersededBy string
+	Supersedes   string
 }
 
 // Query narrows a full-text search.
@@ -98,6 +107,15 @@ type Query struct {
 	// Since keeps only documents updated at or after this time; the zero
 	// time keeps every document.
 	Since time.Time
+	// AsOf keeps documents valid at that instant: valid_from <= as_of and
+	// (valid_to is empty or valid_to > as_of). Zero means "now".
+	AsOf time.Time
+	// IncludeSuperseded keeps documents whose validity ended. An AsOf instant
+	// selects the point in time and takes precedence.
+	IncludeSuperseded bool
+	// Now is the instant a default query evaluates "current" at. Zero means
+	// the adapter clock.
+	Now time.Time
 }
 
 // AllowsSince reports whether a document updated at updatedAt passes the
@@ -123,6 +141,11 @@ type Hit struct {
 	Title     string
 	Snippet   string
 	Score     float64
+	// Validity mirrors the indexed document so a caller can show why a record
+	// is (or was) current.
+	ValidFrom    time.Time
+	ValidTo      time.Time
+	SupersededBy string
 }
 
 // Index provides full-text search over stored knowledge.

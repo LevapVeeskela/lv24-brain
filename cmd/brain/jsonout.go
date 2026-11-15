@@ -200,12 +200,15 @@ func effectiveBudget(budget int) int {
 
 // jsonHit is one search result.
 type jsonHit struct {
-	ID        string  `json:"id"`
-	ProjectID string  `json:"project_id"`
-	Kind      string  `json:"kind"`
-	Title     string  `json:"title"`
-	Snippet   string  `json:"snippet"`
-	Score     float64 `json:"score"`
+	ID           string  `json:"id"`
+	ProjectID    string  `json:"project_id"`
+	Kind         string  `json:"kind"`
+	Title        string  `json:"title"`
+	Snippet      string  `json:"snippet"`
+	Score        float64 `json:"score"`
+	ValidFrom    *string `json:"valid_from"`
+	ValidTo      *string `json:"valid_to"`
+	SupersededBy string  `json:"superseded_by,omitempty"`
 }
 
 // jsonSearch is `brain search --json`.
@@ -218,12 +221,15 @@ func toJSONHits(hits []ports.Hit) []jsonHit {
 	out := make([]jsonHit, 0, len(hits))
 	for _, hit := range hits {
 		out = append(out, jsonHit{
-			ID:        hit.ID,
-			ProjectID: hit.ProjectID,
-			Kind:      hit.Kind,
-			Title:     hit.Title,
-			Snippet:   hit.Snippet,
-			Score:     hit.Score,
+			ID:           hit.ID,
+			ProjectID:    hit.ProjectID,
+			Kind:         hit.Kind,
+			Title:        hit.Title,
+			Snippet:      hit.Snippet,
+			Score:        hit.Score,
+			ValidFrom:    jsonTime(hit.ValidFrom),
+			ValidTo:      jsonTime(hit.ValidTo),
+			SupersededBy: hit.SupersededBy,
 		})
 	}
 	return out

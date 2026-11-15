@@ -134,6 +134,11 @@ type BootstrapOptions struct {
 	// connector or import writes, or an unknown origin) that are excluded from
 	// trusted context by default.
 	IncludeUnreviewed bool
+	// AsOf builds the summary as it was valid at that instant instead of now.
+	AsOf time.Time
+	// IncludeSuperseded keeps records whose validity ended. An AsOf instant
+	// selects the point in time and takes precedence.
+	IncludeSuperseded bool
 }
 
 // BootstrapResult summarizes generated context.
@@ -161,6 +166,14 @@ type NoteInput struct {
 	// agent; promotion passes connector/stated; an importer passes
 	// import/unreviewed so the text stays quarantined until review.
 	Provenance domain.Provenance
+	// Supersedes is the id of the record this note replaces. The old record is
+	// marked superseded after the note is written.
+	Supersedes string
+	// SupersededBy marks the new note as already replaced by that record; it
+	// repairs history and writes valid_to now.
+	SupersededBy string
+	// Confidence is an optional 0..1 author confidence; zero is unset.
+	Confidence float64
 	// CreateProject registers ProjectID when no project, alias or path
 	// matches; without it an unknown project is an error.
 	CreateProject bool
@@ -189,6 +202,12 @@ type DecisionInput struct {
 	Source *domain.SourceRef
 	// Provenance is the write provenance; zero means human/reviewed/verified.
 	Provenance domain.Provenance
+	// Supersedes is the id of the decision this one replaces.
+	Supersedes string
+	// SupersededBy marks the new decision as already replaced by that record.
+	SupersededBy string
+	// Confidence is an optional 0..1 author confidence; zero is unset.
+	Confidence float64
 	// CreateProject registers ProjectID when no project, alias or path
 	// matches; without it an unknown project is an error.
 	CreateProject bool
@@ -213,6 +232,12 @@ type AttemptInput struct {
 	Source *domain.SourceRef
 	// Provenance is the write provenance; zero means human/reviewed/verified.
 	Provenance domain.Provenance
+	// Supersedes is the id of the attempt this one replaces.
+	Supersedes string
+	// SupersededBy marks the new attempt as already replaced by that record.
+	SupersededBy string
+	// Confidence is an optional 0..1 author confidence; zero is unset.
+	Confidence float64
 	// CreateProject registers ProjectID when no project, alias or path
 	// matches; without it an unknown project is an error.
 	CreateProject bool
@@ -232,6 +257,12 @@ type HandoffInput struct {
 	NextAction string
 	// Provenance is the write provenance; zero means human/reviewed/verified.
 	Provenance domain.Provenance
+	// Supersedes is the id of the handoff this one replaces.
+	Supersedes string
+	// SupersededBy marks the new handoff as already replaced by that record.
+	SupersededBy string
+	// Confidence is an optional 0..1 author confidence; zero is unset.
+	Confidence float64
 	// CreateProject registers ProjectID when no project, alias or path
 	// matches; without it an unknown project is an error.
 	CreateProject bool

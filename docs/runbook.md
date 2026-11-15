@@ -140,7 +140,10 @@ projects that are not git repositories, are skipped silently.
 
 ```sh
 brain record list [project] --kind decision --status proposed --since 7d
+brain record list --as-of 2026-03-01          # what was current then
+brain record list --all-time                  # ended records too
 brain record show <id>
+brain record show <id> --history              # supersede chain, oldest first
 brain record status <id> accepted          # proposed|accepted|rejected|superseded
 brain record supersede <old-id> --by <new-id>
 brain record review <id> [--trust verified|stated|inferred]
@@ -156,6 +159,46 @@ brain record restore <id>
   trashed; edit the daily file instead.
 - Agents get `brain_records`, `brain_record` and `brain_decision_status` over
   MCP; trash and restore stay CLI-only.
+
+### Temporal validity and supersede
+
+A record is current from `valid_from` (default: its `created_at`) until
+`valid_to`; an empty `valid_to` means it is still current. Reads never delete
+history:
+
+- `brain search`, `brain context`, `brain open`, `brain catchup` and
+  `brain record list` show current records only by default.
+- `--as-of <RFC3339|2026-03-01>` answers "what was current then": a record is
+  returned when `valid_from <= t` and `valid_to` is empty or later than `t`.
+  A bare date means midnight UTC.
+- `--include-superseded` (alias `--all-time`) lists ended records too. On
+  `brain record show` the record is always printed (you named it) and `--as-of`
+  reports `valid_at: yes|no`.
+
+```sh
+# Write the replacement; the old decision becomes superseded in one step.
+brain decision "Use SQLite FTS5 for search" --status accepted \
+  --context "local index, zero services" --supersedes decision-2026-03-01-use-json-files
+# Link two records that already exist.
+brain record supersede decision-2026-03-01-use-json-files --by decision-2026-04-02-use-sqlite
+# Repair an import: the new record is already replaced.
+brain decision "Old rollout plan" --superseded-by decision-2026-05-01-rollout-v2
+```
+
+The old record keeps its text and file: it gets `valid_to: <now>` and
+`superseded_by: <new>`, the replacement gets `supersedes: <old>` (a decision
+also gets `status: superseded`), so `git log` stays a readable audit trail. The
+command is idempotent, and a second call prints `already superseded by`. A
+conflicting chain (the old record is already superseded by a different record,
+or the new one already supersedes another), a self-link, a missing record and a
+cycle are validation errors; nothing is written in those cases.
+
+`brain review` reports `supersession-gap` when a newer current record reads like
+a replacement of an older current record but is not linked, and
+`stale-superseded` when a record's `valid_to` passed with no replacement named.
+`brain doctor` reports invalid windows and links to missing records
+(`invalid-validity`). Both are report-only: confirm or supersede by hand.
+Server mode has no validity route yet, so the temporal flags are local/git only.
 
 ### Quarantine and provenance review (0.15)
 
@@ -283,6 +326,29 @@ brain journal --repair --dry-run   # records of the last 30 days without a journ
   reindexes after pulling records from another machine. Markdown changed by
   hand needs `brain index` (or `brain index --rebuild` to rebuild it from
   Markdown).
+
+### Retrieval quality evaluation (0.16)
+
+```sh
+brain eval --fixtures eval/fixtures                 # metrics and per-category table
+brain eval --fixtures eval/fixtures --json          # machine-readable report
+brain eval --fixtures eval/fixtures --baseline eval/baseline.json
+brain eval --fixtures eval/fixtures --write-baseline eval/baseline.json
+```
+
+- The harness builds a temporary brain from the authored fixtures, reindexes
+  it through the public app API and scores recall@5, precision@5, MRR,
+  superseded-leak rate, tokens per answer and p95 search latency. No network
+  and no external service are used.
+- `--baseline` exits 1 on a regression: rates may drop by at most 0.02, tokens
+  by 10%, p95 by 2x+5 ms, and the superseded leak must not rise at all. The
+  report warns when the fixture digest differs from the baseline.
+- Fixtures live in `eval/fixtures/`; add a query, label the record that should
+  answer it, and keep a known synonym miss as a miss. The full format, metric
+  definitions and licensing note are in [docs/eval.md](../docs/eval.md).
+- `go test ./eval ./cmd/brain` is the deterministic check for CI. The metric
+  run is documented as a non-blocking job in `docs/eval.md`; no paid workflow
+  is added.
 
 ### Session routine for agents
 

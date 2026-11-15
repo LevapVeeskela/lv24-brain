@@ -10,9 +10,15 @@ var schemaStatements = []string{
 		kind TEXT NOT NULL,
 		title TEXT NOT NULL,
 		body TEXT NOT NULL,
-		updated_at INTEGER NOT NULL
+		updated_at INTEGER NOT NULL,
+		valid_from INTEGER NOT NULL DEFAULT 0,
+		valid_to INTEGER,
+		superseded_by TEXT,
+		supersedes TEXT
 	)`,
 	`CREATE INDEX IF NOT EXISTS documents_project_idx ON documents(project_id)`,
+	`CREATE INDEX IF NOT EXISTS documents_valid_idx ON documents(kind, valid_to)`,
+	`CREATE INDEX IF NOT EXISTS documents_superseded_idx ON documents(superseded_by)`,
 	`CREATE VIRTUAL TABLE IF NOT EXISTS documents_fts USING fts5(
 		title,
 		body,
@@ -34,14 +40,18 @@ var schemaStatements = []string{
 	END`,
 }
 
-const upsertSQL = `INSERT INTO documents (id, project_id, kind, title, body, updated_at)
-VALUES (?, ?, ?, ?, ?, ?)
+const upsertSQL = `INSERT INTO documents (id, project_id, kind, title, body, updated_at, valid_from, valid_to, superseded_by, supersedes)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(id) DO UPDATE SET
 	project_id = excluded.project_id,
 	kind = excluded.kind,
 	title = excluded.title,
 	body = excluded.body,
-	updated_at = excluded.updated_at`
+	updated_at = excluded.updated_at,
+	valid_from = excluded.valid_from,
+	valid_to = excluded.valid_to,
+	superseded_by = excluded.superseded_by,
+	supersedes = excluded.supersedes`
 
 const deleteSQL = `DELETE FROM documents WHERE id = ?`
 
@@ -49,7 +59,8 @@ const deleteSQL = `DELETE FROM documents WHERE id = ?`
 // precede the MATCH placeholder; optional filters are appended by
 // buildSearchStatement. Values are only ever bound, never interpolated.
 const searchSelectSQL = `SELECT d.id, d.project_id, d.kind, d.title,
-	snippet(documents_fts, -1, ?, ?, ?, ?), bm25(documents_fts)
+	snippet(documents_fts, -1, ?, ?, ?, ?), bm25(documents_fts),
+	d.valid_from, d.valid_to, d.superseded_by
 FROM documents_fts
 JOIN documents d ON d.rowid = documents_fts.rowid
 WHERE documents_fts MATCH ?`
@@ -62,7 +73,9 @@ LIMIT ?`
 // id scheme or the table layout changes: the index is derived data, so a
 // mismatch drops it and the caller reindexes from the Markdown sources.
 // Version 2 scopes record ids by project ("<projectID>/<recordID>").
-const schemaVersion = 2
+// Version 3 adds temporal validity (valid_from, valid_to, superseded_by,
+// supersedes) and its indexes.
+const schemaVersion = 3
 
 // dropStatements remove everything schemaStatements creates. Triggers go
 // first because they reference the tables.

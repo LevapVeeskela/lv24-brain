@@ -24,6 +24,7 @@ func runContext(args []string, stdout, stderr io.Writer) int {
 	since := fs.String("since", "", "drop records older than a window (24h, 7d, 2w) or a date (2026-11-01)")
 	raw := fs.Bool("raw", false, "include granted raw-zone excerpts when curated context is thin")
 	includeUnreviewed := fs.Bool("include-unreviewed", false, "include quarantined records (unreviewed agent, connector or import writes)")
+	validity := addValidityFlags(fs)
 	asJSON := fs.Bool("json", false, "print JSON")
 	cfgPath := configFlag(fs)
 	positional, err := parseInterspersed(fs, args)
@@ -42,6 +43,11 @@ func runContext(args []string, stdout, stderr io.Writer) int {
 	// Validate early so a bad value is a usage error (exit 2) like in search.
 	if _, err := domain.ParseSince(*since, time.Now()); err != nil {
 		fmt.Fprintf(stderr, "brain context: --%v\n", err)
+		return 2
+	}
+	asOf, includeSuperseded, err := validity.parse()
+	if err != nil {
+		fmt.Fprintf(stderr, "brain context: %v\n", err)
 		return 2
 	}
 	cfg, err := loadRequiredConfig(*cfgPath)
@@ -66,6 +72,8 @@ func runContext(args []string, stdout, stderr io.Writer) int {
 		Since:             *since,
 		Raw:               *raw,
 		IncludeUnreviewed: *includeUnreviewed,
+		AsOf:              asOf,
+		IncludeSuperseded: includeSuperseded,
 	})
 	if err != nil {
 		return reportError(stderr, "context", err)

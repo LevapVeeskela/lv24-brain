@@ -226,6 +226,12 @@ func noteDocument(note domain.Note) ports.Document {
 		Title:     fallbackTitle(note.Title, note.Body),
 		Body:      body,
 		UpdatedAt: updatedOrCreated(note.UpdatedAt, note.CreatedAt),
+		// ValidFrom defaults to the creation time so an as-of query has an
+		// anchor even for records written before validity existed.
+		ValidFrom:    note.Validity.EffectiveFrom(note.CreatedAt),
+		ValidTo:      note.Validity.ValidTo,
+		SupersededBy: note.Validity.SupersededBy,
+		Supersedes:   note.Validity.Supersedes,
 	}
 }
 
@@ -241,29 +247,41 @@ func decisionDocument(decision domain.Decision) ports.Document {
 			strings.Join(decision.Consequences, "\n"),
 			strings.Join(decision.Evidence, "\n"),
 		),
-		UpdatedAt: updatedOrCreated(decision.UpdatedAt, decision.CreatedAt),
+		UpdatedAt:    updatedOrCreated(decision.UpdatedAt, decision.CreatedAt),
+		ValidFrom:    decision.Validity.EffectiveFrom(decision.CreatedAt),
+		ValidTo:      decision.Validity.ValidTo,
+		SupersededBy: decision.Validity.SupersededBy,
+		Supersedes:   decision.Validity.Supersedes,
 	}
 }
 
 func attemptDocument(attempt domain.Attempt) ports.Document {
 	return ports.Document{
-		ID:        indexKey(attempt.ProjectID, attempt.ID),
-		ProjectID: attempt.ProjectID,
-		Kind:      "attempt",
-		Title:     attempt.Title,
-		Body:      joinText(attempt.Hypothesis, attempt.Result, attempt.Reason),
-		UpdatedAt: updatedOrCreated(attempt.UpdatedAt, attempt.CreatedAt),
+		ID:           indexKey(attempt.ProjectID, attempt.ID),
+		ProjectID:    attempt.ProjectID,
+		Kind:         "attempt",
+		Title:        attempt.Title,
+		Body:         joinText(attempt.Hypothesis, attempt.Result, attempt.Reason),
+		UpdatedAt:    updatedOrCreated(attempt.UpdatedAt, attempt.CreatedAt),
+		ValidFrom:    attempt.Validity.EffectiveFrom(attempt.CreatedAt),
+		ValidTo:      attempt.Validity.ValidTo,
+		SupersededBy: attempt.Validity.SupersededBy,
+		Supersedes:   attempt.Validity.Supersedes,
 	}
 }
 
 func handoffDocument(handoff domain.Handoff) ports.Document {
 	return ports.Document{
-		ID:        indexKey(handoff.ProjectID, handoff.ID),
-		ProjectID: handoff.ProjectID,
-		Kind:      "handoff",
-		Title:     handoffTitle(handoff),
-		Body:      joinText(handoff.Summary, handoff.GitContext, handoff.NextAction),
-		UpdatedAt: handoff.CreatedAt,
+		ID:           indexKey(handoff.ProjectID, handoff.ID),
+		ProjectID:    handoff.ProjectID,
+		Kind:         "handoff",
+		Title:        handoffTitle(handoff),
+		Body:         joinText(handoff.Summary, handoff.GitContext, handoff.NextAction),
+		UpdatedAt:    handoff.CreatedAt,
+		ValidFrom:    handoff.Validity.EffectiveFrom(handoff.CreatedAt),
+		ValidTo:      handoff.Validity.ValidTo,
+		SupersededBy: handoff.Validity.SupersededBy,
+		Supersedes:   handoff.Validity.Supersedes,
 	}
 }
 

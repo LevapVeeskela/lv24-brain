@@ -44,6 +44,7 @@ func (a *App) Doctor(ctx context.Context, opts DoctorOptions) (DoctorReport, err
 	checks = append(checks, a.doctorJournal(ctx))
 	checks = append(checks, a.doctorIDs(ctx))
 	checks = append(checks, a.doctorQuarantine(ctx))
+	checks = append(checks, a.doctorValidity(ctx))
 	checks = append(checks, a.doctorDuplicates(ctx))
 	checks = append(checks, a.doctorGit(ctx))
 	checks = append(checks, a.doctorMergeDrivers(ctx, opts.Fix))
@@ -202,6 +203,63 @@ func (a *App) doctorQuarantine(ctx context.Context) DoctorCheck {
 		Code:   "quarantined",
 		Message: fmt.Sprintf("%d quarantined records are excluded from context (unreviewed or unknown origin): %s%s; inspect with `brain review` and clear with `brain record review --all` (an unknown origin needs a hand edit)",
 			total, strings.Join(ids, ", "), more),
+	}
+}
+
+// doctorValidity reports validity values that cannot be true (valid_to at or
+// before valid_from, a superseded record without an end) and supersede links
+// that name a record the project does not have. Report only: a supersede is an
+// explicit owner action.
+func (a *App) doctorValidity(ctx context.Context) DoctorCheck {
+	if a.deps.Store == nil || a.cfg.Mode == config.ModeServer {
+		return DoctorCheck{Name: "validity", Status: doctorOK, Message: "not checked in this mode"}
+	}
+	projects, err := a.deps.Store.ListProjects(ctx)
+	if err != nil {
+		return DoctorCheck{Name: "validity", Status: doctorFail, Message: err.Error()}
+	}
+	checked := 0
+	var problems []string
+	for _, project := range projects {
+		records, err := a.projectRecords(ctx, project.ID)
+		if err != nil {
+			return DoctorCheck{Name: "validity", Status: doctorFail, Message: project.ID + ": " + err.Error()}
+		}
+		ids := make(map[string]bool, len(records))
+		for _, record := range records {
+			ids[record.Summary().ID] = true
+		}
+		for _, record := range records {
+			summary := record.Summary()
+			checked++
+			validity := record.Validity()
+			if err := validity.Validate("validity", summary.CreatedAt, summary.ID); err != nil {
+				problems = append(problems, project.ID+"/"+summary.ID+": "+err.Error())
+				continue
+			}
+			if validity.SupersededBy != "" && validity.ValidTo.IsZero() {
+				problems = append(problems, project.ID+"/"+summary.ID+": superseded_by is set but valid_to is empty")
+			}
+			for _, link := range []struct{ field, id string }{
+				{"superseded_by", validity.SupersededBy},
+				{"supersedes", validity.Supersedes},
+			} {
+				if link.id != "" && !ids[link.id] {
+					problems = append(problems, project.ID+"/"+summary.ID+": "+link.field+" names missing record "+link.id)
+				}
+			}
+		}
+	}
+	if len(problems) == 0 {
+		return DoctorCheck{Name: "validity", Status: doctorOK, Message: fmt.Sprintf("%d records have consistent validity", checked)}
+	}
+	listed := problems[:min(len(problems), maxListedProblems)]
+	return DoctorCheck{
+		Name:   "validity",
+		Status: doctorWarn,
+		Code:   "invalid-validity",
+		Message: fmt.Sprintf("%d records have invalid validity or a broken supersede link: %s; fix the frontmatter or relink with `brain record supersede`",
+			len(problems), strings.Join(listed, "; ")),
 	}
 }
 

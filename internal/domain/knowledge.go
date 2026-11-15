@@ -91,6 +91,7 @@ type Note struct {
 	Permalink string     `json:"permalink,omitempty"`
 	Source    *SourceRef `json:"source,omitempty"`
 	Provenance
+	Validity
 	CreatedAt time.Time `json:"createdAt"`
 	UpdatedAt time.Time `json:"updatedAt"`
 }
@@ -104,6 +105,9 @@ func (n Note) Validate() error {
 		return err
 	}
 	if err := n.Provenance.Validate(); err != nil {
+		return err
+	}
+	if err := n.Validity.Validate("note.validity", n.CreatedAt, n.ID); err != nil {
 		return err
 	}
 	return validateRecordSource("note.source", n.ProjectID, n.Source)
@@ -143,6 +147,7 @@ type Decision struct {
 	Permalink string     `json:"permalink,omitempty"`
 	Source    *SourceRef `json:"source,omitempty"`
 	Provenance
+	Validity
 	CreatedAt time.Time `json:"createdAt"`
 	UpdatedAt time.Time `json:"updatedAt"`
 }
@@ -187,6 +192,9 @@ func (d Decision) Validate() error {
 	if err := d.Provenance.Validate(); err != nil {
 		return err
 	}
+	if err := d.Validity.Validate("decision.validity", d.CreatedAt, d.ID); err != nil {
+		return err
+	}
 	return validateRecordSource("decision.source", d.ProjectID, d.Source)
 }
 
@@ -201,6 +209,7 @@ type Attempt struct {
 	Permalink  string     `json:"permalink,omitempty"`
 	Source     *SourceRef `json:"source,omitempty"`
 	Provenance
+	Validity
 	CreatedAt time.Time `json:"createdAt"`
 	UpdatedAt time.Time `json:"updatedAt"`
 }
@@ -216,6 +225,9 @@ func (a Attempt) Validate() error {
 	if err := a.Provenance.Validate(); err != nil {
 		return err
 	}
+	if err := a.Validity.Validate("attempt.validity", a.CreatedAt, a.ID); err != nil {
+		return err
+	}
 	return validateRecordSource("attempt.source", a.ProjectID, a.Source)
 }
 
@@ -228,6 +240,7 @@ type Handoff struct {
 	NextAction string `json:"nextAction,omitempty"`
 	Permalink  string `json:"permalink,omitempty"`
 	Provenance
+	Validity
 	CreatedAt time.Time `json:"createdAt"`
 }
 
@@ -237,6 +250,9 @@ func (h Handoff) Validate() error {
 		return err
 	}
 	if err := h.Provenance.Validate(); err != nil {
+		return err
+	}
+	if err := h.Validity.Validate("handoff.validity", h.CreatedAt, h.ID); err != nil {
 		return err
 	}
 	return ValidateRequired("handoff.summary", h.Summary)

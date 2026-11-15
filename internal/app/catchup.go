@@ -24,6 +24,11 @@ type CatchupOptions struct {
 	// IncludeUnreviewed includes quarantined records that are excluded from
 	// trusted context by default.
 	IncludeUnreviewed bool
+	// AsOf reports the records valid at that instant instead of now.
+	AsOf time.Time
+	// IncludeSuperseded keeps records whose validity ended. An AsOf instant
+	// selects the point in time and takes precedence.
+	IncludeSuperseded bool
 }
 
 // CatchupResult is everything that happened in a project after a baseline:
@@ -74,6 +79,7 @@ func (a *App) Catchup(ctx context.Context, opts CatchupOptions) (CatchupResult, 
 		limit = 20
 	}
 	result := CatchupResult{Project: project, IncludeUnreviewed: opts.IncludeUnreviewed}
+	now := a.now()
 	if state, err := a.deps.Store.GetState(ctx, project.ID); err == nil {
 		result.State = state
 	} else if !errors.Is(err, domain.ErrNotFound) {
@@ -108,6 +114,11 @@ func (a *App) Catchup(ctx context.Context, opts CatchupOptions) (CatchupResult, 
 		attempts = trustedAttempts(attempts)
 		handoffs = trustedHandoffs(handoffs)
 	}
+	filter := validityFilter(opts.AsOf, opts.IncludeSuperseded)
+	notes = filterNotes(notes, filter, now)
+	decisions = filterDecisions(decisions, filter, now)
+	attempts = filterAttempts(attempts, filter, now)
+	handoffs = filterHandoffs(handoffs, filter, now)
 
 	switch {
 	case !opts.Since.IsZero():
@@ -174,9 +185,14 @@ func (a *App) Catchup(ctx context.Context, opts CatchupOptions) (CatchupResult, 
 	return result, nil
 }
 
-// RecentRecords returns the newest decisions, attempts and handoffs of a
-// project (for machine-readable open output).
+// RecentRecords returns the newest current decisions, attempts and handoffs of
+// a project (for machine-readable open output).
 func (a *App) RecentRecords(ctx context.Context, projectID string, limit int) ([]domain.Decision, []domain.Attempt, []domain.Handoff, error) {
+	return a.RecentRecordsAt(ctx, projectID, limit, time.Time{}, false)
+}
+
+// RecentRecordsAt is RecentRecords for one validity point in time.
+func (a *App) RecentRecordsAt(ctx context.Context, projectID string, limit int, asOf time.Time, includeSuperseded bool) ([]domain.Decision, []domain.Attempt, []domain.Handoff, error) {
 	if err := a.requireStore(); err != nil {
 		return nil, nil, nil, err
 	}
@@ -199,6 +215,11 @@ func (a *App) RecentRecords(ctx context.Context, projectID string, limit int) ([
 	if err != nil {
 		return nil, nil, nil, err
 	}
+	filter := validityFilter(asOf, includeSuperseded)
+	now := a.now()
+	decisions = filterDecisions(decisions, filter, now)
+	attempts = filterAttempts(attempts, filter, now)
+	handoffs = filterHandoffs(handoffs, filter, now)
 	sort.Slice(handoffs, func(i, j int) bool { return handoffs[i].CreatedAt.After(handoffs[j].CreatedAt) })
 	if len(handoffs) > limit {
 		handoffs = handoffs[:limit]

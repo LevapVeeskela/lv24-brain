@@ -38,6 +38,12 @@ type SearchOptions struct {
 	// Since keeps only documents updated at or after this time; zero keeps
 	// everything.
 	Since time.Time
+	// AsOf keeps documents valid at that instant: default is current records
+	// only, an as-of instant selects the records that were current then.
+	AsOf time.Time
+	// IncludeSuperseded keeps records whose validity ended. An AsOf instant
+	// selects the point in time and takes precedence.
+	IncludeSuperseded bool
 }
 
 // Search queries curated records (no dumps); see SearchWith.
@@ -61,6 +67,11 @@ func (a *App) SearchWithNotice(ctx context.Context, opts SearchOptions) ([]ports
 	if a.cfg.Mode == config.ModeServer {
 		if a.deps.Searcher == nil {
 			return nil, "", fmt.Errorf("%w: server search client is not available", domain.ErrUnsupported)
+		}
+		if !opts.AsOf.IsZero() || opts.IncludeSuperseded {
+			// The server API does not expose validity yet; silently ignoring
+			// the flag would make a past-instant query look answered.
+			return nil, "", fmt.Errorf("%w: as-of and superseded search are local/git only", domain.ErrUnsupported)
 		}
 		// Servers before item support reject exclude_kind=item; a server
 		// treats an excluded "dump" as excluding its items too.
@@ -90,7 +101,10 @@ func (a *App) search(ctx context.Context, opts SearchOptions, rawKinds []string,
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	query := ports.Query{Text: text, ProjectID: strings.TrimSpace(opts.ProjectID), Limit: limit, Since: opts.Since}
+	query := ports.Query{
+		Text: text, ProjectID: strings.TrimSpace(opts.ProjectID), Limit: limit, Since: opts.Since,
+		AsOf: opts.AsOf, IncludeSuperseded: opts.IncludeSuperseded,
+	}
 	for _, kind := range opts.Kinds {
 		if kind = strings.TrimSpace(kind); kind != "" {
 			query.Kinds = append(query.Kinds, kind)

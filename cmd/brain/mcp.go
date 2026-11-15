@@ -527,11 +527,11 @@ func (b mcpBackend) SetDecisionStatus(ctx context.Context, projectID, id, status
 
 // Supersede implements mcpserver.RecordBackend.
 func (b mcpBackend) Supersede(ctx context.Context, projectID, oldID, newID string) (mcpserver.RecordSummary, error) {
-	decision, err := b.app.Supersede(ctx, projectID, oldID, newID)
+	result, err := b.app.Supersede(ctx, projectID, oldID, newID)
 	if err != nil {
 		return mcpserver.RecordSummary{}, err
 	}
-	return toRecordSummary(app.Record{Decision: &decision}.Summary()), nil
+	return toRecordSummary(result.Old), nil
 }
 
 // ReviewRecord implements mcpserver.ReviewRecordBackend.

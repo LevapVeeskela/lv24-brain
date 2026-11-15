@@ -432,6 +432,7 @@ by `.github/workflows/release.yml` on `v*` tags. See
 - [Architecture](docs/architecture.md)
 - [MCP server contract](docs/mcp.md)
 - [Team runbook](docs/runbook.md)
+- [Retrieval evaluation](docs/eval.md)
 - [Security and privacy](docs/security.md)
 - [Product design](docs/product-design.md)
 

@@ -235,6 +235,10 @@ func parseNotesBody(body string, defaultDate time.Time) ([]domain.Note, error) {
 				id = nextNoteID(used, date, title)
 			}
 			used[id] = struct{}{}
+			validity, err := validityFromFrontmatter(metadata.validityFrontmatter, metadata.CreatedAt.UTC())
+			if err != nil {
+				return nil, err
+			}
 			notes = append(notes, domain.Note{
 				ID:         id,
 				Title:      title,
@@ -243,6 +247,7 @@ func parseNotesBody(body string, defaultDate time.Time) ([]domain.Note, error) {
 				Permalink:  metadata.Permalink,
 				Source:     metadata.Source,
 				Provenance: provenanceFromFrontmatter(metadata.provenanceFrontmatter),
+				Validity:   validity,
 				CreatedAt:  metadata.CreatedAt.UTC(),
 			})
 			continue
@@ -277,6 +282,7 @@ func parseNotesBody(body string, defaultDate time.Time) ([]domain.Note, error) {
 				// A hand-written section has no provenance marker: it is the
 				// owner's own text, reviewed by definition.
 				Provenance: domain.Provenance{Reviewed: true},
+				Validity:   domain.Validity{ValidFrom: createdAt},
 				CreatedAt:  createdAt,
 			})
 			continue
@@ -345,6 +351,10 @@ func readDecisionFile(path string) (domain.Decision, error) {
 	if err := validateRecordSourceRef(source, frontmatter.ProjectID); err != nil {
 		return domain.Decision{}, fmt.Errorf("parse %s: %w", path, err)
 	}
+	validity, err := validityFromFrontmatter(frontmatter.validityFrontmatter, frontmatter.CreatedAt.UTC())
+	if err != nil {
+		return domain.Decision{}, fmt.Errorf("parse %s: %w", path, err)
+	}
 	return domain.Decision{
 		ID:           frontmatter.ID,
 		ProjectID:    frontmatter.ProjectID,
@@ -358,6 +368,7 @@ func readDecisionFile(path string) (domain.Decision, error) {
 		Permalink:    frontmatter.Permalink,
 		Source:       source,
 		Provenance:   provenanceFromFrontmatter(frontmatter.provenanceFrontmatter),
+		Validity:     validity,
 		CreatedAt:    frontmatter.CreatedAt.UTC(),
 		UpdatedAt:    frontmatter.UpdatedAt.UTC(),
 	}, nil
@@ -387,6 +398,10 @@ func readAttemptFile(path string) (domain.Attempt, error) {
 	if err := validateRecordSourceRef(source, frontmatter.ProjectID); err != nil {
 		return domain.Attempt{}, fmt.Errorf("parse %s: %w", path, err)
 	}
+	validity, err := validityFromFrontmatter(frontmatter.validityFrontmatter, frontmatter.CreatedAt.UTC())
+	if err != nil {
+		return domain.Attempt{}, fmt.Errorf("parse %s: %w", path, err)
+	}
 	return domain.Attempt{
 		ID:         frontmatter.ID,
 		ProjectID:  frontmatter.ProjectID,
@@ -397,6 +412,7 @@ func readAttemptFile(path string) (domain.Attempt, error) {
 		Permalink:  frontmatter.Permalink,
 		Source:     source,
 		Provenance: provenanceFromFrontmatter(frontmatter.provenanceFrontmatter),
+		Validity:   validity,
 		CreatedAt:  frontmatter.CreatedAt.UTC(),
 		UpdatedAt:  frontmatter.UpdatedAt.UTC(),
 	}, nil
@@ -416,6 +432,10 @@ func readHandoffFile(path string) (domain.Handoff, error) {
 		return domain.Handoff{}, err
 	}
 	summary, gitContext, nextAction := parseHandoffBody(body)
+	validity, err := validityFromFrontmatter(frontmatter.validityFrontmatter, frontmatter.CreatedAt.UTC())
+	if err != nil {
+		return domain.Handoff{}, fmt.Errorf("parse %s: %w", path, err)
+	}
 	return domain.Handoff{
 		ID:         frontmatter.ID,
 		ProjectID:  frontmatter.ProjectID,
@@ -424,6 +444,7 @@ func readHandoffFile(path string) (domain.Handoff, error) {
 		NextAction: nextAction,
 		Permalink:  frontmatter.Permalink,
 		Provenance: provenanceFromFrontmatter(frontmatter.provenanceFrontmatter),
+		Validity:   validity,
 		CreatedAt:  frontmatter.CreatedAt.UTC(),
 	}, nil
 }

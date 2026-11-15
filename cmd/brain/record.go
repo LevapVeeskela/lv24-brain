@@ -22,8 +22,9 @@ func runRecord(args []string, stdout, stderr io.Writer) int {
 	usage := func(w io.Writer) {
 		fmt.Fprint(w, `Usage:
   brain record list [project] [--kind note,decision] [--since 7d|24h]
-                    [--status <status>] [--limit N] [--json]
-  brain record show <id> [--project p] [--json]
+                    [--status <status>] [--limit N]
+                    [--as-of <time|date>] [--include-superseded|--all-time] [--json]
+  brain record show <id> [--project p] [--history] [--as-of <time|date>] [--json]
   brain record status <id> <proposed|accepted|rejected|superseded> [--project p]
   brain record supersede <old-id> --by <new-id> [--project p]
   brain record review <id> [--trust verified|stated|inferred] [--project p]
@@ -33,6 +34,8 @@ func runRecord(args []string, stdout, stderr io.Writer) int {
   brain record trash-list [project] [--json]
 
 [project] is an id, alias or path (default: the working directory's project).
+By default only current records are listed; --as-of reads the records valid at
+an instant and --include-superseded (--all-time) adds the ended ones.
 Trash is reversible: restore brings a trashed record back.
 `)
 	}
@@ -74,6 +77,7 @@ func runRecordList(args []string, stdout, stderr io.Writer) int {
 	since := fs.String("since", "", "only records created or updated within this window, e.g. 24h or 7d")
 	status := fs.String("status", "", "keep decisions with this status")
 	limit := fs.Int("limit", 0, "maximum records; 0 selects the default of 50")
+	validity := addValidityFlags(fs)
 	asJSON := fs.Bool("json", false, "print JSON")
 	cfgPath := configFlag(fs)
 	positional, err := parseInterspersed(fs, args)
@@ -82,6 +86,11 @@ func runRecordList(args []string, stdout, stderr io.Writer) int {
 	}
 	if *limit < 0 {
 		fmt.Fprintln(stderr, "brain record list: --limit must not be negative")
+		return 2
+	}
+	asOf, includeSuperseded, err := validity.parse()
+	if err != nil {
+		fmt.Fprintf(stderr, "brain record list: %v\n", err)
 		return 2
 	}
 	now := time.Now()
@@ -97,21 +106,22 @@ func runRecordList(args []string, stdout, stderr io.Writer) int {
 	}
 	defer func() { _ = runtime.Close() }()
 	records, err := runtime.App.ListRecords(ctx, app.ListRecordsOptions{
-		ProjectID: target.Project.ID,
-		Kinds:     splitList(*kind),
-		Since:     sinceTime,
-		Status:    *status,
-		Limit:     *limit,
+		ProjectID:         target.Project.ID,
+		Kinds:             splitList(*kind),
+		Since:             sinceTime,
+		Status:            *status,
+		Limit:             *limit,
+		AsOf:              asOf,
+		IncludeSuperseded: includeSuperseded,
 	})
 	if err != nil {
 		return reportError(stderr, "record list", err)
 	}
-	summaries := mapAll(records, toRecordSummary)
 	if *asJSON {
-		return writeJSONReport(stdout, stderr, "record list", summaries)
+		return writeJSONReport(stdout, stderr, "record list", mapAll(records, toJSONRecordSummary))
 	}
-	for _, summary := range summaries {
-		fmt.Fprintln(stdout, recordListLine(summary))
+	for _, summary := range records {
+		fmt.Fprintln(stdout, recordSummaryLine(summary))
 	}
 	return 0
 }
@@ -119,6 +129,8 @@ func runRecordList(args []string, stdout, stderr io.Writer) int {
 func runRecordShow(args []string, stdout, stderr io.Writer) int {
 	fs := newFlagSet("record show", stderr)
 	project := fs.String("project", "", "project id or alias")
+	history := fs.Bool("history", false, "also print the supersede chain the record belongs to")
+	asOfValue := fs.String("as-of", "", "mark whether the record was valid at this instant: RFC3339 time or date (2026-11-01)")
 	asJSON := fs.Bool("json", false, "print JSON")
 	cfgPath := configFlag(fs)
 	positional, err := parseInterspersed(fs, args)
@@ -126,6 +138,11 @@ func runRecordShow(args []string, stdout, stderr io.Writer) int {
 		return 2
 	}
 	if !expectArgs("record show", positional, 1, "<id>", stderr) {
+		return 2
+	}
+	asOf, err := domain.ParseAsOf(*asOfValue)
+	if err != nil {
+		fmt.Fprintf(stderr, "brain record show: %v\n", err)
 		return 2
 	}
 	ctx := context.Background()
@@ -139,11 +156,41 @@ func runRecordShow(args []string, stdout, stderr io.Writer) int {
 		return reportError(stderr, "record show", err)
 	}
 	detail := toRecordDetailWithLinks(links)
+	summary := links.Record.Summary()
+	var chain []app.RecordSummary
+	if *history {
+		chain, err = runtime.App.SupersedeChain(ctx, target.Project.ID, positional[0])
+		if err != nil {
+			return reportError(stderr, "record show", err)
+		}
+	}
+	var validAt *bool
+	if !asOf.IsZero() {
+		allowed := links.Record.Validity().AllowsAt(asOf, summary.CreatedAt)
+		validAt = &allowed
+	}
 	if *asJSON {
-		return writeJSONReport(stdout, stderr, "record show", jsonRecordShow{Kind: detail.Kind, Record: detail})
+		return writeJSONReport(stdout, stderr, "record show", jsonRecordShow{
+			Kind:     detail.Kind,
+			Record:   detail,
+			Validity: toJSONSummaryValidity(summary),
+			History:  mapAll(chain, toJSONRecordSummary),
+			ValidAt:  validAt,
+		})
 	}
 	printRecordDetail(stdout, detail)
+	printRecordValidity(stdout, summary)
+	if validAt != nil {
+		printRecordLine(stdout, "as_of", asOf.UTC().Format(time.RFC3339))
+		printRecordLine(stdout, "valid_at", yesNo(*validAt))
+	}
 	printLinkSections(stdout, detail.Links, detail.Backlinks)
+	if *history {
+		fmt.Fprintln(stdout, "history:")
+		for _, record := range chain {
+			fmt.Fprintf(stdout, "  %s\n", recordSummaryLine(record))
+		}
+	}
 	return 0
 }
 
@@ -204,7 +251,11 @@ func runRecordSupersede(args []string, stdout, stderr io.Writer) int {
 	if err != nil {
 		return reportError(stderr, "record supersede", err)
 	}
-	fmt.Fprintf(stdout, "decision %s: superseded by %s\n", decision.ID, newID)
+	if !decision.Changed {
+		fmt.Fprintf(stdout, "%s %s: already superseded by %s\n", decision.Old.Kind, decision.Old.ID, newID)
+		return 0
+	}
+	fmt.Fprintf(stdout, "%s %s: superseded by %s\n", decision.Old.Kind, decision.Old.ID, decision.New.ID)
 	return 0
 }
 
@@ -386,14 +437,41 @@ func parseRecordSince(value string, now time.Time) (time.Time, error) {
 	return now.Add(-window), nil
 }
 
-// recordListLine is `<time>  <kind>  <id>  [<status>]  <title>`; the status
-// column is shown for decisions only.
-func recordListLine(summary mcpserver.RecordSummary) string {
+// recordSummaryLine is `<time>  <kind>  <id>  [<status>]  <title>`; the status
+// column is shown for decisions only, and an ended record names its end.
+func recordSummaryLine(summary app.RecordSummary) string {
 	line := summary.CreatedAt.Local().Format(recordTimeLayout) + "  " + summary.Kind + "  " + summary.ID
 	if summary.Status != "" {
 		line += "  [" + summary.Status + "]"
 	}
+	if !summary.ValidTo.IsZero() {
+		line += "  valid_to " + summary.ValidTo.UTC().Format(time.RFC3339)
+	}
 	return line + "  " + summary.Title
+}
+
+// printRecordValidity prints the temporal fields of a record.
+func printRecordValidity(w io.Writer, summary app.RecordSummary) {
+	if !summary.ValidFrom.IsZero() {
+		printRecordLine(w, "valid_from", summary.ValidFrom.UTC().Format(time.RFC3339))
+	}
+	if summary.ValidTo.IsZero() {
+		printRecordLine(w, "valid_to", "current")
+	} else {
+		printRecordLine(w, "valid_to", summary.ValidTo.UTC().Format(time.RFC3339))
+	}
+	printRecordLine(w, "superseded_by", summary.SupersededBy)
+	printRecordLine(w, "supersedes", summary.Supersedes)
+	if summary.Confidence != 0 {
+		printRecordLine(w, "confidence", strconv.FormatFloat(summary.Confidence, 'f', -1, 64))
+	}
+}
+
+func yesNo(value bool) string {
+	if value {
+		return "yes"
+	}
+	return "no"
 }
 
 // printRecordDetail renders every non-empty field; multi-line text is
@@ -452,11 +530,41 @@ func printRecordItems(w io.Writer, label string, items []string) {
 	}
 }
 
-// jsonRecordShow is `brain record show --json`: the record kind and its
-// fields.
+// jsonRecordShow is `brain record show --json`: the record kind, its fields,
+// its temporal validity and optionally the supersede chain. ValidAt is set only
+// when --as-of was given.
 type jsonRecordShow struct {
-	Kind   string                 `json:"kind"`
-	Record mcpserver.RecordDetail `json:"record"`
+	Kind     string                 `json:"kind"`
+	Record   mcpserver.RecordDetail `json:"record"`
+	Validity jsonValidity           `json:"validity"`
+	History  []jsonRecordSummary    `json:"history,omitempty"`
+	ValidAt  *bool                  `json:"valid_at,omitempty"`
+}
+
+// jsonRecordSummary is one record of `brain record list --json` with its
+// temporal validity.
+type jsonRecordSummary struct {
+	Kind      string       `json:"kind"`
+	ID        string       `json:"id"`
+	ProjectID string       `json:"project_id"`
+	Title     string       `json:"title"`
+	Status    string       `json:"status,omitempty"`
+	CreatedAt time.Time    `json:"created_at,omitzero"`
+	UpdatedAt time.Time    `json:"updated_at,omitzero"`
+	Validity  jsonValidity `json:"validity"`
+}
+
+func toJSONRecordSummary(summary app.RecordSummary) jsonRecordSummary {
+	return jsonRecordSummary{
+		Kind:      summary.Kind,
+		ID:        summary.ID,
+		ProjectID: summary.ProjectID,
+		Title:     summary.Title,
+		Status:    summary.Status,
+		CreatedAt: summary.CreatedAt,
+		UpdatedAt: summary.UpdatedAt,
+		Validity:  toJSONSummaryValidity(summary),
+	}
 }
 
 // jsonTrashedRecord is one entry of `brain record trash-list --json`.

@@ -47,6 +47,14 @@ type RecordReviewer interface {
 	ReviewRecord(ctx context.Context, projectID, kind, id string, trust domain.Trust) (changed bool, err error)
 }
 
+// RecordValiditySetter is implemented by stores that can rewrite the validity
+// fields (valid_from, valid_to, superseded_by, supersedes, confidence) of one
+// stored record without changing its text. It is optional: the supersede
+// command reports that the feature is unavailable for a store that lacks it.
+type RecordValiditySetter interface {
+	SetRecordValidity(ctx context.Context, projectID, kind, id string, validity domain.Validity) error
+}
+
 // TrashedRecord identifies one record in a project's trash.
 type TrashedRecord struct {
 	Kind  string

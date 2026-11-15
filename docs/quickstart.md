@@ -365,6 +365,47 @@ human, reviewed and verified, so nothing changes until an agent or connector
 writes a record. Server mode has no provenance-edit route yet, so `brain record
 review` is local/git only.
 
+### Temporal validity and supersede (0.16)
+
+Decisions get replaced; the old one must stop looking current. Every record has
+`valid_from` (default: when it was written) and `valid_to` (empty = current), so
+"what did we decide in March?" is a query, not archaeology:
+
+```sh
+brain search "storage engine"                     # current records only
+brain search "storage engine" --as-of 2026-03-15  # what was current then
+brain record list --all-time                      # superseded records too
+brain record show <id> --history                  # the supersede chain
+```
+
+Default reads (`brain search`, `brain context`, `brain open`, `brain catchup`,
+`brain record list`) leave out a record whose `valid_to` has passed.
+`--as-of <RFC3339|date>` keeps records where `valid_from <= t` and `valid_to` is
+empty or later than `t`; a bare date means midnight UTC. `--include-superseded`
+(alias `--all-time`) adds the ended ones. The summary of `brain open`/`context`
+lists `as_of: …` when a past instant was requested. Temporary caveat: the server
+API does not expose validity yet, so `--as-of` and `--include-superseded` are
+local/git only and return an error in server mode.
+
+Link a replacement in one step:
+
+```sh
+brain decision "Use SQLite FTS5 for search" --status accepted \
+  --context "local index, zero services" \
+  --supersedes decision-2026-03-01-use-json-files
+# or, for two records that already exist (any kinds):
+brain record supersede decision-2026-03-01-use-json-files --by decision-2026-04-02-use-sqlite
+```
+
+The old record keeps its file and text: it gets `valid_to` and
+`superseded_by`; the replacement gets `supersedes` (and a decision becomes
+`status: superseded`). Both stay in git. The command is idempotent and rejects
+conflicting chains, self-links, missing records and cycles. `--superseded-by`
+on a write repairs history (an imported record that was already replaced), and
+`--confidence 0..1` records author confidence. `brain review` reports
+`supersession-gap` and `stale-superseded`; `brain doctor` reports invalid
+validity (`invalid-validity`). All are report-only.
+
 ### Raw context excerpts (Phase 4.2)
 
 Curated context is the default. To let an agent see a few stored raw items, add
@@ -787,20 +828,21 @@ also accepts `--config <path>`.
 
 | Command | Flags and defaults |
 |---|---|
-| `brain open [path\|id]` | `--project <id\|alias>`; `--budget <runes>` (default 4000) caps the summary; `--brief` prints only the project and state fields (no git or graph sections) |
-| `brain bootstrap [path\|id]` | `--project <id\|alias>`; `--budget <runes>` (default 4000) |
-| `brain note [text]` | `--project`, `--title`, `--body`, `--tags a,b`. Positional text becomes the body and the title is its first line (at most 80 characters). Do not combine positional text with `--body`. |
-| `brain decision [title]` | `--project`, `--title`, `--status proposed\|accepted\|rejected\|superseded` (default `proposed`), `--context <text>`, `--alternatives <a,b>`, `--consequences <a,b>`, `--evidence <a,b>`. The last three are comma-separated lists. |
-| `brain attempt [title]` | `--project`, `--title`, `--hypothesis <text>` (what was expected), `--result <text>` (what happened), `--reason <text>` (why it failed) |
-| `brain handoff [summary]` | `--project`, `--summary`, `--next <text>` (next action), `--git-context <text>` (default: read from the project checkout), `--no-git` (record no git context) |
+| `brain open [path\|id]` | `--project <id\|alias>`; `--budget <runes>` (default 4000) caps the summary; `--brief` prints only the project and state fields (no git or graph sections); `--as-of <time\|date>`, `--include-superseded`/`--all-time` select validity |
+| `brain bootstrap [path\|id]` | `--project <id\|alias>`; `--budget <runes>` (default 4000); `--as-of`, `--include-superseded`/`--all-time` |
+| `brain note [text]` | `--project`, `--title`, `--body`, `--tags a,b`, `--supersedes <id>`, `--superseded-by <id>`, `--confidence 0..1`. Positional text becomes the body and the title is its first line (at most 80 characters). Do not combine positional text with `--body`. |
+| `brain decision [title]` | `--project`, `--title`, `--status proposed\|accepted\|rejected\|superseded` (default `proposed`), `--context <text>`, `--alternatives <a,b>`, `--consequences <a,b>`, `--evidence <a,b>`, `--supersedes <id>`, `--superseded-by <id>`, `--confidence 0..1`. The three list flags are comma-separated. |
+| `brain attempt [title]` | `--project`, `--title`, `--hypothesis <text>` (what was expected), `--result <text>` (what happened), `--reason <text>` (why it failed), `--supersedes <id>`, `--superseded-by <id>`, `--confidence 0..1` |
+| `brain handoff [summary]` | `--project`, `--summary`, `--next <text>` (next action), `--git-context <text>` (default: read from the project checkout), `--no-git`, `--supersedes <id>`, `--superseded-by <id>`, `--confidence 0..1` |
 | `brain journal` | `--project`, `--user`, `--event <name>` (for example `note`, `decision`, `attempt`, `handoff`, `commit`), `--since <duration>` (for example `24h`), `--limit <n>` (default 20). Local and git mode. |
 | `brain event commit` | `--project <id>`, `--repo <path>` (default `.`), `--quiet` (print nothing on success; used by the hook). Local and git mode. |
-| `brain search <query>` | `--project <id>`, `--limit <n>` (default 20), `--kind <kind>` (`note,decision,attempt,handoff,dump,item`; raw-zone `item` is excluded by default and needs a `context-allow.json` grant), `--dumps` (legacy dumps; also un-excludes server items, grant-gated), `--since <24h\|7d\|2w\|2026-11-01\|RFC3339>`. English and Russian word forms match as a prefix. |
+| `brain search <query>` | `--project <id>`, `--limit <n>` (default 20), `--kind <kind>` (`note,decision,attempt,handoff,dump,item`; raw-zone `item` is excluded by default and needs a `context-allow.json` grant), `--dumps` (legacy dumps; also un-excludes server items, grant-gated), `--since <24h\|7d\|2w\|2026-11-01\|RFC3339>`, `--as-of <time\|date>`, `--include-superseded`/`--all-time`. English and Russian word forms match as a prefix. |
+| `brain record` | `list` accepts `--kind`, `--since`, `--status`, `--limit`, `--as-of`, `--include-superseded`/`--all-time`; `show <id>` accepts `--history` and `--as-of`; `supersede <old> --by <new>`, `status`, `review`, `trash`, `restore`, `trash-list` as in the runbook. JSON includes a `validity` object (`valid_from`, `valid_to`, `superseded_by`, `supersedes`, `confidence`). |
 | `brain links <id>` | `--project <id>`, `--json`; `--broken` lists `[[id]]` references to missing records. Write `[[<id>]]`, `[[<id>\|text]]` or `[[<project>/<id>]]` in record text; `brain record show` lists Links and Backlinks. |
-| `brain review` | `--project <id>`, `--since <7d>`, `--fix`, `--fix-kind <kinds>`, `--json`. Lists pending proposals (at most 20) and findings; `broken-link`, `near-duplicate`, `proposal-stale`, `proposal-orphan`, `proposal-contradicted` are report-only. Proposal findings are local/git only, and `--fix` never touches proposals. |
+| `brain review` | `--project <id>`, `--since <7d>`, `--fix`, `--fix-kind <kinds>`, `--json`. Lists pending proposals (at most 20) and findings; `broken-link`, `near-duplicate`, `supersession-gap`, `stale-superseded`, `proposal-stale`, `proposal-orphan`, `proposal-contradicted` are report-only. Proposal findings are local/git only, and `--fix` never touches proposals. |
 | `brain digest` | `--since <90m\|24h\|7d>` (default `24h`; with `--source` the default is `30d`), `--project <id>`, `--json`, `--write` (saves `<data_dir>/digests/YYYY-MM-DD.md`). With `--source <connection>`: `--all`, `--limit <n>` (default 500), `--rule <names>`, `--dry-run` (default; conflicts with `--write`), `--write` (persists proposals). `--source` is local/git only. |
 | `brain promote <id>` | `--project <id>`, `--as decision\|attempt\|note`, `--status proposed\|accepted` (decision only), `--title <text>`, `--dismiss`, `--force` (stale/orphan), `--yes` (local-only source), `--dry-run`, `--json`. Local/git only. |
-| `brain context <task>` | `--project <id>`, `--budget <runes>` (default 4000), `--kind decision\|attempt\|note` (repeatable), `--since <24h\|7d\|2w\|date>`, `--json`, `--raw` (off by default; local/git only; appends at most five excerpts allowed by `<data-dir>/context-allow.json` when the curated context is thin). State, review findings, latest handoff, best-matching records and failed attempts for the task; adds only `pending_proposals: N` when proposals exist, plus granted excerpts with `--raw`. MCP: `brain_context`. |
+| `brain context <task>` | `--project <id>`, `--budget <runes>` (default 4000), `--kind decision\|attempt\|note` (repeatable), `--since <24h\|7d\|2w\|date>`, `--as-of <time\|date>`, `--include-superseded`/`--all-time`, `--json`, `--raw` (off by default; local/git only; appends at most five excerpts allowed by `<data-dir>/context-allow.json` when the curated context is thin). State, review findings, latest handoff, best-matching records and failed attempts for the task; adds only `pending_proposals: N` when proposals exist, plus granted excerpts with `--raw`. MCP: `brain_context`. |
 | `brain sync` | `--status` (read-only branch, ahead/behind, dirty, unmerged paths, last synced revision), `--json`, `--push` (push after committing), `--autostash` (default on; `--autostash=false` disables the stash around the rebase). Exit 3 means an unmerged conflict. |
 | `brain doctor` | `--json`, `--fix` (register the git merge drivers and add their `.gitattributes` lines) |
 | `brain index` | `--rebuild` (delete the local index and rebuild it from Markdown) |

@@ -30,6 +30,12 @@ type RecordSummary struct {
 	Status    string
 	CreatedAt time.Time
 	UpdatedAt time.Time
+	// Validity is the record's temporal validity and supersede links.
+	ValidFrom    time.Time
+	ValidTo      time.Time
+	SupersededBy string
+	Supersedes   string
+	Confidence   float64
 }
 
 // ListRecordsOptions filters ListRecords.
@@ -43,6 +49,11 @@ type ListRecordsOptions struct {
 	Status string
 	// Limit bounds the result; <= 0 uses 50.
 	Limit int
+	// AsOf lists the records valid at that instant instead of now.
+	AsOf time.Time
+	// IncludeSuperseded lists records whose validity ended too. An AsOf
+	// instant selects the point in time and takes precedence.
+	IncludeSuperseded bool
 }
 
 // Record is one record of any kind; exactly one pointer is set.
@@ -56,21 +67,64 @@ type Record struct {
 
 // Summary returns the listing form of a record.
 func (r Record) Summary() RecordSummary {
+	var (
+		summary RecordSummary
+		valid   domain.Validity
+	)
 	switch {
 	case r.Note != nil:
-		return RecordSummary{Kind: ports.RecordNote, ID: r.Note.ID, ProjectID: r.Note.ProjectID,
+		summary = RecordSummary{Kind: ports.RecordNote, ID: r.Note.ID, ProjectID: r.Note.ProjectID,
 			Title: SummarizeLine(valueOr(r.Note.Title, r.Note.Body), 100), CreatedAt: r.Note.CreatedAt, UpdatedAt: r.Note.UpdatedAt}
+		valid = r.Note.Validity
 	case r.Decision != nil:
-		return RecordSummary{Kind: ports.RecordDecision, ID: r.Decision.ID, ProjectID: r.Decision.ProjectID,
+		summary = RecordSummary{Kind: ports.RecordDecision, ID: r.Decision.ID, ProjectID: r.Decision.ProjectID,
 			Title: SummarizeLine(r.Decision.Title, 100), Status: string(r.Decision.Status), CreatedAt: r.Decision.CreatedAt, UpdatedAt: r.Decision.UpdatedAt}
+		valid = r.Decision.Validity
 	case r.Attempt != nil:
-		return RecordSummary{Kind: ports.RecordAttempt, ID: r.Attempt.ID, ProjectID: r.Attempt.ProjectID,
+		summary = RecordSummary{Kind: ports.RecordAttempt, ID: r.Attempt.ID, ProjectID: r.Attempt.ProjectID,
 			Title: SummarizeLine(r.Attempt.Title, 100), CreatedAt: r.Attempt.CreatedAt, UpdatedAt: r.Attempt.UpdatedAt}
+		valid = r.Attempt.Validity
 	case r.Handoff != nil:
-		return RecordSummary{Kind: ports.RecordHandoff, ID: r.Handoff.ID, ProjectID: r.Handoff.ProjectID,
+		summary = RecordSummary{Kind: ports.RecordHandoff, ID: r.Handoff.ID, ProjectID: r.Handoff.ProjectID,
 			Title: SummarizeLine(r.Handoff.Summary, 100), CreatedAt: r.Handoff.CreatedAt, UpdatedAt: r.Handoff.CreatedAt}
+		valid = r.Handoff.Validity
 	}
-	return RecordSummary{}
+	summary.ValidFrom = valid.EffectiveFrom(summary.CreatedAt)
+	summary.ValidTo = valid.ValidTo
+	summary.SupersededBy = valid.SupersededBy
+	summary.Supersedes = valid.Supersedes
+	summary.Confidence = valid.Confidence
+	return summary
+}
+
+// Validity returns the validity of whichever record is set.
+func (r Record) Validity() domain.Validity {
+	switch {
+	case r.Note != nil:
+		return r.Note.Validity
+	case r.Decision != nil:
+		return r.Decision.Validity
+	case r.Attempt != nil:
+		return r.Attempt.Validity
+	case r.Handoff != nil:
+		return r.Handoff.Validity
+	}
+	return domain.Validity{}
+}
+
+// SetValidity updates the in-memory record; it does not write.
+func (r Record) SetValidity(validity domain.Validity) Record {
+	switch {
+	case r.Note != nil:
+		r.Note.Validity = validity
+	case r.Decision != nil:
+		r.Decision.Validity = validity
+	case r.Attempt != nil:
+		r.Attempt.Validity = validity
+	case r.Handoff != nil:
+		r.Handoff.Validity = validity
+	}
+	return r
 }
 
 // projectRecords loads every live record of a project.
@@ -129,6 +183,8 @@ func (a *App) ListRecords(ctx context.Context, opts ListRecordsOptions) ([]Recor
 	if limit <= 0 {
 		limit = 50
 	}
+	filter := domain.ValidityFilter{AsOf: opts.AsOf, IncludeSuperseded: opts.IncludeSuperseded}
+	now := a.now()
 	var out []RecordSummary
 	for _, record := range records {
 		summary := record.Summary()
@@ -136,6 +192,10 @@ func (a *App) ListRecords(ctx context.Context, opts ListRecordsOptions) ([]Recor
 			continue
 		}
 		if opts.Status != "" && (summary.Kind != ports.RecordDecision || !strings.EqualFold(summary.Status, opts.Status)) {
+			continue
+		}
+		validity := domain.Validity{ValidFrom: summary.ValidFrom, ValidTo: summary.ValidTo}
+		if !filter.Allows(validity, summary.CreatedAt, now) {
 			continue
 		}
 		if !opts.Since.IsZero() && !summary.CreatedAt.After(opts.Since) && !summary.UpdatedAt.After(opts.Since) {
@@ -192,28 +252,8 @@ func (a *App) SetDecisionStatus(ctx context.Context, projectID, id string, statu
 	})
 }
 
-// Supersede marks decision oldID superseded by the live decision newID and
-// records the link as evidence on the old one.
-func (a *App) Supersede(ctx context.Context, projectID, oldID, newID string) (domain.Decision, error) {
-	replacement, err := a.GetRecord(ctx, projectID, newID)
-	if err != nil {
-		return domain.Decision{}, err
-	}
-	if replacement.Decision == nil {
-		return domain.Decision{}, domain.NewValidationError("by", fmt.Sprintf("%q is a %s, not a decision", newID, replacement.Kind))
-	}
-	if strings.TrimSpace(oldID) == strings.TrimSpace(newID) {
-		return domain.Decision{}, domain.NewValidationError("by", "a decision cannot supersede itself")
-	}
-	return a.updateDecision(ctx, projectID, oldID, func(decision *domain.Decision) error {
-		decision.Status = domain.DecisionSuperseded
-		link := "superseded by " + replacement.Decision.ID
-		if !containsString(decision.Evidence, link) {
-			decision.Evidence = append(decision.Evidence, link)
-		}
-		return nil
-	})
-}
+// Supersede is implemented in supersede.go: it links any two records of a
+// project and keeps both on disk.
 
 func (a *App) updateDecision(ctx context.Context, projectID, id string, change func(*domain.Decision) error) (domain.Decision, error) {
 	// Server clients can update decisions but have no trash, so this needs

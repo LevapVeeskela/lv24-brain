@@ -10,6 +10,64 @@ import (
 	"github.com/levapveeskela/lv24-brain/internal/domain"
 )
 
+// writeValidity builds the validity of a new record and checks its supersede
+// references against the project before anything is written. supersededBy
+// writes history: the new record is already ended (a repair import).
+func (a *App) writeValidity(ctx context.Context, projectID, supersedes, supersededBy string, confidence float64, now time.Time) (domain.Validity, error) {
+	validity := domain.Validity{ValidFrom: now.UTC(), Confidence: confidence}
+	supersedes = strings.TrimSpace(supersedes)
+	supersededBy = strings.TrimSpace(supersededBy)
+	if supersedes == supersededBy && supersedes != "" {
+		return domain.Validity{}, domain.NewValidationError("supersedes", "a new record cannot supersede and be superseded by the same record")
+	}
+	if supersedes != "" {
+		if err := domain.ValidateRecordReference("supersedes", supersedes); err != nil {
+			return domain.Validity{}, err
+		}
+		target, err := a.GetRecord(ctx, projectID, supersedes)
+		if err != nil {
+			return domain.Validity{}, fmt.Errorf("supersedes %s: %w", supersedes, err)
+		}
+		if current := strings.TrimSpace(target.Validity().SupersededBy); current != "" {
+			return domain.Validity{}, domain.NewValidationError("supersedes",
+				fmt.Sprintf("%s is already superseded by %s; supersede that record instead", supersedes, current))
+		}
+		validity.Supersedes = supersedes
+	}
+	if supersededBy != "" {
+		if err := domain.ValidateRecordReference("superseded-by", supersededBy); err != nil {
+			return domain.Validity{}, err
+		}
+		if _, err := a.GetRecord(ctx, projectID, supersededBy); err != nil {
+			return domain.Validity{}, fmt.Errorf("superseded-by %s: %w", supersededBy, err)
+		}
+		validity.SupersededBy = supersededBy
+		validity.ValidTo = now.UTC()
+		// A repair write is created and ended at the same instant; keep the
+		// documented strict order (valid_to after valid_from) by one
+		// nanosecond instead of rejecting the repair.
+		if !validity.ValidTo.After(validity.ValidFrom) {
+			validity.ValidFrom = validity.ValidTo.Add(-time.Nanosecond)
+		}
+	}
+	return validity, nil
+}
+
+// linkNewSupersede marks the record a new write replaces. A failure is
+// reported after the new record is safely stored: the operator can finish the
+// link with `brain record supersede`.
+func (a *App) linkNewSupersede(ctx context.Context, projectID, supersedes, newID string) error {
+	supersedes = strings.TrimSpace(supersedes)
+	if supersedes == "" {
+		return nil
+	}
+	if _, err := a.linkSupersede(ctx, projectID, supersedes, newID); err != nil {
+		return fmt.Errorf("%s was written but superseding %s failed (retry with brain record supersede %s --by %s): %w",
+			newID, supersedes, supersedes, newID, err)
+	}
+	return nil
+}
+
 // Note appends a dated note and indexes it for search.
 func (a *App) Note(ctx context.Context, input NoteInput) (NoteResult, error) {
 	input.redact()
@@ -21,6 +79,10 @@ func (a *App) Note(ctx context.Context, input NoteInput) (NoteResult, error) {
 		return NoteResult{}, err
 	}
 	now := a.now()
+	validity, err := a.writeValidity(ctx, project.ID, input.Supersedes, input.SupersededBy, input.Confidence, now)
+	if err != nil {
+		return NoteResult{}, err
+	}
 	note := domain.Note{
 		ProjectID:  project.ID,
 		Title:      fallbackTitle(input.Title, input.Body),
@@ -28,6 +90,7 @@ func (a *App) Note(ctx context.Context, input NoteInput) (NoteResult, error) {
 		Tags:       input.Tags,
 		Source:     input.Source,
 		Provenance: input.Provenance.Normalized(),
+		Validity:   validity,
 		CreatedAt:  now,
 		UpdatedAt:  now,
 	}
@@ -52,7 +115,11 @@ func (a *App) Note(ctx context.Context, input NoteInput) (NoteResult, error) {
 		note.ID = id
 		revision, appendErr := a.deps.Store.AppendNote(ctx, note)
 		if appendErr == nil {
-			return a.finishNote(ctx, note, revision)
+			result, finishErr := a.finishNote(ctx, note, revision)
+			if finishErr != nil {
+				return result, finishErr
+			}
+			return result, a.linkNewSupersede(ctx, project.ID, validity.Supersedes, note.ID)
 		}
 		if !errors.Is(appendErr, domain.ErrConflict) && !errors.Is(appendErr, domain.ErrTargetExists) {
 			return NoteResult{}, appendErr
@@ -85,6 +152,14 @@ func (a *App) Decision(ctx context.Context, input DecisionInput) (DecisionResult
 		status = domain.DecisionProposed
 	}
 	now := a.now()
+	validity, err := a.writeValidity(ctx, project.ID, input.Supersedes, input.SupersededBy, input.Confidence, now)
+	if err != nil {
+		return DecisionResult{}, err
+	}
+	if validity.SupersededBy != "" {
+		// A repaired record is history by definition.
+		status = domain.DecisionSuperseded
+	}
 	decision := domain.Decision{
 		ProjectID:    project.ID,
 		Title:        strings.TrimSpace(input.Title),
@@ -96,6 +171,7 @@ func (a *App) Decision(ctx context.Context, input DecisionInput) (DecisionResult
 		Paths:        paths,
 		Source:       input.Source,
 		Provenance:   input.Provenance.Normalized(),
+		Validity:     validity,
 		CreatedAt:    now,
 		UpdatedAt:    now,
 	}
@@ -121,7 +197,10 @@ func (a *App) Decision(ctx context.Context, input DecisionInput) (DecisionResult
 		revision, appendErr := a.deps.Store.AppendDecision(ctx, decision)
 		if appendErr == nil {
 			result := DecisionResult{Decision: decision, Revision: revision}
-			return result, a.afterWrite(ctx, JournalDecision, decision.ProjectID, decision.ID, decision.Title, decisionDocument(decision))
+			if err := a.afterWrite(ctx, JournalDecision, decision.ProjectID, decision.ID, decision.Title, decisionDocument(decision)); err != nil {
+				return result, err
+			}
+			return result, a.linkNewSupersede(ctx, project.ID, validity.Supersedes, decision.ID)
 		}
 		if !errors.Is(appendErr, domain.ErrTargetExists) {
 			return DecisionResult{}, appendErr
@@ -141,6 +220,10 @@ func (a *App) Attempt(ctx context.Context, input AttemptInput) (AttemptResult, e
 		return AttemptResult{}, err
 	}
 	now := a.now()
+	validity, err := a.writeValidity(ctx, project.ID, input.Supersedes, input.SupersededBy, input.Confidence, now)
+	if err != nil {
+		return AttemptResult{}, err
+	}
 	attempt := domain.Attempt{
 		ProjectID:  project.ID,
 		Title:      strings.TrimSpace(input.Title),
@@ -149,6 +232,7 @@ func (a *App) Attempt(ctx context.Context, input AttemptInput) (AttemptResult, e
 		Reason:     input.Reason,
 		Source:     input.Source,
 		Provenance: input.Provenance.Normalized(),
+		Validity:   validity,
 		CreatedAt:  now,
 		UpdatedAt:  now,
 	}
@@ -175,7 +259,10 @@ func (a *App) Attempt(ctx context.Context, input AttemptInput) (AttemptResult, e
 		revision, appendErr := a.deps.Store.AppendAttempt(ctx, attempt)
 		if appendErr == nil {
 			result := AttemptResult{Attempt: attempt, Revision: revision}
-			return result, a.afterWrite(ctx, JournalAttempt, attempt.ProjectID, attempt.ID, attempt.Title, attemptDocument(attempt))
+			if err := a.afterWrite(ctx, JournalAttempt, attempt.ProjectID, attempt.ID, attempt.Title, attemptDocument(attempt)); err != nil {
+				return result, err
+			}
+			return result, a.linkNewSupersede(ctx, project.ID, validity.Supersedes, attempt.ID)
 		}
 		if !errors.Is(appendErr, domain.ErrTargetExists) {
 			return AttemptResult{}, appendErr
@@ -195,12 +282,17 @@ func (a *App) Handoff(ctx context.Context, input HandoffInput) (HandoffResult, e
 		return HandoffResult{}, err
 	}
 	now := a.now()
+	validity, err := a.writeValidity(ctx, project.ID, input.Supersedes, input.SupersededBy, input.Confidence, now)
+	if err != nil {
+		return HandoffResult{}, err
+	}
 	handoff := domain.Handoff{
 		ProjectID:  project.ID,
 		Summary:    input.Summary,
 		GitContext: input.GitContext,
 		NextAction: input.NextAction,
 		Provenance: input.Provenance.Normalized(),
+		Validity:   validity,
 		CreatedAt:  now,
 	}
 	if err := handoff.Validate(); err != nil {
@@ -227,7 +319,10 @@ func (a *App) Handoff(ctx context.Context, input HandoffInput) (HandoffResult, e
 		revision, appendErr := a.deps.Store.AppendHandoff(ctx, handoff)
 		if appendErr == nil {
 			result := HandoffResult{Handoff: handoff, Revision: revision}
-			return result, a.afterWrite(ctx, JournalHandoff, handoff.ProjectID, handoff.ID, handoff.Summary, handoffDocument(handoff))
+			if err := a.afterWrite(ctx, JournalHandoff, handoff.ProjectID, handoff.ID, handoff.Summary, handoffDocument(handoff)); err != nil {
+				return result, err
+			}
+			return result, a.linkNewSupersede(ctx, project.ID, validity.Supersedes, handoff.ID)
 		}
 		if !errors.Is(appendErr, domain.ErrTargetExists) {
 			return HandoffResult{}, appendErr

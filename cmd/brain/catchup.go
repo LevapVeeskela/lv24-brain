@@ -23,6 +23,7 @@ func runCatchup(args []string, stdout, stderr io.Writer) int {
 	since := fs.Duration("since", 0, "look back this far instead of to the latest handoff, e.g. 24h")
 	limit := fs.Int("limit", catchupDefaultLimit, "maximum items per list")
 	includeUnreviewed := fs.Bool("include-unreviewed", false, "include quarantined records (unreviewed agent, connector or import writes)")
+	validity := addValidityFlags(fs)
 	asJSON := fs.Bool("json", false, "print JSON")
 	cfgPath := configFlag(fs)
 	positional, err := parseInterspersed(fs, args)
@@ -31,6 +32,11 @@ func runCatchup(args []string, stdout, stderr io.Writer) int {
 	}
 	if *limit < 0 || *since < 0 {
 		fmt.Fprintln(stderr, "brain catchup: --limit and --since must not be negative")
+		return 2
+	}
+	asOf, includeSuperseded, err := validity.parse()
+	if err != nil {
+		fmt.Fprintf(stderr, "brain catchup: %v\n", err)
 		return 2
 	}
 	ctx := context.Background()
@@ -43,6 +49,8 @@ func runCatchup(args []string, stdout, stderr io.Writer) int {
 		ProjectID:         target.Project.ID,
 		Limit:             *limit,
 		IncludeUnreviewed: *includeUnreviewed,
+		AsOf:              asOf,
+		IncludeSuperseded: includeSuperseded,
 	}
 	if *since > 0 {
 		opts.Since = time.Now().Add(-*since)
@@ -151,6 +159,7 @@ type jsonNote struct {
 	Title     string  `json:"title"`
 	Body      string  `json:"body"`
 	CreatedAt *string `json:"created_at"`
+	jsonValidity
 }
 
 // jsonDecision is one decision changed after the baseline.
@@ -159,6 +168,7 @@ type jsonDecision struct {
 	Title     string  `json:"title"`
 	Status    string  `json:"status"`
 	UpdatedAt *string `json:"updated_at"`
+	jsonValidity
 }
 
 // jsonAttempt is one attempt recorded after the baseline.
@@ -166,6 +176,7 @@ type jsonAttempt struct {
 	ID        string  `json:"id"`
 	Title     string  `json:"title"`
 	CreatedAt *string `json:"created_at"`
+	jsonValidity
 }
 
 // jsonHandoff is a handoff; the baseline and the list entries share it.
@@ -174,6 +185,7 @@ type jsonHandoff struct {
 	Summary    string  `json:"summary"`
 	NextAction string  `json:"next_action"`
 	CreatedAt  *string `json:"created_at"`
+	jsonValidity
 }
 
 // jsonCatchup is `brain catchup --json`.
@@ -218,17 +230,21 @@ func toJSONCatchup(result app.CatchupResult) jsonCatchup {
 }
 
 func toJSONNote(note domain.Note) jsonNote {
-	return jsonNote{ID: note.ID, Title: note.Title, Body: note.Body, CreatedAt: jsonTime(note.CreatedAt)}
+	return jsonNote{ID: note.ID, Title: note.Title, Body: note.Body, CreatedAt: jsonTime(note.CreatedAt),
+		jsonValidity: toJSONValidity(note.Validity, note.CreatedAt)}
 }
 
 func toJSONDecision(decision domain.Decision) jsonDecision {
-	return jsonDecision{ID: decision.ID, Title: decision.Title, Status: string(decision.Status), UpdatedAt: jsonTime(decision.UpdatedAt)}
+	return jsonDecision{ID: decision.ID, Title: decision.Title, Status: string(decision.Status), UpdatedAt: jsonTime(decision.UpdatedAt),
+		jsonValidity: toJSONValidity(decision.Validity, decision.CreatedAt)}
 }
 
 func toJSONAttempt(attempt domain.Attempt) jsonAttempt {
-	return jsonAttempt{ID: attempt.ID, Title: attempt.Title, CreatedAt: jsonTime(attempt.CreatedAt)}
+	return jsonAttempt{ID: attempt.ID, Title: attempt.Title, CreatedAt: jsonTime(attempt.CreatedAt),
+		jsonValidity: toJSONValidity(attempt.Validity, attempt.CreatedAt)}
 }
 
 func toJSONHandoff(handoff domain.Handoff) jsonHandoff {
-	return jsonHandoff{ID: handoff.ID, Summary: handoff.Summary, NextAction: handoff.NextAction, CreatedAt: jsonTime(handoff.CreatedAt)}
+	return jsonHandoff{ID: handoff.ID, Summary: handoff.Summary, NextAction: handoff.NextAction, CreatedAt: jsonTime(handoff.CreatedAt),
+		jsonValidity: toJSONValidity(handoff.Validity, handoff.CreatedAt)}
 }
