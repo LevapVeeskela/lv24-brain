@@ -496,7 +496,7 @@ func TestMCPServerInitializeBadParamsIsInvalidParams(t *testing.T) {
 }
 
 func TestMCPServerUnknownMethodIsMethodNotFound(t *testing.T) {
-	responses := session(t, &fakeBackend{}, `{"jsonrpc":"2.0","id":9,"method":"resources/list"}`)
+	responses := session(t, &fakeBackend{}, `{"jsonrpc":"2.0","id":9,"method":"resources/subscribe"}`)
 	code, _ := errorOf(t, responses[0])
 	if code != -32601 || responses[0]["id"] != float64(9) {
 		t.Fatalf("response = %v", responses[0])

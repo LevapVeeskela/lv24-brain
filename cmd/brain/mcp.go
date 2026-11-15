@@ -29,9 +29,9 @@ func runMCP(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	cfgPath := configFlag(fs)
 	listTools := fs.Bool("list-tools", false, "print the tool catalogue (name, title, annotations, schemas, limits) and exit without serving")
 	asJSON := fs.Bool("json", false, "with --list-tools, print the catalogue as JSON")
-	profileName := fs.String("profile", mcpserver.ProfileLV24, "tool profile to serve: lv24 (the 15-tool native surface)")
-	profileVersion := fs.String("profile-version", "", "profile revision to pin (this build serves 1.0)")
-	strict := fs.Bool("strict", false, "with a migration profile, refuse every approximate alias; no effect on lv24")
+	profileName := fs.String("profile", mcpserver.ProfileLV24, "tool profile to serve: lv24 (default), lv24-legacy, engram, codegraph or graphify")
+	profileVersion := fs.String("profile-version", "", "profile revision to pin (this build serves 1.0; pass 1 to pin the major)")
+	strict := fs.Bool("strict", false, "with a migration profile, refuse every approximate alias and every dropped legacy argument; no effect on lv24")
 	readOnly := fs.Bool("read-only", false, "expose read tools only: write tools are omitted and a call to one is refused with UNSUPPORTED")
 	projectsFlag := fs.String("projects", "", "comma-separated project ids or aliases this server may read and write (default: every registered project)")
 	allowWrite := fs.Bool("allow-write", false, "let write tools target any allowed project, not only the project of the working directory")
@@ -184,39 +184,61 @@ type mcpCatalogue struct {
 	ProtocolVersions []string               `json:"protocol_versions"`
 	Policy           mcpserver.PolicyInfo   `json:"policy"`
 	Tools            []mcpserver.ToolSpec   `json:"tools"`
+	Aliases          []mcpserver.AliasSpec  `json:"aliases"`
 	Capabilities     mcpserver.Capabilities `json:"capabilities"`
 	// OmittedTools are the tools the effective policy hides, so the full
 	// contract stays visible when a profile is applied.
 	OmittedTools []string `json:"omitted_tools"`
+	// Digest pins the effective vocabulary: tools, aliases and omitted names.
+	Digest string `json:"digest"`
 }
 
 // printMCPTools writes the tool contract without serving. It needs no config:
 // the catalogue is static, so an operator can diff it before deploying. The
 // policy is echoed as requested; the running server resolves aliases to ids.
 func printMCPTools(stdout, stderr io.Writer, asJSON bool, profile mcpserver.Profile, policy mcpserver.Policy) int {
-	tools, omitted := mcpserver.CatalogForPolicy(version.Version, profile, policy)
+	contract := mcpserver.BuildCatalogue(version.Version, profile, policy)
 	info := policy.Info()
 	if !asJSON {
-		for _, tool := range tools {
-			fmt.Fprintf(stdout, "%-18s %-11s %s\n", tool.Name, tool.Policy, tool.Title)
+		for _, tool := range contract.Tools {
+			suffix := ""
+			switch {
+			case tool.Legacy && tool.Target != "":
+				suffix = " [" + tool.Grade + " -> " + tool.Target + "]"
+			case tool.Legacy:
+				suffix = " [" + tool.Grade + "]"
+			case tool.Stub:
+				suffix = " [stub]"
+			}
+			fmt.Fprintf(stdout, "%-22s %-11s %s%s\n", tool.Name, tool.Policy, tool.Title, suffix)
 		}
 		projects := "(all)"
 		if len(info.Projects) > 0 {
 			projects = strings.Join(info.Projects, ",")
 		}
-		fmt.Fprintf(stdout, "profile: %s %s\n", profile.Name, profile.Version)
-		fmt.Fprintf(stdout, "policy: read_only=%t allow_write=%t projects=%s\n", info.ReadOnly, info.AllowWrite, projects)
-		if len(omitted) > 0 {
-			fmt.Fprintf(stdout, "omitted: %s\n", strings.Join(omitted, " "))
+		fmt.Fprintf(stdout, "profile: %s %s strict=%t\n", profile.Name, profile.Version, profile.Strict)
+		if aliased := contract.Capabilities.Tools.Aliased; aliased > 0 {
+			grades := contract.Capabilities.Tools.Grades
+			fmt.Fprintf(stdout, "aliases: %d (A %d, B %d, C %d, D %d)\n", aliased,
+				grades["A"], grades["B"], grades["C"], grades["D"])
 		}
+		fmt.Fprintf(stdout, "policy: read_only=%t allow_write=%t projects=%s\n", info.ReadOnly, info.AllowWrite, projects)
+		if len(contract.OmittedTools) > 0 {
+			fmt.Fprintf(stdout, "omitted: %s\n", strings.Join(contract.OmittedTools, " "))
+		}
+		fmt.Fprintf(stdout, "digest: %s\n", contract.Digest)
 		return 0
 	}
 	catalogue := mcpCatalogue{
-		Profile: profile, ProtocolVersions: mcpserver.SupportedVersions(), Policy: info, Tools: tools,
-		Capabilities: mcpserver.CapabilityReport(version.Version, profile, policy), OmittedTools: omitted,
+		Profile: contract.Profile, ProtocolVersions: mcpserver.SupportedVersions(), Policy: info,
+		Tools: contract.Tools, Aliases: contract.Aliases, Capabilities: contract.Capabilities,
+		OmittedTools: contract.OmittedTools, Digest: contract.Digest,
 	}
 	if catalogue.OmittedTools == nil {
 		catalogue.OmittedTools = []string{}
+	}
+	if catalogue.Aliases == nil {
+		catalogue.Aliases = []mcpserver.AliasSpec{}
 	}
 	catalogue.Server.Name = mcpserver.ServerName
 	catalogue.Server.Version = version.Version
@@ -296,6 +318,7 @@ func (b mcpBackend) Search(ctx context.Context, in mcpserver.SearchInput) ([]mcp
 		Text:         in.Query,
 		ProjectID:    in.ProjectID,
 		Limit:        in.Limit,
+		MatchMode:    in.MatchMode,
 		Kinds:        in.Kinds,
 		Scope:        in.Scope,
 		IncludeDumps: in.IncludeDumps,
@@ -560,6 +583,28 @@ func (b mcpBackend) GetRecord(ctx context.Context, projectID, id string) (mcpser
 		return mcpserver.RecordDetail{}, err
 	}
 	return toRecordDetailWithLinks(links), nil
+}
+
+// RecordQuarantined implements mcpserver.RecordQuarantineBackend: a record
+// resource is withheld unless the caller explicitly passes
+// ?include_unreviewed=true, matching the trusted-context rule.
+func (b mcpBackend) RecordQuarantined(ctx context.Context, projectID, id string) (bool, error) {
+	record, err := b.app.GetRecord(ctx, projectID, id)
+	if err != nil {
+		return false, err
+	}
+	switch {
+	case record.Note != nil:
+		return record.Note.Provenance.Quarantined(), nil
+	case record.Decision != nil:
+		return record.Decision.Provenance.Quarantined(), nil
+	case record.Attempt != nil:
+		return record.Attempt.Provenance.Quarantined(), nil
+	case record.Handoff != nil:
+		return record.Handoff.Provenance.Quarantined(), nil
+	default:
+		return false, nil
+	}
 }
 
 // SetDecisionStatus implements mcpserver.RecordBackend.

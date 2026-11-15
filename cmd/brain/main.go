@@ -159,6 +159,8 @@ func runCommand(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return runDiscover(rest, stdout, stderr)
 	case "graphs":
 		return runGraphs(rest, stdout, stderr)
+	case "code":
+		return runCode(rest, stdout, stderr)
 	case "agents":
 		return runAgents(rest, stdout, stderr)
 	case "state":
@@ -252,6 +254,7 @@ Commands:
   config     Set or show the default brain.yaml (config use <path> | show | clear)
   discover   Find git checkouts under --root and register new projects (--apply)
   graphs     Refresh graphify/codegraph indexes of registered projects
+  code       Query a code graph (status, search, node, explore, impact)
   agents     Sync the shared agent instructions (agents sync [--check])
   state      Get or set a project's goal, next action, blockers and questions
   catchup    what changed since the latest handoff

@@ -134,13 +134,79 @@ func TestMCPProfileFlag(t *testing.T) {
 	if !strings.Contains(stdout, `"name": "lv24"`) {
 		t.Fatalf("stdout does not report the lv24 profile: %s", stdout)
 	}
-	code, _, stderr = runForTest(t, "mcp", "--list-tools", "--profile", "engram")
+	code, stdout, stderr = runForTest(t, "mcp", "--list-tools", "--json", "--profile", "engram")
+	if code != 0 {
+		t.Fatalf("engram profile: code = %d, stderr = %q", code, stderr)
+	}
+	if !strings.Contains(stdout, `"name": "engram"`) || !strings.Contains(stdout, `"legacy": "mem_save"`) {
+		t.Fatalf("engram catalogue misses its vocabulary: %s", stdout)
+	}
+	code, _, stderr = runForTest(t, "mcp", "--list-tools", "--profile", "bogus")
 	if code != 2 || !strings.Contains(stderr, "unknown profile") {
 		t.Fatalf("unknown profile: code = %d, stderr = %q", code, stderr)
 	}
 	code, _, stderr = runForTest(t, "mcp", "--list-tools", "--profile", "lv24", "--profile-version", "9")
 	if code != 2 || !strings.Contains(stderr, "unsupported profile version") {
 		t.Fatalf("unknown version: code = %d, stderr = %q", code, stderr)
+	}
+}
+
+func TestMCPListToolsReportsProfileGradesAndDigest(t *testing.T) {
+	code, stdout, stderr := runForTest(t, "mcp", "--list-tools", "--json", "--profile", "engram", "--strict")
+	if code != 0 {
+		t.Fatalf("exit code = %d (stderr: %s)", code, stderr)
+	}
+	var doc struct {
+		Profile struct {
+			Name   string `json:"name"`
+			Strict bool   `json:"strict"`
+			Native bool   `json:"native"`
+		} `json:"profile"`
+		Tools []struct {
+			Name   string `json:"name"`
+			Legacy bool   `json:"legacy"`
+			Target string `json:"target"`
+			Grade  string `json:"grade"`
+		} `json:"tools"`
+		Aliases []struct {
+			Legacy string `json:"legacy"`
+			Grade  string `json:"grade"`
+		} `json:"aliases"`
+		Capabilities struct {
+			Tools struct {
+				Total   int            `json:"total"`
+				Aliased int            `json:"aliased"`
+				Grades  map[string]int `json:"grades"`
+			} `json:"tools"`
+			Gaps []struct {
+				Tool string `json:"tool"`
+			} `json:"gaps"`
+		} `json:"capabilities"`
+		Digest string `json:"digest"`
+	}
+	if err := json.Unmarshal([]byte(stdout), &doc); err != nil {
+		t.Fatalf("stdout is not JSON: %v", err)
+	}
+	if doc.Profile.Name != "engram" || !doc.Profile.Strict || doc.Profile.Native {
+		t.Fatalf("profile = %+v", doc.Profile)
+	}
+	if len(doc.Tools) != 28 || doc.Capabilities.Tools.Total != 28 || doc.Capabilities.Tools.Aliased != 27 {
+		t.Fatalf("tools = %d, total = %d, aliased = %d", len(doc.Tools), doc.Capabilities.Tools.Total, doc.Capabilities.Tools.Aliased)
+	}
+	if len(doc.Aliases) != 27 {
+		t.Fatalf("aliases = %d, want 27", len(doc.Aliases))
+	}
+	wantGrades := map[string]int{"A": 3, "B": 15, "C": 7, "D": 2}
+	for grade, want := range wantGrades {
+		if doc.Capabilities.Tools.Grades[grade] != want {
+			t.Fatalf("grade %s = %d, want %d (%v)", grade, doc.Capabilities.Tools.Grades[grade], want, doc.Capabilities.Tools.Grades)
+		}
+	}
+	if len(doc.Capabilities.Gaps) == 0 {
+		t.Fatal("engram capabilities has no gaps")
+	}
+	if !strings.HasPrefix(doc.Digest, "sha256:") {
+		t.Fatalf("digest = %q", doc.Digest)
 	}
 }
 

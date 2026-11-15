@@ -52,17 +52,23 @@ internal/adapters/
 internal/connectors/       shared run records, retry/rate-limit helpers, redaction
 internal/daemon/           background engine: scheduler, queue, runtime, logs
 internal/agentcontrol/     local control API composition (daemon <-> localapi)
-internal/migrate/          legacy .brain importer
+internal/migrate/          legacy .brain importer and engram importer
 internal/mcpserver/        MCP server over stdio: 2026-07-28 and 2025-06-18
 internal/server/           server config and process wiring
 internal/update/           release check, verify, stage, apply, rollback
 internal/version/          build identity
+internal/textbudget/       shared token estimate for context and previews
+internal/redact/           secret redaction applied before persistence
+internal/mergedriver/      git merge drivers for state, registry and notes
+eval/                      authored retrieval fixtures, runner and baseline
 templates/                 state, decision, attempt, handoff, AGENTS.md
 installers/windows/        install.ps1 and install.bat
 installers/unix/           install.sh for macOS and Linux
 integrations/opencode/     handoff hook template
 deploy/                    Dockerfile, Compose, environment template, GoReleaser
-docs/                      product, quickstart, install, update, deploy, migration, security, runbook
+docs/                      product, quickstart, install, update, deploy, migration, security, runbook;
+                           reference pages: search, context-budget, review, relations, limits,
+                           schema-compat, import-engram, eval, mcp, release-0.15/0.16/0.17
 ```
 
 Module path: see `go.mod` (`github.com/<owner>/lv24-brain`). Go 1.27.
@@ -385,9 +391,10 @@ before 0.16 behaves.
     instant; a bare date means midnight UTC;
   - `--include-superseded` (alias `--all-time`): keep ended records too. An
     `--as-of` instant takes precedence.
-  The SQLite projection stores the same columns (schema version 3, with
-  `(kind, valid_to)` and `(superseded_by)` indexes) and applies the same filter
-  in SQL, so search and the record listing cannot disagree.
+  The SQLite projection stores the same columns (schema version 6, with
+  `(kind, valid_to)` and `(superseded_by)` indexes, plus the derived
+  classification columns) and applies the same filter in SQL, so search and the
+  record listing cannot disagree.
 - **Supersede.** `brain record supersede <old> --by <new>` (any two records of
   one project) sets `valid_to = now` and `superseded_by = <new>` on the old
   record, a decision also gets `status: superseded`, and `<new>` gets
@@ -750,6 +757,9 @@ left untouched and the command exits non-zero.
 ## Tests and CI
 
 - `go test ./...`, `go vet ./...`, `gofmt -l .`.
+- `brain eval` scores retrieval, temporal filtering and context packing against
+  `eval/fixtures` and `eval/baseline.json` offline; the metric run is run
+  locally and is not a CI gate (see [eval.md](eval.md)).
 - Adapter tests use temporary directories; Postgres integration tests require a
   database DSN; server/client tests use `httptest`.
 - `.github/workflows/ci.yml` (GitHub-hosted `ubuntu-latest` only, actions
@@ -775,9 +785,12 @@ left untouched and the command exits non-zero.
 | Raw-zone deletes are not inferred | sources report tombstones only; `Deletes` is false without authoritative tombstones |
 | Curation is local and rule-based | `brain digest --source` and `brain promote` run in local/git mode only, read stored items, and write machine-local git-ignored proposals; server mode, the local API and the desktop app have no proposal surface, and there is no scheduled digest or proposal merge/trash |
 | Raw context excerpts are local/git only | `brain context --raw` and every raw search path read `context-allow.json`; excerpts exist only in local/git mode, and server search never returns raw items to viewers or members |
-| `state.md` has no provenance | state is always trusted context; only records carry `origin/reviewed/trust`, so `brain_state_set` text is not quarantined (planned with the 0.16 state model) |
+| `state.md` has no provenance | state is always trusted context; only records carry `origin/reviewed/trust`, so `brain_state_set` text is not quarantined (planned with a later state model) |
 | `record review` is local/git only | server mode has no provenance-edit route yet; quarantined server records can only be changed through the ordinary update routes |
-| No code graph or semantic index yet | code symbols/impact (0.18) and optional embeddings are not part of 0.15; search stays lexical |
+| Relations are store-and-index only | typed relations and the judged graph are persisted and projected, but no read path uses them for neighbour navigation yet; `brain timeline` and the context `linked` layer still follow `[[id]]` only |
+| Merge is CLI-only | `brain record merge` plans, applies and rolls back in local/git mode; no MCP tool and no server route apply, trash or hard-delete records |
+| MCP surface is the 15-tool `lv24` profile | `--profile=lv24` is the only profile; retired 0.16 tool names return `NOT_FOUND` with `try_instead`; no `engram`, `codegraph` or `graphify` alias profiles and no legacy aliases exist yet |
+| No code graph or native code indexer yet | code symbols and impact (0.18) and optional embeddings are absent; search stays lexical, and `brain_capabilities` reports `brain_code`/`brain_graph` as false |
 | CLI index is local-only | `brain search` in server mode uses `GET /v1/search`; no local index is built |
 | No server-side Markdown import/export | migrate into Markdown first; server records go through the API |
 | Server auto-update not implemented | upgrade by pulling a new image; `BRAIN_SERVER_AUTO_UPDATE` is reserved |

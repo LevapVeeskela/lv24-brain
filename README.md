@@ -432,9 +432,18 @@ by `.github/workflows/release.yml` on `v*` tags. See
 - [Architecture](docs/architecture.md)
 - [MCP server contract](docs/mcp.md)
 - [Team runbook](docs/runbook.md)
+- [Search and progressive disclosure](docs/search.md)
+- [Layered context budget](docs/context-budget.md)
+- [Review findings, dates and duplicates](docs/review.md)
+- [Relations and two-phase merge](docs/relations.md)
+- [Write limits and protected paths](docs/limits.md)
+- [Schema compatibility and engram fields](docs/schema-compat.md)
+- [Importing engram memories](docs/import-engram.md)
+- [Code graph adapter](docs/code-graph.md)
 - [Retrieval evaluation](docs/eval.md)
 - [Security and privacy](docs/security.md)
 - [Product design](docs/product-design.md)
+- [Release 0.15](docs/release-0.15.md) · [0.16](docs/release-0.16.md) · [0.17](docs/release-0.17.md)
 
 ## Security boundary
 

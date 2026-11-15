@@ -1,74 +1,132 @@
 package mcpserver
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"fmt"
+	"slices"
 	"strings"
 )
 
 // Tool profiles. A profile is a vocabulary, not an add-on: tools/list in a
-// profile never mixes two names for the same intent. 0.17 serves one profile,
-// the native 15-tool surface; later releases add migration vocabularies.
+// profile never lists two names for the same intent. The native profile serves
+// the 15 tools of 0.17; the migration profiles serve a peer vocabulary whose
+// calls are translated to the native tool that does the work.
 const (
 	// ProfileLV24 is the native 15-tool profile and the default.
 	ProfileLV24 = "lv24"
-	// ProfileVersion is the additive-compatible revision of the profile. A
+	// ProfileLV24Legacy is the 22-name bridge for clients written against
+	// 0.16: the 15 native names plus the seven retired ones.
+	ProfileLV24Legacy = "lv24-legacy"
+	// ProfileEngram is the 27-name engram-compatible vocabulary.
+	ProfileEngram = "engram"
+	// ProfileCodegraph is the 8-name codegraph vocabulary. Until 0.18 it
+	// answers honestly: status/files report indexed=false, queries refuse.
+	ProfileCodegraph = "codegraph"
+	// ProfileGraphify is the 10-name graphify vocabulary, with the same
+	// honest stub behaviour.
+	ProfileGraphify = "graphify"
+	// ProfileVersion is the additive-compatible revision of every profile. A
 	// minor bump adds names or fields; a major bump changes what an existing
 	// name means.
 	ProfileVersion = "1.0"
 )
+
+// Compatibility grades. A and B preserve the facts of the legacy call; C
+// approximates and says so; D cannot be served at all. GradeStub marks a
+// placeholder tool of the codegraph/graphify profiles, which is neither A nor
+// D: it answers with an honest "not indexed" object or refuses a query.
+const (
+	GradeExact          = "A"
+	GradeEnvelope       = "B"
+	GradeApproximate    = "C"
+	GradeUnsupported    = "D"
+	GradeStub           = "stub"
+	profileDeprecation  = "lv24-legacy is a bridge for 0.16 clients and is removed in 0.19"
+	profileLegacyReason = "the 0.16 name was retired in 0.17; this profile keeps it callable"
+)
+
+// SupportedProfiles is the closed profile vocabulary of this build, in the
+// order --list-tools and error messages report it.
+var SupportedProfiles = []string{
+	ProfileLV24,
+	ProfileLV24Legacy,
+	ProfileEngram,
+	ProfileCodegraph,
+	ProfileGraphify,
+}
 
 // Profile is the tool vocabulary one server process exposes.
 type Profile struct {
 	Name    string `json:"name"`
 	Version string `json:"version"`
 	Strict  bool   `json:"strict"`
+	// Native reports whether the profile is the native vocabulary.
+	Native bool `json:"native"`
+	// Deprecated marks a bridge profile that a later release removes.
+	Deprecated bool `json:"deprecated,omitempty"`
 }
 
 // DefaultProfile returns the native profile.
 func DefaultProfile() Profile {
-	return Profile{Name: ProfileLV24, Version: ProfileVersion}
+	return Profile{Name: ProfileLV24, Version: ProfileVersion, Native: true}
 }
 
 // ResolveProfile validates the profile flags. An unknown profile or an
 // unsupported version pin is a plain error: the server refuses to start rather
 // than silently serve another vocabulary.
 func ResolveProfile(name, version string, strict bool) (Profile, error) {
-	name = strings.TrimSpace(name)
+	name = strings.ToLower(strings.TrimSpace(name))
 	if name == "" {
 		name = ProfileLV24
 	}
-	if name != ProfileLV24 {
-		return Profile{}, fmt.Errorf("unknown profile %q (this build serves: %s)", name, ProfileLV24)
+	if !slices.Contains(SupportedProfiles, name) {
+		return Profile{}, fmt.Errorf("unknown profile %q (this build serves: %s)", name, strings.Join(SupportedProfiles, ", "))
 	}
 	switch strings.TrimSpace(version) {
 	case "", "1", ProfileVersion:
 	default:
-		return Profile{}, fmt.Errorf("unsupported profile version %q (this build serves: %s)", version, ProfileVersion)
+		return Profile{}, fmt.Errorf("unsupported profile version %q (this build serves: %s; pass 1 to pin the major)", version, ProfileVersion)
 	}
-	return Profile{Name: name, Version: ProfileVersion, Strict: strict}, nil
+	return Profile{
+		Name:       name,
+		Version:    ProfileVersion,
+		Strict:     strict,
+		Native:     name == ProfileLV24,
+		Deprecated: name == ProfileLV24Legacy,
+	}, nil
 }
 
-// CapabilityGap is one action the surface cannot serve and the CLI path that
-// does. It is reported by brain_capabilities and by --list-tools.
+// CapabilityGap is one action the surface cannot serve and the path that can.
+// It is reported by brain_capabilities and by --list-tools.
 type CapabilityGap struct {
 	Tool        string `json:"tool"`
 	Action      string `json:"action,omitempty"`
+	Grade       string `json:"grade,omitempty"`
 	Reason      string `json:"reason"`
 	Remediation string `json:"remediation"`
 }
 
 // ToolSummary counts the tools of one profile.
 type ToolSummary struct {
-	Total       int      `json:"total"`
-	ReadOnly    int      `json:"read_only"`
-	AppendOnly  int      `json:"append_only"`
-	Destructive int      `json:"destructive"`
-	Names       []string `json:"names"`
+	Total       int `json:"total"`
+	ReadOnly    int `json:"read_only"`
+	AppendOnly  int `json:"append_only"`
+	Destructive int `json:"destructive"`
+	// Native counts tools of the native surface, Aliased counts legacy names
+	// mapped to a native call, and Stubs counts honest code-graph stubs.
+	Native  int            `json:"native"`
+	Aliased int            `json:"aliased"`
+	Stubs   int            `json:"stubs,omitempty"`
+	Grades  map[string]int `json:"grades,omitempty"`
+	Names   []string       `json:"names"`
 }
 
 // Capabilities is the contract introspection payload: what this profile
 // serves, what it cannot serve, the limits and the refusal vocabulary. It is
-// served by brain_capabilities and by `brain mcp --list-tools --json`.
+// served by brain_capabilities and by `brain mcp --list-tools --json`, so the
+// two cannot drift.
 type Capabilities struct {
 	Profile        string            `json:"profile"`
 	ProfileVersion string            `json:"profile_version"`
@@ -81,6 +139,21 @@ type Capabilities struct {
 	RefusalCodes   []string          `json:"refusal_codes"`
 	Endpoints      map[string]bool   `json:"endpoints"`
 	Schemas        map[string]string `json:"schemas"`
+}
+
+// AliasSpec is one legacy name of a migration profile. Target is empty when
+// the alias has no native equivalent (grade D). Unsupported lists the legacy
+// arguments the translation drops.
+type AliasSpec struct {
+	Legacy      string   `json:"legacy"`
+	Target      string   `json:"target"`
+	Action      string   `json:"action,omitempty"`
+	Grade       string   `json:"grade"`
+	Deprecated  bool     `json:"deprecated,omitempty"`
+	Reason      string   `json:"reason,omitempty"`
+	Remediation string   `json:"remediation,omitempty"`
+	Unsupported []string `json:"unsupported,omitempty"`
+	Note        string   `json:"note,omitempty"`
 }
 
 // ToolSpec is the protocol metadata of one tool: everything tools/list reports
@@ -99,6 +172,32 @@ type ToolSpec struct {
 	// ReadActions names the actions that never mutate, for a mixed tool whose
 	// destructiveHint covers the other actions. Clients ignore it.
 	ReadActions []string `json:"x-lv24-read-actions,omitempty"`
+	// Legacy marks a migration alias. Target and Grade describe what it calls
+	// and how faithfully; Unsupported lists the dropped legacy arguments.
+	Legacy      bool     `json:"legacy,omitempty"`
+	Deprecated  bool     `json:"deprecated,omitempty"`
+	Target      string   `json:"target,omitempty"`
+	Grade       string   `json:"grade,omitempty"`
+	Unsupported []string `json:"unsupported,omitempty"`
+	Note        string   `json:"note,omitempty"`
+	// Reason and Remediation explain a D alias: why it is refused and which
+	// CLI path can do the work.
+	Reason      string `json:"reason,omitempty"`
+	Remediation string `json:"remediation,omitempty"`
+	// Stub marks a codegraph/graphify placeholder that never fabricates data.
+	Stub bool `json:"stub,omitempty"`
+}
+
+// Catalogue is the complete `brain mcp --list-tools --json` contract: the
+// effective tool list, the alias table, the capabilities payload and a digest
+// over the vocabulary. Digest is stable for the same profile and policy.
+type Catalogue struct {
+	Profile      Profile      `json:"profile"`
+	Tools        []ToolSpec   `json:"tools"`
+	Aliases      []AliasSpec  `json:"aliases"`
+	Capabilities Capabilities `json:"capabilities"`
+	OmittedTools []string     `json:"omitted_tools"`
+	Digest       string       `json:"digest"`
 }
 
 // toolPolicy names the write posture of a tool.
@@ -113,19 +212,21 @@ func toolPolicy(t tool) string {
 	}
 }
 
-// Catalog returns the metadata of every tool the profile exposes. It is what
-// `brain mcp --list-tools --json` prints, so the contract can be inspected
-// without a backend, a data directory or a running server. version is reported
-// as serverInfo.version.
-func Catalog(version string, profile Profile) []ToolSpec {
+// newCatalogueServer builds a backend-less server whose tool list is the
+// catalogue of the profile under the policy.
+func newCatalogueServer(version string, profile Profile, policy Policy) *Server {
 	if profile.Name == "" {
 		profile = DefaultProfile()
 	}
-	s := &Server{version: version, profile: profile, catalog: true}
-	s.allTools = s.toolList()
-	s.tools = s.allTools
-	specs := make([]ToolSpec, 0, len(s.tools))
-	for _, t := range s.tools {
+	s := &Server{version: version, profile: profile, policy: policy, catalog: true}
+	s.buildTools()
+	return s
+}
+
+// specsOf renders the tool metadata of a list.
+func specsOf(tools []tool) []ToolSpec {
+	specs := make([]ToolSpec, 0, len(tools))
+	for _, t := range tools {
 		specs = append(specs, ToolSpec{
 			Name:         t.Name,
 			Title:        t.Annotations.Title,
@@ -136,45 +237,120 @@ func Catalog(version string, profile Profile) []ToolSpec {
 			Limits:       t.Limits,
 			Policy:       toolPolicy(t),
 			ReadActions:  t.ReadActions,
+			Legacy:       t.Legacy,
+			Deprecated:   t.Deprecated,
+			Target:       t.Target,
+			Grade:        t.Grade,
+			Unsupported:  t.Unsupported,
+			Note:         t.Note,
+			Reason:       t.Reason,
+			Remediation:  t.Remediation,
+			Stub:         t.Stub,
 		})
 	}
 	return specs
+}
+
+// Catalog returns the metadata of every tool the profile exposes. It is what
+// `brain mcp --list-tools --json` prints, so the contract can be inspected
+// without a backend, a data directory or a running server. version is reported
+// as serverInfo.version.
+func Catalog(version string, profile Profile) []ToolSpec {
+	visible, _ := CatalogForPolicy(version, profile, Policy{})
+	return visible
 }
 
 // CatalogForPolicy splits the catalogue into the tools a server with this
 // policy exposes and the names it omits. It is what `brain mcp --list-tools`
 // prints, so a host can see exactly which tools a profile offers.
 func CatalogForPolicy(version string, profile Profile, policy Policy) (visible []ToolSpec, omitted []string) {
-	specs := Catalog(version, profile)
-	visible = make([]ToolSpec, 0, len(specs))
-	for _, spec := range specs {
-		if policy.ToolListed(spec) {
-			visible = append(visible, spec)
-			continue
-		}
-		omitted = append(omitted, spec.Name)
+	s := newCatalogueServer(version, profile, policy)
+	return specsOf(s.tools), omittedNames(s.allTools, s.tools)
+}
+
+// omittedNames returns the names of all that are not visible, in list order.
+func omittedNames(all, visible []tool) []string {
+	shown := make(map[string]bool, len(visible))
+	for _, t := range visible {
+		shown[t.Name] = true
 	}
-	return visible, omitted
+	omitted := make([]string, 0)
+	for _, t := range all {
+		if !shown[t.Name] {
+			omitted = append(omitted, t.Name)
+		}
+	}
+	return omitted
 }
 
 // CapabilityReport builds the capabilities payload of a profile under a
 // policy without starting a server. brain_capabilities and --list-tools both
 // use it, so the two cannot drift.
 func CapabilityReport(version string, profile Profile, policy Policy) Capabilities {
-	if profile.Name == "" {
-		profile = DefaultProfile()
+	return newCatalogueServer(version, profile, policy).capabilities()
+}
+
+// capabilityMeta wraps the payload in the reserved _meta key of initialize,
+// server/discover and each result.
+func capabilityMeta(payload Capabilities) map[string]any {
+	return map[string]any{"lv24.brain/capabilities": payload}
+}
+
+// BuildCatalogue assembles the --list-tools document and its digest.
+func BuildCatalogue(version string, profile Profile, policy Policy) Catalogue {
+	s := newCatalogueServer(version, profile, policy)
+	catalogue := Catalogue{
+		Profile:      s.profile,
+		Tools:        specsOf(s.tools),
+		Aliases:      Aliases(s.profile),
+		Capabilities: s.capabilities(),
+		OmittedTools: omittedNames(s.allTools, s.tools),
 	}
-	s := &Server{version: version, profile: profile, policy: policy, catalog: true}
-	s.allTools = s.toolList()
-	s.tools = s.applyPolicy(s.allTools)
-	return s.capabilities()
+	if catalogue.Aliases == nil {
+		catalogue.Aliases = []AliasSpec{}
+	}
+	if catalogue.OmittedTools == nil {
+		catalogue.OmittedTools = []string{}
+	}
+	catalogue.Digest = catalogueDigest(catalogue)
+	return catalogue
+}
+
+// catalogueDigest hashes the vocabulary a host pins: the profile identity, the
+// effective tools, the alias table and the omitted names. The policy is
+// reflected through Tools and OmittedTools.
+func catalogueDigest(catalogue Catalogue) string {
+	payload := struct {
+		Profile      Profile     `json:"profile"`
+		Tools        []ToolSpec  `json:"tools"`
+		Aliases      []AliasSpec `json:"aliases"`
+		OmittedTools []string    `json:"omitted_tools"`
+	}{catalogue.Profile, catalogue.Tools, catalogue.Aliases, catalogue.OmittedTools}
+	data, err := json.Marshal(payload)
+	if err != nil {
+		return ""
+	}
+	sum := sha256.Sum256(data)
+	return "sha256:" + hex.EncodeToString(sum[:])
 }
 
 // capabilities assembles the payload from the effective tool list.
 func (s *Server) capabilities() Capabilities {
 	summary := ToolSummary{Total: len(s.tools), Names: make([]string, 0, len(s.tools))}
+	grades := map[string]int{GradeExact: 0, GradeEnvelope: 0, GradeApproximate: 0, GradeUnsupported: 0}
 	for _, t := range s.tools {
 		summary.Names = append(summary.Names, t.Name)
+		switch {
+		case t.Legacy:
+			summary.Aliased++
+		case t.Stub:
+			summary.Stubs++
+		default:
+			summary.Native++
+		}
+		if t.Grade != "" && t.Grade != GradeStub {
+			grades[t.Grade]++
+		}
 		switch toolPolicy(t) {
 		case "read":
 			summary.ReadOnly++
@@ -184,50 +360,75 @@ func (s *Server) capabilities() Capabilities {
 			summary.AppendOnly++
 		}
 	}
+	summary.Grades = grades
 	return Capabilities{
 		Profile:        s.profile.Name,
 		ProfileVersion: s.profile.Version,
 		Engine:         s.version,
 		Policy:         s.policy.Info(),
 		Tools:          summary,
-		Features: map[string]any{
-			"full_text":       true,
-			"semantic_search": false,
-			"topics":          true,
-			"pinning":         false,
-			"record_history":  "supersede-chain",
-			"relations":       true,
-			"sessions":        false,
-			"consolidation":   false,
-			"prompt_zone":     "local-only",
-			"code_graph":      false,
-			"knowledge_graph": false,
-			"resources":       false,
-			"prompts":         false,
-		},
+		Features:       s.featureFlags(),
 		Limits: map[string]int{
-			"body_bytes":         1 << 20,
-			"search_page":        searchMaxPageSize,
-			"search_window":      searchWindow,
-			"record_page":        recordsMaxPageSize,
-			"relation_page":      relationsMaxPageSize,
-			"journal_page":       journalMaxPageSize,
-			"context_tokens":     32000,
-			"expand_tokens":      ExpandMaxTokens,
-			"judgments_per_call": maxJudgeMany,
-			"prompt_page":        promptMaxPageSize,
+			"body_bytes":              1 << 20,
+			"search_page":             searchMaxPageSize,
+			"search_window":           searchWindow,
+			"record_page":             recordsMaxPageSize,
+			"relation_page":           relationsMaxPageSize,
+			"journal_page":            journalMaxPageSize,
+			"context_tokens":          32000,
+			"expand_tokens":           ExpandMaxTokens,
+			"judgments_per_call":      maxJudgeMany,
+			"prompt_page":             promptMaxPageSize,
+			"resource_bytes":          resourceRecordMaxBytes,
+			"resource_state_bytes":    resourceStateMaxBytes,
+			"resource_projects_bytes": resourceProjectsMaxBytes,
+			"resource_review_bytes":   resourceReviewMaxBytes,
 		},
-		Gaps:         capabilityGaps(),
+		Gaps:         s.profileGaps(),
 		RefusalCodes: RefusalCodes(),
 		Endpoints: map[string]bool{
-			"stdio": true, "http": false, "sse": false, "resources": false, "prompts": false,
+			"stdio": true, "http": false, "sse": false, "resources": true, "prompts": false,
 		},
 		Schemas: map[string]string{"record": "knowledge.v1", "refusal": "refusal.v1"},
 	}
 }
 
-// capabilityGaps lists the actions this profile accepts but cannot serve, with
-// the CLI path that can. A gap is never a silent no-op.
+// featureFlags reports what the profile can do, including the approximations
+// of a migration vocabulary. A flag is never a promise the backend cannot
+// keep: codeGraph and knowledgeGraph stay false in 0.17.
+func (s *Server) featureFlags() map[string]any {
+	features := map[string]any{
+		"full_text":       true,
+		"semantic_search": false,
+		"topics":          true,
+		"pinning":         false,
+		"record_history":  "supersede-chain",
+		"relations":       true,
+		"sessions":        false,
+		"consolidation":   false,
+		"prompt_zone":     "local-only",
+		"code_graph":      false,
+		"knowledge_graph": false,
+		"resources":       true,
+		"prompts":         false,
+	}
+	switch s.profile.Name {
+	case ProfileLV24Legacy:
+		features["deprecated"] = profileDeprecation
+	case ProfileEngram:
+		features["pinning"] = "approximate"
+		features["sessions"] = "synthetic"
+		features["consolidation"] = "refused"
+	case ProfileCodegraph:
+		features["code_graph_index"] = "0.18"
+	case ProfileGraphify:
+		features["knowledge_graph_index"] = "0.18"
+	}
+	return features
+}
+
+// capabilityGaps lists the native actions this release accepts but cannot
+// serve, with the CLI path that can. A gap is never a silent no-op.
 func capabilityGaps() []CapabilityGap {
 	return []CapabilityGap{
 		{Tool: "brain_record", Action: "list due_review", Reason: "the due queue is a review action", Remediation: "brain_review(action=due)"},

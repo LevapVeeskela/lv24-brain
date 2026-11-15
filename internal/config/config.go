@@ -55,6 +55,9 @@ type BrainConfig struct {
 	// Prompts configures the opt-in, machine-local prompt zone. The zero
 	// value keeps it disabled.
 	Prompts PromptsConfig `yaml:"prompts,omitempty"`
+	// Graph selects the code-graph engine behind `brain code`. The zero value
+	// keeps it off.
+	Graph GraphConfig `yaml:"graph,omitempty"`
 	// RetiredPaths lists retired checkouts of this workspace. The engine ships
 	// no defaults: selection redirects to ReplacedBy and registration is
 	// refused, but nothing on disk is touched.
@@ -523,6 +526,9 @@ func (c BrainConfig) Validate() error {
 		return err
 	}
 	if err := c.Prompts.Validate(); err != nil {
+		return err
+	}
+	if err := c.Graph.Validate(); err != nil {
 		return err
 	}
 	for _, entry := range c.RetiredPaths {

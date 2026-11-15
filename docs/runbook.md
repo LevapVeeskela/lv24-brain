@@ -1086,6 +1086,45 @@ brain update --rollback                 # restore brain(.exe).previous
 - Before ordinary commands the CLI performs a notify-only daily check. Set
   `BRAIN_NO_UPDATE=1` to disable it.
 
+### Upgrade to 0.16 / 0.17 (engine 0.15 and newer)
+
+A short checklist; the reasons are in [release-0.16.md](release-0.16.md) and
+[release-0.17.md](release-0.17.md).
+
+1. **Upgrade every machine first.** Either `brain update --yes` or rebuild from
+   the branch and replace the binary; confirm with `brain --version`. Data
+   schema stays 1, but an older engine that edits an imported or classified
+   record drops the new optional fields.
+2. **`brain doctor`.** Expect merge drivers registered, no negative `limits`
+   values, and — after an engram import — the quarantine and prompt-zone counts.
+   Fix what it names before writing records.
+3. **Rebuild the index:** `brain index --rebuild`. The projection is at schema
+   version 6 (validity, relations, `subtype`/`scope`/`topic_key`); the index
+   rebuilds itself when its stored version differs, but a manual rebuild is the
+   cheapest way to prove it.
+4. **Restart every MCP host.** The tool list is read at startup.
+   `brain mcp --list-tools --json` must report 15 tools (8 under `--read-only`);
+   `--profile=lv24` is the only profile in 0.17. A retired 0.16 name answers
+   `NOT_FOUND` with `try_instead`; move the client to the new tool and action,
+   not just to a renamed name.
+5. **Re-check client calls** against [mcp.md](mcp.md#11-migration-from-016):
+   `brain_state_get/set`, `brain_journal`, `brain_records`, `brain_relations`,
+   `brain_review_record` and `brain_decision_status` are gone, and
+   `brain_decision(status=...)` is refused in favour of `brain_judge`.
+6. **Engram import, in order:** stop engram writes, back up `engram.db` and the
+   data directory, `brain migrate --from engram --db <path> --dry-run`, read the
+   counts, apply, then `brain migrate --rollback latest` if the result is wrong.
+   See [import-engram.md](import-engram.md). A rollback does not remove
+   `index/`; rebuild after reverting.
+7. **Prompt capture is opt-in.** Set `prompts.enabled: true` in `brain.yaml`
+   before `brain prompt save`; the zone is local-only, gitignored and excluded
+   from the index and revision. `brain doctor` reports retention without
+   deleting anything.
+
+Optional after the upgrade: `brain eval --fixtures eval/fixtures --baseline
+eval/baseline.json` for the retrieval baseline, and a `limits` block in
+`brain.yaml` if agents write to this data directory.
+
 ### Signed manifests
 
 Each release publishes `release.json` and `release.json.sig`. The updater

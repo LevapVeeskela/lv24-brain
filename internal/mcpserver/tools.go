@@ -81,6 +81,9 @@ type SearchInput struct {
 	Query     string
 	ProjectID string
 	Limit     int
+	// MatchMode combines query terms: all requires every term, any accepts
+	// one. Empty keeps the historical relaxed behaviour.
+	MatchMode string
 	// Scope keeps only records with that scope: project, personal or global.
 	Scope string
 	// Kinds keeps only these kinds; empty keeps every non-excluded kind.
@@ -207,10 +210,12 @@ type Backend interface {
 }
 
 // toolResult is the successful output of a tool. Structured must marshal to a
-// JSON object.
+// JSON object. Meta carries the per-call compatibility envelope of a migration
+// alias; it is emitted as the result _meta object.
 type toolResult struct {
 	Text       string
 	Structured any
+	Meta       map[string]any
 }
 
 type toolFunc func(ctx context.Context, args json.RawMessage) (toolResult, error)
@@ -228,6 +233,17 @@ type tool struct {
 	Limits map[string]int
 	// ReadActions names the actions of a mixed tool that never mutate.
 	ReadActions []string
+	// Legacy, Target, Grade, Unsupported and Note describe a migration alias.
+	Legacy      bool
+	Deprecated  bool
+	Target      string
+	Grade       string
+	Unsupported []string
+	Note        string
+	Reason      string
+	Remediation string
+	// Stub marks a codegraph/graphify placeholder.
+	Stub bool
 	// confirm returns the question to ask the user before the call runs, or
 	// nil when the call needs no confirmation. It is consulted only for 2026
 	// clients that declared elicitation (see mrtr.go).
@@ -235,10 +251,10 @@ type tool struct {
 	run     toolFunc
 }
 
-// toolList is the 15-tool native surface, in a fixed order: session start,
-// task context, search, one-record access, the four appends, then the
+// nativeToolList is the 15-tool native surface, in a fixed order: session
+// start, task context, search, one-record access, the four appends, then the
 // curation and introspection tools.
-func (s *Server) toolList() []tool {
+func (s *Server) nativeToolList() []tool {
 	return []tool{
 		s.openTool(),
 		s.contextTool(),
@@ -497,6 +513,7 @@ func (s *Server) searchTool() tool {
 			"cursor":          cursorProp(),
 			"kinds":           stringArrayProp("Keep only these kinds: note, decision, attempt, handoff, dump, item. Omit for curated kinds; raw-zone dumps and external items require an explicit request."),
 			"scope":           enumProp("Keep only records with this scope: project, personal or global.", recordScopes),
+			"match_mode":      enumProp("all requires every query term; any accepts one. Omit for the historical relaxed behaviour.", []string{"all", "any"}),
 			"include_dumps":   boolProp("Include connector dumps in an unfiltered search."),
 			"include_prompts": boolProp("Not available: the prompt zone is local-only and never indexed. Use brain_prompt(action=search)."),
 			"all_projects":    boolProp("Search every project explicitly; mutually exclusive with project."),
@@ -531,6 +548,7 @@ func (s *Server) search(ctx context.Context, raw json.RawMessage) (toolResult, e
 		Cursor         string   `json:"cursor"`
 		Kinds          []string `json:"kinds"`
 		Scope          string   `json:"scope"`
+		MatchMode      string   `json:"match_mode"`
 		IncludeDumps   bool     `json:"include_dumps"`
 		IncludePrompts bool     `json:"include_prompts"`
 		AllProjects    bool     `json:"all_projects"`
@@ -562,6 +580,10 @@ func (s *Server) search(ctx context.Context, raw json.RawMessage) (toolResult, e
 	if scope != "" && !slices.Contains(recordScopes, scope) {
 		return toolResult{}, refusalInvalidf("unknown scope %q (%s)", scope, strings.Join(recordScopes, ", "))
 	}
+	matchMode := strings.TrimSpace(args.MatchMode)
+	if matchMode != "" && matchMode != "all" && matchMode != "any" {
+		return toolResult{}, refusalInvalid("match_mode must be all or any")
+	}
 	if len(args.ExpandIDs) > ExpandMaxRecords {
 		return toolResult{}, refusalInvalidf("expand_ids holds %d ids; the limit is %d", len(args.ExpandIDs), ExpandMaxRecords)
 	}
@@ -587,6 +609,7 @@ func (s *Server) search(ctx context.Context, raw json.RawMessage) (toolResult, e
 		Query:        query,
 		ProjectID:    projectID,
 		Limit:        requested,
+		MatchMode:    matchMode,
 		Scope:        scope,
 		Kinds:        args.Kinds,
 		IncludeDumps: args.IncludeDumps,
@@ -1151,12 +1174,11 @@ func (s *Server) capabilitiesToolRun(_ context.Context, raw json.RawMessage) (to
 		ToolsDetail []toolDetail `json:"tools_detail,omitempty"`
 	}{Capabilities: capabilities}
 	if args.Verbose {
-		specs := make([]ToolSpec, 0, len(s.tools))
 		for _, t := range s.tools {
-			specs = append(specs, ToolSpec{Name: t.Name, Policy: toolPolicy(t), ReadActions: t.ReadActions})
-		}
-		for _, spec := range specs {
-			payload.ToolsDetail = append(payload.ToolsDetail, toolDetail{Name: spec.Name, Policy: spec.Policy, ReadActions: spec.ReadActions})
+			payload.ToolsDetail = append(payload.ToolsDetail, toolDetail{
+				Name: t.Name, Policy: toolPolicy(t), ReadActions: t.ReadActions,
+				Legacy: t.Legacy, Target: t.Target, Grade: t.Grade, Stub: t.Stub,
+			})
 		}
 	}
 	var text strings.Builder
@@ -1171,6 +1193,10 @@ func (s *Server) capabilitiesToolRun(_ context.Context, raw json.RawMessage) (to
 type toolDetail struct {
 	Name        string   `json:"name"`
 	Policy      string   `json:"policy"`
+	Legacy      bool     `json:"legacy,omitempty"`
+	Target      string   `json:"target,omitempty"`
+	Grade       string   `json:"grade,omitempty"`
+	Stub        bool     `json:"stub,omitempty"`
 	ReadActions []string `json:"read_actions,omitempty"`
 }
 

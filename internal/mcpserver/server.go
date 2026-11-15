@@ -57,7 +57,12 @@ type Server struct {
 	// call to a hidden write tool gets a typed refusal.
 	tools    []tool
 	allTools []tool
-	policy   Policy
+	// nativeTools and nativeByName are always the native 15-tool surface, even
+	// in a migration profile: an alias translates its legacy arguments and
+	// runs the native tool by name.
+	nativeTools  []tool
+	nativeByName map[string]tool
+	policy       Policy
 	// catalog makes toolList report every tool group, including the ones a
 	// given backend would hide. It is set by Catalog only.
 	catalog bool
@@ -85,8 +90,7 @@ func NewWithProfile(backend Backend, version string, profile Profile, policy Pol
 		profile = DefaultProfile()
 	}
 	s := &Server{backend: backend, version: version, profile: profile, policy: policy, mrtKey: newMRTRKey()}
-	s.allTools = s.toolList()
-	s.tools = s.applyPolicy(s.allTools)
+	s.buildTools()
 	return s
 }
 
@@ -134,14 +138,25 @@ type initializeResult struct {
 	Capabilities    capabilities `json:"capabilities"`
 	ServerInfo      serverInfo   `json:"serverInfo"`
 	Instructions    string       `json:"instructions"`
+	// Meta carries the lv24.brain/capabilities payload, so a handshake client
+	// can read the profile, grades and gaps without a second call.
+	Meta map[string]any `json:"_meta,omitempty"`
 }
 
 type capabilities struct {
-	Tools toolsCapability `json:"tools"`
+	Tools     toolsCapability     `json:"tools"`
+	Resources resourcesCapability `json:"resources"`
 }
 
 type toolsCapability struct {
 	ListChanged bool `json:"listChanged"`
+}
+
+// resourcesCapability advertises the read-only memory:// resources. The server
+// does not support subscriptions: a resource is read on demand.
+type resourcesCapability struct {
+	ListChanged bool `json:"listChanged"`
+	Subscribe   bool `json:"subscribe"`
 }
 
 type serverInfo struct {
@@ -232,6 +247,12 @@ func (s *Server) dispatch(ctx context.Context, env envelope, req request) (json.
 		return s.listTools(req.Params)
 	case "tools/call":
 		return s.callTool(ctx, env, req.Params)
+	case "resources/list":
+		return s.listResources(ctx, req.Params)
+	case "resources/templates/list":
+		return s.listResourceTemplates(req.Params)
+	case "resources/read":
+		return s.readResource(ctx, req.Params)
 	default:
 		return nil, &rpcError{Code: codeMethodNotFound, Message: "method not found: " + req.Method}
 	}
@@ -248,9 +269,13 @@ func (s *Server) initialize(params json.RawMessage) (json.RawMessage, *rpcError)
 	}
 	return marshalResult(initializeResult{
 		ProtocolVersion: version,
-		Capabilities:    capabilities{Tools: toolsCapability{ListChanged: false}},
-		ServerInfo:      serverInfo{Name: ServerName, Version: s.version},
-		Instructions:    serverInstructions,
+		Capabilities: capabilities{
+			Tools:     toolsCapability{ListChanged: false},
+			Resources: resourcesCapability{ListChanged: false, Subscribe: false},
+		},
+		ServerInfo:   serverInfo{Name: ServerName, Version: s.version},
+		Instructions: serverInstructions,
+		Meta:         capabilityMeta(s.capabilities()),
 	})
 }
 
@@ -305,6 +330,9 @@ type callResult struct {
 	Content           []contentItem `json:"content"`
 	StructuredContent any           `json:"structuredContent,omitempty"`
 	IsError           bool          `json:"isError"`
+	// Meta carries the per-call compatibility envelope of a migration alias,
+	// for example lv24.brain/compat with its grade and ignored fields.
+	Meta map[string]any `json:"_meta,omitempty"`
 }
 
 // callToolParams is one tools/call, including the MRTR retry fields.
@@ -337,6 +365,16 @@ func (s *Server) callTool(ctx context.Context, env envelope, params json.RawMess
 				hidden.Name+" is not available: this server runs read-only",
 				"brain_search or brain_context").Refusal)
 		}
+		if alias, known := nativeAliasFor(s.profile.Name, p.Name); known {
+			// A native name called against a migration vocabulary is not a
+			// protocol error: the client is in the wrong vocabulary and the
+			// alias names the replacement.
+			return refusalResult(Refusal{
+				Code:       RefusalNotFound,
+				Message:    p.Name + " is not listed in the " + s.profile.Name + " profile",
+				TryInstead: alias,
+			})
+		}
 		return nil, invalidParams("unknown tool: " + p.Name)
 	}
 	outcome := s.checkInput(env, t, p)
@@ -356,6 +394,7 @@ func (s *Server) callTool(ctx context.Context, env envelope, params json.RawMess
 		Content:           []contentItem{{Type: "text", Text: out.Text}},
 		StructuredContent: out.Structured,
 		IsError:           false,
+		Meta:              out.Meta,
 	})
 }
 

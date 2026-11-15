@@ -195,13 +195,18 @@ func unsupportedVersion(requested string) *rpcError {
 // the cache hints every 2026 result carries.
 func (s *Server) discover() (json.RawMessage, *rpcError) {
 	return marshalResult(struct {
-		SupportedVersions []string     `json:"supportedVersions"`
-		Capabilities      capabilities `json:"capabilities"`
-		Instructions      string       `json:"instructions"`
+		SupportedVersions []string       `json:"supportedVersions"`
+		Capabilities      capabilities   `json:"capabilities"`
+		Instructions      string         `json:"instructions"`
+		Meta              map[string]any `json:"_meta,omitempty"`
 	}{
 		SupportedVersions: SupportedVersions(),
-		Capabilities:      capabilities{Tools: toolsCapability{ListChanged: false}},
-		Instructions:      serverInstructions,
+		Capabilities: capabilities{
+			Tools:     toolsCapability{ListChanged: false},
+			Resources: resourcesCapability{ListChanged: false, Subscribe: false},
+		},
+		Instructions: serverInstructions,
+		Meta:         capabilityMeta(s.capabilities()),
 	})
 }
 

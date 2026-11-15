@@ -115,6 +115,11 @@ func refusalNotFound(message, tryInstead string) *RefusalError {
 	return &RefusalError{Refusal: Refusal{Code: RefusalNotFound, Message: message, TryInstead: tryInstead}}
 }
 
+// refusalFailed builds the catch-all FAILED refusal.
+func refusalFailed(message string) *RefusalError {
+	return &RefusalError{Refusal: Refusal{Code: RefusalFailed, Message: message}}
+}
+
 // refusalFrom converts any tool error into a refusal envelope. Domain errors
 // keep their meaning; an error that already carries a refusal is returned
 // unchanged.

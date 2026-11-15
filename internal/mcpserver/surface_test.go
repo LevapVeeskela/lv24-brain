@@ -470,11 +470,11 @@ func TestSurfaceCapabilitiesPayload(t *testing.T) {
 		t.Fatal("capabilities has no gaps")
 	}
 	endpoints := payload["endpoints"].(map[string]any)
-	if endpoints["stdio"] != true || endpoints["http"] != false || endpoints["resources"] != false {
+	if endpoints["stdio"] != true || endpoints["http"] != false || endpoints["resources"] != true {
 		t.Fatalf("endpoints = %v", endpoints)
 	}
 	features := payload["features"].(map[string]any)
-	if features["code_graph"] != false || features["semantic_search"] != false {
+	if features["code_graph"] != false || features["semantic_search"] != false || features["resources"] != true {
 		t.Fatalf("features = %v", features)
 	}
 	if _, ok := payload["tools_detail"]; ok {
