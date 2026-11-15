@@ -301,6 +301,10 @@ func (i *Index) upsertOnce(ctx context.Context, doc ports.Document) error {
 		nullableString(doc.Supersedes),
 		doc.Status,
 		doc.Confidence,
+		doc.Subtype,
+		normalizedScope(doc.Scope),
+		doc.TopicKey,
+		normalizedOccurrences(doc.Occurrences),
 	); err != nil {
 		return fmt.Errorf("sqliteindex: upsert %q: %w", doc.ID, err)
 	}
@@ -351,6 +355,22 @@ func nullableString(value string) any {
 		return nil
 	}
 	return strings.TrimSpace(value)
+}
+
+// normalizedScope stores an explicit project scope for documents written
+// without one, so a scope filter matches either spelling.
+func normalizedScope(scope string) string {
+	if value := strings.TrimSpace(scope); value != "" {
+		return value
+	}
+	return string(domain.ScopeProject)
+}
+
+func normalizedOccurrences(count int) int {
+	if count < 1 {
+		return 1
+	}
+	return count
 }
 
 func validateDocument(doc ports.Document) error {
@@ -462,17 +482,26 @@ func (i *Index) runSearch(ctx context.Context, query ports.Query, match string) 
 			supersededBy sql.NullString
 			status       string
 			confidence   float64
+			subtype      string
+			scope        string
+			topicKey     string
+			occurrences  int
 			updatedAt    int64
 		)
 		if err := rows.Scan(&hit.ID, &hit.ProjectID, &hit.Kind, &hit.Title, &snippet, &body, &score,
 			&contrib[0], &contrib[1], &contrib[2], &contrib[3], &contrib[4],
-			&validFrom, &validTo, &supersededBy, &status, &confidence, &updatedAt); err != nil {
+			&validFrom, &validTo, &supersededBy, &status, &confidence,
+			&subtype, &scope, &topicKey, &occurrences, &updatedAt); err != nil {
 			return nil, fmt.Errorf("sqliteindex: scan hit: %w", err)
 		}
 		hit.ID = recordID(hit.ProjectID, hit.ID)
 		hit.Snippet = snippet.String
 		hit.Body = body.String
 		hit.Score = score
+		hit.Subtype = subtype
+		hit.Scope = scope
+		hit.TopicKey = topicKey
+		hit.Occurrences = normalizedOccurrences(occurrences)
 		fresh := isFresh(time.Unix(0, updatedAt), now)
 		hit.MatchReasons = matchReasons(hit.Kind, contributions(contrib), fresh, pinned(hit.Kind, status, confidence))
 		if query.Explain {
@@ -531,6 +560,18 @@ func buildSearchStatement(query ports.Query, match string) (string, []any) {
 	if clause, kindArgs := kindCondition("d.kind", "NOT IN", query.ExcludeKinds); clause != "" {
 		builder.WriteString(" AND " + clause)
 		args = append(args, kindArgs...)
+	}
+	if subtype := strings.TrimSpace(query.Subtype); subtype != "" {
+		builder.WriteString(" AND d.subtype = ?")
+		args = append(args, subtype)
+	}
+	if scope := strings.TrimSpace(query.Scope); scope != "" {
+		builder.WriteString(" AND d.scope = ?")
+		args = append(args, scope)
+	}
+	if topicKey := strings.TrimSpace(query.TopicKey); topicKey != "" {
+		builder.WriteString(" AND d.topic_key = ?")
+		args = append(args, topicKey)
 	}
 	if !query.Since.IsZero() {
 		builder.WriteString(" AND d.updated_at >= ?")

@@ -99,6 +99,14 @@ type Document struct {
 	Status string
 	// Confidence is the optional 0..1 author confidence of the record.
 	Confidence float64
+	// Subtype, Scope and TopicKey are the engram-compatible classification of
+	// the record and are empty for records written before it existed.
+	Subtype  string
+	Scope    string
+	TopicKey string
+	// Occurrences counts the topic writes the record represents; zero is read
+	// as one.
+	Occurrences int
 	// Relations is the typed relation set of the record. The index stores a
 	// derived copy for listings and backlinks; frontmatter stays the source of
 	// truth.
@@ -165,6 +173,11 @@ type Query struct {
 	Explain bool
 	// IncludeBody also returns the full document body in Hit.Body.
 	IncludeBody bool
+	// Subtype, Scope and TopicKey keep only documents whose classification
+	// matches. Empty keeps every value; the default search is unchanged.
+	Subtype  string
+	Scope    string
+	TopicKey string
 }
 
 // AllowsSince reports whether a document updated at updatedAt passes the
@@ -201,9 +214,16 @@ type Hit struct {
 	Score     float64
 	// Validity mirrors the indexed document so a caller can show why a record
 	// is (or was) current.
-	ValidFrom    time.Time
-	ValidTo      time.Time
+	ValidFrom time.Time
+	ValidTo   time.Time
+	// SupersededBy is the id of the record that replaced this one.
 	SupersededBy string
+	// Subtype, Scope, TopicKey and Occurrences mirror the indexed
+	// classification so a caller can show why a hit matched a filter.
+	Subtype     string
+	Scope       string
+	TopicKey    string
+	Occurrences int
 	// Body is the full document text; it is set only when the query asked
 	// for it (Query.IncludeBody).
 	Body string

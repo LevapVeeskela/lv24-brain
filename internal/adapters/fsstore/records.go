@@ -69,6 +69,7 @@ type noteMetadata struct {
 	relationsFrontmatter
 	mergeFrontmatter
 	reviewFrontmatter
+	taxonomyFrontmatter
 	ID        string            `json:"id"`
 	Title     string            `json:"title"`
 	Tags      []string          `json:"tags,omitempty"`
@@ -84,6 +85,7 @@ type decisionFrontmatter struct {
 	relationsFrontmatter  `yaml:",inline"`
 	mergeFrontmatter      `yaml:",inline"`
 	reviewFrontmatter     `yaml:",inline"`
+	taxonomyFrontmatter   `yaml:",inline"`
 	ID                    string                `yaml:"id,omitempty"`
 	Title                 string                `yaml:"title,omitempty"`
 	Status                domain.DecisionStatus `yaml:"status,omitempty"`
@@ -98,6 +100,7 @@ type attemptFrontmatter struct {
 	relationsFrontmatter  `yaml:",inline"`
 	mergeFrontmatter      `yaml:",inline"`
 	reviewFrontmatter     `yaml:",inline"`
+	taxonomyFrontmatter   `yaml:",inline"`
 	ID                    string                `yaml:"id,omitempty"`
 	Title                 string                `yaml:"title,omitempty"`
 	Source                *sourceRefFrontmatter `yaml:"source,omitempty"`
@@ -270,8 +273,10 @@ type handoffFrontmatter struct {
 	relationsFrontmatter  `yaml:",inline"`
 	mergeFrontmatter      `yaml:",inline"`
 	reviewFrontmatter     `yaml:",inline"`
-	ID                    string    `yaml:"id,omitempty"`
-	CreatedAt             time.Time `yaml:"created_at,omitempty"`
+	taxonomyFrontmatter   `yaml:",inline"`
+	ID                    string                `yaml:"id,omitempty"`
+	Source                *sourceRefFrontmatter `yaml:"source,omitempty"`
+	CreatedAt             time.Time             `yaml:"created_at,omitempty"`
 }
 
 // AppendNote appends one note section to projects/<id>/notes/YYYY-MM-DD.md.
@@ -438,13 +443,14 @@ func noteFileWithEntryContent(raw []byte, note domain.Note, date string, created
 		relationsFrontmatter:  relationsToFrontmatter(note.Relations),
 		mergeFrontmatter:      mergeToFrontmatter(note.MergeInfo),
 		reviewFrontmatter:     reviewToFrontmatter(note.ReviewSchedule),
+		taxonomyFrontmatter:   taxonomyToFrontmatter(note.Taxonomy),
 		ID:                    id,
 		Title:                 note.Title,
 		Tags:                  nonNilStrings(note.Tags),
 		Permalink:             note.Permalink,
 		Source:                note.Source,
 		CreatedAt:             createdAt,
-	}, note.Body)
+	}, appendHistory(note.Body, note.History))
 	if body != "" && !strings.HasSuffix(body, "\n\n") {
 		body = strings.TrimRight(body, "\n") + "\n\n"
 	}
@@ -506,6 +512,7 @@ func (s *Store) AppendDecision(ctx context.Context, decision domain.Decision) (d
 				relationsFrontmatter:  relationsToFrontmatter(decision.Relations),
 				mergeFrontmatter:      mergeToFrontmatter(decision.MergeInfo),
 				reviewFrontmatter:     reviewToFrontmatter(decision.ReviewSchedule),
+				taxonomyFrontmatter:   taxonomyToFrontmatter(decision.Taxonomy),
 				ID:                    id,
 				Title:                 decision.Title,
 				Status:                decision.Status,
@@ -566,6 +573,7 @@ func (s *Store) AppendAttempt(ctx context.Context, attempt domain.Attempt) (doma
 				relationsFrontmatter:  relationsToFrontmatter(attempt.Relations),
 				mergeFrontmatter:      mergeToFrontmatter(attempt.MergeInfo),
 				reviewFrontmatter:     reviewToFrontmatter(attempt.ReviewSchedule),
+				taxonomyFrontmatter:   taxonomyToFrontmatter(attempt.Taxonomy),
 				ID:                    id,
 				Title:                 attempt.Title,
 				Source:                sourceRefToFrontmatter(attempt.Source),
@@ -624,7 +632,9 @@ func (s *Store) AppendHandoff(ctx context.Context, handoff domain.Handoff) (doma
 				relationsFrontmatter:  relationsToFrontmatter(handoff.Relations),
 				mergeFrontmatter:      mergeToFrontmatter(handoff.MergeInfo),
 				reviewFrontmatter:     reviewToFrontmatter(handoff.ReviewSchedule),
+				taxonomyFrontmatter:   taxonomyToFrontmatter(handoff.Taxonomy),
 				ID:                    id,
+				Source:                sourceRefToFrontmatter(handoff.Source),
 				CreatedAt:             createdAt,
 			}
 			raw, err := markdown.Render(frontmatter, renderHandoffBody(handoff))
@@ -709,6 +719,10 @@ func renderDecisionBody(decision domain.Decision) string {
 	writeRecordList(&out, decision.Evidence)
 	out.WriteString("\n## Paths\n\n")
 	writeRecordList(&out, decision.Paths)
+	if section := renderHistorySection(decision.History); section != "" {
+		out.WriteString("\n")
+		out.WriteString(section)
+	}
 	return out.String()
 }
 
@@ -721,6 +735,10 @@ func renderAttemptBody(attempt domain.Attempt) string {
 	out.WriteString(strings.TrimSpace(attempt.Result))
 	out.WriteString("\n\n## Why it failed\n\n")
 	out.WriteString(strings.TrimSpace(attempt.Reason))
+	if section := renderHistorySection(attempt.History); section != "" {
+		out.WriteString("\n\n")
+		out.WriteString(section)
+	}
 	return out.String()
 }
 
@@ -733,6 +751,10 @@ func renderHandoffBody(handoff domain.Handoff) string {
 	out.WriteString(strings.TrimSpace(handoff.GitContext))
 	out.WriteString("\n\n## Next action\n\n")
 	out.WriteString(strings.TrimSpace(handoff.NextAction))
+	if section := renderHistorySection(handoff.History); section != "" {
+		out.WriteString("\n\n")
+		out.WriteString(section)
+	}
 	return out.String()
 }
 

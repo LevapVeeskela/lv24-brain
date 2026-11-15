@@ -65,6 +65,11 @@ type ContextOptions struct {
 	// relevant records; empty keeps all three. Failed attempts matching the
 	// task are listed regardless.
 	Kinds []string
+	// Subtype, Scope and TopicKey narrow the relevant records to one
+	// classification. Empty keeps every value.
+	Subtype  string
+	Scope    string
+	TopicKey string
 	// Since drops records and handoffs older than a window (30m, 24h, 7d, 2w)
 	// or a date (2026-11-01, RFC 3339). Empty keeps everything.
 	Since string
@@ -179,6 +184,11 @@ func (a *App) Context(ctx context.Context, opts ContextOptions) (ContextResult, 
 		return ContextResult{}, err
 	}
 	filter := validityFilter(opts.AsOf, opts.IncludeSuperseded)
+	subtype, scope, topic, err := validateClassificationFilters(opts.Subtype, opts.Scope, opts.TopicKey)
+	if err != nil {
+		return ContextResult{}, err
+	}
+	opts.Subtype, opts.Scope, opts.TopicKey = subtype, scope, topic
 	project, err := a.resolveProject(ctx, opts.ProjectID)
 	if err != nil {
 		return ContextResult{}, err
@@ -296,6 +306,7 @@ func (a *App) contextSearch(ctx context.Context, query, projectID string, kinds 
 	return a.SearchWith(ctx, SearchOptions{
 		Text: query, ProjectID: projectID, Limit: contextSearchLimit, Kinds: kinds, Since: since,
 		AsOf: opts.AsOf, IncludeSuperseded: opts.IncludeSuperseded,
+		Subtype: opts.Subtype, Scope: opts.Scope, TopicKey: opts.TopicKey,
 	})
 }
 

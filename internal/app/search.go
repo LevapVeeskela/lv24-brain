@@ -67,6 +67,12 @@ type SearchOptions struct {
 	// Full returns the whole body of each hit in addition to its preview.
 	// Local and git mode only.
 	Full bool
+	// Subtype, Scope and TopicKey keep only records with that classification.
+	// Empty keeps every record, so default search behaviour is unchanged.
+	// Local and git mode only.
+	Subtype  string
+	Scope    string
+	TopicKey string
 }
 
 // SearchReport is one search response: the ranked page and what the query had
@@ -110,6 +116,11 @@ func (a *App) SearchWithReport(ctx context.Context, opts SearchOptions) (SearchR
 		return SearchReport{}, err
 	}
 	opts.MatchMode = mode
+	if subtype, scope, topic, err := validateClassificationFilters(opts.Subtype, opts.Scope, opts.TopicKey); err != nil {
+		return SearchReport{}, err
+	} else {
+		opts.Subtype, opts.Scope, opts.TopicKey = subtype, scope, topic
+	}
 	if err := validateSearchScore(opts); err != nil {
 		return SearchReport{}, err
 	}
@@ -164,6 +175,8 @@ func (a *App) search(ctx context.Context, opts SearchOptions, rawKinds []string,
 		Text: text, ProjectID: strings.TrimSpace(opts.ProjectID), Limit: limit, Since: opts.Since,
 		AsOf: opts.AsOf, IncludeSuperseded: opts.IncludeSuperseded,
 		MinScore: opts.MinScore, Explain: opts.Explain, IncludeBody: opts.Full,
+		Subtype: strings.TrimSpace(opts.Subtype), Scope: strings.TrimSpace(opts.Scope),
+		TopicKey: strings.TrimSpace(opts.TopicKey),
 	}
 	for _, kind := range opts.Kinds {
 		if kind = strings.TrimSpace(kind); kind != "" {
@@ -260,6 +273,12 @@ func localOnlySearchOption(opts SearchOptions) string {
 		return "the ranking explanation"
 	case opts.Full:
 		return "full bodies"
+	case opts.Subtype != "":
+		return "the subtype filter"
+	case opts.Scope != "":
+		return "the scope filter"
+	case opts.TopicKey != "":
+		return "the topic filter"
 	default:
 		return ""
 	}

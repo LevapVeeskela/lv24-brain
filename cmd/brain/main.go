@@ -165,6 +165,8 @@ func runCommand(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return runState(rest, stdout, stderr)
 	case "record":
 		return runRecord(rest, stdout, stderr)
+	case "prompt":
+		return runPrompt(rest, stdout, stderr)
 	case "relation":
 		return runRelation(rest, stdout, stderr)
 	case "links":
@@ -255,6 +257,7 @@ Commands:
   catchup    what changed since the latest handoff
   digest     Morning summary across projects: changes, and what needs you (--write saves it); --source <conn> previews proposals
   record     List, show, change status, merge, trash and restore records
+  prompt     Save or list local-only prompts (opt-in, never committed or indexed)
   relation   List, show and judge typed relations between records
   links      [[id]] links and backlinks of a record; --broken lists dangling links
   session    start|end handlers for agent session hooks
@@ -1059,6 +1062,9 @@ func runNote(args []string, stdout, stderr io.Writer) int {
 	supersedes := fs.String("supersedes", "", "id of the note this one replaces; the old note is marked superseded")
 	supersededBy := fs.String("superseded-by", "", "id of the note that already replaced this one (repair)")
 	confidence := fs.Float64("confidence", 0, "author confidence between 0 and 1")
+	subtype := fs.String("subtype", "", "free-form record subtype (engram observation type, e.g. architecture, bugfix)")
+	scope := fs.String("scope", "", "record scope: project (default), personal or global")
+	topic := fs.String("topic", "", "stable topic key; an existing record with this topic is updated in place")
 	create := fs.Bool("create", false, "register --project first if it does not exist yet")
 	allowProtected := fs.Bool("allow-protected", false, "write even though limits.protected_projects or limits.protected_globs protect the project or path")
 	allowDuplicate := fs.Bool("allow-duplicate", false, "write even though an existing note holds the same normalized text")
@@ -1102,6 +1108,9 @@ func runNote(args []string, stdout, stderr io.Writer) int {
 		Supersedes:     *supersedes,
 		SupersededBy:   *supersededBy,
 		Confidence:     *confidence,
+		Subtype:        *subtype,
+		Scope:          domain.RecordScope(*scope),
+		Topic:          *topic,
 		AllowProtected: *allowProtected,
 		AllowDuplicate: *allowDuplicate,
 		Relations:      relations,
@@ -1109,7 +1118,7 @@ func runNote(args []string, stdout, stderr io.Writer) int {
 	if err != nil {
 		return reportError(stderr, "note", err)
 	}
-	fmt.Fprintf(stdout, "note %s\n", result.Note.ID)
+	fmt.Fprintf(stdout, "note %s%s\n", result.Note.ID, unchangedSuffix(result.Already))
 	return 0
 }
 
@@ -1126,6 +1135,9 @@ func runDecision(args []string, stdout, stderr io.Writer) int {
 	supersedes := fs.String("supersedes", "", "id of the decision this one replaces; the old one is marked superseded")
 	supersededBy := fs.String("superseded-by", "", "id of the decision that already replaced this one (repair)")
 	confidence := fs.Float64("confidence", 0, "author confidence between 0 and 1")
+	subtype := fs.String("subtype", "", "free-form record subtype (engram observation type, e.g. architecture, bugfix)")
+	scope := fs.String("scope", "", "record scope: project (default), personal or global")
+	topic := fs.String("topic", "", "stable topic key; an existing record with this topic is updated in place")
 	create := fs.Bool("create", false, "register --project first if it does not exist yet")
 	allowProtected := fs.Bool("allow-protected", false, "write even though limits.protected_projects or limits.protected_globs protect the project or path")
 	allowDuplicate := fs.Bool("allow-duplicate", false, "write even though an existing decision holds the same normalized text")
@@ -1170,6 +1182,9 @@ func runDecision(args []string, stdout, stderr io.Writer) int {
 		Supersedes:     *supersedes,
 		SupersededBy:   *supersededBy,
 		Confidence:     *confidence,
+		Subtype:        *subtype,
+		Scope:          domain.RecordScope(*scope),
+		Topic:          *topic,
 		AllowProtected: *allowProtected,
 		AllowDuplicate: *allowDuplicate,
 		Relations:      relations,
@@ -1177,7 +1192,7 @@ func runDecision(args []string, stdout, stderr io.Writer) int {
 	if err != nil {
 		return reportError(stderr, "decision", err)
 	}
-	fmt.Fprintf(stdout, "decision %s\n", result.Decision.ID)
+	fmt.Fprintf(stdout, "decision %s%s\n", result.Decision.ID, unchangedSuffix(result.Already))
 	return 0
 }
 
@@ -1191,6 +1206,9 @@ func runAttempt(args []string, stdout, stderr io.Writer) int {
 	supersedes := fs.String("supersedes", "", "id of the attempt this one replaces; the old one is marked superseded")
 	supersededBy := fs.String("superseded-by", "", "id of the attempt that already replaced this one (repair)")
 	confidence := fs.Float64("confidence", 0, "author confidence between 0 and 1")
+	subtype := fs.String("subtype", "", "free-form record subtype (engram observation type, e.g. architecture, bugfix)")
+	scope := fs.String("scope", "", "record scope: project (default), personal or global")
+	topic := fs.String("topic", "", "stable topic key; an existing record with this topic is updated in place")
 	create := fs.Bool("create", false, "register --project first if it does not exist yet")
 	allowProtected := fs.Bool("allow-protected", false, "write even though limits.protected_projects or limits.protected_globs protect the project or path")
 	allowDuplicate := fs.Bool("allow-duplicate", false, "write even though an existing attempt holds the same normalized text")
@@ -1232,6 +1250,9 @@ func runAttempt(args []string, stdout, stderr io.Writer) int {
 		Supersedes:     *supersedes,
 		SupersededBy:   *supersededBy,
 		Confidence:     *confidence,
+		Subtype:        *subtype,
+		Scope:          domain.RecordScope(*scope),
+		Topic:          *topic,
 		AllowProtected: *allowProtected,
 		AllowDuplicate: *allowDuplicate,
 		Relations:      relations,
@@ -1239,7 +1260,7 @@ func runAttempt(args []string, stdout, stderr io.Writer) int {
 	if err != nil {
 		return reportError(stderr, "attempt", err)
 	}
-	fmt.Fprintf(stdout, "attempt %s\n", result.Attempt.ID)
+	fmt.Fprintf(stdout, "attempt %s%s\n", result.Attempt.ID, unchangedSuffix(result.Already))
 	return 0
 }
 
@@ -1253,6 +1274,9 @@ func runHandoff(args []string, stdout, stderr io.Writer) int {
 	supersedes := fs.String("supersedes", "", "id of the handoff this one replaces; the old one is marked superseded")
 	supersededBy := fs.String("superseded-by", "", "id of the handoff that already replaced this one (repair)")
 	confidence := fs.Float64("confidence", 0, "author confidence between 0 and 1")
+	subtype := fs.String("subtype", "", "free-form record subtype (engram observation type, e.g. architecture, bugfix)")
+	scope := fs.String("scope", "", "record scope: project (default), personal or global")
+	topic := fs.String("topic", "", "stable topic key; an existing record with this topic is updated in place")
 	create := fs.Bool("create", false, "register --project first if it does not exist yet")
 	allowProtected := fs.Bool("allow-protected", false, "write even though limits.protected_projects or limits.protected_globs protect the project or path")
 	allowDuplicate := fs.Bool("allow-duplicate", false, "write even though an existing handoff holds the same summary and next action")
@@ -1306,6 +1330,9 @@ func runHandoff(args []string, stdout, stderr io.Writer) int {
 		Supersedes:     *supersedes,
 		SupersededBy:   *supersededBy,
 		Confidence:     *confidence,
+		Subtype:        *subtype,
+		Scope:          domain.RecordScope(*scope),
+		Topic:          *topic,
 		AllowProtected: *allowProtected,
 		AllowDuplicate: *allowDuplicate,
 		Relations:      relations,
@@ -1313,7 +1340,7 @@ func runHandoff(args []string, stdout, stderr io.Writer) int {
 	if err != nil {
 		return reportError(stderr, "handoff", err)
 	}
-	fmt.Fprintf(stdout, "handoff %s\n", result.Handoff.ID)
+	fmt.Fprintf(stdout, "handoff %s%s\n", result.Handoff.ID, unchangedSuffix(result.Already))
 	return 0
 }
 
@@ -1687,6 +1714,9 @@ func runSearch(args []string, stdout, stderr io.Writer) int {
 	full := fs.Bool("full", false, "print the whole record body instead of a preview")
 	pageSize := fs.Int("page-size", 0, "hits per page with --cursor; 0 uses --limit")
 	cursor := fs.String("cursor", "", "page cursor from a previous search; cursors are bound to their query")
+	subtype := fs.String("subtype", "", "keep only records with this subtype")
+	scope := fs.String("scope", "", "keep only records with this scope: project, personal or global")
+	topic := fs.String("topic", "", "keep only records with this topic key")
 	validity := addValidityFlags(fs)
 	asJSON := fs.Bool("json", false, "print JSON")
 	cfgPath := configFlag(fs)
@@ -1700,6 +1730,9 @@ func runSearch(args []string, stdout, stderr io.Writer) int {
 		"min-score":  true,
 		"page-size":  true,
 		"cursor":     true,
+		"subtype":    true,
+		"scope":      true,
+		"topic":      true,
 		"config":     true,
 	})
 	if err := fs.Parse(flagArgs); err != nil {
@@ -1754,7 +1787,8 @@ func runSearch(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	filter := searchFilterFingerprint(query, *project, strings.ToLower(strings.TrimSpace(*matchMode)),
-		fmt.Sprint(*minScore), fmt.Sprint(*dumps), *kinds, *since, asOf.Format(time.RFC3339Nano), fmt.Sprint(includeSuperseded))
+		fmt.Sprint(*minScore), fmt.Sprint(*dumps), *kinds, *since, asOf.Format(time.RFC3339Nano), fmt.Sprint(includeSuperseded),
+		strings.TrimSpace(*subtype), strings.TrimSpace(*scope), strings.TrimSpace(*topic))
 	offset, err := decodeSearchCursor(*cursor, filter)
 	if err != nil {
 		fmt.Fprintf(stderr, "brain search: --cursor: %v\n", err)
@@ -1784,6 +1818,9 @@ func runSearch(args []string, stdout, stderr io.Writer) int {
 		MinScore:          *minScore,
 		Explain:           *explain,
 		Full:              *full,
+		Subtype:           *subtype,
+		Scope:             *scope,
+		TopicKey:          *topic,
 	})
 	if err != nil {
 		return reportError(stderr, "search", err)

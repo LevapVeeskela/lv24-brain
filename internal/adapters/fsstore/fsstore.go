@@ -151,7 +151,7 @@ func (s *Store) CurrentRevision(ctx context.Context) (domain.SyncRevision, error
 			if rel == "." {
 				return nil
 			}
-			if dirEntry.Name() == ".git" || isExcludedRootDir(rel, dirEntry.Name()) {
+			if dirEntry.Name() == ".git" || isExcludedRootDir(rel, dirEntry.Name()) || isPromptDir(rel) {
 				return fs.SkipDir
 			}
 			return nil
@@ -217,6 +217,14 @@ func isExcludedRootDir(rel, name string) bool {
 	default:
 		return false
 	}
+}
+
+// isPromptDir reports whether rel is projects/<id>/prompts. The prompt zone is
+// machine-local, so the revision never includes it and a prompt save does not
+// make a sync look dirty.
+func isPromptDir(rel string) bool {
+	parts := strings.Split(filepath.ToSlash(rel), "/")
+	return len(parts) == 3 && parts[0] == projectsDir && parts[2] == promptsDirName
 }
 
 func (s *Store) projectDir(projectID string) (string, error) {

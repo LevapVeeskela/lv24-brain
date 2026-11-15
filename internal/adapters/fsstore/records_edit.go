@@ -79,6 +79,10 @@ func (s *Store) UpdateDecision(ctx context.Context, decision domain.Decision) er
 		if err != nil {
 			return fmt.Errorf("fsstore: parse decision %q: %w", decision.ID, err)
 		}
+		// History is rendered separately; folding it into Context as an
+		// unknown section would duplicate it and split the body on the next
+		// read.
+		currentBody, _ := splitHistorySection(oldBody)
 		frontmatter := decisionFrontmatter{
 			Frontmatter: markdown.Frontmatter{
 				ProjectID:     current.ProjectID,
@@ -96,13 +100,18 @@ func (s *Store) UpdateDecision(ctx context.Context, decision domain.Decision) er
 			// drops them; the relation editor is the explicit way to set them.
 			relationsFrontmatter: relationsToFrontmatter(relationsOrStored(decision.Relations, current.Relations)),
 			mergeFrontmatter:     mergeToFrontmatter(current.MergeInfo),
-			ID:                   current.ID,
-			Title:                decision.Title,
-			Status:               decision.Status,
-			Source:               sourceRefToFrontmatter(current.Source),
-			CreatedAt:            current.CreatedAt,
+			// The topic classification and its history belong to the stored
+			// record: a status change must not clear the topic key or forget
+			// the previous bodies.
+			taxonomyFrontmatter: taxonomyToFrontmatter(current.Taxonomy),
+			ID:                  current.ID,
+			Title:               decision.Title,
+			Status:              decision.Status,
+			Source:              sourceRefToFrontmatter(current.Source),
+			CreatedAt:           current.CreatedAt,
 		}
-		if extras := decisionExtras(oldBody); extras != "" && !strings.Contains(decision.Context, extras) {
+		decision.TopicHistory = domain.TopicHistory{History: historyOrStored(decision.History, current.History)}
+		if extras := decisionExtras(currentBody); extras != "" && !strings.Contains(decision.Context, extras) {
 			decision.Context = strings.TrimSpace(strings.TrimSpace(decision.Context) + "\n\n" + extras)
 		}
 		raw, err := markdown.Render(frontmatter, renderDecisionBody(decision))
@@ -126,6 +135,14 @@ func relationsOrStored(next, stored domain.RelationList) domain.RelationList {
 		return next
 	}
 	return stored
+}
+
+// historyOrStored keeps the stored topic history when an update carries none.
+func historyOrStored(next, stored []domain.HistoryEntry) []domain.HistoryEntry {
+	if len(next) > 0 {
+		return domain.BoundedHistory(next)
+	}
+	return domain.BoundedHistory(stored)
 }
 
 // decisionExtras returns hand-written text that parsing a decision drops:

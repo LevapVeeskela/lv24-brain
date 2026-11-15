@@ -233,6 +233,10 @@ func noteDocument(note domain.Note) ports.Document {
 		SupersededBy: note.Validity.SupersededBy,
 		Supersedes:   note.Validity.Supersedes,
 		Confidence:   note.Validity.Confidence,
+		Subtype:      note.Subtype,
+		Scope:        string(note.Scope),
+		TopicKey:     note.TopicKey,
+		Occurrences:  note.Taxonomy.NormalizedOccurrences(),
 		Relations:    relationLinks(note.Relations),
 	}
 }
@@ -256,6 +260,10 @@ func decisionDocument(decision domain.Decision) ports.Document {
 		Supersedes:   decision.Validity.Supersedes,
 		Status:       string(decision.Status),
 		Confidence:   decision.Validity.Confidence,
+		Subtype:      decision.Subtype,
+		Scope:        string(decision.Scope),
+		TopicKey:     decision.TopicKey,
+		Occurrences:  decision.Taxonomy.NormalizedOccurrences(),
 		Relations:    relationLinks(decision.Relations),
 	}
 }
@@ -273,6 +281,10 @@ func attemptDocument(attempt domain.Attempt) ports.Document {
 		SupersededBy: attempt.Validity.SupersededBy,
 		Supersedes:   attempt.Validity.Supersedes,
 		Confidence:   attempt.Validity.Confidence,
+		Subtype:      attempt.Subtype,
+		Scope:        string(attempt.Scope),
+		TopicKey:     attempt.TopicKey,
+		Occurrences:  attempt.Taxonomy.NormalizedOccurrences(),
 		Relations:    relationLinks(attempt.Relations),
 	}
 }
@@ -290,6 +302,10 @@ func handoffDocument(handoff domain.Handoff) ports.Document {
 		SupersededBy: handoff.Validity.SupersededBy,
 		Supersedes:   handoff.Validity.Supersedes,
 		Confidence:   handoff.Validity.Confidence,
+		Subtype:      handoff.Subtype,
+		Scope:        string(handoff.Scope),
+		TopicKey:     handoff.TopicKey,
+		Occurrences:  handoff.Taxonomy.NormalizedOccurrences(),
 		Relations:    relationLinks(handoff.Relations),
 	}
 }

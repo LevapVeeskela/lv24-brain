@@ -93,6 +93,8 @@ type Note struct {
 	Provenance
 	Validity
 	MergeInfo
+	Taxonomy
+	TopicHistory
 	// Relations is the typed relation set of the record; empty for records
 	// written before relations existed.
 	Relations RelationList `json:"relations,omitempty"`
@@ -119,6 +121,12 @@ func (n Note) Validate() error {
 		return err
 	}
 	if err := n.Relations.Validate("note.relations", n.ID); err != nil {
+		return err
+	}
+	if err := n.Taxonomy.Validate("note.taxonomy", n.ID); err != nil {
+		return err
+	}
+	if err := ValidateHistory("note.history", n.History); err != nil {
 		return err
 	}
 	return validateRecordSource("note.source", n.ProjectID, n.Source)
@@ -160,6 +168,8 @@ type Decision struct {
 	Provenance
 	Validity
 	MergeInfo
+	Taxonomy
+	TopicHistory
 	Relations RelationList `json:"relations,omitempty"`
 	ReviewSchedule
 	CreatedAt time.Time `json:"createdAt"`
@@ -215,6 +225,12 @@ func (d Decision) Validate() error {
 	if err := d.Relations.Validate("decision.relations", d.ID); err != nil {
 		return err
 	}
+	if err := d.Taxonomy.Validate("decision.taxonomy", d.ID); err != nil {
+		return err
+	}
+	if err := ValidateHistory("decision.history", d.History); err != nil {
+		return err
+	}
 	return validateRecordSource("decision.source", d.ProjectID, d.Source)
 }
 
@@ -231,6 +247,8 @@ type Attempt struct {
 	Provenance
 	Validity
 	MergeInfo
+	Taxonomy
+	TopicHistory
 	Relations RelationList `json:"relations,omitempty"`
 	ReviewSchedule
 	CreatedAt time.Time `json:"createdAt"`
@@ -257,6 +275,12 @@ func (a Attempt) Validate() error {
 	if err := a.Relations.Validate("attempt.relations", a.ID); err != nil {
 		return err
 	}
+	if err := a.Taxonomy.Validate("attempt.taxonomy", a.ID); err != nil {
+		return err
+	}
+	if err := ValidateHistory("attempt.history", a.History); err != nil {
+		return err
+	}
 	return validateRecordSource("attempt.source", a.ProjectID, a.Source)
 }
 
@@ -268,9 +292,14 @@ type Handoff struct {
 	GitContext string `json:"gitContext,omitempty"`
 	NextAction string `json:"nextAction,omitempty"`
 	Permalink  string `json:"permalink,omitempty"`
+	// Source records the external item a handoff came from. Handoffs written
+	// by a session hook have none.
+	Source *SourceRef `json:"source,omitempty"`
 	Provenance
 	Validity
 	MergeInfo
+	Taxonomy
+	TopicHistory
 	Relations RelationList `json:"relations,omitempty"`
 	ReviewSchedule
 	CreatedAt time.Time `json:"createdAt"`
@@ -291,6 +320,15 @@ func (h Handoff) Validate() error {
 		return err
 	}
 	if err := h.Relations.Validate("handoff.relations", h.ID); err != nil {
+		return err
+	}
+	if err := h.Taxonomy.Validate("handoff.taxonomy", h.ID); err != nil {
+		return err
+	}
+	if err := ValidateHistory("handoff.history", h.History); err != nil {
+		return err
+	}
+	if err := validateRecordSource("handoff.source", h.ProjectID, h.Source); err != nil {
 		return err
 	}
 	return ValidateRequired("handoff.summary", h.Summary)

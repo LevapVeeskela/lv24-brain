@@ -206,6 +206,10 @@ type jsonHit struct {
 	Title        string       `json:"title"`
 	Snippet      string       `json:"snippet"`
 	Score        float64      `json:"score"`
+	Subtype      string       `json:"subtype,omitempty"`
+	Scope        string       `json:"scope,omitempty"`
+	TopicKey     string       `json:"topic_key,omitempty"`
+	Occurrences  int          `json:"occurrences,omitempty"`
 	MatchReasons []string     `json:"match_reasons,omitempty"`
 	Explain      *jsonExplain `json:"explain,omitempty"`
 	ValidFrom    *string      `json:"valid_from"`
@@ -248,6 +252,10 @@ func toJSONHits(hits []ports.Hit) []jsonHit {
 			Title:        hit.Title,
 			Snippet:      hit.Snippet,
 			Score:        hit.Score,
+			Subtype:      hit.Subtype,
+			Scope:        hit.Scope,
+			TopicKey:     hit.TopicKey,
+			Occurrences:  hit.Occurrences,
 			MatchReasons: hit.MatchReasons,
 			Explain:      toJSONExplain(hit.Explain),
 			ValidFrom:    jsonTime(hit.ValidFrom),

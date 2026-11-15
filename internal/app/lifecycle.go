@@ -36,6 +36,12 @@ type RecordSummary struct {
 	SupersededBy string
 	Supersedes   string
 	Confidence   float64
+	// Subtype, Scope, TopicKey and Occurrences are the engram-compatible
+	// classification of the record.
+	Subtype     string
+	Scope       string
+	TopicKey    string
+	Occurrences int
 }
 
 // ListRecordsOptions filters ListRecords.
@@ -47,6 +53,11 @@ type ListRecordsOptions struct {
 	Since time.Time
 	// Status keeps decisions with this status (and drops other kinds).
 	Status string
+	// Subtype, Scope and TopicKey keep only records with that classification.
+	// Empty keeps every value.
+	Subtype  string
+	Scope    string
+	TopicKey string
 	// Limit bounds the result; <= 0 uses 50.
 	Limit int
 	// AsOf lists the records valid at that instant instead of now.
@@ -94,7 +105,27 @@ func (r Record) Summary() RecordSummary {
 	summary.SupersededBy = valid.SupersededBy
 	summary.Supersedes = valid.Supersedes
 	summary.Confidence = valid.Confidence
+	summary.Subtype, summary.Scope, summary.TopicKey, summary.Occurrences = taxonomyOf(r)
 	return summary
+}
+
+// taxonomyOf returns the classification of whichever record is set.
+func taxonomyOf(record Record) (string, string, string, int) {
+	switch {
+	case record.Note != nil:
+		taxonomy := record.Note.Taxonomy
+		return taxonomy.Subtype, string(taxonomy.Scope.Normalized()), taxonomy.TopicKey, taxonomy.NormalizedOccurrences()
+	case record.Decision != nil:
+		taxonomy := record.Decision.Taxonomy
+		return taxonomy.Subtype, string(taxonomy.Scope.Normalized()), taxonomy.TopicKey, taxonomy.NormalizedOccurrences()
+	case record.Attempt != nil:
+		taxonomy := record.Attempt.Taxonomy
+		return taxonomy.Subtype, string(taxonomy.Scope.Normalized()), taxonomy.TopicKey, taxonomy.NormalizedOccurrences()
+	case record.Handoff != nil:
+		taxonomy := record.Handoff.Taxonomy
+		return taxonomy.Subtype, string(taxonomy.Scope.Normalized()), taxonomy.TopicKey, taxonomy.NormalizedOccurrences()
+	}
+	return "", "", "", 1
 }
 
 // Validity returns the validity of whichever record is set.
@@ -175,6 +206,11 @@ func (a *App) ListRecords(ctx context.Context, opts ListRecordsOptions) ([]Recor
 			return nil, err
 		}
 	}
+	subtype, scope, topic, err := validateClassificationFilters(opts.Subtype, opts.Scope, opts.TopicKey)
+	if err != nil {
+		return nil, err
+	}
+	opts.Subtype, opts.Scope, opts.TopicKey = subtype, scope, topic
 	records, err := a.projectRecords(ctx, project.ID)
 	if err != nil {
 		return nil, err
@@ -192,6 +228,15 @@ func (a *App) ListRecords(ctx context.Context, opts ListRecordsOptions) ([]Recor
 			continue
 		}
 		if opts.Status != "" && (summary.Kind != ports.RecordDecision || !strings.EqualFold(summary.Status, opts.Status)) {
+			continue
+		}
+		if opts.Subtype != "" && summary.Subtype != strings.TrimSpace(opts.Subtype) {
+			continue
+		}
+		if opts.Scope != "" && summary.Scope != string(domain.RecordScope(opts.Scope).Normalized()) {
+			continue
+		}
+		if opts.TopicKey != "" && summary.TopicKey != strings.TrimSpace(opts.TopicKey) {
 			continue
 		}
 		validity := domain.Validity{ValidFrom: summary.ValidFrom, ValidTo: summary.ValidTo}

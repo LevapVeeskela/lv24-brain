@@ -52,6 +52,9 @@ type BrainConfig struct {
 	// Context sets the token budget of the layered context packer. An omitted
 	// block keeps DefaultContextBudgetTokens.
 	Context ContextConfig `yaml:"context,omitempty"`
+	// Prompts configures the opt-in, machine-local prompt zone. The zero
+	// value keeps it disabled.
+	Prompts PromptsConfig `yaml:"prompts,omitempty"`
 	// RetiredPaths lists retired checkouts of this workspace. The engine ships
 	// no defaults: selection redirects to ReplacedBy and registration is
 	// refused, but nothing on disk is touched.
@@ -189,6 +192,43 @@ func normalizePatterns(values []string) []string {
 		return nil
 	}
 	return out
+}
+
+// DefaultPromptRetentionDays is the default age after which doctor reports a
+// prompt as past its retention window. Nothing is deleted automatically.
+const DefaultPromptRetentionDays = 30
+
+// PromptsConfig is the `prompts` block of brain.yaml: the opt-in,
+// machine-local prompt zone. It is disabled by default and never contributes
+// to the git tree, the search index or shared context.
+type PromptsConfig struct {
+	// Enabled turns prompt capture on. The default is false.
+	Enabled bool `yaml:"enabled,omitempty"`
+	// RetentionDays is how long a prompt stays within its retention window.
+	// Nil selects DefaultPromptRetentionDays; an explicit 0 keeps prompts
+	// forever. Retention is reported by doctor, never enforced by deletion.
+	RetentionDays *int `yaml:"retention_days,omitempty"`
+}
+
+// IsZero lets yaml omit a prompts block that was never configured.
+func (p PromptsConfig) IsZero() bool { return !p.Enabled && p.RetentionDays == nil }
+
+// EffectiveRetentionDays resolves the retention window: nil selects the
+// default, an explicit zero means keep forever.
+func (p PromptsConfig) EffectiveRetentionDays() int {
+	if p.RetentionDays == nil {
+		return DefaultPromptRetentionDays
+	}
+	return *p.RetentionDays
+}
+
+// Validate rejects a negative retention window.
+func (p PromptsConfig) Validate() error {
+	if p.RetentionDays != nil && *p.RetentionDays < 0 {
+		return domain.NewValidationError("config.prompts.retention_days",
+			"must be zero (keep forever) or a positive number of days")
+	}
+	return nil
 }
 
 // ContextConfig is the `context` block of brain.yaml. It is additive: a
@@ -480,6 +520,9 @@ func (c BrainConfig) Validate() error {
 		return err
 	}
 	if err := c.Context.Validate(); err != nil {
+		return err
+	}
+	if err := c.Prompts.Validate(); err != nil {
 		return err
 	}
 	for _, entry := range c.RetiredPaths {

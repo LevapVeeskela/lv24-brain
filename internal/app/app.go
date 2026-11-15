@@ -194,12 +194,22 @@ type NoteInput struct {
 	// accepted (the author claims them); candidate detection only ever adds
 	// pending ones.
 	Relations []domain.Relation
+	// Subtype is the free-form engram observation type of the note.
+	Subtype string
+	// Scope is project, personal or global; empty means project.
+	Scope domain.RecordScope
+	// Topic makes the write a topic upsert when ID is empty: an existing note
+	// with the same topic is updated in place instead of appending a copy.
+	Topic string
 }
 
 // NoteResult identifies the appended note.
 type NoteResult struct {
 	Note     domain.Note
 	Revision domain.SyncRevision
+	// Already reports that a topic upsert found the same body and wrote
+	// nothing; Note is the stored record.
+	Already bool
 }
 
 // DecisionInput is a new decision record.
@@ -235,12 +245,21 @@ type DecisionInput struct {
 	AllowProtected bool
 	// Relations are explicit relations declared at write time.
 	Relations []domain.Relation
+	// Subtype is the free-form engram observation type of the decision.
+	Subtype string
+	// Scope is project, personal or global; empty means project.
+	Scope domain.RecordScope
+	// Topic makes the write a topic upsert when ID is empty.
+	Topic string
 }
 
 // DecisionResult identifies the appended decision.
 type DecisionResult struct {
 	Decision domain.Decision
 	Revision domain.SyncRevision
+	// Already reports that a topic upsert found the same body and wrote
+	// nothing; Decision is the stored record.
+	Already bool
 }
 
 // AttemptInput is a new attempt record.
@@ -272,12 +291,21 @@ type AttemptInput struct {
 	AllowProtected bool
 	// Relations are explicit relations declared at write time.
 	Relations []domain.Relation
+	// Subtype is the free-form engram observation type of the attempt.
+	Subtype string
+	// Scope is project, personal or global; empty means project.
+	Scope domain.RecordScope
+	// Topic makes the write a topic upsert when ID is empty.
+	Topic string
 }
 
 // AttemptResult identifies the appended attempt.
 type AttemptResult struct {
 	Attempt  domain.Attempt
 	Revision domain.SyncRevision
+	// Already reports that a topic upsert found the same body and wrote
+	// nothing; Attempt is the stored record.
+	Already bool
 }
 
 // HandoffInput is a new handoff record.
@@ -286,6 +314,8 @@ type HandoffInput struct {
 	Summary    string
 	GitContext string
 	NextAction string
+	// Source records the external item an imported handoff came from.
+	Source *domain.SourceRef
 	// Provenance is the write provenance; zero means human/reviewed/verified.
 	Provenance domain.Provenance
 	// Supersedes is the id of the handoff this one replaces.
@@ -304,12 +334,21 @@ type HandoffInput struct {
 	AllowProtected bool
 	// Relations are explicit relations declared at write time.
 	Relations []domain.Relation
+	// Subtype is the free-form engram observation type of the handoff.
+	Subtype string
+	// Scope is project, personal or global; empty means project.
+	Scope domain.RecordScope
+	// Topic makes the write a topic upsert when no ID exists for it.
+	Topic string
 }
 
 // HandoffResult identifies the appended handoff.
 type HandoffResult struct {
 	Handoff  domain.Handoff
 	Revision domain.SyncRevision
+	// Already reports that a topic upsert found the same body and wrote
+	// nothing; Handoff is the stored record.
+	Already bool
 }
 
 // StatusResult is the read-only instance status.

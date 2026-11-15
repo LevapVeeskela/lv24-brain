@@ -81,6 +81,9 @@ func runRecordList(args []string, stdout, stderr io.Writer) int {
 	kind := fs.String("kind", "", "comma-separated kinds: note, decision, attempt, handoff")
 	since := fs.String("since", "", "only records created or updated within this window, e.g. 24h or 7d")
 	status := fs.String("status", "", "keep decisions with this status")
+	subtype := fs.String("subtype", "", "keep only records with this subtype")
+	scope := fs.String("scope", "", "keep only records with this scope: project, personal or global")
+	topic := fs.String("topic", "", "keep only records with this topic key")
 	limit := fs.Int("limit", 0, "maximum records; 0 selects the default of 50")
 	validity := addValidityFlags(fs)
 	asJSON := fs.Bool("json", false, "print JSON")
@@ -115,6 +118,9 @@ func runRecordList(args []string, stdout, stderr io.Writer) int {
 		Kinds:             splitList(*kind),
 		Since:             sinceTime,
 		Status:            *status,
+		Subtype:           *subtype,
+		Scope:             *scope,
+		TopicKey:          *topic,
 		Limit:             *limit,
 		AsOf:              asOf,
 		IncludeSuperseded: includeSuperseded,
@@ -179,8 +185,12 @@ func runRecordShow(args []string, stdout, stderr io.Writer) int {
 			Kind:     detail.Kind,
 			Record:   detail,
 			Validity: toJSONSummaryValidity(summary),
-			History:  mapAll(chain, toJSONRecordSummary),
-			ValidAt:  validAt,
+			Classification: jsonClassification{
+				Subtype: summary.Subtype, Scope: summary.Scope,
+				TopicKey: summary.TopicKey, Occurrences: summary.Occurrences,
+			},
+			History: mapAll(chain, toJSONRecordSummary),
+			ValidAt: validAt,
 		})
 	}
 	printRecordDetail(stdout, detail)
@@ -567,36 +577,53 @@ func printRecordItems(w io.Writer, label string, items []string) {
 // its temporal validity and optionally the supersede chain. ValidAt is set only
 // when --as-of was given.
 type jsonRecordShow struct {
-	Kind     string                 `json:"kind"`
-	Record   mcpserver.RecordDetail `json:"record"`
-	Validity jsonValidity           `json:"validity"`
-	History  []jsonRecordSummary    `json:"history,omitempty"`
-	ValidAt  *bool                  `json:"valid_at,omitempty"`
+	Kind           string                 `json:"kind"`
+	Record         mcpserver.RecordDetail `json:"record"`
+	Validity       jsonValidity           `json:"validity"`
+	Classification jsonClassification     `json:"classification"`
+	History        []jsonRecordSummary    `json:"history,omitempty"`
+	ValidAt        *bool                  `json:"valid_at,omitempty"`
+}
+
+// jsonClassification is the engram-compatible classification of a record.
+type jsonClassification struct {
+	Subtype     string `json:"subtype,omitempty"`
+	Scope       string `json:"scope,omitempty"`
+	TopicKey    string `json:"topic_key,omitempty"`
+	Occurrences int    `json:"occurrences,omitempty"`
 }
 
 // jsonRecordSummary is one record of `brain record list --json` with its
 // temporal validity.
 type jsonRecordSummary struct {
-	Kind      string       `json:"kind"`
-	ID        string       `json:"id"`
-	ProjectID string       `json:"project_id"`
-	Title     string       `json:"title"`
-	Status    string       `json:"status,omitempty"`
-	CreatedAt time.Time    `json:"created_at,omitzero"`
-	UpdatedAt time.Time    `json:"updated_at,omitzero"`
-	Validity  jsonValidity `json:"validity"`
+	Kind        string       `json:"kind"`
+	ID          string       `json:"id"`
+	ProjectID   string       `json:"project_id"`
+	Title       string       `json:"title"`
+	Status      string       `json:"status,omitempty"`
+	Subtype     string       `json:"subtype,omitempty"`
+	Scope       string       `json:"scope,omitempty"`
+	TopicKey    string       `json:"topic_key,omitempty"`
+	Occurrences int          `json:"occurrences,omitempty"`
+	CreatedAt   time.Time    `json:"created_at,omitzero"`
+	UpdatedAt   time.Time    `json:"updated_at,omitzero"`
+	Validity    jsonValidity `json:"validity"`
 }
 
 func toJSONRecordSummary(summary app.RecordSummary) jsonRecordSummary {
 	return jsonRecordSummary{
-		Kind:      summary.Kind,
-		ID:        summary.ID,
-		ProjectID: summary.ProjectID,
-		Title:     summary.Title,
-		Status:    summary.Status,
-		CreatedAt: summary.CreatedAt,
-		UpdatedAt: summary.UpdatedAt,
-		Validity:  toJSONSummaryValidity(summary),
+		Kind:        summary.Kind,
+		ID:          summary.ID,
+		ProjectID:   summary.ProjectID,
+		Title:       summary.Title,
+		Status:      summary.Status,
+		Subtype:     summary.Subtype,
+		Scope:       summary.Scope,
+		TopicKey:    summary.TopicKey,
+		Occurrences: summary.Occurrences,
+		CreatedAt:   summary.CreatedAt,
+		UpdatedAt:   summary.UpdatedAt,
+		Validity:    toJSONSummaryValidity(summary),
 	}
 }
 

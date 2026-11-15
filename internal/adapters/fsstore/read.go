@@ -251,16 +251,23 @@ func parseNotesBody(body string, defaultDate time.Time) ([]domain.Note, error) {
 			if err != nil {
 				return nil, err
 			}
+			taxonomy, err := taxonomyFromFrontmatter(metadata.taxonomyFrontmatter)
+			if err != nil {
+				return nil, err
+			}
+			currentBody, history := splitHistorySection(strings.Join(lines[start:i], "\n"))
 			notes = append(notes, domain.Note{
 				ID:             id,
 				Title:          title,
-				Body:           strings.TrimRight(strings.Join(lines[start:i], "\n"), "\n"),
+				Body:           strings.TrimRight(currentBody, "\n"),
 				Tags:           nonNilStrings(metadata.Tags),
 				Permalink:      metadata.Permalink,
 				Source:         metadata.Source,
 				Provenance:     provenanceFromFrontmatter(metadata.provenanceFrontmatter),
 				Validity:       validity,
 				MergeInfo:      merge,
+				Taxonomy:       taxonomy,
+				TopicHistory:   domain.TopicHistory{History: history},
 				Relations:      relations,
 				ReviewSchedule: review,
 				CreatedAt:      metadata.CreatedAt.UTC(),
@@ -349,7 +356,8 @@ func readDecisionFile(path string) (domain.Decision, error) {
 	if err := validateRecordFrontmatter(path, frontmatter.Frontmatter, "decision"); err != nil {
 		return domain.Decision{}, err
 	}
-	title, status, contextText, alternatives, consequences, evidence, paths := parseDecisionBody(body)
+	currentBody, history := splitHistorySection(body)
+	title, status, contextText, alternatives, consequences, evidence, paths := parseDecisionBody(currentBody)
 	if title == "" {
 		title = frontmatter.Title
 	}
@@ -382,6 +390,10 @@ func readDecisionFile(path string) (domain.Decision, error) {
 	if err != nil {
 		return domain.Decision{}, fmt.Errorf("parse %s: %w", path, err)
 	}
+	taxonomy, err := taxonomyFromFrontmatter(frontmatter.taxonomyFrontmatter)
+	if err != nil {
+		return domain.Decision{}, fmt.Errorf("parse %s: %w", path, err)
+	}
 	return domain.Decision{
 		ID:             frontmatter.ID,
 		ProjectID:      frontmatter.ProjectID,
@@ -397,6 +409,8 @@ func readDecisionFile(path string) (domain.Decision, error) {
 		Provenance:     provenanceFromFrontmatter(frontmatter.provenanceFrontmatter),
 		Validity:       validity,
 		MergeInfo:      merge,
+		Taxonomy:       taxonomy,
+		TopicHistory:   domain.TopicHistory{History: history},
 		Relations:      relations,
 		ReviewSchedule: review,
 		CreatedAt:      frontmatter.CreatedAt.UTC(),
@@ -417,7 +431,8 @@ func readAttemptFile(path string) (domain.Attempt, error) {
 	if err := validateRecordFrontmatter(path, frontmatter.Frontmatter, "attempt"); err != nil {
 		return domain.Attempt{}, err
 	}
-	title, hypothesis, result, reason := parseAttemptBody(body)
+	currentBody, history := splitHistorySection(body)
+	title, hypothesis, result, reason := parseAttemptBody(currentBody)
 	if title == "" {
 		title = frontmatter.Title
 	}
@@ -444,6 +459,10 @@ func readAttemptFile(path string) (domain.Attempt, error) {
 	if err != nil {
 		return domain.Attempt{}, fmt.Errorf("parse %s: %w", path, err)
 	}
+	taxonomy, err := taxonomyFromFrontmatter(frontmatter.taxonomyFrontmatter)
+	if err != nil {
+		return domain.Attempt{}, fmt.Errorf("parse %s: %w", path, err)
+	}
 	return domain.Attempt{
 		ID:             frontmatter.ID,
 		ProjectID:      frontmatter.ProjectID,
@@ -456,6 +475,8 @@ func readAttemptFile(path string) (domain.Attempt, error) {
 		Provenance:     provenanceFromFrontmatter(frontmatter.provenanceFrontmatter),
 		Validity:       validity,
 		MergeInfo:      merge,
+		Taxonomy:       taxonomy,
+		TopicHistory:   domain.TopicHistory{History: history},
 		Relations:      relations,
 		ReviewSchedule: review,
 		CreatedAt:      frontmatter.CreatedAt.UTC(),
@@ -476,7 +497,15 @@ func readHandoffFile(path string) (domain.Handoff, error) {
 	if err := validateRecordFrontmatter(path, frontmatter.Frontmatter, "handoff"); err != nil {
 		return domain.Handoff{}, err
 	}
-	summary, gitContext, nextAction := parseHandoffBody(body)
+	currentBody, history := splitHistorySection(body)
+	summary, gitContext, nextAction := parseHandoffBody(currentBody)
+	source, err := sourceRefFromFrontmatter(frontmatter.Source)
+	if err != nil {
+		return domain.Handoff{}, fmt.Errorf("parse %s: %w", path, err)
+	}
+	if err := validateRecordSourceRef(source, frontmatter.ProjectID); err != nil {
+		return domain.Handoff{}, fmt.Errorf("parse %s: %w", path, err)
+	}
 	validity, err := validityFromFrontmatter(frontmatter.validityFrontmatter, frontmatter.CreatedAt.UTC())
 	if err != nil {
 		return domain.Handoff{}, fmt.Errorf("parse %s: %w", path, err)
@@ -493,6 +522,10 @@ func readHandoffFile(path string) (domain.Handoff, error) {
 	if err != nil {
 		return domain.Handoff{}, fmt.Errorf("parse %s: %w", path, err)
 	}
+	taxonomy, err := taxonomyFromFrontmatter(frontmatter.taxonomyFrontmatter)
+	if err != nil {
+		return domain.Handoff{}, fmt.Errorf("parse %s: %w", path, err)
+	}
 	return domain.Handoff{
 		ID:             frontmatter.ID,
 		ProjectID:      frontmatter.ProjectID,
@@ -500,9 +533,12 @@ func readHandoffFile(path string) (domain.Handoff, error) {
 		GitContext:     gitContext,
 		NextAction:     nextAction,
 		Permalink:      frontmatter.Permalink,
+		Source:         source,
 		Provenance:     provenanceFromFrontmatter(frontmatter.provenanceFrontmatter),
 		Validity:       validity,
 		MergeInfo:      merge,
+		Taxonomy:       taxonomy,
+		TopicHistory:   domain.TopicHistory{History: history},
 		Relations:      relations,
 		ReviewSchedule: review,
 		CreatedAt:      frontmatter.CreatedAt.UTC(),

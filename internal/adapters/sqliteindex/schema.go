@@ -16,11 +16,18 @@ var schemaStatements = []string{
 		superseded_by TEXT,
 		supersedes TEXT,
 		status TEXT NOT NULL DEFAULT '',
-		confidence REAL NOT NULL DEFAULT 0
+		confidence REAL NOT NULL DEFAULT 0,
+		subtype TEXT NOT NULL DEFAULT '',
+		scope TEXT NOT NULL DEFAULT 'project',
+		topic_key TEXT NOT NULL DEFAULT '',
+		occurrences INTEGER NOT NULL DEFAULT 1
 	)`,
 	`CREATE INDEX IF NOT EXISTS documents_project_idx ON documents(project_id)`,
 	`CREATE INDEX IF NOT EXISTS documents_valid_idx ON documents(kind, valid_to)`,
 	`CREATE INDEX IF NOT EXISTS documents_superseded_idx ON documents(superseded_by)`,
+	`CREATE INDEX IF NOT EXISTS documents_subtype_idx ON documents(project_id, subtype)`,
+	`CREATE INDEX IF NOT EXISTS documents_scope_idx ON documents(project_id, scope)`,
+	`CREATE INDEX IF NOT EXISTS documents_topic_idx ON documents(project_id, kind, topic_key)`,
 	// relations is the derived projection of the typed relation frontmatter.
 	// source_id is the project-scoped document key ("<project>/<record>") so a
 	// source can be joined to its document; the relation target stays a record
@@ -61,8 +68,8 @@ var schemaStatements = []string{
 	END`,
 }
 
-const upsertSQL = `INSERT INTO documents (id, project_id, kind, title, body, updated_at, valid_from, valid_to, superseded_by, supersedes, status, confidence)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+const upsertSQL = `INSERT INTO documents (id, project_id, kind, title, body, updated_at, valid_from, valid_to, superseded_by, supersedes, status, confidence, subtype, scope, topic_key, occurrences)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(id) DO UPDATE SET
 	project_id = excluded.project_id,
 	kind = excluded.kind,
@@ -74,7 +81,11 @@ ON CONFLICT(id) DO UPDATE SET
 	superseded_by = excluded.superseded_by,
 	supersedes = excluded.supersedes,
 	status = excluded.status,
-	confidence = excluded.confidence`
+	confidence = excluded.confidence,
+	subtype = excluded.subtype,
+	scope = excluded.scope,
+	topic_key = excluded.topic_key,
+	occurrences = excluded.occurrences`
 
 const deleteSQL = `DELETE FROM documents WHERE id = ?`
 
@@ -98,7 +109,9 @@ ON CONFLICT(source_id, target_id, relation) DO UPDATE SET
 // supersedes) and its indexes.
 // Version 4 adds the ranking inputs (decision status, author confidence).
 // Version 5 adds the derived relations table for listings and backlinks.
-const schemaVersion = 5
+// Version 6 adds the engram-compatible classification (subtype, scope,
+// topic_key, occurrences) and its filters.
+const schemaVersion = 6
 
 // dropStatements remove everything schemaStatements creates. Triggers go
 // first because they reference the tables.

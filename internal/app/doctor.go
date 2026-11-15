@@ -52,6 +52,7 @@ func (a *App) Doctor(ctx context.Context, opts DoctorOptions) (DoctorReport, err
 	checks = append(checks, a.doctorGit(ctx))
 	checks = append(checks, a.doctorMergeDrivers(ctx, opts.Fix))
 	checks = append(checks, a.doctorRawZone(ctx)...)
+	checks = append(checks, a.doctorPrompts(ctx))
 	checks = append(checks, a.doctorRetiredPaths(ctx))
 	return DoctorReport{Checks: checks}, nil
 }

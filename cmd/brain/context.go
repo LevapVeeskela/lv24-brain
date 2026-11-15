@@ -23,6 +23,9 @@ func runContext(args []string, stdout, stderr io.Writer) int {
 	var kinds repeatedFlag
 	fs.Var(&kinds, "kind", "keep only this record kind: decision, attempt or note (repeatable)")
 	since := fs.String("since", "", "drop records older than a window (24h, 7d, 2w) or a date (2026-11-01)")
+	subtype := fs.String("subtype", "", "keep only relevant records with this subtype")
+	scope := fs.String("scope", "", "keep only relevant records with this scope: project, personal or global")
+	topic := fs.String("topic", "", "keep only relevant records with this topic key")
 	raw := fs.Bool("raw", false, "include granted raw-zone excerpts when curated context is thin")
 	includeUnreviewed := fs.Bool("include-unreviewed", false, "include quarantined records (unreviewed agent, connector or import writes)")
 	validity := addValidityFlags(fs)
@@ -78,6 +81,9 @@ func runContext(args []string, stdout, stderr io.Writer) int {
 		TokenBudget:       *budget,
 		Kinds:             kinds,
 		Since:             *since,
+		Subtype:           *subtype,
+		Scope:             *scope,
+		TopicKey:          *topic,
 		Raw:               *raw,
 		IncludeUnreviewed: *includeUnreviewed,
 		AsOf:              asOf,

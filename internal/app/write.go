@@ -83,6 +83,21 @@ func (a *App) Note(ctx context.Context, input NoteInput) (NoteResult, error) {
 	if err != nil {
 		return NoteResult{}, err
 	}
+	taxonomy, err := resolveTaxonomy(input.Subtype, input.Scope, input.Topic)
+	if err != nil {
+		return NoteResult{}, err
+	}
+	if result, handled, release, upsertErr := a.prepareTopicNote(ctx, project.ID, input, taxonomy); upsertErr != nil {
+		if release != nil {
+			defer release()
+		}
+		return NoteResult{}, upsertErr
+	} else if handled {
+		defer release()
+		return result, nil
+	} else if release != nil {
+		defer release()
+	}
 	now := a.now()
 	validity, err := a.writeValidity(ctx, project.ID, input.Supersedes, input.SupersededBy, input.Confidence, now)
 	if err != nil {
@@ -100,6 +115,7 @@ func (a *App) Note(ctx context.Context, input NoteInput) (NoteResult, error) {
 		Source:         input.Source,
 		Provenance:     input.Provenance.Normalized(),
 		Validity:       validity,
+		Taxonomy:       taxonomy,
 		Relations:      relations,
 		ReviewSchedule: a.newWriteSchedule(ports.RecordNote, validity, now),
 		CreatedAt:      now,
@@ -159,6 +175,7 @@ func (a *App) Decision(ctx context.Context, input DecisionInput) (DecisionResult
 	if err != nil {
 		return DecisionResult{}, err
 	}
+	input.Paths = paths
 	if err := a.requireStore(); err != nil {
 		return DecisionResult{}, err
 	}
@@ -168,6 +185,21 @@ func (a *App) Decision(ctx context.Context, input DecisionInput) (DecisionResult
 	project, err := a.ensureProject(ctx, input.ProjectID, input.CreateProject)
 	if err != nil {
 		return DecisionResult{}, err
+	}
+	taxonomy, err := resolveTaxonomy(input.Subtype, input.Scope, input.Topic)
+	if err != nil {
+		return DecisionResult{}, err
+	}
+	if result, handled, release, upsertErr := a.prepareTopicDecision(ctx, project.ID, input, taxonomy); upsertErr != nil {
+		if release != nil {
+			defer release()
+		}
+		return DecisionResult{}, upsertErr
+	} else if handled {
+		defer release()
+		return result, nil
+	} else if release != nil {
+		defer release()
 	}
 	status := input.Status
 	if status == "" {
@@ -198,6 +230,7 @@ func (a *App) Decision(ctx context.Context, input DecisionInput) (DecisionResult
 		Source:         input.Source,
 		Provenance:     input.Provenance.Normalized(),
 		Validity:       validity,
+		Taxonomy:       taxonomy,
 		Relations:      relations,
 		ReviewSchedule: a.newWriteSchedule(ports.RecordDecision, validity, now),
 		CreatedAt:      now,
@@ -258,6 +291,21 @@ func (a *App) Attempt(ctx context.Context, input AttemptInput) (AttemptResult, e
 	if err != nil {
 		return AttemptResult{}, err
 	}
+	taxonomy, err := resolveTaxonomy(input.Subtype, input.Scope, input.Topic)
+	if err != nil {
+		return AttemptResult{}, err
+	}
+	if result, handled, release, upsertErr := a.prepareTopicAttempt(ctx, project.ID, input, taxonomy); upsertErr != nil {
+		if release != nil {
+			defer release()
+		}
+		return AttemptResult{}, upsertErr
+	} else if handled {
+		defer release()
+		return result, nil
+	} else if release != nil {
+		defer release()
+	}
 	now := a.now()
 	validity, err := a.writeValidity(ctx, project.ID, input.Supersedes, input.SupersededBy, input.Confidence, now)
 	if err != nil {
@@ -276,6 +324,7 @@ func (a *App) Attempt(ctx context.Context, input AttemptInput) (AttemptResult, e
 		Source:         input.Source,
 		Provenance:     input.Provenance.Normalized(),
 		Validity:       validity,
+		Taxonomy:       taxonomy,
 		Relations:      relations,
 		ReviewSchedule: a.newWriteSchedule(ports.RecordAttempt, validity, now),
 		CreatedAt:      now,
@@ -337,6 +386,21 @@ func (a *App) Handoff(ctx context.Context, input HandoffInput) (HandoffResult, e
 	if err != nil {
 		return HandoffResult{}, err
 	}
+	taxonomy, err := resolveTaxonomy(input.Subtype, input.Scope, input.Topic)
+	if err != nil {
+		return HandoffResult{}, err
+	}
+	if result, handled, release, upsertErr := a.prepareTopicHandoff(ctx, project.ID, input, taxonomy); upsertErr != nil {
+		if release != nil {
+			defer release()
+		}
+		return HandoffResult{}, upsertErr
+	} else if handled {
+		defer release()
+		return result, nil
+	} else if release != nil {
+		defer release()
+	}
 	now := a.now()
 	validity, err := a.writeValidity(ctx, project.ID, input.Supersedes, input.SupersededBy, input.Confidence, now)
 	if err != nil {
@@ -351,8 +415,10 @@ func (a *App) Handoff(ctx context.Context, input HandoffInput) (HandoffResult, e
 		Summary:        input.Summary,
 		GitContext:     input.GitContext,
 		NextAction:     input.NextAction,
+		Source:         input.Source,
 		Provenance:     input.Provenance.Normalized(),
 		Validity:       validity,
+		Taxonomy:       taxonomy,
 		Relations:      relations,
 		ReviewSchedule: a.newWriteSchedule(ports.RecordHandoff, validity, now),
 		CreatedAt:      now,
