@@ -56,6 +56,7 @@ const (
 	FindingDecisionCodeChanged  FindingKind = "decision-code-changed"
 	FindingQuarantined          FindingKind = "quarantined"
 	FindingReviewOverdue        FindingKind = "review-overdue"
+	FindingPendingRelations     FindingKind = "pending-relations"
 )
 
 var findingKinds = []FindingKind{
@@ -64,7 +65,7 @@ var findingKinds = []FindingKind{
 	FindingDecisionCodeChanged, FindingBrokenLink, FindingNearDuplicate,
 	FindingQuarantined, FindingSupersessionGap, FindingStaleSuperseded,
 	FindingProposalStale, FindingProposalOrphan, FindingProposalContradicted,
-	FindingReviewOverdue,
+	FindingReviewOverdue, FindingPendingRelations,
 }
 
 // findingSpec is the review metadata of one finding kind: how much it matters,
@@ -177,6 +178,12 @@ var findingSpecs = map[FindingKind]findingSpec{
 		Why:      "a review date is a prompt to re-check, and these claims have not been re-checked since it passed.",
 		Next:     "run `brain review --due`, then `brain record review <id> --review-after 90d` or supersede the record.",
 		Confirm:  "each listed record still states what the project believes.",
+	},
+	FindingPendingRelations: {
+		Severity: SeverityWarn,
+		Why:      "a pending relation is unjudged, so it is ignored by search and context and the pair stays ambiguous.",
+		Next:     "judge the pair with `brain relation judge <from> <to> --verdict <relation> --reason <text>`.",
+		Confirm:  "whether the two records agree, contradict each other, or are unrelated.",
 	},
 }
 
@@ -343,6 +350,7 @@ func (a *App) Findings(ctx context.Context, projectID string) ([]Finding, error)
 	findings = append(findings, a.linkFindings(ctx, in)...)
 	findings = append(findings, supersessionGapFindings(in)...)
 	findings = append(findings, staleSupersededFindings(in, now)...)
+	findings = append(findings, pendingRelationFindings(in, now)...)
 	findings = append(findings, a.reviewOverdueFindings(in, now)...)
 	// Last, so the shorter lists (context, session start) show the state
 	// findings first.

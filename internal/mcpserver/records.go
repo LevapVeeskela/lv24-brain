@@ -44,6 +44,20 @@ type RecordDetail struct {
 	Links []RecordLink `json:"links"`
 	// Backlinks are the records of the same project that reference it.
 	Backlinks []RecordBacklink `json:"backlinks"`
+	// Relations are the typed relations the record carries, pending ones
+	// included.
+	Relations []RecordRelation `json:"relations"`
+}
+
+// RecordRelation is one typed relation of a record.
+type RecordRelation struct {
+	Target     string  `json:"target"`
+	Relation   string  `json:"relation"`
+	Reason     string  `json:"reason,omitempty"`
+	Confidence float64 `json:"confidence,omitempty"`
+	Status     string  `json:"status"`
+	JudgedAt   string  `json:"judged_at,omitempty"`
+	VerdictBy  string  `json:"verdict_by,omitempty"`
 }
 
 // RecordLink is one outgoing [[id]] reference of a record.
@@ -180,7 +194,8 @@ func (s *Server) recordTools() []tool {
 				"updated_at":   stringProp("RFC3339 last update."),
 				"links":        arrayProp("Outgoing [[id]] references, resolved.", objectProp("One resolved reference.")),
 				"backlinks":    arrayProp("Records of the same project that reference this one.", objectProp("One backlink.")),
-			}, "kind", "id", "project_id", "title", "links", "backlinks"),
+				"relations":    arrayProp("Typed relations of the record, pending ones included.", objectProp("One relation.")),
+			}, "kind", "id", "project_id", "title", "links", "backlinks", "relations"),
 			run: s.recordShow,
 		},
 		{
@@ -480,6 +495,13 @@ func detailText(detail RecordDetail) string {
 	}
 	for _, backlink := range detail.Backlinks {
 		lines = append(lines, "backlink: "+BacklinkLine(backlink))
+	}
+	for _, relation := range detail.Relations {
+		line := "relation: " + relation.Relation + " " + relation.Target + " [" + relation.Status + "]"
+		if relation.Reason != "" {
+			line += " " + relation.Reason
+		}
+		lines = append(lines, line)
 	}
 	return strings.Join(lines, "\n")
 }

@@ -208,11 +208,11 @@ func isExcludedRootDir(rel, name string) bool {
 	switch strings.ToLower(name) {
 	// Derived or private data, and high-churn external or activity data
 	// (connector dumps and runs, raw-zone items and checkpoints under
-	// connectors/<connectionID>/, journals, machine-local proposals): the
-	// revision tracks curated knowledge, so a nightly mail sync, a journal
-	// line or a digest rerun does not change it and writes do not rehash
-	// every derived file.
-	case "secrets", "index", "backups", "mail", "github", "gitlab", "connectors", "journal", "proposals":
+	// connectors/<connectionID>/, journals, machine-local proposals, merge
+	// manifests): the revision tracks curated knowledge, so a nightly mail
+	// sync, a journal line, a digest rerun or a merge manifest does not change
+	// it and writes do not rehash every derived file.
+	case "secrets", "index", "backups", "mail", "github", "gitlab", "connectors", "journal", "proposals", "merges":
 		return true
 	default:
 		return false

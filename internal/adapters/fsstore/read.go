@@ -239,6 +239,14 @@ func parseNotesBody(body string, defaultDate time.Time) ([]domain.Note, error) {
 			if err != nil {
 				return nil, err
 			}
+			relations, err := relationsFromFrontmatter(metadata.relationsFrontmatter, "note.relations", id)
+			if err != nil {
+				return nil, err
+			}
+			merge, err := mergeFromFrontmatter(metadata.mergeFrontmatter, "note.merge", id)
+			if err != nil {
+				return nil, err
+			}
 			review, err := reviewFromFrontmatter(metadata.reviewFrontmatter)
 			if err != nil {
 				return nil, err
@@ -252,6 +260,8 @@ func parseNotesBody(body string, defaultDate time.Time) ([]domain.Note, error) {
 				Source:         metadata.Source,
 				Provenance:     provenanceFromFrontmatter(metadata.provenanceFrontmatter),
 				Validity:       validity,
+				MergeInfo:      merge,
+				Relations:      relations,
 				ReviewSchedule: review,
 				CreatedAt:      metadata.CreatedAt.UTC(),
 			})
@@ -360,6 +370,14 @@ func readDecisionFile(path string) (domain.Decision, error) {
 	if err != nil {
 		return domain.Decision{}, fmt.Errorf("parse %s: %w", path, err)
 	}
+	relations, err := relationsFromFrontmatter(frontmatter.relationsFrontmatter, "decision.relations", frontmatter.ID)
+	if err != nil {
+		return domain.Decision{}, fmt.Errorf("parse %s: %w", path, err)
+	}
+	merge, err := mergeFromFrontmatter(frontmatter.mergeFrontmatter, "decision.merge", frontmatter.ID)
+	if err != nil {
+		return domain.Decision{}, fmt.Errorf("parse %s: %w", path, err)
+	}
 	review, err := reviewFromFrontmatter(frontmatter.reviewFrontmatter)
 	if err != nil {
 		return domain.Decision{}, fmt.Errorf("parse %s: %w", path, err)
@@ -378,6 +396,8 @@ func readDecisionFile(path string) (domain.Decision, error) {
 		Source:         source,
 		Provenance:     provenanceFromFrontmatter(frontmatter.provenanceFrontmatter),
 		Validity:       validity,
+		MergeInfo:      merge,
+		Relations:      relations,
 		ReviewSchedule: review,
 		CreatedAt:      frontmatter.CreatedAt.UTC(),
 		UpdatedAt:      frontmatter.UpdatedAt.UTC(),
@@ -412,6 +432,14 @@ func readAttemptFile(path string) (domain.Attempt, error) {
 	if err != nil {
 		return domain.Attempt{}, fmt.Errorf("parse %s: %w", path, err)
 	}
+	relations, err := relationsFromFrontmatter(frontmatter.relationsFrontmatter, "attempt.relations", frontmatter.ID)
+	if err != nil {
+		return domain.Attempt{}, fmt.Errorf("parse %s: %w", path, err)
+	}
+	merge, err := mergeFromFrontmatter(frontmatter.mergeFrontmatter, "attempt.merge", frontmatter.ID)
+	if err != nil {
+		return domain.Attempt{}, fmt.Errorf("parse %s: %w", path, err)
+	}
 	review, err := reviewFromFrontmatter(frontmatter.reviewFrontmatter)
 	if err != nil {
 		return domain.Attempt{}, fmt.Errorf("parse %s: %w", path, err)
@@ -427,6 +455,8 @@ func readAttemptFile(path string) (domain.Attempt, error) {
 		Source:         source,
 		Provenance:     provenanceFromFrontmatter(frontmatter.provenanceFrontmatter),
 		Validity:       validity,
+		MergeInfo:      merge,
+		Relations:      relations,
 		ReviewSchedule: review,
 		CreatedAt:      frontmatter.CreatedAt.UTC(),
 		UpdatedAt:      frontmatter.UpdatedAt.UTC(),
@@ -451,6 +481,14 @@ func readHandoffFile(path string) (domain.Handoff, error) {
 	if err != nil {
 		return domain.Handoff{}, fmt.Errorf("parse %s: %w", path, err)
 	}
+	relations, err := relationsFromFrontmatter(frontmatter.relationsFrontmatter, "handoff.relations", frontmatter.ID)
+	if err != nil {
+		return domain.Handoff{}, fmt.Errorf("parse %s: %w", path, err)
+	}
+	merge, err := mergeFromFrontmatter(frontmatter.mergeFrontmatter, "handoff.merge", frontmatter.ID)
+	if err != nil {
+		return domain.Handoff{}, fmt.Errorf("parse %s: %w", path, err)
+	}
 	review, err := reviewFromFrontmatter(frontmatter.reviewFrontmatter)
 	if err != nil {
 		return domain.Handoff{}, fmt.Errorf("parse %s: %w", path, err)
@@ -464,6 +502,8 @@ func readHandoffFile(path string) (domain.Handoff, error) {
 		Permalink:      frontmatter.Permalink,
 		Provenance:     provenanceFromFrontmatter(frontmatter.provenanceFrontmatter),
 		Validity:       validity,
+		MergeInfo:      merge,
+		Relations:      relations,
 		ReviewSchedule: review,
 		CreatedAt:      frontmatter.CreatedAt.UTC(),
 	}, nil

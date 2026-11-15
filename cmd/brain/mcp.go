@@ -553,3 +553,61 @@ func (b mcpBackend) ReviewRecord(ctx context.Context, in mcpserver.ReviewRecordI
 		Reviewed:  mapAll(result.Reviewed, toRecordSummary),
 	}, nil
 }
+
+// ListRelations implements mcpserver.RelationBackend.
+func (b mcpBackend) ListRelations(ctx context.Context, query mcpserver.RelationQuery) ([]mcpserver.RelationRow, error) {
+	statuses := make([]domain.RelationStatus, 0, len(query.Statuses))
+	for _, status := range query.Statuses {
+		statuses = append(statuses, domain.RelationStatus(status))
+	}
+	kinds := make([]domain.RelationKind, 0, len(query.Relations))
+	for _, relation := range query.Relations {
+		kinds = append(kinds, domain.RelationKind(relation))
+	}
+	views, err := b.app.Relations(ctx, app.RelationListOptions{
+		ProjectID: query.ProjectID,
+		ID:        query.ID,
+		TargetID:  query.Target,
+		Statuses:  statuses,
+		Kinds:     kinds,
+		Limit:     query.Limit,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return mapAll(views, toMCPRelation), nil
+}
+
+// JudgeRelation implements mcpserver.RelationBackend.
+func (b mcpBackend) JudgeRelation(ctx context.Context, in mcpserver.JudgeInput) (mcpserver.JudgedRelation, error) {
+	result, err := b.app.JudgeRelation(ctx, app.JudgeOptions{
+		ProjectID:  in.ProjectID,
+		From:       in.From,
+		To:         in.To,
+		Verdict:    domain.RelationKind(in.Verdict),
+		Reason:     in.Reason,
+		Confidence: in.Confidence,
+		By:         domain.VerdictBy(in.By),
+	})
+	if err != nil {
+		return mcpserver.JudgedRelation{}, err
+	}
+	return mcpserver.JudgedRelation{Relation: toMCPRelation(result.Relation), Changed: result.Changed}, nil
+}
+
+// toMCPRelation projects one relation view for the MCP tools.
+func toMCPRelation(view app.RelationView) mcpserver.RelationRow {
+	row := mcpserver.RelationRow{
+		SourceKind: view.Source.Kind, SourceID: view.Source.ID, SourceTitle: view.Source.Title,
+		TargetID: view.TargetID, TargetState: view.TargetState,
+		Relation: string(view.Relation.Relation), Status: string(view.Relation.Status),
+		Reason: view.Relation.Reason, Confidence: view.Relation.Confidence,
+		JudgedAt: view.Relation.JudgedAt, VerdictBy: string(view.Relation.VerdictBy),
+		Direction: view.Direction, AgeDays: view.AgeDays,
+	}
+	if view.Target != nil {
+		row.TargetKind = view.Target.Kind
+		row.TargetTitle = view.Target.Title
+	}
+	return row
+}

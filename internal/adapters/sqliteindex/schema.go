@@ -21,6 +21,25 @@ var schemaStatements = []string{
 	`CREATE INDEX IF NOT EXISTS documents_project_idx ON documents(project_id)`,
 	`CREATE INDEX IF NOT EXISTS documents_valid_idx ON documents(kind, valid_to)`,
 	`CREATE INDEX IF NOT EXISTS documents_superseded_idx ON documents(superseded_by)`,
+	// relations is the derived projection of the typed relation frontmatter.
+	// source_id is the project-scoped document key ("<project>/<record>") so a
+	// source can be joined to its document; the relation target stays a record
+	// id, because relations never cross projects.
+	`CREATE TABLE IF NOT EXISTS relations (
+		source_id TEXT NOT NULL,
+		project_id TEXT NOT NULL,
+		target_id TEXT NOT NULL,
+		relation TEXT NOT NULL,
+		status TEXT NOT NULL,
+		confidence REAL NOT NULL DEFAULT 0,
+		reason TEXT NOT NULL DEFAULT '',
+		judged_at INTEGER,
+		verdict_by TEXT NOT NULL DEFAULT '',
+		PRIMARY KEY (source_id, target_id, relation)
+	)`,
+	`CREATE INDEX IF NOT EXISTS relations_project_idx ON relations(project_id)`,
+	`CREATE INDEX IF NOT EXISTS relations_target_idx ON relations(project_id, target_id)`,
+	`CREATE INDEX IF NOT EXISTS relations_status_idx ON relations(project_id, status)`,
 	`CREATE VIRTUAL TABLE IF NOT EXISTS documents_fts USING fts5(
 		title,
 		body,
@@ -59,6 +78,18 @@ ON CONFLICT(id) DO UPDATE SET
 
 const deleteSQL = `DELETE FROM documents WHERE id = ?`
 
+const deleteRelationsSQL = `DELETE FROM relations WHERE source_id = ?`
+
+const upsertRelationSQL = `INSERT INTO relations (source_id, project_id, target_id, relation, status, confidence, reason, judged_at, verdict_by)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+ON CONFLICT(source_id, target_id, relation) DO UPDATE SET
+	project_id = excluded.project_id,
+	status = excluded.status,
+	confidence = excluded.confidence,
+	reason = excluded.reason,
+	judged_at = excluded.judged_at,
+	verdict_by = excluded.verdict_by`
+
 // schemaVersion is stored in SQLite's user_version. Bump it when the document
 // id scheme or the table layout changes: the index is derived data, so a
 // mismatch drops it and the caller reindexes from the Markdown sources.
@@ -66,7 +97,8 @@ const deleteSQL = `DELETE FROM documents WHERE id = ?`
 // Version 3 adds temporal validity (valid_from, valid_to, superseded_by,
 // supersedes) and its indexes.
 // Version 4 adds the ranking inputs (decision status, author confidence).
-const schemaVersion = 4
+// Version 5 adds the derived relations table for listings and backlinks.
+const schemaVersion = 5
 
 // dropStatements remove everything schemaStatements creates. Triggers go
 // first because they reference the tables.
@@ -74,6 +106,7 @@ var dropStatements = []string{
 	`DROP TRIGGER IF EXISTS documents_after_insert`,
 	`DROP TRIGGER IF EXISTS documents_after_delete`,
 	`DROP TRIGGER IF EXISTS documents_after_update`,
+	`DROP TABLE IF EXISTS relations`,
 	`DROP TABLE IF EXISTS documents_fts`,
 	`DROP TABLE IF EXISTS documents`,
 }

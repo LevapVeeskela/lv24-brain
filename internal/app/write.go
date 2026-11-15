@@ -88,6 +88,10 @@ func (a *App) Note(ctx context.Context, input NoteInput) (NoteResult, error) {
 	if err != nil {
 		return NoteResult{}, err
 	}
+	relations, err := a.prepareRelations(ctx, project.ID, input.ID, input.Relations)
+	if err != nil {
+		return NoteResult{}, err
+	}
 	note := domain.Note{
 		ProjectID:      project.ID,
 		Title:          title,
@@ -96,6 +100,7 @@ func (a *App) Note(ctx context.Context, input NoteInput) (NoteResult, error) {
 		Source:         input.Source,
 		Provenance:     input.Provenance.Normalized(),
 		Validity:       validity,
+		Relations:      relations,
 		ReviewSchedule: a.newWriteSchedule(ports.RecordNote, validity, now),
 		CreatedAt:      now,
 		UpdatedAt:      now,
@@ -103,6 +108,7 @@ func (a *App) Note(ctx context.Context, input NoteInput) (NoteResult, error) {
 	if err := note.Validate(); err != nil {
 		return NoteResult{}, err
 	}
+	note.Relations = append(note.Relations, a.candidateRelations(ctx, project.ID, Record{Note: &note}, note.Relations)...)
 	if err := a.enforceCreateLimits(project.ID, ports.RecordNote, noteWriteContent(note), input.AllowProtected); err != nil {
 		return NoteResult{}, err
 	}
@@ -172,6 +178,10 @@ func (a *App) Decision(ctx context.Context, input DecisionInput) (DecisionResult
 	if err != nil {
 		return DecisionResult{}, err
 	}
+	relations, err := a.prepareRelations(ctx, project.ID, input.ID, input.Relations)
+	if err != nil {
+		return DecisionResult{}, err
+	}
 	if validity.SupersededBy != "" {
 		// A repaired record is history by definition.
 		status = domain.DecisionSuperseded
@@ -188,6 +198,7 @@ func (a *App) Decision(ctx context.Context, input DecisionInput) (DecisionResult
 		Source:         input.Source,
 		Provenance:     input.Provenance.Normalized(),
 		Validity:       validity,
+		Relations:      relations,
 		ReviewSchedule: a.newWriteSchedule(ports.RecordDecision, validity, now),
 		CreatedAt:      now,
 		UpdatedAt:      now,
@@ -195,6 +206,7 @@ func (a *App) Decision(ctx context.Context, input DecisionInput) (DecisionResult
 	if err := decision.Validate(); err != nil {
 		return DecisionResult{}, err
 	}
+	decision.Relations = append(decision.Relations, a.candidateRelations(ctx, project.ID, Record{Decision: &decision}, decision.Relations)...)
 	if err := a.enforceCreateLimits(project.ID, ports.RecordDecision, decisionWriteContent(decision), input.AllowProtected); err != nil {
 		return DecisionResult{}, err
 	}
@@ -251,6 +263,10 @@ func (a *App) Attempt(ctx context.Context, input AttemptInput) (AttemptResult, e
 	if err != nil {
 		return AttemptResult{}, err
 	}
+	relations, err := a.prepareRelations(ctx, project.ID, input.ID, input.Relations)
+	if err != nil {
+		return AttemptResult{}, err
+	}
 	attempt := domain.Attempt{
 		ProjectID:      project.ID,
 		Title:          strings.TrimSpace(input.Title),
@@ -260,6 +276,7 @@ func (a *App) Attempt(ctx context.Context, input AttemptInput) (AttemptResult, e
 		Source:         input.Source,
 		Provenance:     input.Provenance.Normalized(),
 		Validity:       validity,
+		Relations:      relations,
 		ReviewSchedule: a.newWriteSchedule(ports.RecordAttempt, validity, now),
 		CreatedAt:      now,
 		UpdatedAt:      now,
@@ -267,6 +284,7 @@ func (a *App) Attempt(ctx context.Context, input AttemptInput) (AttemptResult, e
 	if err := attempt.Validate(); err != nil {
 		return AttemptResult{}, err
 	}
+	attempt.Relations = append(attempt.Relations, a.candidateRelations(ctx, project.ID, Record{Attempt: &attempt}, attempt.Relations)...)
 	if err := a.enforceCreateLimits(project.ID, ports.RecordAttempt, attemptWriteContent(attempt), input.AllowProtected); err != nil {
 		return AttemptResult{}, err
 	}
@@ -324,6 +342,10 @@ func (a *App) Handoff(ctx context.Context, input HandoffInput) (HandoffResult, e
 	if err != nil {
 		return HandoffResult{}, err
 	}
+	relations, err := a.prepareRelations(ctx, project.ID, "", input.Relations)
+	if err != nil {
+		return HandoffResult{}, err
+	}
 	handoff := domain.Handoff{
 		ProjectID:      project.ID,
 		Summary:        input.Summary,
@@ -331,12 +353,14 @@ func (a *App) Handoff(ctx context.Context, input HandoffInput) (HandoffResult, e
 		NextAction:     input.NextAction,
 		Provenance:     input.Provenance.Normalized(),
 		Validity:       validity,
+		Relations:      relations,
 		ReviewSchedule: a.newWriteSchedule(ports.RecordHandoff, validity, now),
 		CreatedAt:      now,
 	}
 	if err := handoff.Validate(); err != nil {
 		return HandoffResult{}, err
 	}
+	handoff.Relations = append(handoff.Relations, a.candidateRelations(ctx, project.ID, Record{Handoff: &handoff}, handoff.Relations)...)
 	if err := a.enforceCreateLimits(project.ID, ports.RecordHandoff, handoffWriteContent(handoff), input.AllowProtected); err != nil {
 		return HandoffResult{}, err
 	}

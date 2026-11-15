@@ -16,8 +16,8 @@ func listToolsWith(t *testing.T, backend Backend) map[string]any {
 func TestContractEveryToolIsAnnotated(t *testing.T) {
 	result := listToolsWith(t, &fullFake{})
 	tools := result["tools"].([]any)
-	if len(tools) != 16 {
-		t.Fatalf("tools = %d, want 16", len(tools))
+	if len(tools) != 18 {
+		t.Fatalf("tools = %d, want 18", len(tools))
 	}
 	for _, raw := range tools {
 		tool := raw.(map[string]any)
@@ -48,7 +48,7 @@ func TestContractReadOnlyHintsMatchTheTools(t *testing.T) {
 	readOnly := map[string]bool{
 		"brain_open": true, "brain_context": true, "brain_search": true, "brain_journal": true,
 		"brain_projects": true, "brain_state_get": true, "brain_catchup": true, "brain_review": true,
-		"brain_records": true, "brain_record": true,
+		"brain_records": true, "brain_record": true, "brain_relations": true,
 	}
 	for _, raw := range result["tools"].([]any) {
 		tool := raw.(map[string]any)
@@ -62,8 +62,8 @@ func TestContractReadOnlyHintsMatchTheTools(t *testing.T) {
 
 func TestContractCatalogueCoversEveryTool(t *testing.T) {
 	specs := Catalog("test-version")
-	if len(specs) != 17 {
-		t.Fatalf("catalogue = %d tools, want 17", len(specs))
+	if len(specs) != 19 {
+		t.Fatalf("catalogue = %d tools, want 19", len(specs))
 	}
 	seen := map[string]bool{}
 	for _, spec := range specs {
@@ -78,7 +78,7 @@ func TestContractCatalogueCoversEveryTool(t *testing.T) {
 			t.Fatalf("%s schemas = %v / %v", spec.Name, spec.InputSchema["type"], spec.OutputSchema["type"])
 		}
 	}
-	for _, name := range []string{"brain_search", "brain_records", "brain_journal"} {
+	for _, name := range []string{"brain_search", "brain_records", "brain_journal", "brain_relations"} {
 		spec := findSpec(t, specs, name)
 		for _, key := range []string{"default_page_size", "max_page_size"} {
 			if spec.Limits[key] <= 0 {

@@ -233,6 +233,7 @@ func noteDocument(note domain.Note) ports.Document {
 		SupersededBy: note.Validity.SupersededBy,
 		Supersedes:   note.Validity.Supersedes,
 		Confidence:   note.Validity.Confidence,
+		Relations:    relationLinks(note.Relations),
 	}
 }
 
@@ -255,6 +256,7 @@ func decisionDocument(decision domain.Decision) ports.Document {
 		Supersedes:   decision.Validity.Supersedes,
 		Status:       string(decision.Status),
 		Confidence:   decision.Validity.Confidence,
+		Relations:    relationLinks(decision.Relations),
 	}
 }
 
@@ -271,6 +273,7 @@ func attemptDocument(attempt domain.Attempt) ports.Document {
 		SupersededBy: attempt.Validity.SupersededBy,
 		Supersedes:   attempt.Validity.Supersedes,
 		Confidence:   attempt.Validity.Confidence,
+		Relations:    relationLinks(attempt.Relations),
 	}
 }
 
@@ -287,6 +290,7 @@ func handoffDocument(handoff domain.Handoff) ports.Document {
 		SupersededBy: handoff.Validity.SupersededBy,
 		Supersedes:   handoff.Validity.Supersedes,
 		Confidence:   handoff.Validity.Confidence,
+		Relations:    relationLinks(handoff.Relations),
 	}
 }
 

@@ -32,6 +32,8 @@ func runRecord(args []string, stdout, stderr io.Writer) int {
   brain record review --all [--trust verified|stated|inferred] [--project p]
   brain record trash <id> --yes [--project p]
   brain record restore <id> [--project p]
+  brain record merge <survivor> <duplicate>... [--dry-run|--apply] [--json]
+  brain record merge --rollback <manifest> [--json]
   brain record trash-list [project] [--json]
 
 [project] is an id, alias or path (default: the working directory's project).
@@ -59,6 +61,8 @@ Trash is reversible: restore brings a trashed record back.
 		return runRecordTrash(args[1:], stdout, stderr)
 	case "restore":
 		return runRecordRestore(args[1:], stdout, stderr)
+	case "merge":
+		return runRecordMerge(args[1:], stdout, stderr)
 	case "trash-list":
 		return runRecordTrashList(args[1:], stdout, stderr)
 	case "help", "-h", "--help":
@@ -181,6 +185,7 @@ func runRecordShow(args []string, stdout, stderr io.Writer) int {
 	}
 	printRecordDetail(stdout, detail)
 	printRecordValidity(stdout, summary)
+	printRecordRelations(stdout, detail.Relations)
 	if validAt != nil {
 		printRecordLine(stdout, "as_of", asOf.UTC().Format(time.RFC3339))
 		printRecordLine(stdout, "valid_at", yesNo(*validAt))
@@ -629,6 +634,7 @@ func toRecordDetail(record app.Record) mcpserver.RecordDetail {
 		Status:    summary.Status,
 		CreatedAt: summary.CreatedAt,
 		UpdatedAt: summary.UpdatedAt,
+		Relations: toMCPRelations(record.Relations()),
 	}
 	switch {
 	case record.Note != nil:

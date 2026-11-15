@@ -190,6 +190,10 @@ type NoteInput struct {
 	// limits.protected_globs refusal. It is the explicit CLI flag; MCP never
 	// sets it.
 	AllowProtected bool
+	// Relations are explicit relations declared at write time. They are
+	// accepted (the author claims them); candidate detection only ever adds
+	// pending ones.
+	Relations []domain.Relation
 }
 
 // NoteResult identifies the appended note.
@@ -229,6 +233,8 @@ type DecisionInput struct {
 	CreateProject bool
 	// AllowProtected overrides the protected project and glob refusal.
 	AllowProtected bool
+	// Relations are explicit relations declared at write time.
+	Relations []domain.Relation
 }
 
 // DecisionResult identifies the appended decision.
@@ -264,6 +270,8 @@ type AttemptInput struct {
 	CreateProject bool
 	// AllowProtected overrides the protected project and glob refusal.
 	AllowProtected bool
+	// Relations are explicit relations declared at write time.
+	Relations []domain.Relation
 }
 
 // AttemptResult identifies the appended attempt.
@@ -294,6 +302,8 @@ type HandoffInput struct {
 	CreateProject bool
 	// AllowProtected overrides the protected project and glob refusal.
 	AllowProtected bool
+	// Relations are explicit relations declared at write time.
+	Relations []domain.Relation
 }
 
 // HandoffResult identifies the appended handoff.

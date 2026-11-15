@@ -97,7 +97,7 @@ func policySession(t *testing.T, backend Backend, policy Policy, messages ...str
 // writeTools are every tool whose annotations say it writes.
 var writeTools = []string{
 	"brain_note", "brain_decision", "brain_attempt", "brain_handoff",
-	"brain_state_set", "brain_decision_status", "brain_review_record",
+	"brain_state_set", "brain_decision_status", "brain_review_record", "brain_judge",
 }
 
 func TestReadOnlyPolicyOmitsEveryWriteTool(t *testing.T) {

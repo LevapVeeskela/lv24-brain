@@ -264,12 +264,31 @@ func (i *Index) Close() error {
 	return i.db.Close()
 }
 
-// Upsert inserts or replaces one indexed document.
+// Upsert inserts or replaces one indexed document and its derived relation
+// rows. Both happen in one transaction, so a reader never sees a document with
+// a stale relation set. Another process writing the same index can make the
+// transaction lose the lock, so the whole unit is retried while the database is
+// busy.
 func (i *Index) Upsert(ctx context.Context, doc ports.Document) error {
 	if err := validateDocument(doc); err != nil {
 		return err
 	}
-	if _, err := i.db.ExecContext(ctx, upsertSQL,
+	if err := validateRelations(doc); err != nil {
+		return err
+	}
+	return retryOnBusy(ctx, busyTimeout, func() error {
+		return i.upsertOnce(ctx, doc)
+	})
+}
+
+// upsertOnce performs one upsert transaction.
+func (i *Index) upsertOnce(ctx context.Context, doc ports.Document) error {
+	tx, err := i.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("sqliteindex: begin upsert %q: %w", doc.ID, err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err := tx.ExecContext(ctx, upsertSQL,
 		doc.ID,
 		doc.ProjectID,
 		doc.Kind,
@@ -284,6 +303,27 @@ func (i *Index) Upsert(ctx context.Context, doc ports.Document) error {
 		doc.Confidence,
 	); err != nil {
 		return fmt.Errorf("sqliteindex: upsert %q: %w", doc.ID, err)
+	}
+	if _, err := tx.ExecContext(ctx, deleteRelationsSQL, doc.ID); err != nil {
+		return fmt.Errorf("sqliteindex: clear relations of %q: %w", doc.ID, err)
+	}
+	for _, relation := range doc.Relations {
+		if _, err := tx.ExecContext(ctx, upsertRelationSQL,
+			doc.ID,
+			doc.ProjectID,
+			relation.Target,
+			relation.Relation,
+			relation.Status,
+			relation.Confidence,
+			relation.Reason,
+			nullableNanos(relation.JudgedAt),
+			relation.VerdictBy,
+		); err != nil {
+			return fmt.Errorf("sqliteindex: index relation %q of %q: %w", relation.Target, doc.ID, err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("sqliteindex: commit upsert %q: %w", doc.ID, err)
 	}
 	return nil
 }
@@ -338,13 +378,32 @@ func (i *Index) IDs(ctx context.Context) ([]string, error) {
 	return ids, rows.Err()
 }
 
-// Delete removes a document from the index. Unknown ids are ignored.
+// Delete removes a document and its relation rows from the index. Unknown ids
+// are ignored. Like Upsert, the unit is retried while another process holds the
+// write lock.
 func (i *Index) Delete(ctx context.Context, id string) error {
 	if err := domain.ValidateRequired("index.document.id", id); err != nil {
 		return err
 	}
-	if _, err := i.db.ExecContext(ctx, deleteSQL, id); err != nil {
+	return retryOnBusy(ctx, busyTimeout, func() error {
+		return i.deleteOnce(ctx, id)
+	})
+}
+
+func (i *Index) deleteOnce(ctx context.Context, id string) error {
+	tx, err := i.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("sqliteindex: begin delete %q: %w", id, err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err := tx.ExecContext(ctx, deleteRelationsSQL, id); err != nil {
+		return fmt.Errorf("sqliteindex: delete relations of %q: %w", id, err)
+	}
+	if _, err := tx.ExecContext(ctx, deleteSQL, id); err != nil {
 		return fmt.Errorf("sqliteindex: delete %q: %w", id, err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("sqliteindex: commit delete %q: %w", id, err)
 	}
 	return nil
 }

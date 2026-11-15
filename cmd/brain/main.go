@@ -165,6 +165,8 @@ func runCommand(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return runState(rest, stdout, stderr)
 	case "record":
 		return runRecord(rest, stdout, stderr)
+	case "relation":
+		return runRelation(rest, stdout, stderr)
 	case "links":
 		return runLinks(rest, stdout, stderr)
 	case "catchup":
@@ -252,7 +254,8 @@ Commands:
   state      Get or set a project's goal, next action, blockers and questions
   catchup    what changed since the latest handoff
   digest     Morning summary across projects: changes, and what needs you (--write saves it); --source <conn> previews proposals
-  record     List, show, change status, trash and restore records
+  record     List, show, change status, merge, trash and restore records
+  relation   List, show and judge typed relations between records
   links      [[id]] links and backlinks of a record; --broken lists dangling links
   session    start|end handlers for agent session hooks
   mcp        Serve the brain as an MCP server over stdio (for coding agents)
@@ -1059,6 +1062,8 @@ func runNote(args []string, stdout, stderr io.Writer) int {
 	create := fs.Bool("create", false, "register --project first if it does not exist yet")
 	allowProtected := fs.Bool("allow-protected", false, "write even though limits.protected_projects or limits.protected_globs protect the project or path")
 	allowDuplicate := fs.Bool("allow-duplicate", false, "write even though an existing note holds the same normalized text")
+	var relationFlags repeatedFlag
+	fs.Var(&relationFlags, "relation", "declare a relation as <target>:<relation>[:<reason>] (repeatable)")
 	cfgPath := configFlag(fs)
 	positional, err := parseInterspersed(fs, args)
 	if err != nil {
@@ -1073,6 +1078,11 @@ func runNote(args []string, stdout, stderr io.Writer) int {
 		if *title == "" {
 			*title = splitTitle(text)
 		}
+	}
+	relations, err := app.ParseRelationSpecs(relationFlags, domain.VerdictByHuman, time.Now())
+	if err != nil {
+		fmt.Fprintf(stderr, "brain note: %v\n", err)
+		return 2
 	}
 	cfg, err := loadRequiredConfig(*cfgPath)
 	if err != nil {
@@ -1094,6 +1104,7 @@ func runNote(args []string, stdout, stderr io.Writer) int {
 		Confidence:     *confidence,
 		AllowProtected: *allowProtected,
 		AllowDuplicate: *allowDuplicate,
+		Relations:      relations,
 	})
 	if err != nil {
 		return reportError(stderr, "note", err)
@@ -1118,6 +1129,8 @@ func runDecision(args []string, stdout, stderr io.Writer) int {
 	create := fs.Bool("create", false, "register --project first if it does not exist yet")
 	allowProtected := fs.Bool("allow-protected", false, "write even though limits.protected_projects or limits.protected_globs protect the project or path")
 	allowDuplicate := fs.Bool("allow-duplicate", false, "write even though an existing decision holds the same normalized text")
+	var relationFlags repeatedFlag
+	fs.Var(&relationFlags, "relation", "declare a relation as <target>:<relation>[:<reason>] (repeatable)")
 	cfgPath := configFlag(fs)
 	positional, err := parseInterspersed(fs, args)
 	if err != nil {
@@ -1129,6 +1142,11 @@ func runDecision(args []string, stdout, stderr io.Writer) int {
 			return 2
 		}
 		*title = text
+	}
+	relations, err := app.ParseRelationSpecs(relationFlags, domain.VerdictByHuman, time.Now())
+	if err != nil {
+		fmt.Fprintf(stderr, "brain decision: %v\n", err)
+		return 2
 	}
 	cfg, err := loadRequiredConfig(*cfgPath)
 	if err != nil {
@@ -1154,6 +1172,7 @@ func runDecision(args []string, stdout, stderr io.Writer) int {
 		Confidence:     *confidence,
 		AllowProtected: *allowProtected,
 		AllowDuplicate: *allowDuplicate,
+		Relations:      relations,
 	})
 	if err != nil {
 		return reportError(stderr, "decision", err)
@@ -1175,6 +1194,8 @@ func runAttempt(args []string, stdout, stderr io.Writer) int {
 	create := fs.Bool("create", false, "register --project first if it does not exist yet")
 	allowProtected := fs.Bool("allow-protected", false, "write even though limits.protected_projects or limits.protected_globs protect the project or path")
 	allowDuplicate := fs.Bool("allow-duplicate", false, "write even though an existing attempt holds the same normalized text")
+	var relationFlags repeatedFlag
+	fs.Var(&relationFlags, "relation", "declare a relation as <target>:<relation>[:<reason>] (repeatable)")
 	cfgPath := configFlag(fs)
 	positional, err := parseInterspersed(fs, args)
 	if err != nil {
@@ -1186,6 +1207,11 @@ func runAttempt(args []string, stdout, stderr io.Writer) int {
 			return 2
 		}
 		*title = text
+	}
+	relations, err := app.ParseRelationSpecs(relationFlags, domain.VerdictByHuman, time.Now())
+	if err != nil {
+		fmt.Fprintf(stderr, "brain attempt: %v\n", err)
+		return 2
 	}
 	cfg, err := loadRequiredConfig(*cfgPath)
 	if err != nil {
@@ -1208,6 +1234,7 @@ func runAttempt(args []string, stdout, stderr io.Writer) int {
 		Confidence:     *confidence,
 		AllowProtected: *allowProtected,
 		AllowDuplicate: *allowDuplicate,
+		Relations:      relations,
 	})
 	if err != nil {
 		return reportError(stderr, "attempt", err)
@@ -1229,6 +1256,8 @@ func runHandoff(args []string, stdout, stderr io.Writer) int {
 	create := fs.Bool("create", false, "register --project first if it does not exist yet")
 	allowProtected := fs.Bool("allow-protected", false, "write even though limits.protected_projects or limits.protected_globs protect the project or path")
 	allowDuplicate := fs.Bool("allow-duplicate", false, "write even though an existing handoff holds the same summary and next action")
+	var relationFlags repeatedFlag
+	fs.Var(&relationFlags, "relation", "declare a relation as <target>:<relation>[:<reason>] (repeatable)")
 	cfgPath := configFlag(fs)
 	positional, err := parseInterspersed(fs, args)
 	if err != nil {
@@ -1240,6 +1269,11 @@ func runHandoff(args []string, stdout, stderr io.Writer) int {
 			return 2
 		}
 		*summary = text
+	}
+	relations, err := app.ParseRelationSpecs(relationFlags, domain.VerdictByHuman, time.Now())
+	if err != nil {
+		fmt.Fprintf(stderr, "brain handoff: %v\n", err)
+		return 2
 	}
 	cfg, err := loadRequiredConfig(*cfgPath)
 	if err != nil {
@@ -1274,6 +1308,7 @@ func runHandoff(args []string, stdout, stderr io.Writer) int {
 		Confidence:     *confidence,
 		AllowProtected: *allowProtected,
 		AllowDuplicate: *allowDuplicate,
+		Relations:      relations,
 	})
 	if err != nil {
 		return reportError(stderr, "handoff", err)

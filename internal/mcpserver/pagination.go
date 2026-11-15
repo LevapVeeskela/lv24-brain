@@ -157,6 +157,8 @@ func pageLimitsFor(tool string) pageLimits {
 		return pageLimits{def: recordsDefaultPageSize, max: recordsMaxPageSize}
 	case "brain_journal":
 		return pageLimits{def: DefaultJournalLimit, max: journalMaxPageSize, window: journalWindow}
+	case "brain_relations":
+		return pageLimits{def: relationsDefaultPageSize, max: relationsMaxPageSize}
 	default:
 		return pageLimits{def: 20, max: 100}
 	}
@@ -178,6 +180,11 @@ const (
 	journalMaxPageSize = 500
 	// journalWindow is the largest journal offset the journal adapter can serve.
 	journalWindow = 1000
+	// relationsDefaultPageSize is the page size of an unpaginated
+	// brain_relations.
+	relationsDefaultPageSize = 50
+	// relationsMaxPageSize bounds one brain_relations page.
+	relationsMaxPageSize = 200
 )
 
 // limitsOf renders page limits as the limits map of a catalogue entry.

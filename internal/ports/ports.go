@@ -99,6 +99,10 @@ type Document struct {
 	Status string
 	// Confidence is the optional 0..1 author confidence of the record.
 	Confidence float64
+	// Relations is the typed relation set of the record. The index stores a
+	// derived copy for listings and backlinks; frontmatter stays the source of
+	// truth.
+	Relations []RelationLink
 }
 
 // Match modes of a query. The zero value keeps the historical behaviour: the

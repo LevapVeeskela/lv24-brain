@@ -182,7 +182,7 @@ type tool struct {
 func (s *Server) toolList() []tool {
 	core := s.coreTools()
 	// brain_context sits right after brain_open: both load context.
-	return slices.Concat(core[:1], s.contextTools(), core[1:], s.stateTools(), s.catchupTools(), s.reviewTools(), s.recordTools())
+	return slices.Concat(core[:1], s.contextTools(), core[1:], s.stateTools(), s.catchupTools(), s.reviewTools(), s.recordTools(), s.relationTools())
 }
 
 func (s *Server) coreTools() []tool {

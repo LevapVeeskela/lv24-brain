@@ -91,11 +91,16 @@ func (s *Store) UpdateDecision(ctx context.Context, decision domain.Decision) er
 			// review state.
 			provenanceFrontmatter: provenanceToFrontmatter(current.Provenance),
 			validityFrontmatter:   validityToFrontmatter(decision.Validity, current.CreatedAt),
-			ID:                    current.ID,
-			Title:                 decision.Title,
-			Status:                decision.Status,
-			Source:                sourceRefToFrontmatter(current.Source),
-			CreatedAt:             current.CreatedAt,
+			// Relations and merge history are curation metadata. An update that
+			// carries none keeps the stored ones, so a status change never
+			// drops them; the relation editor is the explicit way to set them.
+			relationsFrontmatter: relationsToFrontmatter(relationsOrStored(decision.Relations, current.Relations)),
+			mergeFrontmatter:     mergeToFrontmatter(current.MergeInfo),
+			ID:                   current.ID,
+			Title:                decision.Title,
+			Status:               decision.Status,
+			Source:               sourceRefToFrontmatter(current.Source),
+			CreatedAt:            current.CreatedAt,
 		}
 		if extras := decisionExtras(oldBody); extras != "" && !strings.Contains(decision.Context, extras) {
 			decision.Context = strings.TrimSpace(strings.TrimSpace(decision.Context) + "\n\n" + extras)
@@ -114,6 +119,14 @@ func (s *Store) UpdateDecision(ctx context.Context, decision domain.Decision) er
 // decisionListSections are the list sections; text after them that is not a
 // bullet under a known heading is dropped by parsing.
 var decisionListSections = []string{"alternatives", "consequences", "evidence", "paths"}
+
+// relationsOrStored keeps a stored relation list when an update carries none.
+func relationsOrStored(next, stored domain.RelationList) domain.RelationList {
+	if len(next) > 0 {
+		return next
+	}
+	return stored
+}
 
 // decisionExtras returns hand-written text that parsing a decision drops:
 // paragraphs between the title/status and the first section, and sections

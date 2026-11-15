@@ -95,7 +95,7 @@ func (e mcpPolicyEnv) toolNames(t *testing.T, flags []string) map[string]bool {
 func TestMCPReadOnlyFlagHidesWriteToolsAndRefusesCalls(t *testing.T) {
 	env := newMCPPolicyEnv(t)
 	names := env.toolNames(t, []string{"--read-only"})
-	for _, tool := range []string{"brain_note", "brain_decision", "brain_attempt", "brain_handoff", "brain_state_set", "brain_decision_status", "brain_review_record"} {
+	for _, tool := range []string{"brain_note", "brain_decision", "brain_attempt", "brain_handoff", "brain_state_set", "brain_decision_status", "brain_review_record", "brain_judge"} {
 		if names[tool] {
 			t.Fatalf("--read-only lists %s", tool)
 		}
@@ -293,7 +293,7 @@ func TestMCPListToolsReportsTheEffectivePolicy(t *testing.T) {
 	if !catalogue.Policy.ReadOnly || catalogue.Policy.AllowWrite || !catalogue.Policy.AllProjects || catalogue.Policy.Projects == nil {
 		t.Fatalf("policy = %+v", catalogue.Policy)
 	}
-	if len(catalogue.OmittedTools) != 7 {
+	if len(catalogue.OmittedTools) != 8 {
 		t.Fatalf("omitted_tools = %v", catalogue.OmittedTools)
 	}
 	for _, tool := range catalogue.Tools {
@@ -303,8 +303,8 @@ func TestMCPListToolsReportsTheEffectivePolicy(t *testing.T) {
 			}
 		}
 	}
-	if len(catalogue.Tools)+len(catalogue.OmittedTools) != 17 {
-		t.Fatalf("tools = %d listed + %d omitted, want 17", len(catalogue.Tools), len(catalogue.OmittedTools))
+	if len(catalogue.Tools)+len(catalogue.OmittedTools) != 19 {
+		t.Fatalf("tools = %d listed + %d omitted, want 19", len(catalogue.Tools), len(catalogue.OmittedTools))
 	}
 }
 
@@ -329,7 +329,7 @@ func TestMCPListToolsDefaultPolicyIsUnrestricted(t *testing.T) {
 	if catalogue.Policy.ReadOnly || catalogue.Policy.AllowWrite || !catalogue.Policy.AllProjects {
 		t.Fatalf("policy = %+v", catalogue.Policy)
 	}
-	if len(catalogue.Tools) != 17 || len(catalogue.OmittedTools) != 0 {
+	if len(catalogue.Tools) != 19 || len(catalogue.OmittedTools) != 0 {
 		t.Fatalf("tools = %d, omitted = %v", len(catalogue.Tools), catalogue.OmittedTools)
 	}
 }

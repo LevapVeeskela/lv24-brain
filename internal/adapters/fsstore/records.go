@@ -66,6 +66,8 @@ func provenanceFromFrontmatter(provenance provenanceFrontmatter) domain.Provenan
 type noteMetadata struct {
 	provenanceFrontmatter
 	validityFrontmatter
+	relationsFrontmatter
+	mergeFrontmatter
 	reviewFrontmatter
 	ID        string            `json:"id"`
 	Title     string            `json:"title"`
@@ -79,6 +81,8 @@ type decisionFrontmatter struct {
 	markdown.Frontmatter  `yaml:",inline"`
 	provenanceFrontmatter `yaml:",inline"`
 	validityFrontmatter   `yaml:",inline"`
+	relationsFrontmatter  `yaml:",inline"`
+	mergeFrontmatter      `yaml:",inline"`
 	reviewFrontmatter     `yaml:",inline"`
 	ID                    string                `yaml:"id,omitempty"`
 	Title                 string                `yaml:"title,omitempty"`
@@ -91,6 +95,8 @@ type attemptFrontmatter struct {
 	markdown.Frontmatter  `yaml:",inline"`
 	provenanceFrontmatter `yaml:",inline"`
 	validityFrontmatter   `yaml:",inline"`
+	relationsFrontmatter  `yaml:",inline"`
+	mergeFrontmatter      `yaml:",inline"`
 	reviewFrontmatter     `yaml:",inline"`
 	ID                    string                `yaml:"id,omitempty"`
 	Title                 string                `yaml:"title,omitempty"`
@@ -261,6 +267,8 @@ type handoffFrontmatter struct {
 	markdown.Frontmatter  `yaml:",inline"`
 	provenanceFrontmatter `yaml:",inline"`
 	validityFrontmatter   `yaml:",inline"`
+	relationsFrontmatter  `yaml:",inline"`
+	mergeFrontmatter      `yaml:",inline"`
 	reviewFrontmatter     `yaml:",inline"`
 	ID                    string    `yaml:"id,omitempty"`
 	CreatedAt             time.Time `yaml:"created_at,omitempty"`
@@ -333,14 +341,11 @@ func quarantine(path string, now time.Time) error {
 }
 
 // appendNoteLocked performs the read-modify-write of one daily notes file. The
-// caller must hold the lock for path.
+// caller must hold the lock for path. A damaged file is quarantined and a fresh
+// one starts, so one broken day never blocks today's notes.
 func appendNoteLocked(path string, note domain.Note, date string, createdAt, updatedAt time.Time) error {
-	var frontmatter noteFileFrontmatter
-	body := ""
 	raw, err := os.ReadFile(path)
 	if err == nil && !notesFileParses(raw) {
-		// A damaged daily file must not block today's notes: keep it aside
-		// for repair (listing reports it) and start a fresh file.
 		if err := quarantine(path, updatedAt); err != nil {
 			return err
 		}
@@ -348,17 +353,58 @@ func appendNoteLocked(path string, note domain.Note, date string, createdAt, upd
 	}
 	switch {
 	case err == nil:
-		body, err = markdown.Parse(raw, &frontmatter)
-		if err != nil {
-			return fmt.Errorf("fsstore: parse notes %s: %w", path, err)
-		}
-		if err := validateRecordFrontmatter(path, frontmatter.Frontmatter, "note"); err != nil {
-			return err
-		}
-		if err := checkProjectMatch(path, frontmatter.ProjectID, note.ProjectID); err != nil {
-			return err
-		}
 	case os.IsNotExist(err):
+		raw = nil
+	default:
+		return fmt.Errorf("fsstore: read notes %s: %w", path, err)
+	}
+	rendered, err := noteFileWithEntryContent(raw, note, date, createdAt, updatedAt)
+	if err != nil {
+		return err
+	}
+	if err := writeFileAtomic(path, rendered); err != nil {
+		return fmt.Errorf("fsstore: write notes %s: %w", path, err)
+	}
+	return nil
+}
+
+// noteFileWithEntry returns the content the daily notes file at path would have
+// after appending note. It performs the same read and parse steps as
+// appendNoteLocked but writes nothing and never quarantines, so a merge can
+// build several entries and publish them under one manifest.
+func noteFileWithEntry(path string, note domain.Note, date string, createdAt, updatedAt time.Time) ([]byte, error) {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		if !os.IsNotExist(err) {
+			return nil, fmt.Errorf("fsstore: read notes %s: %w", path, err)
+		}
+		raw = nil
+	}
+	if raw != nil && !notesFileParses(raw) {
+		return nil, fmt.Errorf("fsstore: notes %s do not parse; repair the file before merging into it", path)
+	}
+	return noteFileWithEntryContent(raw, note, date, createdAt, updatedAt)
+}
+
+// noteFileWithEntryContent is noteFileWithEntry over an in-memory content, so a
+// caller can append several entries without reading the file again.
+func noteFileWithEntryContent(raw []byte, note domain.Note, date string, createdAt, updatedAt time.Time) ([]byte, error) {
+	var frontmatter noteFileFrontmatter
+	body := ""
+	switch {
+	case raw != nil:
+		parsed, parseErr := markdown.Parse(raw, &frontmatter)
+		if parseErr != nil {
+			return nil, fmt.Errorf("fsstore: parse notes: %w", parseErr)
+		}
+		body = parsed
+		if err := validateRecordFrontmatter("notes", frontmatter.Frontmatter, "note"); err != nil {
+			return nil, err
+		}
+		if err := checkProjectMatch("notes", frontmatter.ProjectID, note.ProjectID); err != nil {
+			return nil, err
+		}
+	default:
 		body = fmt.Sprintf("# Notes — %s\n\n", date)
 		frontmatter = noteFileFrontmatter{
 			Frontmatter: markdown.Frontmatter{
@@ -369,13 +415,11 @@ func appendNoteLocked(path string, note domain.Note, date string, createdAt, upd
 			},
 			Date: date,
 		}
-	default:
-		return fmt.Errorf("fsstore: read notes %s: %w", path, err)
 	}
 
 	existing, err := parseNotesBody(body, createdAt)
 	if err != nil {
-		return fmt.Errorf("fsstore: parse notes %s: %w", path, err)
+		return nil, fmt.Errorf("fsstore: parse notes: %w", err)
 	}
 	usedIDs := make(map[string]struct{}, len(existing))
 	for _, existingNote := range existing {
@@ -385,12 +429,14 @@ func appendNoteLocked(path string, note domain.Note, date string, createdAt, upd
 	if id == "" {
 		id = nextNoteID(usedIDs, date, note.Title)
 	} else if _, conflict := usedIDs[id]; conflict {
-		return fmt.Errorf("fsstore: note %q: %w", id, domain.ErrConflict)
+		return nil, fmt.Errorf("fsstore: note %q: %w", id, domain.ErrConflict)
 	}
 
 	entry := renderNoteEntry(noteMetadata{
 		provenanceFrontmatter: provenanceToFrontmatter(note.Provenance),
 		validityFrontmatter:   validityToFrontmatter(note.Validity, createdAt),
+		relationsFrontmatter:  relationsToFrontmatter(note.Relations),
+		mergeFrontmatter:      mergeToFrontmatter(note.MergeInfo),
 		reviewFrontmatter:     reviewToFrontmatter(note.ReviewSchedule),
 		ID:                    id,
 		Title:                 note.Title,
@@ -411,12 +457,9 @@ func appendNoteLocked(path string, note domain.Note, date string, createdAt, upd
 	frontmatter.Date = date
 	rendered, err := markdown.Render(frontmatter, body)
 	if err != nil {
-		return fmt.Errorf("fsstore: render notes %s: %w", path, err)
+		return nil, fmt.Errorf("fsstore: render notes: %w", err)
 	}
-	if err := writeFileAtomic(path, rendered); err != nil {
-		return fmt.Errorf("fsstore: write notes %s: %w", path, err)
-	}
-	return nil
+	return rendered, nil
 }
 
 // AppendDecision writes projects/<id>/decisions/YYYY-MM-DD-<slug>.md.
@@ -460,6 +503,8 @@ func (s *Store) AppendDecision(ctx context.Context, decision domain.Decision) (d
 				},
 				provenanceFrontmatter: provenanceToFrontmatter(decision.Provenance),
 				validityFrontmatter:   validityToFrontmatter(decision.Validity, createdAt),
+				relationsFrontmatter:  relationsToFrontmatter(decision.Relations),
+				mergeFrontmatter:      mergeToFrontmatter(decision.MergeInfo),
 				reviewFrontmatter:     reviewToFrontmatter(decision.ReviewSchedule),
 				ID:                    id,
 				Title:                 decision.Title,
@@ -518,6 +563,8 @@ func (s *Store) AppendAttempt(ctx context.Context, attempt domain.Attempt) (doma
 				},
 				provenanceFrontmatter: provenanceToFrontmatter(attempt.Provenance),
 				validityFrontmatter:   validityToFrontmatter(attempt.Validity, createdAt),
+				relationsFrontmatter:  relationsToFrontmatter(attempt.Relations),
+				mergeFrontmatter:      mergeToFrontmatter(attempt.MergeInfo),
 				reviewFrontmatter:     reviewToFrontmatter(attempt.ReviewSchedule),
 				ID:                    id,
 				Title:                 attempt.Title,
@@ -574,6 +621,8 @@ func (s *Store) AppendHandoff(ctx context.Context, handoff domain.Handoff) (doma
 				},
 				provenanceFrontmatter: provenanceToFrontmatter(handoff.Provenance),
 				validityFrontmatter:   validityToFrontmatter(handoff.Validity, createdAt),
+				relationsFrontmatter:  relationsToFrontmatter(handoff.Relations),
+				mergeFrontmatter:      mergeToFrontmatter(handoff.MergeInfo),
 				reviewFrontmatter:     reviewToFrontmatter(handoff.ReviewSchedule),
 				ID:                    id,
 				CreatedAt:             createdAt,

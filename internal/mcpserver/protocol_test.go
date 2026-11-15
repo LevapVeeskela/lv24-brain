@@ -19,12 +19,36 @@ type fullFake struct {
 	records       []RecordSummary
 	hits          []Hit
 	recordsQuery  RecordQuery
+	relations     []RelationRow
+	judged        []JudgeInput
 	conflicts     bool
 	notFound      bool
 	supersedes    []string
 	statusChanges []string
 	catchup       Catchup
 	review        Review
+}
+
+// ListRelations implements RelationBackend.
+func (f *fullFake) ListRelations(_ context.Context, query RelationQuery) ([]RelationRow, error) {
+	out := f.relations
+	if query.Limit > 0 && len(out) > query.Limit {
+		out = out[:query.Limit]
+	}
+	return out, nil
+}
+
+// JudgeRelation implements RelationBackend.
+func (f *fullFake) JudgeRelation(_ context.Context, in JudgeInput) (JudgedRelation, error) {
+	f.judged = append(f.judged, in)
+	return JudgedRelation{
+		Changed: true,
+		Relation: RelationRow{
+			SourceKind: "decision", SourceID: in.From, SourceTitle: "Use fsstore",
+			TargetID: in.To, TargetState: "found", Relation: in.Verdict, Status: "accepted",
+			Reason: in.Reason, Confidence: in.Confidence, VerdictBy: in.By,
+		},
+	}, nil
 }
 
 // Search honours the page window the tool asks for, unlike the fixed fake.
@@ -215,8 +239,8 @@ func TestProtocolModernToolsListNeedsNoHandshake(t *testing.T) {
 	if meta, ok := result["_meta"].(map[string]any); !ok || meta[metaServerInfo] == nil {
 		t.Fatalf("_meta = %v", result["_meta"])
 	}
-	if got := len(toolNames(t, result)); got != 16 {
-		t.Fatalf("tools = %d, want 16", got)
+	if got := len(toolNames(t, result)); got != 18 {
+		t.Fatalf("tools = %d, want 18", got)
 	}
 }
 
