@@ -21,8 +21,8 @@ builds its own.
 
 PyPI is a thin launcher, not a second engine: it requires Node.js 18+ and
 delegates to the npm package at the same version. npm and the signed installers
-remain canonical; see `docs/pypi.md`. `0.18.0` is the pending PyPI launcher
-release for the `v0.18.0` engine tag; `0.14.1` is the latest published one.
+remain canonical; see `docs/pypi.md`. `0.19.0` is the pending PyPI launcher
+release for the `v0.19.0` engine tag; `0.14.1` is the latest published one.
 
 Name check (2026-11-08): `lv24-brain` and `@lv24/brain` are free on npm;
 `brain-cli` is taken.
