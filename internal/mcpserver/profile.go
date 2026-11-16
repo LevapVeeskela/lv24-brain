@@ -2284,7 +2284,9 @@ func graphifyAliasSpecs() []aliasSpec {
 		"source": stringProp("Start node."), "target": stringProp("End node."),
 		"max_hops": intProp("Hop limit.", 0), "undirected": boolProp("Ignore edge direction."),
 	})
-	community := base(map[string]any{"community_id": intProp("Community id.", 0)})
+	community := base(map[string]any{
+		"community_id": intProp("Community id.", 0), "limit": intProp("Member limit.", 0),
+	})
 	god := base(map[string]any{
 		"top_n": intProp("How many nodes.", 0), "exclude_hubs_percentile": intProp("Hub percentile to drop.", 0),
 	})
@@ -2336,25 +2338,33 @@ func graphifyAliasSpecs() []aliasSpec {
 			augment: func(out toolResult) toolResult { return statsLegacyFields(out) },
 		},
 		{
-			AliasSpec: AliasSpec{Legacy: "shortest_path", Target: "brain_graph", Action: "path", Grade: GradeUnsupported,
-				Reason:      "path search over the symbol graph is not implemented; brain_graph(path) answers UNSUPPORTED",
-				Remediation: graphUnsupported["path"].Remediation},
-			Title: "Shortest path", Description: "Find a path between two symbols. UNSUPPORTED in this release.",
+			AliasSpec: AliasSpec{Legacy: "shortest_path", Target: "brain_graph", Action: "path", Grade: GradeApproximate,
+				Unsupported: []string{"undirected"},
+				Note:        "returns the shortest chain as self/nodes/hops; the search falls back to undirected edges when no directed path exists, and the hop limit is a bound rather than a post-check"},
+			Title: "Shortest path", Description: "Find a path between two symbols. Calls brain_graph(action=path).",
 			Kind: "read", InputSchema: path,
+			translate: func(a aliasArgs) (nativeArgs, error) {
+				return translateGraphCall("path", a, []string{"source", "target"}, []string{"max_hops:depth"})
+			},
 		},
 		{
-			AliasSpec: AliasSpec{Legacy: "get_community", Target: "brain_graph", Action: "communities", Grade: GradeUnsupported,
-				Reason:      "community detection is not implemented; no community is invented",
-				Remediation: graphUnsupported["communities"].Remediation},
-			Title: "Read a graph community", Description: "Read one community. UNSUPPORTED in this release.",
+			AliasSpec: AliasSpec{Legacy: "get_community", Target: "brain_graph", Action: "communities", Grade: GradeApproximate,
+				Note: "returns one community with its members; ids are this engine's 1-based community ids, not graphify ids"},
+			Title: "Read a graph community", Description: "Read one community. Calls brain_graph(action=communities).",
 			Kind: "read", InputSchema: community,
+			translate: func(a aliasArgs) (nativeArgs, error) {
+				return translateGraphCall("communities", a, nil, []string{"community_id:community_id", "limit:member_limit"})
+			},
 		},
 		{
-			AliasSpec: AliasSpec{Legacy: "god_nodes", Target: "brain_graph", Action: "god_nodes", Grade: GradeUnsupported,
-				Reason:      "degree ranking is not implemented; a list built from record links would not be a code graph",
-				Remediation: graphUnsupported["god_nodes"].Remediation},
-			Title: "Central graph nodes", Description: "Report the most connected symbols. UNSUPPORTED in this release.",
+			AliasSpec: AliasSpec{Legacy: "god_nodes", Target: "brain_graph", Action: "god_nodes", Grade: GradeApproximate,
+				Unsupported: []string{"exclude_hubs_percentile"},
+				Note:        "ranks by distinct dependency relationships, not by multigraph edge count; package and file hubs are excluded"},
+			Title: "Central graph nodes", Description: "Report the most connected symbols. Calls brain_graph(action=god_nodes).",
 			Kind: "read", InputSchema: god,
+			translate: func(a aliasArgs) (nativeArgs, error) {
+				return translateGraphCall("god_nodes", a, nil, []string{"top_n:limit"})
+			},
 		},
 		{
 			AliasSpec: AliasSpec{Legacy: "list_prs", Grade: GradeUnsupported, Deprecated: false,
@@ -2365,9 +2375,9 @@ func graphifyAliasSpecs() []aliasSpec {
 		},
 		{
 			AliasSpec: AliasSpec{Legacy: "get_pr_impact", Target: "brain_graph", Action: "pr_impact", Grade: GradeUnsupported,
-				Reason:      graphUnsupported["pr_impact"].Reason,
-				Remediation: graphUnsupported["pr_impact"].Remediation},
-			Title: "Pull request impact", Description: "Report the impact of a pull request. UNSUPPORTED permanently: no PR data is stored.",
+				Reason:      "this server fetches no pull-request data; brain_graph(pr_impact) diffs two local git refs instead",
+				Remediation: "brain_graph(action=pr_impact, base=<base>, head=<head>) for a local diff, or gh pr diff"},
+			Title: "Pull request impact", Description: "Report the impact of a pull request. UNSUPPORTED: no PR data is stored.",
 			Kind: "read", InputSchema: pr,
 		},
 		{
@@ -2480,22 +2490,29 @@ func filesLegacyFields(out toolResult) toolResult {
 }
 
 // statsLegacyFields adds the graphify graph_stats fields that the symbol graph
-// can answer. Community data is not invented and is reported as unavailable.
+// can answer. Community data comes from the analytics half when the engine
+// serves it; it is never invented.
 func statsLegacyFields(out toolResult) toolResult {
 	data, err := json.Marshal(out.Structured)
 	if err != nil {
 		return out
 	}
 	var payload struct {
-		Stats ports.GraphStatus `json:"stats"`
+		Stats     ports.GraphStatus     `json:"stats"`
+		Analytics *ports.GraphStatsView `json:"analytics"`
 	}
 	if err := json.Unmarshal(data, &payload); err != nil {
 		return out
 	}
-	return addStructuredFields(out, map[string]any{
+	fields := map[string]any{
 		"indexed": true, "engine": "graphify", "nodes": payload.Stats.Nodes,
-		"edges": payload.Stats.Edges, "communities_available": false,
-	})
+		"edges": payload.Stats.Edges, "communities_available": payload.Analytics != nil,
+	}
+	if payload.Analytics != nil {
+		fields["communities"] = payload.Analytics.Communities
+		fields["orphans"] = payload.Analytics.Orphans
+	}
+	return addStructuredFields(out, fields)
 }
 
 // Aliases returns the public alias table of a profile. The native profile has

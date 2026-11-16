@@ -53,7 +53,8 @@ func runCode(args []string, stdout, stderr io.Writer) int {
 func printCodeUsage(w io.Writer) {
 	fmt.Fprint(w, `Build and query a code graph.
 
-The native engine indexes Go with go/ast and go/types and keeps a derived
+The native engine indexes Go with go/ast and go/types, and TypeScript, TSX,
+JavaScript and JSX with an embedded tree-sitter runtime. It keeps a derived
 SQLite store under the brain data directory. The codegraph engine reads an
 external CodeGraph index in place and cannot write it.
 

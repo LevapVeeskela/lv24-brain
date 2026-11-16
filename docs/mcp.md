@@ -149,9 +149,10 @@ CLI `try_instead`, never a silent no-op. The gaps are:
 | `brain_projects` | `merge` | `brain project set <id> --alias <old-id>` or `brain import --map-project` |
 | `brain_judge` | `pin`, `unpin` | `brain note "<why this record matters>"` (pinning lands in 0.18) |
 | `brain_judge` | `consolidate` | `brain record supersede <old-id> --by <new-id>` |
-| `brain_graph` | `path` | `brain_code(action=impact)`; `brain code explore` for the flow |
-| `brain_graph` | `communities`, `god_nodes` | `brain_code(action=search)` now; the analytics slice later |
-| `brain_graph` | `pr_impact` | `brain_code(action=impact)`; no PR data is stored |
+
+A graph engine that serves symbol navigation but not analytics refuses the
+analytics actions of `brain_graph` at call time; both shipped engines serve
+them, and an off or absent index refuses with the `brain_code` recovery path.
 
 `brain_capabilities` returns the same list, so a host can discover a gap
 without calling it. A migration profile adds its own gaps to the payload: every
@@ -182,7 +183,7 @@ its `readOnlyHint` is false while `x-lv24-read-actions` names the reads.
 | `brain_projects` | read | `list` (default), `current`, `register`, `merge` | project registry; `current` reports the resolution source |
 | `brain_prompt` | destructive | `save`, `search`, `discard` | opt-in local-only prompt zone |
 | `brain_code` | mixed | `status` (default), `search`, `node`, `explore`, `impact`, `index`, `sync` | query or index one checkout's code graph |
-| `brain_graph` | read | `stats` (default), `neighbors`, `path`, `communities`, `god_nodes`, `pr_impact` | symbol-graph counts and neighbours; the analytics actions refuse |
+| `brain_graph` | read | `stats` (default), `neighbors`, `path`, `communities`, `god_nodes`, `pr_impact` | graph counts, neighbours, communities, degree ranking, path and local-diff impact |
 | `brain_capabilities` | read | – | profile, engine, tools, features, limits, gaps, refusal codes, endpoints |
 
 The write postures are exact: **9 read, 5 non-destructive writes, 3
@@ -230,25 +231,44 @@ Typed refusals, never empty answers:
 
 ### 6.2 `brain_graph`
 
-`brain_graph` exposes the graph as a graph rather than as a symbol reader.
+`brain_graph` exposes the graph as a graph rather than as a symbol reader. All
+six actions are read-only; `pr_impact` runs `git diff` against two local refs
+and never fetches or stores pull-request data.
 
-| Action | State | Answer |
-|---|---|---|
-| `stats` (default) | served | the same index envelope as `brain_code(status)`; no community count is invented |
-| `neighbors` | served | one symbol with both edge directions, no source |
-| `path` | `UNSUPPORTED` | traversal is the analytics slice; use `brain_code(action=impact)` |
-| `communities` | `UNSUPPORTED` | community detection is not implemented |
-| `god_nodes` | `UNSUPPORTED` | degree ranking is not implemented |
-| `pr_impact` | `UNSUPPORTED` | no pull-request data is fetched or stored |
+| Action | Answer |
+|---|---|
+| `stats` (default) | the same index envelope as `brain_code(status)`, plus `analytics`: communities, orphans, languages and node kinds |
+| `neighbors` | one symbol with both edge directions, no source |
+| `path` | the shortest chain between two symbols, its hops, direction and weakest confidence |
+| `communities` | the detected communities by size, or one community with its members, cohesion and signature |
+| `god_nodes` | definitions ranked by distinct dependency relationships, with both degree directions and centrality |
+| `pr_impact` | changed files → changed symbols → reverse blast radius, risk tier and test files for `base..head` |
 
-The four unsupported actions are listed in `brain_capabilities.gaps`, so a host
-can see them without a call. None of them returns an empty collection, a zero
-count or a ranking derived from memory links.
+Algorithms, limits and the risk tiers are documented in
+[`code-graph.md`](code-graph.md#analytics).
 
 Inputs: `project` (required), `symbol`, `file`, `engine` (`native`/`codegraph`,
-default `graph.engine`), `limit` (neighbours per side, ≤100) and — accepted for
-the refused `path` action — `source`/`target`. Answers are enveloped as
-`{action, project, stats|neighbors}`.
+default `graph.engine`), `limit` (neighbours ≤100, communities ≤100, god nodes
+≤50), `community_id`, `member_limit` ≤200, `depth` (path hops, 1–16, default 8),
+`base` (required for `pr_impact`) and `head` (default `HEAD`). Answers are
+enveloped as `{action, project, stats|analytics|neighbors|path|communities|
+god_nodes|pr_impact}` and the inner object mirrors the port DTO.
+
+Caps are applied by the engine and disclosed, never silent: 100 communities,
+200 members of one community, 50 god nodes, 20 path nodes, 200 changed files,
+500 changed or reachable PR symbols. A cap that cuts an answer sets
+`truncated` and adds a note.
+
+Typed refusals, never empty answers:
+
+| Condition | Code | `try_instead` |
+|---|---|---|
+| engine off, index absent or empty | `UNSUPPORTED` | `brain code index --project <id>` or `codegraph index` |
+| engine serves navigation but not analytics | `UNSUPPORTED` | `stats`/`neighbors` still work; switch to `graph.engine: native` |
+| unknown community id | `NOT_FOUND` | `communities` lists ids |
+| unknown symbol, ambiguous name | `NOT_FOUND` / `INVALID_ARGUMENTS` | `brain_graph(neighbors)`, `brain_code(search)` or add `file` |
+| `base` missing, ref malformed or unknown | `INVALID_ARGUMENTS` | pass two refs such as `base=HEAD~1 head=HEAD` |
+| an argument above its cap | `INVALID_ARGUMENTS` | lower it to the documented maximum |
 
 
 ## 7. Pagination
@@ -399,7 +419,7 @@ brain mcp --profile=graphify                 # 10 graphify names mapped to brain
 | `lv24-legacy` (deprecated bridge) | 24 | 13 | 5 | 6 | 7 | A 6, B 1 |
 | `engram` | 28 | 12 | 7 | 9 | 27 | A 3, B 15, C 7, D 2 |
 | `codegraph` | 9 | 9 | 0 | 0 | 8 | B 5, C 3 |
-| `graphify` | 11 | 11 | 0 | 0 | 10 | B 2, C 2, D 6 |
+| `graphify` | 11 | 11 | 0 | 0 | 10 | B 2, C 5, D 3 |
 
 `brain_capabilities` is the one native name every migration profile keeps: it
 has no peer alias and is how a host reads the profile's grades and gaps. It is
@@ -415,7 +435,8 @@ counted as a native tool, not as an alias.
 | **D** | Cannot be served | `UNSUPPORTED` + CLI remediation, never a no-op |
 
 This release serves no stub: the codegraph and graphify names are real
-translations, and the analytics names without an implementation are D.
+translations. The three PR names stay D because this server fetches no
+pull-request data; the native `pr_impact` diffs two local refs instead.
 
 `--strict` turns every C into an explicit `UNSUPPORTED` and every dropped
 argument into `INVALID_ARGUMENTS` naming the field; D always refuses, with or
@@ -537,11 +558,11 @@ and echoed in `ignored_fields`; `--strict` refuses them.
 | `query_graph` | `brain_code(action=search)` | C | symbol hits for the question, not a rendered subgraph; traversal/budget fields dropped |
 | `get_node` | `brain_code(action=node)` | B | `label` or `node_id` selects the symbol |
 | `get_neighbors` | `brain_graph(action=neighbors)` | C | callers and callees with edge kinds; relation filter dropped |
-| `graph_stats` | `brain_graph(action=stats)` | B | adds `indexed:true`, `nodes`, `edges`; `communities_available:false` |
-| `shortest_path` | `brain_graph(action=path)` | D | path search is the analytics slice |
-| `get_community` | `brain_graph(action=communities)` | D | no community detection |
-| `god_nodes` | `brain_graph(action=god_nodes)` | D | no degree ranking |
-| `get_pr_impact` | `brain_graph(action=pr_impact)` | D | no PR data is stored |
+| `graph_stats` | `brain_graph(action=stats)` | B | adds `indexed:true`, `nodes`, `edges`, `communities_available:true` and the community/orphan counts |
+| `shortest_path` | `brain_graph(action=path)` | C | BFS with an undirected fallback; `max_hops` bounds the search, `undirected` is reported as dropped |
+| `get_community` | `brain_graph(action=communities)` | C | one community with members; ids are this engine's 1-based community ids |
+| `god_nodes` | `brain_graph(action=god_nodes)` | C | distinct dependency relationships; `exclude_hubs_percentile` is reported as dropped |
+| `get_pr_impact` | `brain_graph(action=pr_impact)` | D | takes a PR number; this server fetches no PR data and diffs local refs instead |
 | `list_prs`, `triage_prs` | – | D | no PR data is stored; `try_instead` names `brain_code(action=impact)` and `gh pr list` |
 
 The D names refuse with a typed `UNSUPPORTED` and a working alternative. Their
@@ -660,10 +681,11 @@ two minor releases after 0.17.
 
 ## 17. Not implemented, and why
 
-- **Graph analytics** — `brain_graph(action=path|communities|god_nodes|
-  pr_impact)` — are refused with `UNSUPPORTED` and a working alternative. The
-  symbol graph (`stats`, `neighbors`) and the symbol reader (`brain_code`) are
-  served; no ranking, community or PR fact is invented before that slice.
+- **Pull-request data** — `list_prs`, `triage_prs` and the graphify
+  `get_pr_impact` name stay `UNSUPPORTED`: this server fetches and stores no
+  GitHub/GitLab pull requests. The native `brain_graph(action=pr_impact)`
+  answers the same underlying question for two local git refs and never writes
+  to the checkout.
 - **Pin, unpin, consolidation and prompt discard** are refused with guidance
   (§5); the underlying app methods land later.
 - **In-place record edit, MCP delete and hard delete** stay CLI-only. The

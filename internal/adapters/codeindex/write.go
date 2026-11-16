@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/levapveeskela/lv24-brain/internal/domain"
 	"github.com/levapveeskela/lv24-brain/internal/ports"
 	"golang.org/x/tools/go/packages"
 )
@@ -44,14 +45,35 @@ func (i *Index) indexLocked(ctx context.Context, project string, reason string) 
 	if err != nil {
 		return ports.GraphSyncResult{}, err
 	}
-	pkgs, packageErrors, loadNotes, err := i.loadPackages(ctx, nil, i.patterns)
+	if len(scan.Files) == 0 {
+		return ports.GraphSyncResult{}, fmt.Errorf(
+			"%w: the native engine indexes Go, TypeScript, TSX, JavaScript and JSX; no supported source file was found under %s",
+			domain.ErrUnsupported, i.root)
+	}
+	goFiles := 0
+	for _, state := range scan.Files {
+		if state.Language == Language {
+			goFiles++
+		}
+	}
+	var pkgs []*packages.Package
+	packageErrors := 0
+	var loadNotes []string
+	if goFiles > 0 {
+		pkgs, packageErrors, loadNotes, err = i.loadPackages(ctx, nil, i.patterns)
+		if err != nil {
+			return ports.GraphSyncResult{}, err
+		}
+	}
+	goBatch, err := i.extractPackages(ctx, pkgs, nil)
 	if err != nil {
 		return ports.GraphSyncResult{}, err
 	}
-	batch, err := i.extractPackages(ctx, pkgs, nil)
+	polyBatch, err := i.extractPolyglot(ctx, scan.Files, nil)
 	if err != nil {
 		return ports.GraphSyncResult{}, err
 	}
+	batch := mergeBatches(goBatch, polyBatch.result())
 	unresolved := 0
 	for _, count := range batch.Unresolved {
 		unresolved += count
@@ -80,6 +102,7 @@ func (i *Index) indexLocked(ctx context.Context, project string, reason string) 
 		metaUnresolved: fmt.Sprint(unresolved),
 		metaSkipped:    fmt.Sprint(scan.Skipped),
 		metaPkgErrors:  fmt.Sprint(packageErrors),
+		metaPartial:    fmt.Sprint(polyBatch.Partial),
 		metaGitSHA:     gitHead(i.root),
 	}
 	if gitDirty(i.root) {
@@ -101,16 +124,23 @@ func (i *Index) indexLocked(ctx context.Context, project string, reason string) 
 	result.Notes = append(result.Notes, fmt.Sprintf(
 		"indexed %d file(s), %d symbol(s), %d edge(s) in %s",
 		len(files), len(batch.Symbols), len(batch.Edges), time.Since(started).Round(time.Millisecond)))
+	if len(polyBatch.Files) > 0 {
+		note := fmt.Sprintf("%d TypeScript/JavaScript file(s) extracted with tree-sitter", len(polyBatch.Files))
+		if polyBatch.Partial > 0 {
+			note += fmt.Sprintf("; %d had syntax errors and their ERROR-span declarations were skipped", polyBatch.Partial)
+		}
+		result.Notes = append(result.Notes, note)
+	}
 	if reason != "" {
 		result.Notes = append(result.Notes, reason)
 	}
 	result.Notes = append(result.Notes, scan.Notes...)
 	result.Notes = append(result.Notes, loadNotes...)
-	if i.module == "" {
+	if i.module == "" && goFiles > 0 {
 		result.Notes = append(result.Notes, "no go.mod was found above the checkout; qualified names keep the full package path")
 	}
-	if len(pkgs) == 0 {
-		result.Notes = append(result.Notes, "no Go packages were loaded; the store holds files but no symbols")
+	if goFiles > 0 && len(pkgs) == 0 {
+		result.Notes = append(result.Notes, "no Go packages were loaded; the store holds files but no Go symbols")
 	}
 	i.needsRebuild = false
 	i.notes = nil
@@ -176,6 +206,21 @@ func (i *Index) Sync(ctx context.Context, project string, paths []string) (ports
 	if len(changed) == 0 && len(deleted) == 0 {
 		result.Notes = append(result.Notes, "no indexed file changed")
 		return result, nil
+	}
+	goChanged, polyChanged := splitByLanguage(changed)
+	goDeleted, polyDeleted := splitByLanguage(deleted)
+	if len(polyChanged)+len(polyDeleted) > 0 {
+		if len(goChanged)+len(goDeleted) > 0 {
+			result.Notes = append(result.Notes, "Go and TypeScript/JavaScript files changed together; full rebuild")
+			rebuilt, rebuildErr := i.indexLocked(ctx, project, "")
+			if rebuildErr != nil {
+				return ports.GraphSyncResult{}, rebuildErr
+			}
+			rebuilt.Changed = result.Changed
+			rebuilt.Notes = append(result.Notes, rebuilt.Notes...)
+			return rebuilt, nil
+		}
+		return i.syncPolyglotLocked(ctx, scan, polyChanged, polyDeleted, result, started)
 	}
 	oldIDs, err := i.symbolIDsForFiles(ctx, append(append([]string(nil), changed...), deleted...))
 	if err != nil {
@@ -258,7 +303,7 @@ func (i *Index) Sync(ctx context.Context, project string, paths []string) (ports
 
 // fileStates reads the indexed file rows.
 func (i *Index) fileStates(ctx context.Context) (map[string]fileState, error) {
-	rows, err := i.db.QueryContext(ctx, `SELECT path, sha256, size, mtime_ns, package FROM files`)
+	rows, err := i.db.QueryContext(ctx, `SELECT path, sha256, size, mtime_ns, package, language FROM files`)
 	if err != nil {
 		return nil, fmt.Errorf("codeindex: read indexed files: %w", err)
 	}
@@ -266,7 +311,7 @@ func (i *Index) fileStates(ctx context.Context) (map[string]fileState, error) {
 	out := map[string]fileState{}
 	for rows.Next() {
 		var state fileState
-		if err := rows.Scan(&state.Path, &state.SHA256, &state.Size, &state.MTimeNS, &state.Package); err != nil {
+		if err := rows.Scan(&state.Path, &state.SHA256, &state.Size, &state.MTimeNS, &state.Package, &state.Language); err != nil {
 			return nil, fmt.Errorf("codeindex: read indexed files: %w", err)
 		}
 		out[state.Path] = state
@@ -343,6 +388,12 @@ func (i *Index) writeAll(ctx context.Context, files []fileState, batch batchResu
 	if err := insertEdges(ctx, tx, batch.Edges); err != nil {
 		return err
 	}
+	communities, err := rebuildCommunities(ctx, tx)
+	if err != nil {
+		return err
+	}
+	meta[metaCommunities] = fmt.Sprint(communities)
+	meta[metaCommunityAlgo] = CommunityAlgorithm
 	if err := rebuildFTS(ctx, tx); err != nil {
 		return err
 	}
@@ -404,6 +455,10 @@ func (i *Index) writeIncremental(ctx context.Context, files []fileState, deleted
 	if err := insertEdges(ctx, tx, batch.Edges); err != nil {
 		return err
 	}
+	communities, err := rebuildCommunities(ctx, tx)
+	if err != nil {
+		return err
+	}
 	if err := rebuildFTS(ctx, tx); err != nil {
 		return err
 	}
@@ -412,11 +467,13 @@ func (i *Index) writeIncremental(ctx context.Context, files []fileState, deleted
 		return fmt.Errorf("codeindex: count unresolved references: %w", err)
 	}
 	meta := map[string]string{
-		metaIndexedAt:  fmt.Sprint(indexedAt),
-		metaState:      stateComplete,
-		metaUnresolved: fmt.Sprint(unresolved),
-		metaPkgErrors:  fmt.Sprint(packageErrors),
-		metaSkipped:    fmt.Sprint(skipped),
+		metaIndexedAt:     fmt.Sprint(indexedAt),
+		metaState:         stateComplete,
+		metaUnresolved:    fmt.Sprint(unresolved),
+		metaPkgErrors:     fmt.Sprint(packageErrors),
+		metaSkipped:       fmt.Sprint(skipped),
+		metaCommunities:   fmt.Sprint(communities),
+		metaCommunityAlgo: CommunityAlgorithm,
 	}
 	if sha := gitHead(i.root); sha != "" {
 		meta[metaGitSHA] = sha
@@ -448,8 +505,12 @@ func insertFiles(ctx context.Context, tx *sql.Tx, files []fileState, unresolved 
 	}
 	defer func() { _ = statement.Close() }()
 	for _, file := range files {
+		language := file.Language
+		if language == "" {
+			language = Language
+		}
 		if _, err := statement.ExecContext(ctx, file.Path, file.SHA256, file.Size, file.MTimeNS,
-			file.Package, Language, indexedAt, unresolved[file.Path]); err != nil {
+			file.Package, language, indexedAt, unresolved[file.Path]); err != nil {
 			return fmt.Errorf("codeindex: write file %s: %w", file.Path, err)
 		}
 	}

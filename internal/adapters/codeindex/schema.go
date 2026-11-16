@@ -12,26 +12,34 @@ import (
 // written by another schema is rebuilt from the checkout instead of migrated:
 // the index is derived data, so a rebuild is cheaper and safer than a
 // migration that can leave half-mapped rows behind.
-const SchemaVersion = 1
+//
+// Schema 2 adds the communities and community_members tables.
+const SchemaVersion = 2
 
 // ExtractorVersion is the version of the extraction rules. Bumping it forces a
 // rebuild because symbol identity or edge kinds may have changed.
-const ExtractorVersion = 1
+//
+// Version 2 adds the tree-sitter TypeScript/TSX/JavaScript/JSX extractor and
+// the module symbol kind.
+const ExtractorVersion = 2
 
 // metaKeys are the keys stored in the meta table.
 const (
-	metaSchema     = "schema_version"
-	metaExtractor  = "extractor_version"
-	metaEngine     = "engine"
-	metaProject    = "project"
-	metaModule     = "module"
-	metaGitSHA     = "git_sha"
-	metaGitDirty   = "git_dirty"
-	metaIndexedAt  = "indexed_at"
-	metaState      = "index_state"
-	metaUnresolved = "unresolved_refs"
-	metaSkipped    = "skipped_files"
-	metaPkgErrors  = "package_errors"
+	metaSchema        = "schema_version"
+	metaExtractor     = "extractor_version"
+	metaEngine        = "engine"
+	metaProject       = "project"
+	metaModule        = "module"
+	metaGitSHA        = "git_sha"
+	metaGitDirty      = "git_dirty"
+	metaIndexedAt     = "indexed_at"
+	metaState         = "index_state"
+	metaUnresolved    = "unresolved_refs"
+	metaSkipped       = "skipped_files"
+	metaPkgErrors     = "package_errors"
+	metaCommunities   = "communities"
+	metaCommunityAlgo = "community_algorithm"
+	metaPartial       = "partial_files"
 )
 
 // schemaStatements creates the graph store. There is deliberately no source
@@ -82,6 +90,22 @@ var schemaStatements = []string{
 	`CREATE INDEX edges_target ON edges(target, kind)`,
 	`CREATE INDEX edges_source ON edges(source, kind)`,
 
+	`CREATE TABLE communities (
+		id INTEGER PRIMARY KEY,
+		name TEXT NOT NULL,
+		top_symbol TEXT NOT NULL,
+		size INTEGER NOT NULL,
+		cohesion REAL NOT NULL,
+		signature TEXT NOT NULL
+	)`,
+	`CREATE UNIQUE INDEX communities_signature ON communities(signature)`,
+	`CREATE TABLE community_members (
+		community_id INTEGER NOT NULL,
+		symbol_id TEXT NOT NULL,
+		PRIMARY KEY (community_id, symbol_id)
+	) WITHOUT ROWID`,
+	`CREATE INDEX community_members_symbol ON community_members(symbol_id)`,
+
 	`CREATE VIRTUAL TABLE symbols_fts USING fts5(
 		name, qualname, signature, doc,
 		content='symbols', content_rowid='rowid',
@@ -92,6 +116,8 @@ var schemaStatements = []string{
 // removed with the virtual table.
 var dropStatements = []string{
 	`DROP TABLE IF EXISTS symbols_fts`,
+	`DROP TABLE IF EXISTS community_members`,
+	`DROP TABLE IF EXISTS communities`,
 	`DROP TABLE IF EXISTS edges`,
 	`DROP TABLE IF EXISTS symbols`,
 	`DROP TABLE IF EXISTS files`,
@@ -99,7 +125,7 @@ var dropStatements = []string{
 }
 
 // schemaTables are the tables a complete store must contain.
-var schemaTables = []string{"meta", "files", "symbols", "edges", "symbols_fts"}
+var schemaTables = []string{"meta", "files", "symbols", "edges", "communities", "community_members", "symbols_fts"}
 
 // ensureSchema creates the store when it is missing and rebuilds it when the
 // schema or extractor version moved. It is a no-op for an up-to-date store.

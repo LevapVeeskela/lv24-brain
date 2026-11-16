@@ -200,8 +200,8 @@ func (i *Index) loadSymbols(ctx context.Context, ids []string) ([]ports.GraphSym
 }
 
 // IsTestFile reports whether a repository path belongs to a test suite. The
-// native engine indexes Go, but the suffix list is shared with the query layer
-// so a future language does not need a second rule.
+// suffix list covers Go and the script languages the native engine indexes, so
+// a TypeScript spec file is marked without a second rule.
 func IsTestFile(path string) bool {
 	normalized := strings.ToLower(strings.ReplaceAll(path, `\`, "/"))
 	base := normalized

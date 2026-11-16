@@ -397,6 +397,13 @@ func (s *Server) capabilities() Capabilities {
 			"graph_explore_files":     ports.MaxGraphExploreFiles,
 			"graph_explore_bytes":     ports.MaxGraphExploreBytes,
 			"graph_neighbors":         ports.MaxGraphSearchLimit,
+			"graph_communities":       ports.MaxGraphCommunities,
+			"graph_community_members": ports.MaxGraphCommunityMembers,
+			"graph_god_nodes":         ports.MaxGraphGodNodes,
+			"graph_path_depth":        ports.MaxGraphPathDepth,
+			"graph_path_nodes":        ports.MaxGraphPathNodes,
+			"graph_pr_symbols":        ports.MaxGraphPRSymbols,
+			"graph_pr_files":          ports.MaxGraphPRFiles,
 		},
 		Gaps:         s.profileGaps(),
 		RefusalCodes: RefusalCodes(),
@@ -410,8 +417,8 @@ func (s *Server) capabilities() Capabilities {
 // featureFlags reports what the profile can do, including the approximations
 // of a migration vocabulary. A flag is never a promise the backend cannot
 // keep: code_graph is true only where the profile serves brain_code, and the
-// analytics half of the knowledge graph is reported separately because five of
-// its six actions answer UNSUPPORTED in this release.
+// analytics half of the knowledge graph is reported separately because an
+// engine can serve navigation without answering analytics.
 func (s *Server) featureFlags() map[string]any {
 	features := map[string]any{
 		"full_text":       true,
@@ -439,15 +446,15 @@ func (s *Server) featureFlags() map[string]any {
 	switch s.profile.Name {
 	case ProfileLV24, ProfileLV24Legacy, ProfileCodegraph:
 		features["code_graph"] = true
-		features["code_graph_analytics"] = false
+		features["code_graph_analytics"] = true
 	case ProfileGraphify:
 		features["code_graph"] = true
 		features["knowledge_graph"] = "partial"
-		features["code_graph_analytics"] = false
+		features["code_graph_analytics"] = true
 	}
 	if s.servesGraphTool("brain_graph") {
 		features["knowledge_graph"] = "partial"
-		features["knowledge_graph_analytics"] = false
+		features["knowledge_graph_analytics"] = true
 	}
 	return features
 }
@@ -473,10 +480,6 @@ func capabilityGaps() []CapabilityGap {
 		{Tool: "brain_judge", Action: "pin", Reason: "pinning needs additive frontmatter and ranking weight (0.18)", Remediation: "brain note \"<why this record matters>\""},
 		{Tool: "brain_judge", Action: "unpin", Reason: "pinning needs additive frontmatter and ranking weight (0.18)", Remediation: "brain note \"<why this record matters>\""},
 		{Tool: "brain_judge", Action: "consolidate", Reason: "two-phase consolidation is not exposed over MCP in 0.17", Remediation: "brain record supersede <old-id> --by <new-id>"},
-		graphUnsupported["path"],
-		graphUnsupported["communities"],
-		graphUnsupported["god_nodes"],
-		graphUnsupported["pr_impact"],
 	}
 }
 

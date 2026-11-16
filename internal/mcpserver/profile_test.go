@@ -403,7 +403,7 @@ func TestGraphifyProfileIsHonestWithoutAGraph(t *testing.T) {
 		"query_graph", "get_node", "get_neighbors", "get_community", "shortest_path",
 		"god_nodes", "graph_stats", "list_prs", "get_pr_impact", "triage_prs",
 	} {
-		result := profileCall(t, server, name, `{"project":"alpha","question":"run","label":"Run","symbol":"Run"}`)
+		result := profileCall(t, server, name, `{"project":"alpha","question":"run","label":"Run","symbol":"Run","source":"Run","target":"Load"}`)
 		refusal := structured(t, result)
 		if result["isError"] != true || refusal["code"] != RefusalUnsupported {
 			t.Fatalf("%s = %v", name, result)
@@ -428,9 +428,9 @@ func TestGraphifyProfilePublishesItsMapping(t *testing.T) {
 		"get_node":      {target: "brain_code", action: "node", grade: GradeEnvelope},
 		"get_neighbors": {target: "brain_graph", action: "neighbors", grade: GradeApproximate},
 		"graph_stats":   {target: "brain_graph", action: "stats", grade: GradeEnvelope},
-		"shortest_path": {target: "brain_graph", action: "path", grade: GradeUnsupported},
-		"get_community": {target: "brain_graph", action: "communities", grade: GradeUnsupported},
-		"god_nodes":     {target: "brain_graph", action: "god_nodes", grade: GradeUnsupported},
+		"shortest_path": {target: "brain_graph", action: "path", grade: GradeApproximate},
+		"get_community": {target: "brain_graph", action: "communities", grade: GradeApproximate},
+		"god_nodes":     {target: "brain_graph", action: "god_nodes", grade: GradeApproximate},
 		"list_prs":      {grade: GradeUnsupported},
 		"get_pr_impact": {target: "brain_graph", action: "pr_impact", grade: GradeUnsupported},
 		"triage_prs":    {grade: GradeUnsupported},
@@ -457,8 +457,8 @@ func TestCapabilitiesReflectTheActiveProfile(t *testing.T) {
 		stubs    int
 		wantGaps int
 	}{
-		{ProfileLV24, 17, 0, 0, 11},
-		{ProfileLV24Legacy, 24, 7, 0, 11},
+		{ProfileLV24, 17, 0, 0, 7},
+		{ProfileLV24Legacy, 24, 7, 0, 7},
 		{ProfileEngram, 28, 27, 0, 10},
 		{ProfileCodegraph, 9, 8, 0, 3},
 		{ProfileGraphify, 11, 10, 0, 8},

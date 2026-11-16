@@ -48,6 +48,44 @@ const (
 	// answer. It stays under the host inline limit so a caller receives the
 	// whole answer instead of a cliff.
 	MaxGraphExploreBytes = 24 << 10
+
+	// DefaultGraphCommunities is the number of communities one listing shows.
+	DefaultGraphCommunities = 20
+	// MaxGraphCommunities bounds one community listing.
+	MaxGraphCommunities = 100
+	// DefaultGraphCommunityMembers is the member list length of one selected
+	// community.
+	DefaultGraphCommunityMembers = 50
+	// MaxGraphCommunityMembers bounds the member list of one community.
+	MaxGraphCommunityMembers = 200
+	// DefaultGraphGodNodes is the number of ranked nodes one god-node answer
+	// shows.
+	DefaultGraphGodNodes = 10
+	// MaxGraphGodNodes bounds one god-node ranking.
+	MaxGraphGodNodes = 50
+	// DefaultGraphPathDepth is the hop limit of one path query.
+	DefaultGraphPathDepth = 8
+	// MaxGraphPathDepth bounds the hop limit of one path query.
+	MaxGraphPathDepth = 16
+	// MaxGraphPathNodes bounds the nodes of one reported path, including the
+	// two endpoints.
+	MaxGraphPathNodes = 20
+	// DefaultGraphPRDepth is the reverse-BFS depth of one PR impact answer.
+	DefaultGraphPRDepth = 2
+	// MaxGraphPRSymbols bounds the changed and reachable symbols one PR
+	// impact answer reports.
+	MaxGraphPRSymbols = 500
+	// MaxGraphPRFiles bounds the changed files one PR impact answer reports.
+	MaxGraphPRFiles = 200
+)
+
+// Risk tiers of a PR impact answer, from least to most likely to break a
+// caller. The tier is computed from the reachable symbol count, the changed
+// symbol count and deleted files; the adapter reports the inputs in Notes.
+const (
+	GraphRiskLow    = "low"
+	GraphRiskMedium = "medium"
+	GraphRiskHigh   = "high"
 )
 
 // GraphIndex answers symbol and relationship questions about one checkout.
@@ -74,6 +112,11 @@ type GraphIndex interface {
 	// Impact walks incoming edges from symbol and reports what a change can
 	// reach, marking test files.
 	Impact(ctx context.Context, project, symbol, file string, depth int) (ImpactView, error)
+	// Analytics exposes the optional analytics half of this engine. An
+	// engine that cannot answer analytics returns nil, false and the caller
+	// reports UNSUPPORTED instead of inventing an answer. The method is
+	// cheap: it reports a capability, it does not compute one.
+	Analytics() (GraphAnalytics, bool)
 }
 
 // GraphStatus is the read-only identity and size of one graph index.
@@ -258,4 +301,184 @@ type ImpactView struct {
 	Tests     []string    `json:"tests,omitempty"`
 	Truncated bool        `json:"truncated,omitempty"`
 	Notes     []string    `json:"notes,omitempty"`
+}
+
+// GraphAnalytics is the optional analytics half of a graph engine. It is a
+// separate interface because an engine can serve symbol navigation without
+// being able to answer analytics: GraphIndex.Analytics reports whether the half
+// exists, and a caller that gets false reports UNSUPPORTED instead of inventing
+// an empty collection, a zero count or a ranking derived from something other
+// than the indexed edges.
+//
+// Analytics never writes. PRImpact runs git diff in read-only mode against
+// two refs of the checkout; it fetches no pull-request data and stores
+// nothing.
+type GraphAnalytics interface {
+	// Communities lists detected communities by size, or one community with
+	// its members. A community id is stable while its member set is
+	// unchanged; ordering is by size, not by id.
+	Communities(ctx context.Context, project string, opts CommunityQuery) (CommunityView, error)
+	// GodNodes ranks the most connected definitions by total degree.
+	GodNodes(ctx context.Context, project string, limit int) (GodNodesView, error)
+	// ShortestPath finds the shortest chain between two definitions, first
+	// along dependency edges and then, when that fails, ignoring direction.
+	ShortestPath(ctx context.Context, project, from, to string, maxDepth int) (GraphPath, error)
+	// PRImpact maps the files and symbols changed between two git refs to
+	// their reverse blast radius, a risk tier and the test files involved.
+	PRImpact(ctx context.Context, project, base, head string) (PRImpactView, error)
+	// GraphStats reports counts that need the whole graph: communities,
+	// orphan definitions and the language mix.
+	GraphStats(ctx context.Context, project string) (GraphStatsView, error)
+}
+
+// CommunityQuery selects what a Communities call returns. The zero value lists
+// the largest communities; ID selects exactly one.
+type CommunityQuery struct {
+	// ID is a 1-based community id. Zero returns the largest communities up to
+	// Limit.
+	ID int `json:"community_id,omitempty"`
+	// Limit bounds the listed communities; zero selects
+	// DefaultGraphCommunities and an engine clamps above MaxGraphCommunities.
+	Limit int `json:"limit,omitempty"`
+	// MemberLimit bounds the member list of one selected community; zero
+	// selects DefaultGraphCommunityMembers and an engine clamps above
+	// MaxGraphCommunityMembers.
+	MemberLimit int `json:"member_limit,omitempty"`
+}
+
+// GraphCommunity is one detected cluster of definitions.
+type GraphCommunity struct {
+	ID int `json:"id"`
+	// Name is the display label: the name of the highest-degree member.
+	Name string `json:"name"`
+	// Size is the member count.
+	Size int `json:"size"`
+	// Cohesion is the internal edge density of the undirected member
+	// subgraph: internal edges over n*(n-1)/2. A singleton is 0.
+	Cohesion float64 `json:"cohesion"`
+	// Signature is a short hash of the sorted member ids. Two answers with
+	// the same signature have the same members, which is what makes an id
+	// worth citing.
+	Signature string `json:"signature"`
+	// Top is the highest-degree member.
+	Top GraphSymbol `json:"top"`
+	// Members is filled only when one community was selected; it is ordered
+	// by file and line and capped by the query's MemberLimit.
+	Members          []GraphSymbol `json:"members,omitempty"`
+	MembersTruncated bool          `json:"members_truncated,omitempty"`
+}
+
+// CommunityView is one community listing or one community with members.
+type CommunityView struct {
+	Communities []GraphCommunity `json:"communities"`
+	// Total is the number of detected communities, not the number returned.
+	Total     int      `json:"total"`
+	Truncated bool     `json:"truncated,omitempty"`
+	Notes     []string `json:"notes,omitempty"`
+}
+
+// GraphGodNode is one ranked definition. Degree counts distinct neighbours
+// over dependency edges in both directions, so repeated call sites of the same
+// pair do not inflate it.
+type GraphGodNode struct {
+	GraphSymbol
+	Degree      int     `json:"degree"`
+	InDegree    int     `json:"in_degree"`
+	OutDegree   int     `json:"out_degree"`
+	Centrality  float64 `json:"centrality"`
+	Community   string  `json:"community,omitempty"`
+	CommunityID int     `json:"community_id,omitempty"`
+	Test        bool    `json:"test,omitempty"`
+	// Why states the facts behind the rank: both degree directions and the
+	// centrality formula. It is not a guess about importance.
+	Why string `json:"why"`
+}
+
+// GodNodesView is one degree ranking.
+type GodNodesView struct {
+	Nodes []GraphGodNode `json:"nodes"`
+	// Total is the number of definitions the ranking considered.
+	Total     int      `json:"total"`
+	Truncated bool     `json:"truncated,omitempty"`
+	Notes     []string `json:"notes,omitempty"`
+}
+
+// GraphPathStep is one node of a path. Edge, Line, Confidence and Reverse
+// describe the hop that reached it; the first step has an empty Edge.
+type GraphPathStep struct {
+	GraphSymbol
+	Edge       string  `json:"edge,omitempty"`
+	Line       int     `json:"line,omitempty"`
+	Reverse    bool    `json:"reverse,omitempty"`
+	Confidence float64 `json:"confidence,omitempty"`
+}
+
+// GraphPath is the shortest chain between two definitions.
+type GraphPath struct {
+	From GraphSymbol `json:"from"`
+	To   GraphSymbol `json:"to"`
+	// Steps includes both endpoints: Hops is len(Steps)-1.
+	Steps []GraphPathStep `json:"steps,omitempty"`
+	Hops  int             `json:"hops"`
+	Found bool            `json:"found"`
+	// Directed is true when the path follows dependency edges only; false
+	// when the search had to ignore direction to find any path.
+	Directed bool `json:"directed"`
+	// Confidence is the weakest edge confidence on the path.
+	Confidence float64  `json:"confidence"`
+	Notes      []string `json:"notes,omitempty"`
+}
+
+// PRFileImpact is one file changed between the two refs.
+type PRFileImpact struct {
+	Path string `json:"path"`
+	// Status is the git name-status letter: A, M, D, T, R or C.
+	Status string `json:"status"`
+	// Symbols is the number of indexed definitions in that file.
+	Symbols int `json:"symbols"`
+}
+
+// PRImpactView is the read-only impact of a git diff. It is not a pull-request
+// answer: no GitHub or GitLab API is called, and no PR metadata is stored.
+type PRImpactView struct {
+	Base string `json:"base"`
+	Head string `json:"head"`
+	// Files is the changed file list, capped at MaxGraphPRFiles.
+	Files []PRFileImpact `json:"files"`
+	// ChangedFiles is the number of files git reported, not the number listed.
+	ChangedFiles int `json:"changed_files"`
+	// ChangedSymbols are the indexed definitions of the changed files, capped
+	// at MaxGraphPRSymbols.
+	ChangedSymbols []GraphSymbol `json:"changed_symbols,omitempty"`
+	// Impact is the reverse blast radius of ChangedSymbols, capped at
+	// MaxGraphPRSymbols and ordered by distance.
+	Impact []ImpactHit `json:"impact,omitempty"`
+	// TotalImpact is the number of reachable symbols the walk found. When
+	// Truncated is set the walk stopped at the cap, so the true reach is
+	// larger.
+	TotalImpact int    `json:"total_impact"`
+	Risk        string `json:"risk"`
+	// Tests are the test files among the changed files and the reachable
+	// symbols.
+	Tests     []string `json:"tests,omitempty"`
+	Truncated bool     `json:"truncated,omitempty"`
+	Notes     []string `json:"notes,omitempty"`
+}
+
+// GraphStatsView reports the counts that need the whole graph.
+type GraphStatsView struct {
+	Engine            string `json:"engine"`
+	Project           string `json:"project"`
+	DBPath            string `json:"db_path,omitempty"`
+	SchemaVersion     int    `json:"schema_version"`
+	ExtractionVersion int    `json:"extraction_version"`
+	Files             int    `json:"files"`
+	Symbols           int    `json:"symbols"`
+	Edges             int    `json:"edges"`
+	Communities       int    `json:"communities"`
+	// Orphans are definitions with no dependency edge in either direction.
+	Orphans     int            `json:"orphans"`
+	Languages   map[string]int `json:"languages,omitempty"`
+	NodesByKind map[string]int `json:"nodes_by_kind,omitempty"`
+	Notes       []string       `json:"notes,omitempty"`
 }

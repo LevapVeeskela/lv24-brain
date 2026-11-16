@@ -17,11 +17,12 @@ const symbolColumns = `id, kind, name, qualname, path, start_line, end_line, sig
 
 // traversalEdgeKinds are the edges that mean "one definition depends on
 // another". contains/file ownership does not exist in this store.
-var traversalEdgeKinds = []string{"calls", "references", "imports", "implements", "embeds"}
+var traversalEdgeKinds = []string{"calls", "references", "imports", "implements", "embeds", "extends"}
 
 // defaultKinds are the definitions an agent navigates. The native store has no
-// file or import nodes, so every indexed kind is a useful answer.
-var defaultKinds = []string{"package", "type", "func", "method", "const", "var"}
+// file nodes, so a module node is also a useful answer: its name and qualified
+// name are the repository path.
+var defaultKinds = []string{"package", "module", "type", "func", "method", "const", "var"}
 
 // ErrAmbiguous marks a symbol name that resolves to more than one definition.
 var ErrAmbiguous = errors.New("codeindex: ambiguous symbol")
@@ -161,7 +162,7 @@ func collectHits(rows *sql.Rows, match string, confidence float64, score func(in
 		if err := rows.Scan(dest...); err != nil {
 			return nil, fmt.Errorf("codeindex: scan symbol: %w", err)
 		}
-		hit.Language = Language
+		hit.Language = symbolLanguage(hit.File)
 		hit.Visibility = visibility(hit.Exported)
 		hit.Match = match
 		hit.Confidence = confidence
@@ -213,7 +214,7 @@ const kindRank = `CASE kind
 // edgeKindRank orders direct neighbours so a call is listed before a type
 // reference at the same distance.
 const edgeKindRank = `CASE e.kind
-	WHEN 'calls' THEN 0 WHEN 'implements' THEN 1 WHEN 'embeds' THEN 2
+	WHEN 'calls' THEN 0 WHEN 'implements' THEN 1 WHEN 'extends' THEN 1 WHEN 'embeds' THEN 2
 	WHEN 'references' THEN 3 WHEN 'imports' THEN 4 ELSE 5 END`
 
 // normalizeKinds resolves an explicit kind filter or the default kinds.
@@ -397,7 +398,7 @@ func (i *Index) neighbors(ctx context.Context, id, side string, limit int) ([]po
 			return nil, false, fmt.Errorf("codeindex: scan %s: %w", side, err)
 		}
 		symbol.Exported = exported != 0
-		symbol.Language = Language
+		symbol.Language = symbolLanguage(symbol.File)
 		symbol.Visibility = visibility(symbol.Exported)
 		key := symbol.ID + "\x00" + edge
 		if existing, ok := grouped[key]; ok {
@@ -443,7 +444,7 @@ func scanSymbol(row interface{ Scan(dest ...any) error }, withRank bool) (ports.
 		return ports.GraphSymbol{}, err
 	}
 	symbol.Exported = exported != 0
-	symbol.Language = Language
+	symbol.Language = symbolLanguage(symbol.File)
 	symbol.Visibility = visibility(symbol.Exported)
 	return symbol, nil
 }

@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/levapveeskela/lv24-brain/internal/domain"
 	"github.com/levapveeskela/lv24-brain/internal/ports"
 )
 
@@ -218,6 +219,12 @@ func graphFailure(projectID string, err error) error {
 		return refusalUnsupported(
 			"the codegraph engine is read-only; brain mcp cannot index it",
 			"run codegraph index in the checkout, or switch graph.engine to native")
+	case errors.Is(err, domain.ErrNotFound):
+		return refusalNotFound(err.Error(),
+			"run brain code search to find the exact symbol, or brain_graph(action=communities) to list community ids")
+	case errors.Is(err, domain.ErrUnsupported):
+		return refusalUnsupported(err.Error(),
+			"run brain code status, or rebuild the index with brain code index --project "+projectID)
 	default:
 		return err
 	}

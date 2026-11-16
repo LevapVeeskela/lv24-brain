@@ -1,11 +1,15 @@
-// Package codeindex builds and queries a native code graph for Go projects.
+// Package codeindex builds and queries a native code graph for Go and
+// TypeScript/JavaScript checkouts.
 //
 // The store is derived data: one SQLite file per checkout under the brain data
 // directory, never inside the checkout and never in git. It holds files,
 // symbols, edges and meta rows only; source text is re-read from the checkout
-// at query time. The extractor uses go/ast for declarations and go/types (via
-// golang.org/x/tools/go/packages) for exact call, method, embedding and
-// interface-satisfaction resolution.
+// at query time. The Go extractor uses go/ast for declarations and go/types
+// (via golang.org/x/tools/go/packages) for exact call, method, embedding and
+// interface-satisfaction resolution. The script extractor runs a pinned
+// tree-sitter WASI reactor with wazero and extracts syntax-level declarations,
+// imports, calls, heritage and type references; it never invents a
+// type-resolved edge.
 //
 // The adapter implements ports.GraphIndex for the "native" engine:
 //
@@ -44,7 +48,8 @@ const (
 	// Engine is the engine name the adapter reports and config accepts.
 	Engine = ports.GraphEngineNative
 
-	// Language is the only language the native extractor indexes today.
+	// Language is the type-checked language of the native extractor. The
+	// syntax-only tree-sitter languages are reported by LanguageForPath.
 	Language = "go"
 
 	// DefaultDBSubdir is the derived store directory under the brain data
@@ -116,6 +121,7 @@ type Index struct {
 
 	needsRebuild bool
 	notes        []string
+	ts           *tsEngine
 	mu           sync.Mutex
 }
 
@@ -195,7 +201,14 @@ func Open(ctx context.Context, opts Options) (*Index, error) {
 
 // Close checkpoints the WAL and releases the database handle.
 func (i *Index) Close() error {
-	if i == nil || i.db == nil {
+	if i == nil {
+		return nil
+	}
+	if i.ts != nil {
+		_ = i.ts.close()
+		i.ts = nil
+	}
+	if i.db == nil {
 		return nil
 	}
 	_, _ = i.db.Exec(`PRAGMA wal_checkpoint(TRUNCATE)`)
@@ -306,6 +319,9 @@ func (i *Index) Status(ctx context.Context, project string) (ports.GraphStatus, 
 	}
 	if pkgErrors := metaInt(meta, metaPkgErrors); pkgErrors > 0 {
 		status.Notes = append(status.Notes, fmt.Sprintf("%d package(s) reported type or load errors; symbols were extracted syntactically where possible", pkgErrors))
+	}
+	if partial := metaInt(meta, metaPartial); partial > 0 {
+		status.Notes = append(status.Notes, fmt.Sprintf("%d file(s) had syntax errors at the last full index; declarations intersecting ERROR spans were skipped", partial))
 	}
 	return status, nil
 }

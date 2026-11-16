@@ -14,25 +14,39 @@ import (
 // call so a test can prove the action reached the port with the translated
 // values, and it can fail every read with one error.
 type graphIndexFake struct {
-	status     ports.GraphStatus
-	syncResult ports.GraphSyncResult
-	hits       []ports.SymbolHit
-	node       ports.NodeView
-	explore    ports.ExploreView
-	impact     ports.ImpactView
-	err        error
+	status         ports.GraphStatus
+	syncResult     ports.GraphSyncResult
+	hits           []ports.SymbolHit
+	node           ports.NodeView
+	explore        ports.ExploreView
+	impact         ports.ImpactView
+	communities    ports.CommunityView
+	godNodes       ports.GodNodesView
+	path           ports.GraphPath
+	prImpact       ports.PRImpactView
+	analyticsStats ports.GraphStatsView
+	err            error
+	// hideAnalytics makes the index answer stats and neighbors only.
+	hideAnalytics bool
 
-	searchQuery  ports.GraphQuery
-	nodeSymbol   string
-	nodeFile     string
-	nodeOpts     ports.NodeOpts
-	exploreQuery string
-	exploreFiles int
-	impactSymbol string
-	impactDepth  int
-	closeCount   int
-	indexCalls   int
-	syncCalls    int
+	searchQuery    ports.GraphQuery
+	nodeSymbol     string
+	nodeFile       string
+	nodeOpts       ports.NodeOpts
+	exploreQuery   string
+	exploreFiles   int
+	impactSymbol   string
+	impactDepth    int
+	communityQuery ports.CommunityQuery
+	godLimit       int
+	pathFrom       string
+	pathTo         string
+	pathDepth      int
+	prBase         string
+	prHead         string
+	closeCount     int
+	indexCalls     int
+	syncCalls      int
 }
 
 func (f *graphIndexFake) Status(context.Context, string) (ports.GraphStatus, error) {
@@ -61,6 +75,50 @@ func (f *graphIndexFake) Explore(_ context.Context, _, query string, maxFiles in
 func (f *graphIndexFake) Impact(_ context.Context, _, symbol, _ string, depth int) (ports.ImpactView, error) {
 	f.impactSymbol, f.impactDepth = symbol, depth
 	return f.impact, f.err
+}
+
+// Analytics reports the optional analytics half. hideAnalytics simulates an
+// engine that can navigate symbols but cannot rank or cluster them.
+func (f *graphIndexFake) Analytics() (ports.GraphAnalytics, bool) {
+	if f.hideAnalytics {
+		return nil, false
+	}
+	return f, true
+}
+
+func (f *graphIndexFake) Communities(_ context.Context, _ string, opts ports.CommunityQuery) (ports.CommunityView, error) {
+	f.communityQuery = opts
+	view := f.communities
+	if opts.ID > 0 {
+		selected := ports.CommunityView{Total: view.Total}
+		for _, community := range view.Communities {
+			if community.ID == opts.ID {
+				selected.Communities = []ports.GraphCommunity{community}
+				break
+			}
+		}
+		return selected, f.err
+	}
+	return view, f.err
+}
+
+func (f *graphIndexFake) GodNodes(_ context.Context, _ string, limit int) (ports.GodNodesView, error) {
+	f.godLimit = limit
+	return f.godNodes, f.err
+}
+
+func (f *graphIndexFake) ShortestPath(_ context.Context, _, from, to string, maxDepth int) (ports.GraphPath, error) {
+	f.pathFrom, f.pathTo, f.pathDepth = from, to, maxDepth
+	return f.path, f.err
+}
+
+func (f *graphIndexFake) PRImpact(_ context.Context, _, base, head string) (ports.PRImpactView, error) {
+	f.prBase, f.prHead = base, head
+	return f.prImpact, f.err
+}
+
+func (f *graphIndexFake) GraphStats(context.Context, string) (ports.GraphStatsView, error) {
+	return f.analyticsStats, f.err
 }
 
 func (f *graphIndexFake) Close() error {
@@ -131,6 +189,41 @@ func newGraphFake() *graphFake {
 				Symbol: symbol, Depth: 2,
 				Hits:  []ports.ImpactHit{{GraphSymbol: symbol, Distance: 1, Via: "calls", ViaFile: "main.go", ViaLine: 4, Test: true, Confidence: 1}},
 				Files: []string{"main_test.go"}, Tests: []string{"main_test.go"},
+			},
+			communities: ports.CommunityView{
+				Total: 2,
+				Communities: []ports.GraphCommunity{
+					{ID: 1, Name: "core", Size: 12, Cohesion: 0.4, Signature: "sig-core", Top: symbol},
+					{ID: 2, Name: "loading", Size: 5, Cohesion: 0.2, Signature: "sig-load", Top: symbol},
+				},
+			},
+			godNodes: ports.GodNodesView{
+				Total: 900,
+				Nodes: []ports.GraphGodNode{{
+					GraphSymbol: symbol, Degree: 3, InDegree: 1, OutDegree: 2,
+					Centrality: 0.01, Community: "core", CommunityID: 1,
+					Why: "3 distinct dependency relationship(s): 1 incoming, 2 outgoing",
+				}},
+			},
+			path: ports.GraphPath{
+				From: symbol, To: ports.GraphSymbol{ID: "function:ghi", Kind: "function", Name: "Load", File: "load.go", StartLine: 7, EndLine: 9},
+				Steps: []ports.GraphPathStep{
+					{GraphSymbol: symbol},
+					{GraphSymbol: ports.GraphSymbol{ID: "function:ghi", Kind: "function", Name: "Load", File: "load.go", StartLine: 7, EndLine: 9}, Edge: "calls", Line: 11, Confidence: 1},
+				},
+				Hops: 1, Found: true, Directed: true, Confidence: 1,
+			},
+			prImpact: ports.PRImpactView{
+				Base: "HEAD~1", Head: "HEAD", ChangedFiles: 1,
+				Files:          []ports.PRFileImpact{{Path: "main.go", Status: "M", Symbols: 1}},
+				ChangedSymbols: []ports.GraphSymbol{symbol},
+				Impact:         []ports.ImpactHit{{GraphSymbol: symbol, Distance: 1, Via: "calls", ViaFile: "main.go", Test: true, Confidence: 1}},
+				TotalImpact:    1, Risk: ports.GraphRiskLow, Tests: []string{"main_test.go"},
+			},
+			analyticsStats: ports.GraphStatsView{
+				Engine: ports.GraphEngineNative, Project: "alpha",
+				Files: 42, Symbols: 900, Edges: 2000, Communities: 2, Orphans: 7,
+				Languages: map[string]int{"go": 42},
 			},
 		},
 	}
@@ -353,6 +446,10 @@ func TestBrainGraphStatsAndNeighbors(t *testing.T) {
 	if _, ok := envelope["communities"]; ok {
 		t.Fatalf("stats invents communities: %v", envelope)
 	}
+	analytics, _ := stats["analytics"].(map[string]any)
+	if analytics["communities"] != float64(2) || analytics["orphans"] != float64(7) {
+		t.Fatalf("analytics = %v", stats)
+	}
 
 	neighbors := structured(t, profileCall(t, server, "brain_graph", `{"action":"neighbors","project":"alpha","symbol":"Run","limit":4}`))
 	view, _ := neighbors["neighbors"].(map[string]any)
@@ -371,10 +468,78 @@ func TestBrainGraphStatsAndNeighbors(t *testing.T) {
 	}
 }
 
-func TestBrainGraphAnalyticsAreHonestlyUnsupported(t *testing.T) {
+func TestBrainGraphAnalyticsActions(t *testing.T) {
 	backend, server := graphServer(t, Policy{})
-	for _, action := range []string{"path", "communities", "god_nodes", "pr_impact"} {
-		result := profileCall(t, server, "brain_graph", `{"action":"`+action+`","project":"alpha","symbol":"Run","source":"a","target":"b"}`)
+
+	path := structured(t, profileCall(t, server, "brain_graph",
+		`{"action":"path","project":"alpha","source":"Run","target":"Load","depth":4}`))
+	if path["action"] != "path" {
+		t.Fatalf("path = %v", path)
+	}
+	if backend.index.pathFrom != "Run" || backend.index.pathTo != "Load" || backend.index.pathDepth != 4 {
+		t.Fatalf("path args = %q -> %q depth %d", backend.index.pathFrom, backend.index.pathTo, backend.index.pathDepth)
+	}
+	view, _ := path["path"].(map[string]any)
+	if view["found"] != true || view["hops"] != float64(1) {
+		t.Fatalf("path view = %v", view)
+	}
+	if text := textOf(t, profileCall(t, server, "brain_graph",
+		`{"action":"path","project":"alpha","source":"Run","target":"Load"}`)); !strings.Contains(text, "-[calls]-> Load") {
+		t.Fatalf("path text = %q", text)
+	}
+
+	communities := structured(t, profileCall(t, server, "brain_graph",
+		`{"action":"communities","project":"alpha","limit":5,"member_limit":10}`))
+	if communities["action"] != "communities" {
+		t.Fatalf("communities = %v", communities)
+	}
+	if backend.index.communityQuery.Limit != 5 || backend.index.communityQuery.MemberLimit != 10 || backend.index.communityQuery.ID != 0 {
+		t.Fatalf("community query = %+v", backend.index.communityQuery)
+	}
+	selected := structured(t, profileCall(t, server, "brain_graph",
+		`{"action":"communities","project":"alpha","community_id":2}`))
+	if backend.index.communityQuery.ID != 2 {
+		t.Fatalf("community_id = %d", backend.index.communityQuery.ID)
+	}
+	if list, _ := selected["communities"].(map[string]any)["communities"].([]any); len(list) != 1 {
+		t.Fatalf("selected communities = %v", selected)
+	}
+
+	god := structured(t, profileCall(t, server, "brain_graph",
+		`{"action":"god_nodes","project":"alpha","limit":5}`))
+	if god["action"] != "god_nodes" || backend.index.godLimit != 5 {
+		t.Fatalf("god_nodes = %v limit %d", god, backend.index.godLimit)
+	}
+	if text := textOf(t, profileCall(t, server, "brain_graph",
+		`{"action":"god_nodes","project":"alpha"}`)); !strings.Contains(text, "degree 3") {
+		t.Fatalf("god text = %q", text)
+	}
+
+	impact := structured(t, profileCall(t, server, "brain_graph",
+		`{"action":"pr_impact","project":"alpha","base":"HEAD~1"}`))
+	if impact["action"] != "pr_impact" || backend.index.prBase != "HEAD~1" || backend.index.prHead != "" {
+		t.Fatalf("pr_impact = %v base %q head %q", impact, backend.index.prBase, backend.index.prHead)
+	}
+	if text := textOf(t, profileCall(t, server, "brain_graph",
+		`{"action":"pr_impact","project":"alpha","base":"HEAD~1","head":"HEAD"}`)); !strings.Contains(text, "risk: low") {
+		t.Fatalf("pr text = %q", text)
+	}
+	if backend.index.prHead != "HEAD" {
+		t.Fatalf("head = %q", backend.index.prHead)
+	}
+}
+
+func TestBrainGraphAnalyticsRefuseAnEngineWithoutAnalytics(t *testing.T) {
+	backend, server := graphServer(t, Policy{})
+	backend.index.hideAnalytics = true
+	cases := map[string]string{
+		"path":        `{"action":"path","project":"alpha","source":"a","target":"b"}`,
+		"communities": `{"action":"communities","project":"alpha"}`,
+		"god_nodes":   `{"action":"god_nodes","project":"alpha"}`,
+		"pr_impact":   `{"action":"pr_impact","project":"alpha","base":"HEAD~1"}`,
+	}
+	for action, args := range cases {
+		result := profileCall(t, server, "brain_graph", args)
 		refusal := structured(t, result)
 		if result["isError"] != true || refusal["code"] != RefusalUnsupported {
 			t.Fatalf("%s = %v", action, result)
@@ -383,20 +548,53 @@ func TestBrainGraphAnalyticsAreHonestlyUnsupported(t *testing.T) {
 			t.Fatalf("%s has no alternative: %v", action, refusal)
 		}
 	}
-	if len(backend.opens) != 0 {
-		t.Fatalf("an analytics action opened the graph: %v", backend.opens)
+	stats := structured(t, profileCall(t, server, "brain_graph", `{"project":"alpha"}`))
+	if _, ok := stats["analytics"]; ok {
+		t.Fatalf("stats invented analytics: %v", stats)
 	}
+	if note, _ := stats["note"].(string); note == "" {
+		t.Fatalf("stats did not disclose the missing analytics: %v", stats)
+	}
+	if len(backend.opens) != len(cases)+1 {
+		t.Fatalf("opens = %v", backend.opens)
+	}
+
 	payload := CapabilityReport("test-version", DefaultProfile(), Policy{})
-	found := map[string]bool{}
 	for _, gap := range payload.Gaps {
 		if gap.Tool == "brain_graph" {
-			found[gap.Action] = true
+			t.Fatalf("capabilities still list a graph gap: %+v", payload.Gaps)
 		}
 	}
-	for _, action := range []string{"path", "communities", "god_nodes", "pr_impact"} {
-		if !found[action] {
-			t.Fatalf("capabilities miss the %s gap: %+v", action, payload.Gaps)
+	if payload.Features["knowledge_graph_analytics"] != true || payload.Features["code_graph_analytics"] != true {
+		t.Fatalf("analytics feature flag = %v", payload.Features)
+	}
+	for _, key := range []string{"graph_communities", "graph_god_nodes", "graph_path_nodes", "graph_pr_symbols"} {
+		if payload.Limits[key] <= 0 {
+			t.Fatalf("capability limit %s = %v", key, payload.Limits)
 		}
+	}
+}
+
+func TestBrainGraphAnalyticsCapsAndRefusals(t *testing.T) {
+	backend, server := graphServer(t, Policy{})
+	cases := map[string]string{
+		"path-depth":      `{"action":"path","project":"alpha","source":"a","target":"b","depth":17}`,
+		"path-missing":    `{"action":"path","project":"alpha","source":"a"}`,
+		"communities-cap": `{"action":"communities","project":"alpha","limit":101}`,
+		"members-cap":     `{"action":"communities","project":"alpha","member_limit":201}`,
+		"community-id":    `{"action":"communities","project":"alpha","community_id":-1}`,
+		"god-cap":         `{"action":"god_nodes","project":"alpha","limit":51}`,
+		"pr-base":         `{"action":"pr_impact","project":"alpha"}`,
+		"unknown":         `{"action":"cycles","project":"alpha"}`,
+	}
+	for name, args := range cases {
+		result := profileCall(t, server, "brain_graph", args)
+		if result["isError"] != true || structured(t, result)["code"] != RefusalInvalidArguments {
+			t.Fatalf("%s = %v", name, result)
+		}
+	}
+	if len(backend.opens) != 0 {
+		t.Fatalf("an invalid analytics call opened the graph: %v", backend.opens)
 	}
 }
 
@@ -488,10 +686,33 @@ func TestGraphifyAliasesCallTheGraphTools(t *testing.T) {
 		t.Fatalf("get_neighbors = %v", result)
 	}
 	stats := structured(t, profileCall(t, server, "graph_stats", `{"project":"alpha"}`))
-	if stats["indexed"] != true || stats["nodes"] != float64(900) || stats["communities_available"] != false {
+	if stats["indexed"] != true || stats["nodes"] != float64(900) ||
+		stats["communities_available"] != true || stats["communities"] != float64(2) {
 		t.Fatalf("graph_stats = %v", stats)
 	}
-	for _, name := range []string{"shortest_path", "get_community", "god_nodes", "list_prs", "get_pr_impact", "triage_prs"} {
+	pathResult := profileCall(t, server, "shortest_path",
+		`{"project":"alpha","source":"Run","target":"Load","max_hops":4}`)
+	if pathResult["isError"] != false || backend.index.pathDepth != 4 {
+		t.Fatalf("shortest_path = %v depth %d", pathResult, backend.index.pathDepth)
+	}
+	communityResult := profileCall(t, server, "get_community",
+		`{"project":"alpha","community_id":2,"limit":3}`)
+	if communityResult["isError"] != false {
+		t.Fatalf("get_community = %v", communityResult)
+	}
+	if backend.index.communityQuery.ID != 2 || backend.index.communityQuery.MemberLimit != 3 {
+		t.Fatalf("community query = %+v", backend.index.communityQuery)
+	}
+	godResult := profileCall(t, server, "god_nodes",
+		`{"project":"alpha","top_n":5,"exclude_hubs_percentile":10}`)
+	if godResult["isError"] != false || backend.index.godLimit != 5 {
+		t.Fatalf("god_nodes = %v limit %d", godResult, backend.index.godLimit)
+	}
+	droppedPercentile, _ := godResult["_meta"].(map[string]any)["lv24.brain/compat"].(map[string]any)["ignored_fields"].([]any)
+	if len(droppedPercentile) != 1 || droppedPercentile[0] != "exclude_hubs_percentile" {
+		t.Fatalf("dropped percentile is not reported: %v", droppedPercentile)
+	}
+	for _, name := range []string{"list_prs", "get_pr_impact", "triage_prs"} {
 		result := profileCall(t, server, name, `{"project":"alpha","source":"a","target":"b"}`)
 		if result["isError"] != true || structured(t, result)["code"] != RefusalUnsupported {
 			t.Fatalf("%s = %v", name, result)

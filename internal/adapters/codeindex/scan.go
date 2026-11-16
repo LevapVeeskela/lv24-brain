@@ -23,11 +23,12 @@ var skippedDirs = map[string]bool{
 
 // fileState is one indexed source file.
 type fileState struct {
-	Path    string
-	SHA256  string
-	Size    int64
-	MTimeNS int64
-	Package string
+	Path     string
+	SHA256   string
+	Size     int64
+	MTimeNS  int64
+	Package  string
+	Language string
 }
 
 // scanResult is the file set of one checkout scan.
@@ -37,9 +38,10 @@ type scanResult struct {
 	Notes   []string
 }
 
-// scan walks the checkout and hashes every Go file that belongs to the
-// platform build. known supplies the previous size and mtime so an unchanged
-// file is not read again; a size or mtime difference forces a hash.
+// scan walks the checkout and hashes every Go, TypeScript, TSX, JavaScript and
+// JSX file that belongs to the platform build. known supplies the previous
+// size and mtime so an unchanged file is not read again; a size or mtime
+// difference forces a hash.
 func (i *Index) scan(ctx context.Context, known map[string]fileState) (scanResult, error) {
 	result := scanResult{Files: map[string]fileState{}}
 	buildCtx := build.Default
@@ -64,6 +66,12 @@ func (i *Index) scan(ctx context.Context, known map[string]fileState) (scanResul
 			if path == root {
 				return nil
 			}
+			// A nested Git checkout is a different repository with its own
+			// index and its own file set; following it would mix two
+			// checkouts into one path-keyed store.
+			if isNestedRepo(path, root) {
+				return fs.SkipDir
+			}
 			if skippedDirs[name] || strings.HasPrefix(name, ".") || strings.HasPrefix(name, "_") {
 				return fs.SkipDir
 			}
@@ -75,7 +83,7 @@ func (i *Index) scan(ctx context.Context, known map[string]fileState) (scanResul
 			}
 			return nil
 		}
-		if !entry.Type().IsRegular() || !strings.HasSuffix(name, ".go") {
+		if !entry.Type().IsRegular() {
 			return nil
 		}
 		if strings.HasPrefix(name, ".") || strings.HasPrefix(name, "_") {
@@ -85,8 +93,16 @@ func (i *Index) scan(ctx context.Context, known map[string]fileState) (scanResul
 		if !ok || i.excluded(rel) {
 			return nil
 		}
-		matched, matchErr := buildCtx.MatchFile(filepath.Dir(path), name)
-		if matchErr != nil || !matched {
+		language := LanguageForPath(name)
+		if language == "" {
+			return nil
+		}
+		if language == Language {
+			matched, matchErr := buildCtx.MatchFile(filepath.Dir(path), name)
+			if matchErr != nil || !matched {
+				return nil
+			}
+		} else if !polyglotPathIndexable(rel) {
 			return nil
 		}
 		info, statErr := entry.Info()
@@ -98,8 +114,8 @@ func (i *Index) scan(ctx context.Context, known map[string]fileState) (scanResul
 			result.Skipped++
 			return nil
 		}
-		state := fileState{Path: rel, Size: info.Size(), MTimeNS: info.ModTime().UnixNano()}
-		if previous, ok := known[rel]; ok && previous.Size == state.Size && previous.MTimeNS == state.MTimeNS {
+		state := fileState{Path: rel, Size: info.Size(), MTimeNS: info.ModTime().UnixNano(), Language: language}
+		if previous, ok := known[rel]; ok && previous.Size == state.Size && previous.MTimeNS == state.MTimeNS && previous.Language == state.Language {
 			state.SHA256 = previous.SHA256
 			state.Package = previous.Package
 			result.Files[rel] = state
@@ -170,6 +186,19 @@ func isNestedModule(dir, moduleRoot string) bool {
 		return false
 	}
 	if _, err := os.Stat(filepath.Join(dir, "go.mod")); err == nil {
+		return true
+	}
+	return false
+}
+
+// isNestedRepo reports whether dir is a separate Git checkout below the
+// indexed root. One store describes one checkout, so a nested clone or linked
+// worktree is not walked.
+func isNestedRepo(dir, root string) bool {
+	if filepath.Clean(dir) == filepath.Clean(root) {
+		return false
+	}
+	if _, err := os.Stat(filepath.Join(dir, ".git")); err == nil {
 		return true
 	}
 	return false
