@@ -282,7 +282,7 @@ In local or `git` mode it writes dumps below the data directory and
 persists each run as Markdown under `connectors/runs/`; `connection run`
 instead writes raw items/checkpoints under `connectors/<id>/`. In server mode the same
 snapshot command calls `POST /v1/connectors/run`; with PostgreSQL the server persists
-raw items and checkpoints (schema 9) plus the run record, while the in-memory
+raw items and checkpoints (schema 10) plus the run record, while the in-memory
 development store has no raw zone and rejects the run as unsupported. The server
 has no local-only raw zone, so it stores items only when the run is explicitly
 shared: pass `--publish shared`. A provider whose raw zone defaults to
@@ -721,7 +721,7 @@ a token in the repository URL.
 The HTTP API and the token-authenticated CLI client are implemented. Postgres
 persistence is enabled by `BRAIN_DATABASE_URL` (or `DATABASE_URL`); without it
 the server falls back to an in-memory store and loses data on restart. Server
-schema 9 (migrations `0002_auth_tokens.sql` through `0009_connector_items.sql`)
+schema 10 (migrations `0002_auth_tokens.sql` through `0010_record_provenance.sql`)
 stores API tokens (with optional scopes and project allow-lists), refresh-token
 families, the security audit log, knowledge-record owners, and project access
 rules durably. See

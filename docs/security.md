@@ -112,7 +112,7 @@ matching `.gitignore` into the data directory.
   shared|local-only`). Untracking never erases prior git history, and mail
   defaults to `local-only`. Server mode runs the same
   native item-level path through `POST /v1/connectors/run` (admin only): with
-  PostgreSQL it persists raw items, checkpoints and the run record (schema 9);
+  PostgreSQL it persists raw items, checkpoints and the run record (schema 10);
   the in-memory development store has no raw zone and rejects connector runs
   as unsupported instead of discarding output. The server has no local-only
   raw zone, so it enforces the policy at admission: a connection whose publish
@@ -393,7 +393,7 @@ Implemented in `internal/adapters/httpapi` and `internal/auth`:
   refresh-token reuse, deletion and role changes take effect immediately.
 - Rotating refresh tokens stored as SHA-256 hashes; reuse revokes the token
   family. In a Postgres deployment they are persisted by migrations
-  `0002_auth_tokens.sql` and `0003_auth_revocations.sql` (server schema 9), so
+  `0002_auth_tokens.sql` and `0003_auth_revocations.sql` (server schema 10), so
   restarts do not invalidate sessions. Revocation tombstones have no expiry, so
   pruning expired token rows cannot resurrect a revoked family or session.
 - Opaque API tokens with the `brain_` prefix, stored as SHA-256 hashes in the
@@ -502,7 +502,7 @@ Current limits, stated plainly:
   applies embedded migrations on startup; startup logs redact the database URL.
 - An existing Postgres schema with pending migrations refuses to start until a
   backup is taken and `BRAIN_DATABASE_BACKUP_CONFIRMED=1` is set. Migrations are
-  forward-only; every upgrade (currently to schema 9) is gated this way.
+  forward-only; every upgrade (currently to schema 10) is gated this way.
 - API tokens and refresh-token families are durable in Postgres (migrations
   `0002_auth_tokens.sql` and `0003_auth_revocations.sql`), so restart no longer
   forces re-authentication.
@@ -558,5 +558,6 @@ issue with exploit details. Do not include secrets or personal data in reports.
 
 ## Server record provenance review
 
-Server mode exposes POST /v1/projects/{project}/records/{kind}/{id}/review (and /v1/records/{kind}/{id}/review) to update a record's eviewed and 	rust fields without rewriting its body. Access follows the existing owner/member/admin rules, the write bumps the server revision and records an audit event, and optimistic concurrency uses expected_revision. Quarantined (unreviewed) records stay out of trusted context and server search until reviewed.
+Server mode exposes POST /v1/projects/{project}/records/{kind}/{id}/review (and /v1/records/{kind}/{id}/review) to update a record's 
+eviewed and 	rust fields without rewriting its body. Access follows the existing owner/member/admin rules, the write bumps the server revision and records an audit event, and optimistic concurrency uses expected_revision. Quarantined (unreviewed) records stay out of trusted context and server search until reviewed.
 

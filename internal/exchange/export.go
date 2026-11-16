@@ -266,7 +266,7 @@ func exportBundle(ctx context.Context, src Source, opts ExportOptions) (Manifest
 	manifest.FormatVersion = FormatVersion
 	manifest.Version = FormatVersion
 	manifest.Generator.Name = "lv24-brain"
-	manifest.Generator.Version = "0.19.0"
+	manifest.Generator.Version = "0.20.0"
 	manifest.Generator.Profile = "engine"
 	manifest.CreatedAt = time.Now().UTC().Format(time.RFC3339Nano)
 	manifest.Source.System = "lv24-brain"

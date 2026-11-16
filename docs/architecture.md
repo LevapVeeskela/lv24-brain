@@ -529,7 +529,7 @@ Persistence:
   refuses to start until a backup is taken and
   `BRAIN_DATABASE_BACKUP_CONFIRMED=1` is set. A fresh database migrates
   immediately.
-- `postgres.SchemaVersion` is 9. Migration `0002_auth_tokens.sql` adds the
+- `postgres.SchemaVersion` is 10. Migration `0002_auth_tokens.sql` adds the
   `api_tokens` and `refresh_tokens` tables, so API tokens and refresh-token
   families survive restarts. Migration `0003_auth_revocations.sql` adds durable
   family/session revocation tombstones with no expiry, so pruning expired token
@@ -554,6 +554,8 @@ Persistence:
 - Migration `0009_connector_items.sql` adds the server raw store
   (`connector_items`, `connector_checkpoints`, run `connection_id`/`stats`)
   used by the native item-level ingestion.
+- Migration `0010_record_provenance.sql` adds record `origin`, `reviewed` and
+  `trust` columns plus the server record review route's optimistic checks.
 - The authenticated login is attached to the request context through
   `ports.WithActor`, which both the HTTP layer and the Postgres adapter use, so
   every revision and audit row records who made the change.
@@ -638,7 +640,7 @@ pagination (`Link` / `X-Next-Page`, at most 10 pages, `limit` up to 1000).
 In server mode the command calls `POST /v1/connectors/run`; the server builds
 the native item-level connection from environment/OS secrets, runs it with
 `BRAIN_CONNECTOR_TIMEOUT`, stores raw items and checkpoints in PostgreSQL
-(schema 9) plus the run record through `httpapi.Store`, and maps items to an
+(schema 10) plus the run record through `httpapi.Store`, and maps items to an
 existing project when the request carries `projectId`. The in-memory
 development store has no raw zone and rejects the run as unsupported instead
 of discarding output. Viewers can list and fetch runs
@@ -804,5 +806,6 @@ automatic mail body storage, and Rust components (interfaces are reserved).
 
 ## Server record provenance review
 
-Server-mode records carry origin, eviewed, and 	rust provenance. POST .../records/{kind}/{id}/review updates only those fields, bumps the revision, and audits the change; httpclient implements RecordReviewer so rain record review works against a server.
+Server-mode records carry origin, 
+eviewed, and 	rust provenance. POST .../records/{kind}/{id}/review updates only those fields, bumps the revision, and audits the change; httpclient implements RecordReviewer so rain record review works against a server.
 

@@ -700,7 +700,8 @@ two minor releases after 0.17.
   GitHub/GitLab pull requests. The native `brain_graph(action=pr_impact)`
   answers the same underlying question for two local git refs and never writes
   to the checkout.
-- **Pin, unpin, consolidation and prompt discard** are refused with guidance
+- **Consolidation and prompt discard** are refused with guidance (`pin`/`unpin`
+  are served by `brain_judge`).
   (§5); the underlying app methods land later.
 - **In-place record edit, MCP delete and hard delete** stay CLI-only. The
   Markdown truth is append-only: evolution is `brain_note(topic_key=…)`,

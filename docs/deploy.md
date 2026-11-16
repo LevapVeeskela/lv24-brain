@@ -196,7 +196,7 @@ docker compose --env-file .env -f docker-compose.yml up -d brain-server
 Before an upgrade, take a backup. The server applies embedded migrations on
 startup; an existing schema with pending migrations refuses to start until
 `BRAIN_DATABASE_BACKUP_CONFIRMED=1` is set in the server environment. Upgrading
-a database to schema 9 (migrations `0007_search_fulltext.sql`,
+a database to schema 10 (migrations `0007_search_fulltext.sql`,
 `0008_project_access.sql`, and `0009_connector_items.sql` on top of the earlier ones) is such a migration: back up first, set the
 confirmation variable for the upgrade start, and unset it afterwards if you
 prefer to keep the gate explicit for the next migration. An update must not run
@@ -256,7 +256,7 @@ pruned token row cannot resurrect a revoked family or session. Connector runs
 are persisted server-side in the `connector_runs` table (migration `0001`).
 Server connector runs use the native item-level path: with PostgreSQL they
 store raw items and checkpoints in `connector_items`/`connector_checkpoints`
-(schema 9) and export each run record on demand through
+(schema 10) and export each run record on demand through
 `GET /v1/connectors/runs/{id}/markdown`. Raw items are stored only for an
 explicitly shared run (`publish: shared` in `POST /v1/connectors/run`, or
 `brain connector run --publish shared`); a local-only connection is refused
@@ -269,7 +269,7 @@ Current limits:
 
 - Pending migrations on an existing schema require a backup and
   `BRAIN_DATABASE_BACKUP_CONFIRMED=1`; migrations are forward-only. Upgrading a
-  server to schema 9 therefore needs a backup first.
+  server to schema 10 therefore needs a backup first.
 - Multi-replica deployment is not supported: the SSE broker and login rate
   limiter are per-process, so events and throttling are not shared between
   instances. Durable tokens do not change that.
