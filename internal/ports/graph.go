@@ -11,6 +11,8 @@ const (
 	GraphEngineOff = "off"
 	// GraphEngineCodeGraph reads an external codegraph index in place.
 	GraphEngineCodeGraph = "codegraph"
+	// GraphEngineNative builds and reads the native Go graph store.
+	GraphEngineNative = "native"
 )
 
 // Retrieval tiers of a symbol search, best first. A hit records the tier that

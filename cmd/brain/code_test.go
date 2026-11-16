@@ -280,11 +280,11 @@ func TestCodeRefusesOffAndMissingIndex(t *testing.T) {
 		t.Fatalf("off: exit %d: %s", code, stderr)
 	}
 
-	// Act: native is not implemented yet.
+	// Act: the native engine has no store yet.
 	code, _, stderr = runForTest(t, append([]string{"code", "status", "--engine", "native"}, common...)...)
 
 	// Assert
-	if code != 1 || !strings.Contains(stderr, "not implemented yet") {
+	if code != 1 || !strings.Contains(stderr, "no native graph index") {
 		t.Fatalf("native: exit %d: %s", code, stderr)
 	}
 
@@ -337,7 +337,7 @@ func TestCodeRejectsInvalidGraphConfig(t *testing.T) {
 	if err := yaml.Unmarshal(raw, &doc); err != nil {
 		t.Fatal(err)
 	}
-	doc["graph"] = map[string]any{"engine": "native"}
+	doc["graph"] = map[string]any{"engine": "future"}
 	encoded, err := yaml.Marshal(doc)
 	if err != nil {
 		t.Fatal(err)
@@ -348,7 +348,7 @@ func TestCodeRejectsInvalidGraphConfig(t *testing.T) {
 
 	code, _, stderr := runForTest(t, "code", "status", "--project", "demo", "--config", cfgPath)
 
-	if code != 1 || !strings.Contains(stderr, "not available yet") {
+	if code != 1 || !strings.Contains(stderr, "unknown engine") {
 		t.Fatalf("exit %d: %s", code, stderr)
 	}
 }

@@ -11,7 +11,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/levapveeskela/lv24-brain/internal/adapters/codegraph"
 	"github.com/levapveeskela/lv24-brain/internal/app"
 	"github.com/levapveeskela/lv24-brain/internal/bootstrap"
 	"github.com/levapveeskela/lv24-brain/internal/config"
@@ -19,7 +18,7 @@ import (
 	"github.com/levapveeskela/lv24-brain/internal/ports"
 )
 
-// runCode dispatches the read-only code-graph commands.
+// runCode dispatches the code-graph commands.
 func runCode(args []string, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
 		printCodeUsage(stderr)
@@ -30,6 +29,10 @@ func runCode(args []string, stdout, stderr io.Writer) int {
 	case "help", "-h", "--help":
 		printCodeUsage(stdout)
 		return 0
+	case "index":
+		return runCodeIndex(rest, stdout, stderr)
+	case "sync":
+		return runCodeSync(rest, stdout, stderr)
 	case "status":
 		return runCodeStatus(rest, stdout, stderr)
 	case "search":
@@ -48,11 +51,16 @@ func runCode(args []string, stdout, stderr io.Writer) int {
 }
 
 func printCodeUsage(w io.Writer) {
-	fmt.Fprint(w, `Query a code graph. The index is opened read-only; indexing belongs to the
-engine that produced it.
+	fmt.Fprint(w, `Build and query a code graph.
+
+The native engine indexes Go with go/ast and go/types and keeps a derived
+SQLite store under the brain data directory. The codegraph engine reads an
+external CodeGraph index in place and cannot write it.
 
 Usage:
-  brain code status  [--project p] [--json]
+  brain code index   [--project p] [--engine native] [--rebuild] [--tags t] [--json]
+  brain code sync    [path...] [--project p] [--engine native|codegraph] [--tags t] [--json]
+  brain code status  [--project p] [--engine native|codegraph] [--json]
   brain code search  <query> [--kind k]... [--file f] [--limit n] [--json]
   brain code node    <symbol> [--file f] [--code] [--callers=false] [--callees=false] [--json]
   brain code explore <query> [--max-files n] [--json]
@@ -60,18 +68,21 @@ Usage:
 
 Flags:
   --project <id>    project id or alias (default: the working directory)
-  --engine <name>   codegraph or off (default: graph.engine in brain.yaml)
-  --db <path>       codegraph.db or its directory (default: graph.path, then
-                    <checkout>/.codegraph/codegraph.db)
+  --engine <name>   native, codegraph or off (default: graph.engine in brain.yaml)
+  --db <path>       index file or its directory (default: graph.path, then the
+                    engine default)
   --root <dir>      checkout source is read from (default: the project path)
+  --tags <list>     extra Go build tags for the native indexer (repeatable)
+  --rebuild         drop the native store before indexing
   --json            print the typed JSON answer
   --config <path>   path to brain.yaml
 
-The code graph is off by default. Enable it with:
+The code graph is off by default. Enable the native indexer with:
 
   graph:
-    engine: codegraph
+    engine: native
 
+Then run: brain code index
 Exit codes: 0 success, 1 runtime error, 2 usage error.
 `)
 }
@@ -84,22 +95,32 @@ type codeFlags struct {
 	root    *string
 	asJSON  *bool
 	config  *string
+	rebuild *bool
+	tags    *stringList
 }
 
 func addCodeFlags(fs *flag.FlagSet) *codeFlags {
 	return &codeFlags{
 		project: fs.String("project", "", "project id or alias"),
-		engine:  fs.String("engine", "", "graph engine: codegraph or off (default: graph.engine)"),
-		db:      fs.String("db", "", "codegraph.db path or its directory"),
+		engine:  fs.String("engine", "", "graph engine: native, codegraph or off (default: graph.engine)"),
+		db:      fs.String("db", "", "index file or its directory"),
 		root:    fs.String("root", "", "checkout root to read source from"),
 		asJSON:  fs.Bool("json", false, "print JSON"),
 		config:  configFlag(fs),
 	}
 }
 
-// withCodeIndex resolves the engine, project, checkout and index, then runs fn
-// with an open read-only index.
-func withCodeIndex(ctx context.Context, flags *codeFlags, command string, stderr io.Writer, fn func(domain.Project, *codegraph.Index) int) int {
+// addCodeWriteFlags adds the flags only the native writer understands.
+func addCodeWriteFlags(fs *flag.FlagSet, flags *codeFlags) {
+	flags.rebuild = fs.Bool("rebuild", false, "drop and rebuild the native store")
+	flags.tags = &stringList{}
+	fs.Var(flags.tags, "tags", "extra Go build tags (repeatable or comma-separated)")
+}
+
+// withCodeRuntime resolves the engine, project, checkout and index, then runs
+// fn. writable creates an empty native store; a read command leaves a missing
+// store missing and reports the index command instead.
+func withCodeRuntime(ctx context.Context, flags *codeFlags, command string, stderr io.Writer, writable bool, fn func(domain.Project, *bootstrap.GraphRuntime) int) int {
 	cfg, err := loadRequiredConfig(*flags.config)
 	if err != nil {
 		return reportError(stderr, command, err)
@@ -113,14 +134,11 @@ func withCodeIndex(ctx context.Context, flags *codeFlags, command string, stderr
 	}
 	switch engine {
 	case ports.GraphEngineOff:
-		fmt.Fprintf(stderr, "brain %s: the code graph is off; set graph.engine: codegraph in brain.yaml or pass --engine codegraph\n", command)
+		fmt.Fprintf(stderr, "brain %s: the code graph is off; set graph.engine: native in brain.yaml or pass --engine native\n", command)
 		return 1
-	case ports.GraphEngineCodeGraph:
-	case "native":
-		fmt.Fprintf(stderr, "brain %s: graph engine \"native\" is not implemented yet; use codegraph or off\n", command)
-		return 1
+	case ports.GraphEngineNative, ports.GraphEngineCodeGraph:
 	default:
-		fmt.Fprintf(stderr, "brain %s: unknown graph engine %q; use codegraph or off\n", command, engine)
+		fmt.Fprintf(stderr, "brain %s: unknown graph engine %q; use native, codegraph or off\n", command, engine)
 		return 1
 	}
 	if cfg.Mode == config.ModeServer {
@@ -142,18 +160,35 @@ func withCodeIndex(ctx context.Context, flags *codeFlags, command string, stderr
 			command, target.Project.ID, target.Project.ID)
 		return 1
 	}
-	dbPath := codeDBPath(*flags.db, cfg, root)
-	if _, err := os.Stat(dbPath); err != nil {
-		fmt.Fprintf(stderr, "brain %s: no codegraph index at %s; create one with `codegraph index` (or brain graphs --init) in %s, or set graph.path\n",
-			command, dbPath, root)
-		return 1
-	}
-	index, err := codegraph.Open(ctx, codegraph.Options{DBPath: dbPath, Root: root, Project: target.Project.ID})
+	dbPath, err := bootstrap.GraphDBPath(cfg, engine, root, target.Project.ID, *flags.db)
 	if err != nil {
 		return reportError(stderr, command, err)
 	}
-	defer func() { _ = index.Close() }()
-	return fn(target.Project, index)
+	if !writable {
+		if _, statErr := os.Stat(dbPath); statErr != nil {
+			if engine == ports.GraphEngineCodeGraph {
+				fmt.Fprintf(stderr, "brain %s: no codegraph index at %s; create one with `codegraph index` (or brain graphs --init) in %s, or set graph.path\n",
+					command, dbPath, root)
+			} else {
+				fmt.Fprintf(stderr, "brain %s: no native graph index at %s; run brain code index --project %s\n",
+					command, dbPath, target.Project.ID)
+			}
+			return 1
+		}
+	}
+	runtime, err := bootstrap.OpenGraph(ctx, bootstrap.GraphOptions{
+		Engine:  engine,
+		Root:    root,
+		Project: target.Project.ID,
+		DBPath:  dbPath,
+		Create:  writable,
+		Tags:    flags.tags.values(),
+	})
+	if err != nil {
+		return reportError(stderr, command, err)
+	}
+	defer func() { _ = runtime.Close() }()
+	return fn(target.Project, runtime)
 }
 
 // codeRoot picks the checkout: the explicit flag, the resolved path, then the
@@ -178,29 +213,70 @@ func codeRoot(flagRoot string, target app.Resolved) string {
 	return ""
 }
 
-// codeDBPath resolves the index file. A path ending in .db is a file, anything
-// else is a directory holding the default relative path.
-func codeDBPath(flagDB string, cfg config.BrainConfig, root string) string {
-	candidate := strings.TrimSpace(flagDB)
-	if candidate == "" {
-		candidate = strings.TrimSpace(cfg.Graph.Path)
+// codeDBPath is intentionally not duplicated here: bootstrap.GraphDBPath owns
+// the engine-specific default and the graph.path override.
+
+func runCodeIndex(args []string, stdout, stderr io.Writer) int {
+	fs := newFlagSet("code index", stderr)
+	flags := addCodeFlags(fs)
+	addCodeWriteFlags(fs, flags)
+	positional, err := parseInterspersed(fs, args)
+	if err != nil {
+		return 2
 	}
-	if candidate == "" {
-		return filepath.Join(root, filepath.FromSlash(codegraph.DefaultDBRelPath))
+	if !expectArgs("code index", positional, 0, "no arguments", stderr) {
+		return 2
 	}
-	if !filepath.IsAbs(candidate) {
-		candidate = filepath.Join(root, candidate)
-	}
-	if info, err := os.Stat(candidate); err == nil {
-		if info.IsDir() {
-			return filepath.Join(candidate, filepath.FromSlash(codegraph.DefaultDBRelPath))
+	ctx := context.Background()
+	return withCodeRuntime(ctx, flags, "code index", stderr, true, func(project domain.Project, runtime *bootstrap.GraphRuntime) int {
+		if runtime.Native == nil {
+			fmt.Fprintln(stderr, "brain code index: the codegraph engine is read-only; run `codegraph index` in the checkout and use brain code status")
+			return 1
 		}
-		return candidate
+		var result ports.GraphSyncResult
+		var err error
+		if *flags.rebuild {
+			result, err = runtime.Native.Rebuild(ctx, project.ID)
+		} else {
+			result, err = runtime.Native.Index(ctx, project.ID)
+		}
+		if err != nil {
+			return reportError(stderr, "code index", err)
+		}
+		if *flags.asJSON {
+			return writeJSONReport(stdout, stderr, "code index", result)
+		}
+		printCodeSync(stdout, "index", result)
+		return 0
+	})
+}
+
+func runCodeSync(args []string, stdout, stderr io.Writer) int {
+	fs := newFlagSet("code sync", stderr)
+	flags := addCodeFlags(fs)
+	addCodeWriteFlags(fs, flags)
+	positional, err := parseInterspersed(fs, args)
+	if err != nil {
+		return 2
 	}
-	if strings.EqualFold(filepath.Ext(candidate), ".db") {
-		return candidate
-	}
-	return filepath.Join(candidate, filepath.FromSlash(codegraph.DefaultDBRelPath))
+	ctx := context.Background()
+	return withCodeRuntime(ctx, flags, "code sync", stderr, true, func(project domain.Project, runtime *bootstrap.GraphRuntime) int {
+		var result ports.GraphSyncResult
+		var err error
+		if runtime.Native != nil {
+			result, err = runtime.Native.Sync(ctx, project.ID, positional)
+		} else {
+			result, err = runtime.Index.Sync(ctx, project.ID, positional)
+		}
+		if err != nil {
+			return reportError(stderr, "code sync", err)
+		}
+		if *flags.asJSON {
+			return writeJSONReport(stdout, stderr, "code sync", result)
+		}
+		printCodeSync(stdout, "sync", result)
+		return 0
+	})
 }
 
 func runCodeStatus(args []string, stdout, stderr io.Writer) int {
@@ -214,8 +290,8 @@ func runCodeStatus(args []string, stdout, stderr io.Writer) int {
 		return 2
 	}
 	ctx := context.Background()
-	return withCodeIndex(ctx, flags, "code status", stderr, func(project domain.Project, index *codegraph.Index) int {
-		status, err := index.Status(ctx, project.ID)
+	return withCodeRuntime(ctx, flags, "code status", stderr, false, func(project domain.Project, runtime *bootstrap.GraphRuntime) int {
+		status, err := runtime.Index.Status(ctx, project.ID)
 		if err != nil {
 			return reportError(stderr, "code status", err)
 		}
@@ -248,8 +324,8 @@ func runCodeSearch(args []string, stdout, stderr io.Writer) int {
 		return 2
 	}
 	ctx := context.Background()
-	return withCodeIndex(ctx, flags, "code search", stderr, func(project domain.Project, index *codegraph.Index) int {
-		hits, err := index.Search(ctx, ports.GraphQuery{Text: query, Kinds: kinds, File: *file, Limit: *limit})
+	return withCodeRuntime(ctx, flags, "code search", stderr, false, func(project domain.Project, runtime *bootstrap.GraphRuntime) int {
+		hits, err := runtime.Index.Search(ctx, ports.GraphQuery{Text: query, Kinds: kinds, File: *file, Limit: *limit})
 		if err != nil {
 			return reportError(stderr, "code search", err)
 		}
@@ -279,8 +355,8 @@ func runCodeNode(args []string, stdout, stderr io.Writer) int {
 		return 2
 	}
 	ctx := context.Background()
-	return withCodeIndex(ctx, flags, "code node", stderr, func(project domain.Project, index *codegraph.Index) int {
-		view, err := index.Node(ctx, project.ID, symbol, *file, ports.NodeOpts{
+	return withCodeRuntime(ctx, flags, "code node", stderr, false, func(project domain.Project, runtime *bootstrap.GraphRuntime) int {
+		view, err := runtime.Index.Node(ctx, project.ID, symbol, *file, ports.NodeOpts{
 			IncludeSource:  *includeSource,
 			IncludeCallers: *includeCallers,
 			IncludeCallees: *includeCallees,
@@ -315,8 +391,8 @@ func runCodeExplore(args []string, stdout, stderr io.Writer) int {
 		return 2
 	}
 	ctx := context.Background()
-	return withCodeIndex(ctx, flags, "code explore", stderr, func(project domain.Project, index *codegraph.Index) int {
-		view, err := index.Explore(ctx, project.ID, query, *maxFiles)
+	return withCodeRuntime(ctx, flags, "code explore", stderr, false, func(project domain.Project, runtime *bootstrap.GraphRuntime) int {
+		view, err := runtime.Index.Explore(ctx, project.ID, query, *maxFiles)
 		if err != nil {
 			return reportError(stderr, "code explore", err)
 		}
@@ -347,8 +423,8 @@ func runCodeImpact(args []string, stdout, stderr io.Writer) int {
 		return 2
 	}
 	ctx := context.Background()
-	return withCodeIndex(ctx, flags, "code impact", stderr, func(project domain.Project, index *codegraph.Index) int {
-		view, err := index.Impact(ctx, project.ID, symbol, *file, *depth)
+	return withCodeRuntime(ctx, flags, "code impact", stderr, false, func(project domain.Project, runtime *bootstrap.GraphRuntime) int {
+		view, err := runtime.Index.Impact(ctx, project.ID, symbol, *file, *depth)
 		if err != nil {
 			return reportError(stderr, "code impact", err)
 		}
@@ -374,10 +450,42 @@ func (l *stringList) Set(value string) error {
 	return nil
 }
 
+// values splits comma-separated occurrences into individual tags.
+func (l *stringList) values() []string {
+	if l == nil {
+		return nil
+	}
+	out := make([]string, 0, len(*l))
+	for _, value := range *l {
+		for _, part := range strings.Split(value, ",") {
+			part = strings.TrimSpace(part)
+			if part != "" {
+				out = append(out, part)
+			}
+		}
+	}
+	return out
+}
+
+// printCodeSync renders the result of index or sync.
+func printCodeSync(w io.Writer, command string, result ports.GraphSyncResult) {
+	fmt.Fprintf(w, "%s: %s (project %s)\n", command, result.Engine, result.Project)
+	if result.Unsupported {
+		fmt.Fprintln(w, "status: unsupported by this engine")
+	} else {
+		fmt.Fprintf(w, "changed files: %d\n", result.Changed)
+	}
+	printNotes(w, result.Notes)
+}
+
 func printCodeStatus(w io.Writer, status ports.GraphStatus) {
 	fmt.Fprintf(w, "project:       %s\n", status.Project)
-	fmt.Fprintf(w, "engine:        %s (schema %d, extraction %d, codegraph %s)\n",
-		status.Engine, status.SchemaVersion, status.ExtractionVersion, status.IndexedWithVersion)
+	with := status.IndexedWithVersion
+	if with == "" {
+		with = "-"
+	}
+	fmt.Fprintf(w, "engine:        %s (schema %d, extraction %d, indexed with %s)\n",
+		status.Engine, status.SchemaVersion, status.ExtractionVersion, with)
 	fmt.Fprintf(w, "checkout:      %s\n", status.Root)
 	fmt.Fprintf(w, "index:         %s (%s)\n", status.DBPath, formatBytes(status.SizeBytes))
 	indexed := "unknown"
@@ -399,7 +507,11 @@ func printCodeStatus(w io.Writer, status ports.GraphStatus) {
 	fmt.Fprintf(w, "nodes:         %d\n", status.Nodes)
 	fmt.Fprintf(w, "edges:         %d\n", status.Edges)
 	fmt.Fprintf(w, "unresolved:    %d\n", status.UnresolvedRefs)
-	fmt.Fprintf(w, "read mode:     read-only (no statement can write)\n")
+	if status.Engine == ports.GraphEngineNative {
+		fmt.Fprintf(w, "writes:        brain code index | brain code sync\n")
+	} else {
+		fmt.Fprintf(w, "read mode:     read-only (no statement can write)\n")
+	}
 	printCounts(w, "nodes by kind", status.NodesByKind, 8)
 	printCounts(w, "files by language", status.FilesByLanguage, 6)
 	printNotes(w, status.Notes)

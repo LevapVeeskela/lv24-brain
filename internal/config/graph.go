@@ -9,13 +9,14 @@ import (
 )
 
 // GraphConfig is the `graph` block of brain.yaml: which code-graph engine
-// answers `brain code`. It is disabled unless configured, because reading an
-// external index needs an explicit path decision by the workspace owner.
+// answers `brain code`. It is disabled unless configured, because indexing a
+// checkout is an explicit decision by the workspace owner.
 type GraphConfig struct {
-	// Engine selects the code-graph engine: "off" (default) or "codegraph".
-	// The native Go indexer is a later work package.
+	// Engine selects the code-graph engine: "off" (default), "native" (the
+	// built-in Go indexer) or "codegraph" (an external read-only index).
 	Engine string `yaml:"engine,omitempty"`
-	// Path optionally overrides the index location. It is either the
+	// Path optionally overrides the index location. For "native" it is the
+	// database file or a directory holding it; for "codegraph" it is the
 	// codegraph.db file or a directory containing .codegraph/codegraph.db.
 	// A relative path is resolved against the project checkout.
 	Path string `yaml:"path,omitempty"`
@@ -39,13 +40,11 @@ func (g GraphConfig) EffectiveEngine() string {
 // Validate rejects an unknown engine and names the supported values.
 func (g GraphConfig) Validate() error {
 	switch g.EffectiveEngine() {
-	case ports.GraphEngineOff, ports.GraphEngineCodeGraph:
+	case ports.GraphEngineOff, ports.GraphEngineCodeGraph, ports.GraphEngineNative:
 		return nil
-	case "native":
-		return domain.NewValidationError("config.graph.engine",
-			fmt.Sprintf("%q is not available yet; use %q or %q", "native", ports.GraphEngineCodeGraph, ports.GraphEngineOff))
 	default:
 		return domain.NewValidationError("config.graph.engine",
-			fmt.Sprintf("unknown engine %q; use %q or %q", g.Engine, ports.GraphEngineCodeGraph, ports.GraphEngineOff))
+			fmt.Sprintf("unknown engine %q; use %q, %q or %q",
+				g.Engine, ports.GraphEngineNative, ports.GraphEngineCodeGraph, ports.GraphEngineOff))
 	}
 }
