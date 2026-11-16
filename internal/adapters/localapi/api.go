@@ -77,14 +77,22 @@ type JobCanceler interface {
 
 // RunView deliberately excludes error text and any credential-bearing fields.
 type RunView struct {
-	ID           string                 `json:"id"`
-	Source       string                 `json:"source"`
-	ConnectionID string                 `json:"connectionId,omitempty"`
-	Status       domain.ConnectorStatus `json:"status"`
-	StartedAt    time.Time              `json:"startedAt"`
-	FinishedAt   *time.Time             `json:"finishedAt,omitempty"`
-	Counts       map[string]int         `json:"counts,omitempty"`
-	Stats        *domain.RunStats       `json:"stats,omitempty"`
+	ID           string `json:"id"`
+	Source       string `json:"source"`
+	ConnectionID string `json:"connectionId,omitempty"`
+	// ConnectionIDSnakeCase mirrors connectionId for the snake_case memory
+	// contract; both are the same value.
+	ConnectionIDSnakeCase string                 `json:"connection_id,omitempty"`
+	ProjectIDs            []string               `json:"project_ids,omitempty"`
+	Status                domain.ConnectorStatus `json:"status"`
+	StartedAt             time.Time              `json:"startedAt"`
+	FinishedAt            *time.Time             `json:"finishedAt,omitempty"`
+	Counts                map[string]int         `json:"counts,omitempty"`
+	Stats                 *domain.RunStats       `json:"stats,omitempty"`
+	// Actor is the trigger recorded on the run. Run records do not persist one
+	// today, so the field is omitted rather than guessed; it is reserved for a
+	// future run schema.
+	Actor string `json:"actor,omitempty"`
 }
 
 // LogLine is one already-redacted line emitted for a run.
@@ -177,6 +185,11 @@ type Options struct {
 	// keeps serving the connection routes and reports memory routes as
 	// unavailable.
 	Memory MemoryService
+	// ProjectAllowlist limits every memory route to these resolved project
+	// ids. Empty serves every registered project. A non-empty list refuses an
+	// all-projects read unless it holds exactly one project: spanning several
+	// projects needs an explicit scope.
+	ProjectAllowlist []string
 }
 
 // Handler is the protected HTTP handler. Instantiate through NewHandler or

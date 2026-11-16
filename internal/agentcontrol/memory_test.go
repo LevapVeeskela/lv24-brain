@@ -257,7 +257,7 @@ func TestMemoryServiceReviewProposalsAndCatchup(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	review, err := fixture.service.Review(ctx, "demo")
+	review, err := fixture.service.Review(ctx, localapi.ReviewQuery{ProjectID: "demo"})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -3,6 +3,7 @@ package domain
 import (
 	"errors"
 	"fmt"
+	"time"
 )
 
 var (
@@ -146,6 +147,34 @@ func (e *TargetExistsError) Is(target error) bool { return target == ErrConflict
 // NewTargetExistsError builds a typed "the name is taken" error.
 func NewTargetExistsError(kind, id, path string) error {
 	return &TargetExistsError{Kind: kind, ID: id, Path: path}
+}
+
+// RevisionConflictError reports a record edit refused because the stored
+// record changed after the caller read it. CurrentUpdatedAt is the revision the
+// caller must send to retry; the conflicting edit wrote nothing.
+type RevisionConflictError struct {
+	Kind             string
+	ID               string
+	CurrentUpdatedAt time.Time
+}
+
+func (e *RevisionConflictError) Error() string {
+	return fmt.Sprintf("%s %q changed since it was read: current revision is %s: %v",
+		e.Kind, e.ID, e.CurrentRevision(), ErrConflict)
+}
+
+// Unwrap keeps the documented conflict contract of a failed compare-and-swap.
+func (e *RevisionConflictError) Unwrap() error { return ErrConflict }
+
+// CurrentRevision renders the stored revision in the same RFC3339 form the
+// local API exposes as updated_at.
+func (e *RevisionConflictError) CurrentRevision() string {
+	return e.CurrentUpdatedAt.UTC().Format(time.RFC3339Nano)
+}
+
+// NewRevisionConflictError builds a typed record edit conflict.
+func NewRevisionConflictError(kind, id string, current time.Time) error {
+	return &RevisionConflictError{Kind: kind, ID: id, CurrentUpdatedAt: current}
 }
 
 // DuplicateError reports a write whose normalized text already exists in the

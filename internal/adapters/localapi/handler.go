@@ -137,6 +137,12 @@ func (h *Handler) route(w http.ResponseWriter, r *http.Request) {
 		h.search(w, r)
 	case path == "/v1/review":
 		h.review(w, r)
+	case path == "/v1/review/fix":
+		h.reviewFix(w, r)
+	case path == "/v1/quarantine":
+		h.quarantine(w, r)
+	case strings.HasPrefix(path, "/v1/quarantine/"):
+		h.quarantineRoute(w, r, strings.TrimPrefix(path, "/v1/quarantine/"))
 	case path == "/v1/proposals":
 		h.proposals(w, r)
 	case strings.HasPrefix(path, "/v1/proposals/"):
@@ -499,11 +505,41 @@ func (h *Handler) runs(w http.ResponseWriter, r *http.Request) {
 		internal(w)
 		return
 	}
+	projects := h.runProjectScopes(r.Context(), items)
 	views := make([]RunView, 0, len(items))
 	for _, item := range items {
-		views = append(views, h.safeRun(item))
+		views = append(views, h.safeRun(item, projects[item.ConnectionID]))
 	}
 	writeJSON(w, http.StatusOK, views)
+}
+
+// runProjectScopes resolves the projects of every connection a run names. The
+// value is omitted when the connection is unknown; it is never invented.
+func (h *Handler) runProjectScopes(ctx context.Context, runs []domain.ConnectorRun) map[string][]string {
+	scopes := map[string][]string{}
+	if h.opts.Connections == nil {
+		return scopes
+	}
+	for _, run := range runs {
+		id := run.ConnectionID
+		if id == "" {
+			continue
+		}
+		if _, seen := scopes[id]; seen {
+			continue
+		}
+		connection, err := h.opts.Connections.Get(ctx, id)
+		if err != nil {
+			scopes[id] = nil
+			continue
+		}
+		if len(connection.Projects) > 0 {
+			scopes[id] = append([]string(nil), connection.Projects...)
+		} else {
+			scopes[id] = nil
+		}
+	}
+	return scopes
 }
 
 func (h *Handler) runRoute(w http.ResponseWriter, r *http.Request, rest string) {
@@ -543,7 +579,8 @@ func (h *Handler) runRoute(w http.ResponseWriter, r *http.Request, rest string) 
 		h.writeServiceError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, h.safeRun(item))
+	projects := h.runProjectScopes(r.Context(), []domain.ConnectorRun{item})
+	writeJSON(w, http.StatusOK, h.safeRun(item, projects[item.ConnectionID]))
 }
 
 func (h *Handler) cancelRun(w http.ResponseWriter, r *http.Request, id string) {
@@ -558,12 +595,19 @@ func (h *Handler) cancelRun(w http.ResponseWriter, r *http.Request, id string) {
 	writeJSON(w, http.StatusAccepted, map[string]string{"status": "canceling"})
 }
 
-func (h *Handler) safeRun(run domain.ConnectorRun) RunView {
+func (h *Handler) safeRun(run domain.ConnectorRun, projects []string) RunView {
 	view := RunView{ID: run.ID, Source: run.Source, ConnectionID: run.ConnectionID, Status: run.Status,
 		StartedAt: run.StartedAt, FinishedAt: run.FinishedAt}
 	view.ID = h.redact(view.ID)
 	view.Source = h.redact(view.Source)
 	view.ConnectionID = h.redact(view.ConnectionID)
+	view.ConnectionIDSnakeCase = view.ConnectionID
+	if len(projects) > 0 {
+		view.ProjectIDs = make([]string, 0, len(projects))
+		for _, project := range projects {
+			view.ProjectIDs = append(view.ProjectIDs, h.redact(project))
+		}
+	}
 	if run.Counts != nil {
 		view.Counts = make(map[string]int, len(run.Counts))
 		for key, value := range run.Counts {
@@ -849,15 +893,31 @@ func (h *Handler) writeServiceError(w http.ResponseWriter, err error) {
 // revision, 400 unsupported, 500 unavailable).
 func (h *Handler) writeMemoryError(w http.ResponseWriter, err error) {
 	var revision *app.StateRevisionConflict
+	var recordRevision *domain.RevisionConflictError
+	var limit *domain.LimitError
+	var protected *domain.ProtectedError
+	var duplicate *domain.DuplicateError
 	switch {
 	case errors.As(err, &revision):
 		writeErrorRevision(w, revision.Error(), revision.Current)
+	case errors.As(err, &recordRevision):
+		writeErrorRevision(w, h.redact(recordRevision.Error()), recordRevision.CurrentRevision())
+	case errors.As(err, &limit):
+		writeError(w, http.StatusRequestEntityTooLarge, "limit_exceeded", h.redact(limit.Error()))
+	case errors.As(err, &protected):
+		writeError(w, http.StatusForbidden, "forbidden", h.redact(protected.Error()))
+	case errors.As(err, &duplicate):
+		writeError(w, http.StatusConflict, "duplicate", h.redact(duplicate.Error()))
 	case errors.Is(err, domain.ErrValidation):
 		writeError(w, http.StatusBadRequest, "validation", "request is invalid")
 	case errors.Is(err, domain.ErrNotFound):
 		writeError(w, http.StatusNotFound, "not_found", "resource not found")
 	case errors.Is(err, domain.ErrConflict):
 		writeError(w, http.StatusConflict, "conflict", "resource is busy or conflicts with existing data")
+	case errors.Is(err, domain.ErrForbidden):
+		writeError(w, http.StatusForbidden, "forbidden", "the engine refuses this write")
+	case errors.Is(err, domain.ErrDuplicate):
+		writeError(w, http.StatusConflict, "duplicate", "another record already holds the same text")
 	case errors.Is(err, domain.ErrUnsupported):
 		writeError(w, http.StatusBadRequest, "unsupported", "the engine cannot serve this request in the current mode")
 	case errors.Is(err, app.ErrNotImplemented):

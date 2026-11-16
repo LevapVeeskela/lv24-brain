@@ -29,8 +29,19 @@ const (
 	catchupDefaultLimit = 20
 	catchupMaxLimit     = 100
 
-	recordBodyDefaultTokens = 4000
+	quarantineDefaultPageSize = 50
+	quarantineMaxPageSize     = 200
+	quarantineWindow          = 1000
+
+	recordBodyDefaultTokens = RecordBodyDefaultTokens
 	recordBodyMaxTokens     = 32000
+
+	// Proposal bodies are source excerpts. The list route stays small: one
+	// body is capped and the whole page shares a budget, so a full page of
+	// candidates cannot grow without bound. The detail route allows a larger
+	// single budget.
+	proposalBodyDefaultTokens = 600
+	proposalBodyMaxTokens     = 2000
 )
 
 // Exported window sizes, so the composition layer can request exactly the scan
@@ -38,9 +49,15 @@ const (
 const (
 	// RecordScanWindow is the largest record offset GET /v1/records serves.
 	RecordScanWindow = recordsWindow
+	// RecordBodyDefaultTokens is the default body budget of one record detail.
+	RecordBodyDefaultTokens = 4000
 	// ProposalScanWindow is the largest proposal offset GET /v1/proposals
 	// serves.
 	ProposalScanWindow = proposalsWindow
+	// ProposalBodiesBudgetTokens is the combined body budget of one proposal
+	// page. Items past it are returned with body_omitted instead of growing
+	// the response.
+	ProposalBodiesBudgetTokens = 16000
 )
 
 // cursorVersion is bumped when the cursor payload changes shape.

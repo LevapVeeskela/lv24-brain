@@ -205,7 +205,7 @@ var completionTable = []completionCmd{
 	),
 	cmdLeaf("migrate", valueFlag("from"), valueFlag("db"), valueFlag("data-dir"), boolFlag("dry-run"), boolFlag("include-prompts"), valueFlag("project-map"), boolFlag("json"), valueFlag("rollback"), valueFlag("config")),
 	cmdGroup("agent",
-		cmdLeaf("run", valueFlag("parent-pid"), valueFlag("config")),
+		cmdLeaf("run", valueFlag("parent-pid"), valueFlag("projects"), valueFlag("config")),
 		cmdLeaf("status", boolFlag("json"), valueFlag("config")),
 		cmdLeaf("stop", valueFlag("config")),
 	),

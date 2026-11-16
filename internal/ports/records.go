@@ -56,6 +56,30 @@ type RecordScheduler interface {
 	SetReviewAfter(ctx context.Context, projectID, kind, id string, at time.Time) (changed bool, err error)
 }
 
+// RecordTextUpdate is one in-place text edit of a stored record. Exactly one
+// record pointer is set; its ID, kind and project identify the stored file.
+// ExpectedUpdatedAt is the revision the caller read: a non-zero value makes the
+// edit a compare-and-swap and a mismatch returns a
+// domain.RevisionConflictError without writing. The store keeps the ID, file
+// name, created_at, provenance, validity, relations, review state and topic
+// classification; the caller supplies the new text and bounded history.
+type RecordTextUpdate struct {
+	Note     *domain.Note
+	Decision *domain.Decision
+	Attempt  *domain.Attempt
+	Handoff  *domain.Handoff
+	// ExpectedUpdatedAt is zero for a last-write-wins edit.
+	ExpectedUpdatedAt time.Time
+}
+
+// RecordTextUpdater is implemented by stores that can rewrite the text of one
+// existing record under a compare-and-swap. It is optional like the other
+// single-record editors: a store without it reports that editing is
+// unavailable.
+type RecordTextUpdater interface {
+	UpdateRecordText(ctx context.Context, update RecordTextUpdate) error
+}
+
 // RecordValiditySetter is implemented by stores that can rewrite the validity
 // fields (valid_from, valid_to, superseded_by, supersedes, confidence) of one
 // stored record without changing its text. It is optional: the supersede

@@ -166,7 +166,7 @@ func runCommand(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	case "state":
 		return runState(rest, stdout, stderr)
 	case "record":
-		return runRecord(rest, stdout, stderr)
+		return runRecord(rest, stdin, stdout, stderr)
 	case "prompt":
 		return runPrompt(rest, stdout, stderr)
 	case "relation":

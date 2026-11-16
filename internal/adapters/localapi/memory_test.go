@@ -23,33 +23,54 @@ import (
 type fakeMemory struct {
 	mu sync.Mutex
 
-	records []RecordView
-	detail  RecordDetailView
-	search  SearchResult
-	state   StateView
-	review  ReviewView
-	page    ProposalPage
-	outcome ProposalOutcome
-	catchup CatchupView
+	records          []RecordView
+	detail           RecordDetailView
+	search           SearchResult
+	state            StateView
+	review           ReviewView
+	page             ProposalPage
+	proposal         ProposalDetailView
+	outcome          ProposalOutcome
+	catchup          CatchupView
+	quarantine       []QuarantineItemView
+	quarantineReview QuarantineReviewView
+	fix              ReviewFixView
+	record           RecordView
+	edit             RecordDetailView
+	projects         map[string]string
 
-	recordErr  error
-	detailErr  error
-	searchErr  error
-	stateErr   error
-	reviewErr  error
-	propErr    error
-	promoteErr error
-	catchupErr error
+	recordErr     error
+	detailErr     error
+	searchErr     error
+	stateErr      error
+	reviewErr     error
+	propErr       error
+	promoteErr    error
+	catchupErr    error
+	quarantineErr error
+	fixErr        error
+	trashErr      error
+	restoreErr    error
+	editErr       error
+	resolveErr    error
 	// conflict, when set, is returned by SetState even for a fresh revision.
 	conflict *app.StateRevisionConflict
 
-	lastRecord   RecordQuery
-	lastDetail   RecordDetailQuery
-	lastSearch   SearchQuery
-	lastState    StateWrite
-	lastProposal ProposalQuery
-	lastDecision ProposalDecision
-	lastCatchup  CatchupQuery
+	lastRecord     RecordQuery
+	lastDetail     RecordDetailQuery
+	lastSearch     SearchQuery
+	lastState      StateWrite
+	lastReview     ReviewQuery
+	lastProposal   ProposalQuery
+	lastProposalID ProposalDetailQuery
+	lastDecision   ProposalDecision
+	lastCatchup    CatchupQuery
+	lastQuarantine QuarantineQuery
+	lastReviewID   QuarantineReviewDecision
+	lastFix        ReviewFixRequest
+	lastTrashed    string
+	lastRestored   string
+	lastEdit       RecordEditRequest
 
 	decided map[string]string
 }
@@ -76,6 +97,16 @@ func (f *fakeMemory) RecordDetail(_ context.Context, query RecordDetailQuery) (R
 		return RecordDetailView{}, f.detailErr
 	}
 	return f.detail, nil
+}
+
+func (f *fakeMemory) EditRecord(_ context.Context, request RecordEditRequest) (RecordDetailView, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.lastEdit = request
+	if f.editErr != nil {
+		return RecordDetailView{}, f.editErr
+	}
+	return f.edit, nil
 }
 
 func (f *fakeMemory) Search(_ context.Context, query SearchQuery) (SearchResult, error) {
@@ -125,14 +156,98 @@ func (f *fakeMemory) SetState(_ context.Context, _ string, write StateWrite) (St
 	return f.state, nil
 }
 
-func (f *fakeMemory) Review(_ context.Context, projectID string) (ReviewView, error) {
+func (f *fakeMemory) Review(_ context.Context, query ReviewQuery) (ReviewView, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.lastReview = query
 	if f.reviewErr != nil {
 		return ReviewView{}, f.reviewErr
 	}
-	f.review.ProjectID = projectID
+	if query.AllProjects {
+		f.review.ProjectID = AllProjectsProjectID
+		f.review.AllProjects = true
+		f.review.ProjectIDs = append([]string(nil), query.ProjectIDs...)
+		return f.review, nil
+	}
+	f.review.ProjectID = query.ProjectID
 	return f.review, nil
+}
+
+func (f *fakeMemory) ReviewFix(_ context.Context, request ReviewFixRequest) (ReviewFixView, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.lastFix = request
+	if f.fixErr != nil {
+		return ReviewFixView{}, f.fixErr
+	}
+	view := f.fix
+	if view.ProjectID == "" {
+		view.ProjectID = request.ProjectID
+	}
+	view.DryRun = request.DryRun
+	return view, nil
+}
+
+func (f *fakeMemory) ListQuarantined(_ context.Context, query QuarantineQuery) ([]QuarantineItemView, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.lastQuarantine = query
+	if f.quarantineErr != nil {
+		return nil, f.quarantineErr
+	}
+	return append([]QuarantineItemView(nil), f.quarantine...), nil
+}
+
+func (f *fakeMemory) ReviewQuarantine(_ context.Context, decision QuarantineReviewDecision) (QuarantineReviewView, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.lastReviewID = decision
+	if f.quarantineErr != nil {
+		return QuarantineReviewView{}, f.quarantineErr
+	}
+	return f.quarantineReview, nil
+}
+
+func (f *fakeMemory) ProposalDetail(_ context.Context, query ProposalDetailQuery) (ProposalDetailView, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.lastProposalID = query
+	if f.propErr != nil {
+		return ProposalDetailView{}, f.propErr
+	}
+	return f.proposal, nil
+}
+
+func (f *fakeMemory) TrashRecord(_ context.Context, _, id string) (RecordView, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.lastTrashed = id
+	if f.trashErr != nil {
+		return RecordView{}, f.trashErr
+	}
+	return f.record, nil
+}
+
+func (f *fakeMemory) RestoreRecord(_ context.Context, _, id string) (RecordView, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.lastRestored = id
+	if f.restoreErr != nil {
+		return RecordView{}, f.restoreErr
+	}
+	return f.record, nil
+}
+
+func (f *fakeMemory) ResolveProject(_ context.Context, selector string) (Project, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.resolveErr != nil {
+		return Project{}, f.resolveErr
+	}
+	if id, ok := f.projects[selector]; ok {
+		return Project{ID: id, Name: id}, nil
+	}
+	return Project{ID: selector, Name: selector}, nil
 }
 
 func (f *fakeMemory) ListProposals(_ context.Context, query ProposalQuery) (ProposalPage, error) {
@@ -341,12 +456,12 @@ func TestRecordsPaginationFiltersAndCursorBinding(t *testing.T) {
 		}
 	}
 	for _, path := range []string{
-		"/v1/records",
 		"/v1/records?project=brain&limit=0",
 		"/v1/records?project=brain&limit=201",
 		"/v1/records?project=brain&due_review=maybe",
 		"/v1/records?project=brain&since=never",
 		"/v1/records?project=brain&scope=world",
+		"/v1/records?project=brain&all_projects=1",
 	} {
 		w := request(fixture, http.MethodGet, path, "", nil)
 		if w.Code != http.StatusBadRequest {
@@ -448,11 +563,11 @@ func TestSearchPaginationValidationAndShape(t *testing.T) {
 	}
 	for _, path := range []string{
 		"/v1/search?project=brain",
-		"/v1/search?q=x",
 		"/v1/search?q=x&project=brain&mode=some",
 		"/v1/search?q=x&project=brain&min_score=2",
 		"/v1/search?q=x&project=brain&explain=maybe",
 		"/v1/search?q=x&project=brain&limit=101",
+		"/v1/search?q=x&project=brain&all_projects=1",
 	} {
 		if got := request(fixture, http.MethodGet, path, "", nil); got.Code != http.StatusBadRequest {
 			t.Fatalf("%s = %d %s", path, got.Code, got.Body.String())
@@ -540,8 +655,11 @@ func TestReviewIsReadOnlyAndOrdersFindings(t *testing.T) {
 	if got := request(fixture, http.MethodPost, "/v1/review?project=brain", `{}`, nil); got.Code != http.StatusMethodNotAllowed || got.Header().Get("Allow") != "GET" {
 		t.Fatalf("review write = %d Allow=%q", got.Code, got.Header().Get("Allow"))
 	}
-	if got := request(fixture, http.MethodGet, "/v1/review", "", nil); got.Code != http.StatusBadRequest {
-		t.Fatalf("missing project = %d", got.Code)
+	if got := request(fixture, http.MethodGet, "/v1/review", "", nil); got.Code != http.StatusOK {
+		t.Fatalf("all-projects review = %d %s", got.Code, got.Body.String())
+	}
+	if !memory.lastReview.AllProjects {
+		t.Fatalf("review query = %+v", memory.lastReview)
 	}
 }
 
@@ -704,7 +822,7 @@ func TestMemoryBodySizeContentTypeAndMethodRules(t *testing.T) {
 		name, method, path, allow string
 	}{
 		{"records", http.MethodPost, "/v1/records", "GET"},
-		{"record", http.MethodDelete, "/v1/records/note-1", "GET"},
+		{"record", http.MethodDelete, "/v1/records/note-1", "GET, PATCH"},
 		{"search", http.MethodPost, "/v1/search", "GET"},
 		{"state", http.MethodDelete, "/v1/projects/brain/state", "GET, PUT"},
 		{"review", http.MethodPut, "/v1/review", "GET"},

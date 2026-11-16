@@ -50,6 +50,12 @@ type ProposalListItem struct {
 	Orphan       bool
 	LocalOnly    bool
 	HealthReason string
+	// Body, BodyTruncated, BodyTokens and MaxTokens are set only when the
+	// listing asked for bodies.
+	Body          string
+	BodyTruncated bool
+	BodyTokens    int
+	MaxTokens     int
 }
 
 // proposalSourceHealth is the freshness verdict shared by review and

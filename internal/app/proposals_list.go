@@ -7,6 +7,7 @@ import (
 
 	"github.com/levapveeskela/lv24-brain/internal/domain"
 	"github.com/levapveeskela/lv24-brain/internal/ports"
+	"github.com/levapveeskela/lv24-brain/internal/textbudget"
 )
 
 // ProposalQuery narrows a proposal listing. Limit caps how many proposals the
@@ -20,11 +21,36 @@ type ProposalQuery struct {
 	Kind domain.ProposalKind
 	// Limit bounds Items; <= 0 uses DefaultProposalListLimit.
 	Limit int
+	// IncludeBody renders the candidate text of every listed proposal under
+	// BodyTokens. It is opt-in because a body is the largest part of a row.
+	IncludeBody bool
+	// BodyTokens bounds the rendered body; <= 0 uses DefaultProposalBodyTokens.
+	BodyTokens int
 }
 
 // DefaultProposalListLimit is the proposal window a caller gets without an
 // explicit limit.
 const DefaultProposalListLimit = 50
+
+// DefaultProposalBodyTokens bounds a proposal body when the caller gives no
+// budget. A candidate is a source excerpt, not a whole record.
+const DefaultProposalBodyTokens = 600
+
+// ProposalBody is the readable text of one candidate under a token budget.
+type ProposalBody struct {
+	Kind      domain.ProposalKind
+	ID        string
+	ProjectID string
+	Title     string
+	Status    domain.ProposalStatus
+	Body      string
+	// Truncated reports that the candidate continues past the budget.
+	Truncated bool
+	// Tokens is the approximate token count of Body.
+	Tokens int
+	// MaxTokens is the budget that was applied; zero means unlimited.
+	MaxTokens int
+}
 
 // ProposalListing is one window of a project's proposals. Total counts every
 // proposal matching the query, even when Items is capped.
@@ -70,9 +96,18 @@ func (a *App) ListProposals(ctx context.Context, query ProposalQuery) (ProposalL
 	if len(stored) > limit {
 		stored = stored[:limit]
 	}
+	bodyTokens := query.BodyTokens
+	if bodyTokens <= 0 {
+		bodyTokens = DefaultProposalBodyTokens
+	}
 	listing.Items = make([]ProposalListItem, 0, len(stored))
 	for _, proposal := range stored {
 		item := proposalListItem(proposal)
+		if query.IncludeBody {
+			body, truncated := textbudget.Truncate(ProposalText(proposal), bodyTokens)
+			item.Body, item.BodyTruncated = body, truncated
+			item.BodyTokens, item.MaxTokens = textbudget.Tokens(body), bodyTokens
+		}
 		health, err := a.proposalSourceHealth(ctx, proposal)
 		if err != nil {
 			return ProposalListing{}, err
@@ -81,6 +116,55 @@ func (a *App) ListProposals(ctx context.Context, query ProposalQuery) (ProposalL
 		listing.Items = append(listing.Items, item)
 	}
 	return listing, nil
+}
+
+// ProposalBody returns the readable text of one candidate, cut to maxTokens.
+// A non-positive budget returns the whole candidate. Proposal bodies are source
+// excerpts; they are still redacted by the caller that renders them.
+func (a *App) ProposalBody(ctx context.Context, projectID, id string, maxTokens int) (ProposalBody, error) {
+	if err := a.requireStore(); err != nil {
+		return ProposalBody{}, err
+	}
+	if a.deps.Proposals == nil {
+		return ProposalBody{}, notImplemented("proposals: proposal store")
+	}
+	project, err := a.ensureProject(ctx, projectID, false)
+	if err != nil {
+		return ProposalBody{}, err
+	}
+	proposal, err := a.deps.Proposals.Get(ctx, project.ID, id)
+	if err != nil {
+		return ProposalBody{}, fmt.Errorf("load proposal %s: %w", id, err)
+	}
+	body, truncated := textbudget.Truncate(ProposalText(proposal), maxTokens)
+	return ProposalBody{
+		Kind: proposal.Kind, ID: proposal.ID, ProjectID: project.ID, Title: proposal.Title,
+		Status: proposal.StatusOrPending(), Body: body, Truncated: truncated,
+		Tokens: textbudget.Tokens(body), MaxTokens: maxTokens,
+	}, nil
+}
+
+// ProposalText renders the free body and the ordered sections of a candidate.
+// It is the text a promotion copies into the curated record, not a record body.
+func ProposalText(proposal domain.Proposal) string {
+	var out strings.Builder
+	if body := strings.TrimSpace(proposal.Body); body != "" {
+		out.WriteString(body)
+	}
+	for _, section := range proposal.Sections {
+		heading, body := strings.TrimSpace(section.Heading), strings.TrimSpace(section.Body)
+		if heading == "" && body == "" {
+			continue
+		}
+		if out.Len() > 0 {
+			out.WriteString("\n\n")
+		}
+		if heading != "" {
+			out.WriteString(heading + ":\n")
+		}
+		out.WriteString(body)
+	}
+	return out.String()
 }
 
 // PendingProposals lists the pending and stale candidates a review inbox shows,

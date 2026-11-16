@@ -137,7 +137,8 @@ func (r Record) Summary() RecordSummary {
 		valid = r.Attempt.Validity
 	case r.Handoff != nil:
 		summary = RecordSummary{Kind: ports.RecordHandoff, ID: r.Handoff.ID, ProjectID: r.Handoff.ProjectID,
-			Title: SummarizeLine(r.Handoff.Summary, 100), CreatedAt: r.Handoff.CreatedAt, UpdatedAt: r.Handoff.CreatedAt}
+			Title: SummarizeLine(r.Handoff.Summary, 100), CreatedAt: r.Handoff.CreatedAt,
+			UpdatedAt: updatedOrCreated(r.Handoff.UpdatedAt, r.Handoff.CreatedAt)}
 		valid = r.Handoff.Validity
 	}
 	summary.ValidFrom = valid.EffectiveFrom(summary.CreatedAt)

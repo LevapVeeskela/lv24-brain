@@ -542,5 +542,6 @@ func readHandoffFile(path string) (domain.Handoff, error) {
 		Relations:      relations,
 		ReviewSchedule: review,
 		CreatedAt:      frontmatter.CreatedAt.UTC(),
+		UpdatedAt:      frontmatter.UpdatedAt.UTC(),
 	}, nil
 }

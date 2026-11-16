@@ -6,6 +6,8 @@ GET /v1/health
 GET /v1/projects
 GET /v1/projects/{id}/state
 GET /v1/proposals
+GET /v1/proposals/{project}/{id}
+GET /v1/quarantine
 GET /v1/records
 GET /v1/records/{id}
 GET /v1/review
@@ -16,6 +18,7 @@ GET /v1/schedules
 GET /v1/search
 GET /v1/settings
 PATCH /v1/connections/{id}
+PATCH /v1/records/{id}
 POST /v1/connections
 POST /v1/connections/{id}/credentials/{field}
 POST /v1/connections/{id}/run
@@ -23,6 +26,10 @@ POST /v1/connections/{id}/test
 POST /v1/engine/update
 POST /v1/proposals/{project}/{id}/dismiss
 POST /v1/proposals/{project}/{id}/promote
+POST /v1/quarantine/{id}/review
+POST /v1/records/{id}/restore
+POST /v1/records/{id}/trash
+POST /v1/review/fix
 POST /v1/runs/{id}/cancel
 POST /v1/shutdown
 PUT /v1/projects/{id}/state

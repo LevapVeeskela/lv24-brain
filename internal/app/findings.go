@@ -287,7 +287,43 @@ func finalizeFindings(findings []Finding) []Finding {
 // FixResult lists the applied fixes and the resulting state.
 type FixResult struct {
 	Applied []Finding
+	Changes []FixChange
 	State   domain.State
+}
+
+// FixChange is one state field a safe review fix changes.
+type FixChange struct {
+	// Kind is the finding kind that caused the change.
+	Kind FindingKind
+	// Action is set_next_action or drop_question.
+	Action string
+	// Field is the state field the change writes.
+	Field string
+	// Value is the new value (the later handoff's next action or the removed
+	// question).
+	Value string
+	// Evidence is the record id that justifies the change.
+	Evidence string
+}
+
+// The safe review fixes, as fields of FixChange.Action.
+const (
+	FixSetNextAction = "set_next_action"
+	FixDropQuestion  = "drop_question"
+)
+
+// FixPlan is what a review fix targets, computed without writing. It is the
+// dry-run form of FixFindings and always describes the same safe repairs:
+// adopting the next action of a later handoff and removing open questions a
+// later record answers. Semantic fixes are never planned.
+type FixPlan struct {
+	ProjectID string
+	// Findings lists the fixable findings the plan targets.
+	Findings []Finding
+	// Changes lists the exact state fields the plan writes.
+	Changes []FixChange
+	// State is the stored state the plan was computed from; it is unchanged.
+	State domain.State
 }
 
 // ParseFindingKinds parses a comma-separated kind list; "" means all.
@@ -362,41 +398,12 @@ func (a *App) Findings(ctx context.Context, projectID string) ([]Finding, error)
 // filters them; nil means every fixable kind) in one state update. Removed
 // open questions are kept in a note so nothing is lost.
 func (a *App) FixFindings(ctx context.Context, projectID string, kinds []FindingKind) (FixResult, error) {
-	findings, err := a.Findings(ctx, projectID)
+	plan, input, dropped, err := a.planFixes(ctx, projectID, kinds)
 	if err != nil {
 		return FixResult{}, err
 	}
-	project, err := a.ensureProject(ctx, projectID, false)
-	if err != nil {
-		return FixResult{}, err
-	}
-	_, state, err := a.GetState(ctx, project.ID)
-	if err != nil {
-		return FixResult{}, err
-	}
-	input := StateInput{ProjectID: project.ID}
-	questions := append([]string(nil), state.OpenQuestions...)
-	var applied, dropped []Finding
-	for _, finding := range findings {
-		if !finding.Fixable || (kinds != nil && !containsKind(kinds, finding.Kind)) {
-			continue
-		}
-		switch {
-		case finding.nextAction != nil:
-			input.NextAction = finding.nextAction
-		case finding.dropQuestion != "":
-			questions = removeString(questions, finding.dropQuestion)
-			dropped = append(dropped, finding)
-		default:
-			continue
-		}
-		applied = append(applied, finding)
-	}
-	if len(applied) == 0 {
-		return FixResult{State: state}, nil
-	}
-	if len(dropped) > 0 {
-		input.OpenQuestions = &questions
+	if len(plan.Findings) == 0 {
+		return FixResult{State: plan.State}, nil
 	}
 	updated, err := a.SetState(ctx, input)
 	if err != nil {
@@ -405,11 +412,74 @@ func (a *App) FixFindings(ctx context.Context, projectID string, kinds []Finding
 	// The note is written after the state change succeeded, so it never
 	// reports a removal that did not happen.
 	if len(dropped) > 0 {
-		if err := a.noteDroppedQuestions(ctx, project.ID, dropped); err != nil {
-			return FixResult{Applied: applied, State: updated}, err
+		if err := a.noteDroppedQuestions(ctx, plan.ProjectID, dropped); err != nil {
+			return FixResult{Applied: plan.Findings, Changes: plan.Changes, State: updated}, err
 		}
 	}
-	return FixResult{Applied: applied, State: updated}, nil
+	return FixResult{Applied: plan.Findings, Changes: plan.Changes, State: updated}, nil
+}
+
+// PlanFixFindings computes the fixes FixFindings would apply without writing
+// anything. It is the dry-run form of the safe review fix and never returns a
+// semantic repair.
+func (a *App) PlanFixFindings(ctx context.Context, projectID string, kinds []FindingKind) (FixPlan, error) {
+	plan, _, _, err := a.planFixes(ctx, projectID, kinds)
+	return plan, err
+}
+
+// planFixes is the shared selection of both the dry run and the write. It
+// returns the plan, the state input to apply and the findings that drop an
+// open question.
+func (a *App) planFixes(ctx context.Context, projectID string, kinds []FindingKind) (FixPlan, StateInput, []Finding, error) {
+	findings, err := a.Findings(ctx, projectID)
+	if err != nil {
+		return FixPlan{}, StateInput{}, nil, err
+	}
+	project, err := a.ensureProject(ctx, projectID, false)
+	if err != nil {
+		return FixPlan{}, StateInput{}, nil, err
+	}
+	_, state, err := a.GetState(ctx, project.ID)
+	if err != nil {
+		return FixPlan{}, StateInput{}, nil, err
+	}
+	input := StateInput{ProjectID: project.ID}
+	questions := append([]string(nil), state.OpenQuestions...)
+	var applied, dropped []Finding
+	var changes []FixChange
+	for _, finding := range findings {
+		if !finding.Fixable || (kinds != nil && !containsKind(kinds, finding.Kind)) {
+			continue
+		}
+		switch {
+		case finding.nextAction != nil:
+			input.NextAction = finding.nextAction
+			changes = append(changes, FixChange{
+				Kind: finding.Kind, Action: FixSetNextAction, Field: "next_action",
+				Value: *finding.nextAction, Evidence: finding.Evidence,
+			})
+		case finding.dropQuestion != "":
+			questions = removeString(questions, finding.dropQuestion)
+			dropped = append(dropped, finding)
+			changes = append(changes, FixChange{
+				Kind: finding.Kind, Action: FixDropQuestion, Field: "open_questions",
+				Value: finding.dropQuestion, Evidence: finding.Evidence,
+			})
+		default:
+			continue
+		}
+		applied = append(applied, finding)
+	}
+	if len(applied) == 0 {
+		if state.ProjectID == "" {
+			state.ProjectID = project.ID
+		}
+		return FixPlan{ProjectID: project.ID, State: state}, input, nil, nil
+	}
+	if len(dropped) > 0 {
+		input.OpenQuestions = &questions
+	}
+	return FixPlan{ProjectID: project.ID, Findings: applied, Changes: changes, State: state}, input, dropped, nil
 }
 
 func (a *App) noteDroppedQuestions(ctx context.Context, projectID string, dropped []Finding) error {

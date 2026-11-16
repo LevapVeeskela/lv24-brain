@@ -320,6 +320,9 @@ type Handoff struct {
 	Relations RelationList `json:"relations,omitempty"`
 	ReviewSchedule
 	CreatedAt time.Time `json:"createdAt"`
+	// UpdatedAt is the last text edit. It is zero for records written before
+	// handoffs carried one and falls back to CreatedAt.
+	UpdatedAt time.Time `json:"updatedAt,omitzero"`
 }
 
 // Validate checks required handoff fields.

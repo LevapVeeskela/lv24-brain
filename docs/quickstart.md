@@ -365,6 +365,33 @@ human, reviewed and verified, so nothing changes until an agent or connector
 writes a record. Server mode has no provenance-edit route yet, so `brain record
 review` is local/git only.
 
+### Edit a record in place
+
+`brain record edit` changes the text of an existing note, decision, attempt or
+handoff. It keeps the record ID, file name and `created_at`, preserves
+provenance, validity, relations and review state, moves the previous body into
+the bounded history, and reindexes the record for search. Editing an unreviewed
+record does not mark it reviewed; a decision status or supersede link still
+needs `brain record status` or `brain record supersede`.
+
+```sh
+brain record edit note-2026-11-15-fix-cache --title "Fix the cache key"
+brain record edit decision-2026-11-01-use-sqlite \
+  --body-file decision.md --expected-updated-at 2026-11-15T10:00:00.123456789Z
+printf 'updated text\n' | brain record edit attempt-2026-11-02-retry --body-file -
+brain record edit note-2026-11-15-fix-cache --tags cache,search
+brain record edit note-2026-11-15-fix-cache --title "Preview" --dry-run
+```
+
+`body` is the note text, the decision context, the attempt result or the handoff
+summary; a handoff has no title, so edit its summary with `--body-file`. Tags
+apply to notes only. The optional `--expected-updated-at` makes the edit a
+compare-and-swap: a stale value refuses with the current revision instead of
+overwriting a concurrent edit; take the value from `brain record show <id>
+--json` or the local API `updated_at`. `--allow-duplicate` accepts text that
+another live record of the same kind already has. Limits, protected projects and
+globs apply exactly as they do to a create.
+
 ### Temporal validity and supersede (0.16)
 
 Decisions get replaced; the old one must stop looking current. Every record has
@@ -841,7 +868,7 @@ also accepts `--config <path>`.
 | `brain journal` | `--project`, `--user`, `--event <name>` (for example `note`, `decision`, `attempt`, `handoff`, `commit`), `--since <duration>` (for example `24h`), `--limit <n>` (default 20). Local and git mode. |
 | `brain event commit` | `--project <id>`, `--repo <path>` (default `.`), `--quiet` (print nothing on success; used by the hook). Local and git mode. |
 | `brain search <query>` | `--project <id>`, `--limit <n>` (default 20), `--kind <kind>` (`note,decision,attempt,handoff,dump,item`; raw-zone `item` is excluded by default and needs a `context-allow.json` grant), `--dumps` (legacy dumps; also un-excludes server items, grant-gated), `--since <24h\|7d\|2w\|2026-11-01\|RFC3339>`, `--as-of <time\|date>`, `--include-superseded`/`--all-time`. English and Russian word forms match as a prefix. |
-| `brain record` | `list` accepts `--kind`, `--since`, `--status`, `--limit`, `--as-of`, `--include-superseded`/`--all-time`; `show <id>` accepts `--history` and `--as-of`; `supersede <old> --by <new>`, `status`, `review`, `trash`, `restore`, `trash-list` as in the runbook. JSON includes a `validity` object (`valid_from`, `valid_to`, `superseded_by`, `supersedes`, `confidence`). |
+| `brain record` | `list` accepts `--kind`, `--since`, `--status`, `--limit`, `--as-of`, `--include-superseded`/`--all-time`; `show <id>` accepts `--history` and `--as-of`; `edit <id>` accepts `--title`, `--body-file` (`-` for stdin), `--tags`, `--expected-updated-at`, `--allow-duplicate`, `--dry-run`; `supersede <old> --by <new>`, `status`, `review`, `trash`, `restore`, `trash-list` as in the runbook. JSON includes a `validity` object (`valid_from`, `valid_to`, `superseded_by`, `supersedes`, `confidence`). |
 | `brain links <id>` | `--project <id>`, `--json`; `--broken` lists `[[id]]` references to missing records. Write `[[<id>]]`, `[[<id>\|text]]` or `[[<project>/<id>]]` in record text; `brain record show` lists Links and Backlinks. |
 | `brain review` | `--project <id>`, `--since <7d>`, `--fix`, `--fix-kind <kinds>`, `--json`. Lists pending proposals (at most 20) and findings; `broken-link`, `near-duplicate`, `supersession-gap`, `stale-superseded`, `proposal-stale`, `proposal-orphan`, `proposal-contradicted` are report-only. Proposal findings are local/git only, and `--fix` never touches proposals. |
 | `brain digest` | `--since <90m\|24h\|7d>` (default `24h`; with `--source` the default is `30d`), `--project <id>`, `--json`, `--write` (saves `<data_dir>/digests/YYYY-MM-DD.md`). With `--source <connection>`: `--all`, `--limit <n>` (default 500), `--rule <names>`, `--dry-run` (default; conflicts with `--write`), `--write` (persists proposals). `--source` is local/git only. |

@@ -88,7 +88,10 @@ type BacklinkView struct {
 // RelationView is one typed relation of a record. Targets are record ids of the
 // same project, so a client can open them with the record route.
 type RelationView struct {
-	Target     string    `json:"target"`
+	Target string `json:"target"`
+	// TargetKind is the kind of the target record when it is still live and
+	// known to the project; empty when the target is gone.
+	TargetKind string    `json:"target_kind,omitempty"`
 	Relation   string    `json:"relation"`
 	Reason     string    `json:"reason,omitempty"`
 	Confidence float64   `json:"confidence,omitempty"`
@@ -126,14 +129,18 @@ type RecordDetailView struct {
 // the handler always asks for its full scan window.
 type RecordQuery struct {
 	ProjectID string
-	Kinds     []string
-	Status    string
-	Subtype   string
-	Scope     string
-	TopicKey  string
-	Since     time.Time
-	DueReview bool
-	Limit     int
+	// ProjectIDs spans several projects when AllProjects is set. Empty means
+	// every project the engine serves.
+	ProjectIDs  []string
+	AllProjects bool
+	Kinds       []string
+	Status      string
+	Subtype     string
+	Scope       string
+	TopicKey    string
+	Since       time.Time
+	DueReview   bool
+	Limit       int
 }
 
 // RecordDetailQuery selects one record.
@@ -144,13 +151,30 @@ type RecordDetailQuery struct {
 	History   bool
 }
 
+// RecordEditRequest changes the text of one record. Nil fields are left alone.
+// ExpectedUpdatedAt is zero for a last-write-wins edit; a non-zero value is the
+// updated_at the client read and makes the edit a compare-and-swap.
+type RecordEditRequest struct {
+	ProjectID         string
+	ID                string
+	Title             *string
+	Body              *string
+	Tags              *[]string
+	ExpectedUpdatedAt time.Time
+	AllowDuplicate    bool
+}
+
 // SearchQuery is one ranked search request. Raw-zone kinds are never requested,
 // so a search can only answer from curated records.
 type SearchQuery struct {
-	Text      string
-	ProjectID string
-	Kinds     []string
-	Limit     int
+	Text string
+	// ProjectID selects one project. AllProjects spans ProjectIDs, or every
+	// project the engine serves when ProjectIDs is empty.
+	ProjectID   string
+	ProjectIDs  []string
+	AllProjects bool
+	Kinds       []string
+	Limit       int
 	// Mode is all or any; empty keeps the strict-then-relaxed history.
 	Mode     string
 	MinScore float64
@@ -228,19 +252,24 @@ func (w StateWrite) Empty() bool {
 
 // FindingView is one review finding.
 type FindingView struct {
-	Kind     string `json:"kind"`
-	Severity string `json:"severity"`
-	Message  string `json:"message"`
-	Why      string `json:"why"`
-	Next     string `json:"next"`
-	Confirm  string `json:"confirm"`
-	Evidence string `json:"evidence,omitempty"`
-	Fixable  bool   `json:"fixable"`
-	Fix      string `json:"fix,omitempty"`
+	// ProjectID names the project of an all-projects review; it is empty when
+	// the report covers one project.
+	ProjectID string `json:"project_id,omitempty"`
+	Kind      string `json:"kind"`
+	Severity  string `json:"severity"`
+	Message   string `json:"message"`
+	Why       string `json:"why"`
+	Next      string `json:"next"`
+	Confirm   string `json:"confirm"`
+	Evidence  string `json:"evidence,omitempty"`
+	Fixable   bool   `json:"fixable"`
+	Fix       string `json:"fix,omitempty"`
 }
 
 // DueReviewView is one record, state or proposal past its review date.
 type DueReviewView struct {
+	// ProjectID names the project of an all-projects review.
+	ProjectID      string    `json:"project_id,omitempty"`
 	Kind           string    `json:"kind"`
 	ID             string    `json:"id"`
 	Title          string    `json:"title"`
@@ -269,6 +298,34 @@ type ProposalView struct {
 	SourceOrphan bool   `json:"source_orphan"`
 	LocalOnly    bool   `json:"local_only"`
 	SourceHealth string `json:"source_health,omitempty"`
+	// Body is the redacted candidate text, present only when the caller asked
+	// for bodies. BodyOmitted marks an item whose body did not fit the page
+	// budget; it is never silently empty.
+	Body          string `json:"body,omitempty"`
+	BodyTruncated bool   `json:"body_truncated,omitempty"`
+	BodyTokens    int    `json:"body_tokens,omitempty"`
+	MaxTokens     int    `json:"max_tokens,omitempty"`
+	BodyOmitted   bool   `json:"body_omitted,omitempty"`
+}
+
+// ProposalDetailQuery selects one candidate.
+type ProposalDetailQuery struct {
+	ProjectID string
+	ID        string
+	MaxTokens int
+}
+
+// ProposalDetailView is one candidate with its bounded body.
+type ProposalDetailView struct {
+	ID            string `json:"id"`
+	ProjectID     string `json:"project_id"`
+	Kind          string `json:"kind"`
+	Title         string `json:"title"`
+	Status        string `json:"status"`
+	Body          string `json:"body"`
+	BodyTruncated bool   `json:"body_truncated"`
+	BodyTokens    int    `json:"body_tokens"`
+	MaxTokens     int    `json:"max_tokens"`
 }
 
 // ProposalSummaryView is the pending-proposal summary of a review report.
@@ -278,21 +335,110 @@ type ProposalSummaryView struct {
 }
 
 // ReviewView is the read-only review report: findings, due reviews, pending
-// proposals and the quarantine size.
+// proposals and the quarantine size. An all-projects review sets AllProjects,
+// names its scope in ProjectIDs and sets ProjectID to AllProjectsProjectID;
+// every finding and due review then carries its own project_id.
 type ReviewView struct {
 	ProjectID        string              `json:"project_id"`
+	ProjectIDs       []string            `json:"project_ids,omitempty"`
+	AllProjects      bool                `json:"all_projects,omitempty"`
 	Findings         []FindingView       `json:"findings"`
 	DueReviews       []DueReviewView     `json:"due_reviews"`
 	Proposals        ProposalSummaryView `json:"proposals"`
 	QuarantinedCount int                 `json:"quarantined_count"`
+	// The truncated flags report that the all-projects aggregate hit a cap.
+	FindingsTruncated   bool `json:"findings_truncated,omitempty"`
+	DueReviewsTruncated bool `json:"due_reviews_truncated,omitempty"`
+	ProposalsTruncated  bool `json:"proposals_truncated,omitempty"`
+}
+
+// ReviewQuery selects the project scope of a review report.
+type ReviewQuery struct {
+	ProjectID   string
+	ProjectIDs  []string
+	AllProjects bool
+}
+
+// AllProjectsProjectID is the project_id an all-projects review reports.
+const AllProjectsProjectID = "*"
+
+// Caps of an all-projects review. A single-project report is uncapped, matching
+// the CLI; the aggregate list stops at these bounds and says so by length.
+const (
+	AllProjectsFindingsCap   = 1000
+	AllProjectsDueReviewsCap = 1000
+	AllProjectsProposalsCap  = 100
+)
+
+// ReviewFixRequest is one `brain review --fix` equivalent. Apply is the
+// explicit confirmation; DryRun is the default and never writes.
+type ReviewFixRequest struct {
+	ProjectID string
+	DryRun    bool
+	Apply     bool
+	Kinds     []string
+}
+
+// ReviewFixChange is one state field a safe review fix writes or would write.
+type ReviewFixChange struct {
+	Kind     string `json:"kind"`
+	Action   string `json:"action"`
+	Field    string `json:"field"`
+	Value    string `json:"value"`
+	Evidence string `json:"evidence,omitempty"`
+}
+
+// ReviewFixView is the dry-run or applied result of the safe review fixes.
+type ReviewFixView struct {
+	ProjectID string            `json:"project_id"`
+	DryRun    bool              `json:"dry_run"`
+	Findings  []FindingView     `json:"findings"`
+	Changes   []ReviewFixChange `json:"changes"`
+	State     StateView         `json:"state"`
+}
+
+// QuarantineQuery selects one page of the quarantine inbox.
+type QuarantineQuery struct {
+	ProjectID string
+	Limit     int
+}
+
+// QuarantineItemView is one quarantined record without its body.
+type QuarantineItemView struct {
+	ID         string    `json:"id"`
+	Kind       string    `json:"kind"`
+	ProjectID  string    `json:"project_id"`
+	Title      string    `json:"title"`
+	Reason     string    `json:"reason"`
+	Origin     string    `json:"origin,omitempty"`
+	Trust      string    `json:"trust,omitempty"`
+	CreatedAt  time.Time `json:"created_at,omitzero"`
+	AgeSeconds int64     `json:"age_seconds"`
+}
+
+// QuarantineReviewDecision reviews one quarantined record. Trust optionally
+// replaces the stored trust; an empty value keeps it.
+type QuarantineReviewDecision struct {
+	ProjectID string
+	ID        string
+	Trust     string
+}
+
+// QuarantineReviewView is the record after its review. A record with an
+// unknown origin stays quarantined: review cannot repair a malformed origin.
+type QuarantineReviewView struct {
+	Record     RecordView     `json:"record"`
+	Provenance ProvenanceView `json:"provenance"`
 }
 
 // ProposalQuery narrows a proposal listing.
 type ProposalQuery struct {
-	ProjectID string
-	Statuses  []string
-	Kind      string
-	Limit     int
+	ProjectID   string
+	Statuses    []string
+	Kind        string
+	Limit       int
+	IncludeBody bool
+	BodyTokens  int
 }
 
 // ProposalPage is one window of proposals plus the total matching count.
@@ -374,13 +520,23 @@ type CatchupView struct {
 type MemoryService interface {
 	ListRecords(context.Context, RecordQuery) ([]RecordView, error)
 	RecordDetail(context.Context, RecordDetailQuery) (RecordDetailView, error)
+	EditRecord(context.Context, RecordEditRequest) (RecordDetailView, error)
+	TrashRecord(context.Context, string, string) (RecordView, error)
+	RestoreRecord(context.Context, string, string) (RecordView, error)
 	Search(context.Context, SearchQuery) (SearchResult, error)
 	State(context.Context, string) (StateView, error)
 	SetState(context.Context, string, StateWrite) (StateView, error)
-	Review(context.Context, string) (ReviewView, error)
+	Review(context.Context, ReviewQuery) (ReviewView, error)
+	ReviewFix(context.Context, ReviewFixRequest) (ReviewFixView, error)
+	ListQuarantined(context.Context, QuarantineQuery) ([]QuarantineItemView, error)
+	ReviewQuarantine(context.Context, QuarantineReviewDecision) (QuarantineReviewView, error)
 	ListProposals(context.Context, ProposalQuery) (ProposalPage, error)
+	ProposalDetail(context.Context, ProposalDetailQuery) (ProposalDetailView, error)
 	Promote(context.Context, ProposalDecision) (ProposalOutcome, error)
 	Catchup(context.Context, CatchupQuery) (CatchupView, error)
+	// ResolveProject maps an id, alias or path to its registered project so
+	// the handler can enforce the project allowlist on the canonical id.
+	ResolveProject(context.Context, string) (Project, error)
 }
 
 // recordPage is the response of GET /v1/records.
@@ -405,6 +561,99 @@ type searchPageView struct {
 	pageView
 }
 
+// quarantinePage is the response of GET /v1/quarantine.
+type quarantinePage struct {
+	Items []QuarantineItemView `json:"items"`
+	pageView
+}
+
+// projectScope is the resolved project scope of a collection route. Exactly one
+// of ProjectID and AllProjects is set.
+type projectScope struct {
+	ProjectID   string
+	ProjectIDs  []string
+	AllProjects bool
+}
+
+// fingerprint binds a page cursor to the scope it was issued for.
+func (s projectScope) fingerprint() string {
+	if !s.AllProjects {
+		return "project:" + s.ProjectID
+	}
+	return "all:" + strings.Join(s.ProjectIDs, ",")
+}
+
+// resolveProjectID maps a selector to its canonical project id and enforces the
+// API's project allowlist. A selector cannot escape the allowlist through an
+// alias or path because resolution happens first.
+func (h *Handler) resolveProjectID(w http.ResponseWriter, r *http.Request, selector string) (string, bool) {
+	resolved, err := h.opts.Memory.ResolveProject(r.Context(), selector)
+	if err != nil {
+		h.writeMemoryError(w, err)
+		return "", false
+	}
+	if !h.projectAllowed(resolved.ID) {
+		writeError(w, http.StatusBadRequest, "validation", "project is outside this API's allowed projects")
+		return "", false
+	}
+	return resolved.ID, true
+}
+
+// requiredProjectQuery resolves the required project selector of a route.
+func (h *Handler) requiredProjectQuery(w http.ResponseWriter, r *http.Request) (string, bool) {
+	selector, ok := h.requiredQuery(w, r, "project")
+	if !ok {
+		return "", false
+	}
+	return h.resolveProjectID(w, r, selector)
+}
+
+// projectScope resolves the project selector of a collection route and enforces
+// the API's project allowlist. An unscoped read is allowed only when the policy
+// serves every project; a one-project allowlist binds to that project, and a
+// wider allowlist requires an explicit project.
+func (h *Handler) projectScope(w http.ResponseWriter, r *http.Request) (projectScope, bool) {
+	project := queryText(r, "project")
+	allProjects, ok := h.queryFlag(w, r, "all_projects")
+	if !ok {
+		return projectScope{}, false
+	}
+	if project != "" && allProjects {
+		writeError(w, http.StatusBadRequest, "validation", "pass either project or all_projects, not both")
+		return projectScope{}, false
+	}
+	if project != "" {
+		resolved, ok := h.resolveProjectID(w, r, project)
+		if !ok {
+			return projectScope{}, false
+		}
+		return projectScope{ProjectID: resolved}, true
+	}
+	switch len(h.opts.ProjectAllowlist) {
+	case 0:
+		return projectScope{AllProjects: true}, true
+	case 1:
+		return projectScope{ProjectID: h.opts.ProjectAllowlist[0]}, true
+	default:
+		writeError(w, http.StatusBadRequest, "validation",
+			"project is required: this API is limited to several projects, so an all-projects read is not allowed")
+		return projectScope{}, false
+	}
+}
+
+// projectAllowed reports whether a canonical project id is served.
+func (h *Handler) projectAllowed(id string) bool {
+	if len(h.opts.ProjectAllowlist) == 0 {
+		return true
+	}
+	for _, allowed := range h.opts.ProjectAllowlist {
+		if allowed == id {
+			return true
+		}
+	}
+	return false
+}
+
 func (h *Handler) records(w http.ResponseWriter, r *http.Request) {
 	if !method(w, r, http.MethodGet) {
 		return
@@ -413,7 +662,7 @@ func (h *Handler) records(w http.ResponseWriter, r *http.Request) {
 		unavailable(w)
 		return
 	}
-	project, ok := h.requiredQuery(w, r, "project")
+	scope, ok := h.projectScope(w, r)
 	if !ok {
 		return
 	}
@@ -422,7 +671,7 @@ func (h *Handler) records(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	status, subtype, topic := queryText(r, "status"), queryText(r, "subtype"), queryText(r, "topic")
-	scope, ok := h.queryScope(w, r)
+	recordScope, ok := h.queryScope(w, r)
 	if !ok {
 		return
 	}
@@ -435,13 +684,14 @@ func (h *Handler) records(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	offset, filter, ok := h.pageCursor(w, r, "records", recordsWindow, project, strings.Join(kinds, ","), status, subtype, scope, topic, queryText(r, "since"), strconv.FormatBool(due))
+	offset, filter, ok := h.pageCursor(w, r, "records", recordsWindow, scope.fingerprint(), strings.Join(kinds, ","), status, subtype, recordScope, topic, queryText(r, "since"), strconv.FormatBool(due))
 	if !ok {
 		return
 	}
 	items, err := h.opts.Memory.ListRecords(r.Context(), RecordQuery{
-		ProjectID: project, Kinds: kinds, Status: status, Subtype: subtype,
-		Scope: scope, TopicKey: topic, Since: since, DueReview: due,
+		ProjectID: scope.ProjectID, ProjectIDs: scope.ProjectIDs, AllProjects: scope.AllProjects,
+		Kinds: kinds, Status: status, Subtype: subtype,
+		Scope: recordScope, TopicKey: topic, Since: since, DueReview: due,
 		Limit: scanLimit(offset, limit, recordsWindow),
 	})
 	if err != nil {
@@ -460,18 +710,43 @@ func (h *Handler) records(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) recordRoute(w http.ResponseWriter, r *http.Request, rest string) {
 	parts, ok := pathParts(rest)
-	if !ok || len(parts) != 1 {
+	if !ok || len(parts) == 0 || len(parts) > 2 {
 		writeError(w, http.StatusNotFound, "not_found", "record not found")
 		return
 	}
-	if !method(w, r, http.MethodGet) {
+	if len(parts) == 2 {
+		switch parts[1] {
+		case "trash":
+			if !method(w, r, http.MethodPost) {
+				return
+			}
+			h.recordLifecycle(w, r, parts[0], false)
+		case "restore":
+			if !method(w, r, http.MethodPost) {
+				return
+			}
+			h.recordLifecycle(w, r, parts[0], true)
+		default:
+			writeError(w, http.StatusNotFound, "not_found", "endpoint not found")
+		}
 		return
 	}
+	switch r.Method {
+	case http.MethodGet:
+		h.getRecord(w, r, parts[0])
+	case http.MethodPatch:
+		h.editRecord(w, r, parts[0])
+	default:
+		method(w, r, http.MethodGet, http.MethodPatch)
+	}
+}
+
+func (h *Handler) getRecord(w http.ResponseWriter, r *http.Request, id string) {
 	if h.opts.Memory == nil {
 		unavailable(w)
 		return
 	}
-	project, ok := h.requiredQuery(w, r, "project")
+	project, ok := h.requiredProjectQuery(w, r)
 	if !ok {
 		return
 	}
@@ -484,8 +759,95 @@ func (h *Handler) recordRoute(w http.ResponseWriter, r *http.Request, rest strin
 		return
 	}
 	detail, err := h.opts.Memory.RecordDetail(r.Context(), RecordDetailQuery{
-		ProjectID: project, ID: parts[0], MaxTokens: maxTokens, History: history,
+		ProjectID: project, ID: id, MaxTokens: maxTokens, History: history,
 	})
+	if err != nil {
+		h.writeMemoryError(w, err)
+		return
+	}
+	writeSafeJSON(w, http.StatusOK, detail, h.redact)
+}
+
+// recordLifecycle trashes or restores one record. Both are reversible state
+// moves through the same use case the CLI uses; the API never hard-deletes.
+func (h *Handler) recordLifecycle(w http.ResponseWriter, r *http.Request, id string, restore bool) {
+	if h.opts.Memory == nil {
+		unavailable(w)
+		return
+	}
+	project, ok := h.requiredProjectQuery(w, r)
+	if !ok {
+		return
+	}
+	var view RecordView
+	var err error
+	if restore {
+		view, err = h.opts.Memory.RestoreRecord(r.Context(), project, id)
+	} else {
+		view, err = h.opts.Memory.TrashRecord(r.Context(), project, id)
+	}
+	if err != nil {
+		h.writeMemoryError(w, err)
+		return
+	}
+	writeSafeJSON(w, http.StatusOK, view, h.redact)
+}
+
+// recordEditMaxTags bounds the tag list a PATCH may carry. The byte cap is
+// enforced by the write limits; this only stops a pathological JSON array
+// before it reaches the use case.
+const recordEditMaxTags = 256
+
+// editRecord applies PATCH /v1/records/{id}. Only the text fields are
+// editable; an expected_updated_at makes the write a compare-and-swap and a
+// stale value returns 409 with the current revision. Provenance and review
+// state are preserved, so an edit never marks a quarantined record reviewed.
+func (h *Handler) editRecord(w http.ResponseWriter, r *http.Request, id string) {
+	if h.opts.Memory == nil {
+		unavailable(w)
+		return
+	}
+	project, ok := h.requiredProjectQuery(w, r)
+	if !ok {
+		return
+	}
+	var body struct {
+		Title             *string   `json:"title"`
+		Body              *string   `json:"body"`
+		Tags              *[]string `json:"tags"`
+		ExpectedUpdatedAt *string   `json:"expected_updated_at"`
+		AllowDuplicate    bool      `json:"allow_duplicate"`
+	}
+	if !h.decode(w, r, &body) {
+		return
+	}
+	if body.Title == nil && body.Body == nil && body.Tags == nil {
+		writeError(w, http.StatusBadRequest, "validation", "nothing to change; pass title, body or tags")
+		return
+	}
+	if body.Tags != nil && len(*body.Tags) > recordEditMaxTags {
+		writeError(w, http.StatusBadRequest, "validation", "tags must name at most 256 values")
+		return
+	}
+	request := RecordEditRequest{
+		ProjectID: project, ID: id,
+		Title: body.Title, Body: body.Body, Tags: body.Tags,
+		AllowDuplicate: body.AllowDuplicate,
+	}
+	if body.ExpectedUpdatedAt != nil {
+		raw := strings.TrimSpace(*body.ExpectedUpdatedAt)
+		if raw == "" {
+			writeError(w, http.StatusBadRequest, "validation", "expected_updated_at must be an RFC3339 timestamp or omitted")
+			return
+		}
+		expected, err := time.Parse(time.RFC3339Nano, raw)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "validation", "expected_updated_at must be an RFC3339 timestamp or omitted")
+			return
+		}
+		request.ExpectedUpdatedAt = expected.UTC()
+	}
+	detail, err := h.opts.Memory.EditRecord(r.Context(), request)
 	if err != nil {
 		h.writeMemoryError(w, err)
 		return
@@ -501,7 +863,7 @@ func (h *Handler) search(w http.ResponseWriter, r *http.Request) {
 		unavailable(w)
 		return
 	}
-	project, ok := h.requiredQuery(w, r, "project")
+	scope, ok := h.projectScope(w, r)
 	if !ok {
 		return
 	}
@@ -527,12 +889,13 @@ func (h *Handler) search(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	kinds := queryKinds(r)
-	offset, filter, ok := h.pageCursor(w, r, "search", searchWindow, project, query, strings.Join(kinds, ","), mode, strconv.FormatFloat(minScore, 'g', -1, 64), strconv.FormatBool(explain))
+	offset, filter, ok := h.pageCursor(w, r, "search", searchWindow, scope.fingerprint(), query, strings.Join(kinds, ","), mode, strconv.FormatFloat(minScore, 'g', -1, 64), strconv.FormatBool(explain))
 	if !ok {
 		return
 	}
 	result, err := h.opts.Memory.Search(r.Context(), SearchQuery{
-		Text: query, ProjectID: project, Kinds: kinds, Limit: scanLimit(offset, limit, searchWindow),
+		Text: query, ProjectID: scope.ProjectID, ProjectIDs: scope.ProjectIDs, AllProjects: scope.AllProjects,
+		Kinds: kinds, Limit: scanLimit(offset, limit, searchWindow),
 		Mode: mode, MinScore: minScore, Explain: explain,
 	})
 	if err != nil {
@@ -566,6 +929,10 @@ func (h *Handler) getState(w http.ResponseWriter, r *http.Request, projectID str
 		unavailable(w)
 		return
 	}
+	projectID, ok := h.resolveProjectID(w, r, projectID)
+	if !ok {
+		return
+	}
 	state, err := h.opts.Memory.State(r.Context(), projectID)
 	if err != nil {
 		h.writeMemoryError(w, err)
@@ -577,6 +944,10 @@ func (h *Handler) getState(w http.ResponseWriter, r *http.Request, projectID str
 func (h *Handler) putState(w http.ResponseWriter, r *http.Request, projectID string) {
 	if h.opts.Memory == nil {
 		unavailable(w)
+		return
+	}
+	projectID, ok := h.resolveProjectID(w, r, projectID)
+	if !ok {
 		return
 	}
 	var body StateWrite
@@ -615,11 +986,126 @@ func (h *Handler) review(w http.ResponseWriter, r *http.Request) {
 		unavailable(w)
 		return
 	}
-	project, ok := h.requiredQuery(w, r, "project")
+	scope, ok := h.projectScope(w, r)
 	if !ok {
 		return
 	}
-	view, err := h.opts.Memory.Review(r.Context(), project)
+	view, err := h.opts.Memory.Review(r.Context(), ReviewQuery{
+		ProjectID: scope.ProjectID, ProjectIDs: scope.ProjectIDs, AllProjects: scope.AllProjects,
+	})
+	if err != nil {
+		h.writeMemoryError(w, err)
+		return
+	}
+	writeSafeJSON(w, http.StatusOK, view, h.redact)
+}
+
+// reviewFix is POST /v1/review/fix?project= with an explicit confirmation. The
+// default is a dry run; writing needs apply=true, and dry_run=true with apply
+// is refused rather than resolved silently.
+func (h *Handler) reviewFix(w http.ResponseWriter, r *http.Request) {
+	if !method(w, r, http.MethodPost) {
+		return
+	}
+	if h.opts.Memory == nil {
+		unavailable(w)
+		return
+	}
+	project, ok := h.requiredProjectQuery(w, r)
+	if !ok {
+		return
+	}
+	var body struct {
+		DryRun *bool    `json:"dry_run"`
+		Apply  bool     `json:"apply"`
+		Kinds  []string `json:"kinds"`
+	}
+	if r.ContentLength != 0 && !h.decode(w, r, &body) {
+		return
+	}
+	if len(body.Kinds) > 32 {
+		writeError(w, http.StatusBadRequest, "validation", "kinds must name at most 32 finding kinds")
+		return
+	}
+	if body.Apply && body.DryRun != nil && *body.DryRun {
+		writeError(w, http.StatusBadRequest, "validation", "dry_run and apply cannot both be true")
+		return
+	}
+	if !body.Apply && body.DryRun != nil && !*body.DryRun {
+		writeError(w, http.StatusBadRequest, "confirmation_required", "apply=true is required to write; omit dry_run or pass dry_run=true to preview")
+		return
+	}
+	apply := body.Apply
+	dryRun := !apply
+	view, err := h.opts.Memory.ReviewFix(r.Context(), ReviewFixRequest{
+		ProjectID: project, DryRun: dryRun, Apply: body.Apply, Kinds: body.Kinds,
+	})
+	if err != nil {
+		h.writeMemoryError(w, err)
+		return
+	}
+	writeSafeJSON(w, http.StatusOK, view, h.redact)
+}
+
+// quarantine is GET /v1/quarantine?project=: the review inbox of records that
+// are excluded from trusted context. Bodies stay out of this route.
+func (h *Handler) quarantine(w http.ResponseWriter, r *http.Request) {
+	if !method(w, r, http.MethodGet) {
+		return
+	}
+	if h.opts.Memory == nil {
+		unavailable(w)
+		return
+	}
+	project, ok := h.requiredProjectQuery(w, r)
+	if !ok {
+		return
+	}
+	limit, ok := h.queryLimit(w, r, quarantineDefaultPageSize, quarantineMaxPageSize)
+	if !ok {
+		return
+	}
+	offset, filter, ok := h.pageCursor(w, r, "quarantine", quarantineWindow, project)
+	if !ok {
+		return
+	}
+	items, err := h.opts.Memory.ListQuarantined(r.Context(), QuarantineQuery{
+		ProjectID: project, Limit: scanLimit(offset, limit, quarantineWindow),
+	})
+	if err != nil {
+		h.writeMemoryError(w, err)
+		return
+	}
+	page, pageInfo := paginate(items, offset, limit, quarantineWindow, "quarantine", filter)
+	writeSafeJSON(w, http.StatusOK, quarantinePage{Items: nonNilSlice(page), pageView: pageInfo}, h.redact)
+}
+
+func (h *Handler) quarantineRoute(w http.ResponseWriter, r *http.Request, rest string) {
+	parts, ok := pathParts(rest)
+	if !ok || len(parts) != 2 || parts[1] != "review" {
+		writeError(w, http.StatusNotFound, "not_found", "endpoint not found")
+		return
+	}
+	if !method(w, r, http.MethodPost) {
+		return
+	}
+	if h.opts.Memory == nil {
+		unavailable(w)
+		return
+	}
+	project, ok := h.requiredProjectQuery(w, r)
+	if !ok {
+		return
+	}
+	var body struct {
+		Trust string `json:"trust"`
+	}
+	if r.ContentLength != 0 && !h.decode(w, r, &body) {
+		return
+	}
+	view, err := h.opts.Memory.ReviewQuarantine(r.Context(), QuarantineReviewDecision{
+		ProjectID: project, ID: parts[0], Trust: body.Trust,
+	})
 	if err != nil {
 		h.writeMemoryError(w, err)
 		return
@@ -635,7 +1121,7 @@ func (h *Handler) proposals(w http.ResponseWriter, r *http.Request) {
 		unavailable(w)
 		return
 	}
-	project, ok := h.requiredQuery(w, r, "project")
+	project, ok := h.requiredProjectQuery(w, r)
 	if !ok {
 		return
 	}
@@ -645,13 +1131,22 @@ func (h *Handler) proposals(w http.ResponseWriter, r *http.Request) {
 	}
 	statuses := queryKindsNamed(r, "status")
 	kind := queryText(r, "kind")
-	offset, filter, ok := h.pageCursor(w, r, "proposals", proposalsWindow, project, strings.Join(statuses, ","), kind)
+	includeBody, ok := h.queryFlag(w, r, "include_body")
+	if !ok {
+		return
+	}
+	maxTokens, ok := h.queryBoundedInt(w, r, "max_tokens", proposalBodyDefaultTokens, 1, proposalBodyMaxTokens)
+	if !ok {
+		return
+	}
+	offset, filter, ok := h.pageCursor(w, r, "proposals", proposalsWindow, project, strings.Join(statuses, ","), kind, strconv.FormatBool(includeBody), strconv.Itoa(maxTokens))
 	if !ok {
 		return
 	}
 	page, err := h.opts.Memory.ListProposals(r.Context(), ProposalQuery{
 		ProjectID: project, Statuses: statuses, Kind: kind,
-		Limit: scanLimit(offset, limit, proposalsWindow),
+		Limit:       scanLimit(offset, limit, proposalsWindow),
+		IncludeBody: includeBody, BodyTokens: maxTokens,
 	})
 	if err != nil {
 		h.writeMemoryError(w, err)
@@ -663,11 +1158,38 @@ func (h *Handler) proposals(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) proposalRoute(w http.ResponseWriter, r *http.Request, rest string) {
 	parts, ok := pathParts(rest)
-	if !ok || len(parts) != 3 {
+	if !ok || len(parts) < 2 || len(parts) > 3 {
 		writeError(w, http.StatusNotFound, "not_found", "endpoint not found")
 		return
 	}
-	projectID, proposalID, action := parts[0], parts[1], parts[2]
+	projectID, proposalID := parts[0], parts[1]
+	if len(parts) == 2 {
+		if !method(w, r, http.MethodGet) {
+			return
+		}
+		if h.opts.Memory == nil {
+			unavailable(w)
+			return
+		}
+		projectID, ok := h.resolveProjectID(w, r, projectID)
+		if !ok {
+			return
+		}
+		maxTokens, ok := h.queryBoundedInt(w, r, "max_tokens", proposalBodyDefaultTokens, 1, recordBodyMaxTokens)
+		if !ok {
+			return
+		}
+		detail, err := h.opts.Memory.ProposalDetail(r.Context(), ProposalDetailQuery{
+			ProjectID: projectID, ID: proposalID, MaxTokens: maxTokens,
+		})
+		if err != nil {
+			h.writeMemoryError(w, err)
+			return
+		}
+		writeSafeJSON(w, http.StatusOK, detail, h.redact)
+		return
+	}
+	action := parts[2]
 	if action != "promote" && action != "dismiss" {
 		writeError(w, http.StatusNotFound, "not_found", "endpoint not found")
 		return
@@ -677,6 +1199,10 @@ func (h *Handler) proposalRoute(w http.ResponseWriter, r *http.Request, rest str
 	}
 	if h.opts.Memory == nil {
 		unavailable(w)
+		return
+	}
+	projectID, ok = h.resolveProjectID(w, r, projectID)
+	if !ok {
 		return
 	}
 	decision := ProposalDecision{ProjectID: projectID, ProposalID: proposalID, Dismiss: action == "dismiss"}
@@ -715,7 +1241,7 @@ func (h *Handler) catchup(w http.ResponseWriter, r *http.Request) {
 		unavailable(w)
 		return
 	}
-	project, ok := h.requiredQuery(w, r, "project")
+	project, ok := h.requiredProjectQuery(w, r)
 	if !ok {
 		return
 	}

@@ -55,6 +55,9 @@ type Options struct {
 	// without it keeps serving the connection routes and reports the memory
 	// routes as unavailable.
 	App MemoryApp
+	// ProjectAllowlist bounds the memory routes to these resolved project
+	// ids. Empty serves every registered project.
+	ProjectAllowlist []string
 }
 
 // Control owns the loopback server for one agent process.
@@ -118,16 +121,19 @@ func (c *Control) Start(ctx context.Context, runtime daemon.Runtime) (int, error
 		memory = newMemoryService(c.opts.App, c.opts.Now)
 	}
 	server, err := localapi.NewServer(localapi.Options{
-		Token:       localapi.TokenFunc(func() string { return runtime.Token }),
-		Port:        0,
-		Version:     c.opts.Version,
-		PID:         runtime.PID,
-		StartedAt:   runtime.StartedAt,
-		Now:         c.opts.Now,
-		Heartbeat:   15 * time.Second,
-		Status:      "running",
-		Memory:      memory,
-		Connections: connectionService{store: c.opts.Connections, agent: agent, locker: c.opts.Locker},
+		Token:     localapi.TokenFunc(func() string { return runtime.Token }),
+		Port:      0,
+		Version:   c.opts.Version,
+		PID:       runtime.PID,
+		StartedAt: runtime.StartedAt,
+		Now:       c.opts.Now,
+		Heartbeat: 15 * time.Second,
+		Status:    "running",
+		Memory:    memory,
+		// The local API's memory routes honour the same project scope as
+		// `brain mcp`.
+		ProjectAllowlist: c.opts.ProjectAllowlist,
+		Connections:      connectionService{store: c.opts.Connections, agent: agent, locker: c.opts.Locker},
 		Sources: sourceRegistry{
 			registry: c.opts.Registry,
 			deps:     c.opts.Deps,

@@ -20,14 +20,15 @@ import (
 
 func printAgentUsage(w io.Writer) {
 	fmt.Fprint(w, `Usage:
-  brain agent [--config <path>] [--parent-pid <pid>]
+  brain agent [--config <path>] [--parent-pid <pid>] [--projects <ids|aliases>]
   brain agent status [--config <path>] [--json]
   brain agent stop [--config <path>]
 
 Without a subcommand, agent runs in the foreground. A parent PID makes the
 agent stop when its supervisor exits. The local control API listens on an
 ephemeral loopback port published in the agent runtime record; its bearer token
-is written only to the owner-readable runtime file.
+is written only to the owner-readable runtime file. --projects bounds every
+memory route of that API to the listed projects.
 `)
 }
 
@@ -46,11 +47,13 @@ func runAgent(args []string, stdout, stderr io.Writer) int {
 	cfgPath := configFlag(fs)
 	var asJSON bool
 	var parentPID int
+	var projectsFlag string
 	if command == "status" {
 		fs.BoolVar(&asJSON, "json", false, "print JSON")
 	}
 	if command == "run" {
 		fs.IntVar(&parentPID, "parent-pid", 0, "exit when this parent process exits")
+		fs.StringVar(&projectsFlag, "projects", "", "comma-separated project ids or aliases the local API may serve (default: every registered project)")
 	}
 	positional, err := parseInterspersed(fs, args)
 	if err != nil {
@@ -93,14 +96,19 @@ func runAgent(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stdout, "agent stop requested")
 		return 0
 	case "run":
-		return runAgentForeground(cfg, parentPID, stdout, stderr)
+		return runAgentForeground(cfg, parentPID, projectsFlag, stdout, stderr)
 	default:
 		printAgentUsage(stderr)
 		return 2
 	}
 }
 
-func runAgentForeground(cfg config.BrainConfig, parentPID int, stdout, stderr io.Writer) int {
+func runAgentForeground(cfg config.BrainConfig, parentPID int, projectsFlag string, stdout, stderr io.Writer) int {
+	projects, err := parseProjectAllowlist(projectsFlag)
+	if err != nil {
+		fmt.Fprintf(stderr, "brain agent: %v\n", err)
+		return 2
+	}
 	ingestion, err := buildIngestion(cfg, bootstrap.Options{})
 	if err != nil {
 		return reportError(stderr, "agent", err)
@@ -111,18 +119,25 @@ func runAgentForeground(cfg config.BrainConfig, parentPID int, stdout, stderr io
 		fmt.Fprintln(stderr, "brain agent: runtime services are unavailable")
 		return 1
 	}
+	ctx := context.Background()
+	allowlist, err := resolveProjectAllowlist(ctx, inspection.App, projects)
+	if err != nil {
+		fmt.Fprintf(stderr, "brain agent: %v\n", err)
+		return 2
+	}
 	control, err := agentcontrol.New(agentcontrol.Options{
-		DataDir:     cfg.DataDir,
-		Connections: ingestion.Ingestion.Connections,
-		Secrets:     inspection.Secrets,
-		Registry:    ingestion.Ingestion.Registry,
-		Deps:        ingestion.Ingestion.Deps,
-		Runs:        ingestion.Ingestion.Runs,
-		Projects:    inspection.App,
-		Updater:     inspection.Updater,
-		Locker:      ingestion.Ingestion.Locker,
-		Version:     version.Version,
-		App:         inspection.App,
+		DataDir:          cfg.DataDir,
+		Connections:      ingestion.Ingestion.Connections,
+		Secrets:          inspection.Secrets,
+		Registry:         ingestion.Ingestion.Registry,
+		Deps:             ingestion.Ingestion.Deps,
+		Runs:             ingestion.Ingestion.Runs,
+		Projects:         inspection.App,
+		Updater:          inspection.Updater,
+		Locker:           ingestion.Ingestion.Locker,
+		Version:          version.Version,
+		App:              inspection.App,
+		ProjectAllowlist: allowlist,
 	})
 	if err != nil {
 		return reportError(stderr, "agent", err)

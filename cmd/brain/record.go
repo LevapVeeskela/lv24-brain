@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -16,15 +17,18 @@ import (
 
 const recordTimeLayout = "2006-01-02 15:04"
 
-// runRecord implements `brain record`: list, read, change the status of,
+// runRecord implements `brain record`: list, read, edit, change the status of,
 // supersede, trash and restore single records of any kind.
-func runRecord(args []string, stdout, stderr io.Writer) int {
+func runRecord(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	usage := func(w io.Writer) {
 		fmt.Fprint(w, `Usage:
   brain record list [project] [--kind note,decision] [--since 7d|24h]
                     [--status <status>] [--limit N]
                     [--as-of <time|date>] [--include-superseded|--all-time] [--json]
   brain record show <id> [--project p] [--history] [--as-of <time|date>] [--json]
+  brain record edit <id> [--title T] [--body-file F|-] [--tags a,b]
+                         [--expected-updated-at RFC3339] [--allow-duplicate]
+                         [--dry-run] [--project p] [--json]
   brain record status <id> <proposed|accepted|rejected|superseded> [--project p]
   brain record supersede <old-id> --by <new-id> [--project p]
   brain record review <id> [--trust verified|stated|inferred] [--review-after 90d|2027-02-05] [--project p]
@@ -51,6 +55,8 @@ Trash is reversible: restore brings a trashed record back.
 		return runRecordList(args[1:], stdout, stderr)
 	case "show":
 		return runRecordShow(args[1:], stdout, stderr)
+	case "edit":
+		return runRecordEdit(args[1:], stdin, stdout, stderr)
 	case "status":
 		return runRecordStatus(args[1:], stdout, stderr)
 	case "supersede":
@@ -208,6 +214,133 @@ func runRecordShow(args []string, stdout, stderr io.Writer) int {
 		}
 	}
 	return 0
+}
+
+// recordEditInputLimit bounds what the CLI reads from a body file or stdin
+// before the configured record limits are applied. It is deliberately larger
+// than the default body cap so a user sees the limit error, not a truncated
+// body.
+const recordEditInputLimit = 4 << 20
+
+// runRecordEdit changes the text of one live record through the same use case
+// the local API uses. Without --dry-run the record file is rewritten in place;
+// its ID, path, created_at, provenance, validity and relations stay the same.
+func runRecordEdit(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
+	fs := newFlagSet("record edit", stderr)
+	project := fs.String("project", "", "project id or alias")
+	var title string
+	var titleSet bool
+	fs.Func("title", "new title (an empty value clears a note title)", func(value string) error {
+		title, titleSet = value, true
+		return nil
+	})
+	bodyFile := fs.String("body-file", "", "read the new body from this file; - reads stdin")
+	var tags []string
+	var tagsSet bool
+	fs.Func("tags", "replace note tags with a comma-separated list (an empty value clears them)", func(value string) error {
+		tags, tagsSet = splitList(value), true
+		return nil
+	})
+	expected := fs.String("expected-updated-at", "", "refuse the edit unless the record still has this RFC3339 updated_at")
+	allowDuplicate := fs.Bool("allow-duplicate", false, "accept text another live record of the same kind already has")
+	dryRun := fs.Bool("dry-run", false, "validate and print the result without writing")
+	asJSON := fs.Bool("json", false, "print JSON")
+	cfgPath := configFlag(fs)
+	positional, err := parseInterspersed(fs, args)
+	if err != nil {
+		return 2
+	}
+	if !expectArgs("record edit", positional, 1, "<id> [--title T] [--body-file F|-] [--tags a,b]", stderr) {
+		return 2
+	}
+	if !titleSet && *bodyFile == "" && !tagsSet {
+		fmt.Fprintln(stderr, "brain record edit: nothing to change; pass --title, --body-file or --tags")
+		return 2
+	}
+	var expectedAt time.Time
+	if raw := strings.TrimSpace(*expected); raw != "" {
+		parsed, err := time.Parse(time.RFC3339Nano, raw)
+		if err != nil {
+			fmt.Fprintf(stderr, "brain record edit: --expected-updated-at %q: want an RFC3339 timestamp\n", raw)
+			return 2
+		}
+		expectedAt = parsed.UTC()
+	}
+	edit := app.RecordEdit{
+		ID: positional[0], ExpectedUpdatedAt: expectedAt,
+		AllowDuplicate: *allowDuplicate, DryRun: *dryRun,
+	}
+	if titleSet {
+		edit.Title = &title
+	}
+	if *bodyFile != "" {
+		body, err := readRecordEditBody(*bodyFile, stdin)
+		if err != nil {
+			fmt.Fprintf(stderr, "brain record edit: %v\n", err)
+			return 2
+		}
+		edit.Body = &body
+	}
+	if tagsSet {
+		edit.Tags = &tags
+	}
+	ctx := context.Background()
+	runtime, target, code := stateTarget(ctx, *cfgPath, *project, nil, stderr, "record edit")
+	if code != 0 {
+		return code
+	}
+	defer func() { _ = runtime.Close() }()
+	edit.ProjectID = target.Project.ID
+	result, err := runtime.App.EditRecord(ctx, edit)
+	if err != nil {
+		return reportError(stderr, "record edit", err)
+	}
+	summary := result.Record.Summary()
+	if *asJSON {
+		return writeJSONReport(stdout, stderr, "record edit", jsonRecordEdit{
+			Kind: summary.Kind, ID: summary.ID, ProjectID: summary.ProjectID,
+			Title: summary.Title, UpdatedAt: summary.UpdatedAt,
+			Changed: result.Changed, DryRun: result.DryRun,
+		})
+	}
+	switch {
+	case result.DryRun:
+		fmt.Fprintf(stdout, "would edit %s %s (dry run): %s\n", summary.Kind, summary.ID, summary.Title)
+	case !result.Changed:
+		fmt.Fprintf(stdout, "no change: %s %s already has this text\n", summary.Kind, summary.ID)
+	default:
+		fmt.Fprintf(stdout, "edited %s %s: %s\n", summary.Kind, summary.ID, summary.Title)
+		fmt.Fprintf(stdout, "updated: %s\n", summary.UpdatedAt.UTC().Format(time.RFC3339Nano))
+	}
+	return 0
+}
+
+// readRecordEditBody reads a body file or stdin, bounded before the record
+// limits apply. Trailing line breaks are dropped: Markdown bodies do not keep
+// the newline a text file ends with.
+func readRecordEditBody(name string, stdin io.Reader) (string, error) {
+	var (
+		reader io.Reader
+		source string
+	)
+	if name == "-" {
+		reader, source = stdin, "stdin"
+	} else {
+		file, err := os.Open(name)
+		if err != nil {
+			return "", fmt.Errorf("read --body-file %q: %w", name, err)
+		}
+		defer file.Close()
+		reader, source = file, fmt.Sprintf("--body-file %q", name)
+	}
+	data, err := io.ReadAll(io.LimitReader(reader, recordEditInputLimit+1))
+	if err != nil {
+		return "", fmt.Errorf("read %s: %w", source, err)
+	}
+	if len(data) > recordEditInputLimit {
+		return "", fmt.Errorf("%s is larger than %d bytes", source, recordEditInputLimit)
+	}
+	return strings.TrimRight(string(data), "\r\n"), nil
 }
 
 func runRecordStatus(args []string, stdout, stderr io.Writer) int {
@@ -625,6 +758,17 @@ func toJSONRecordSummary(summary app.RecordSummary) jsonRecordSummary {
 		UpdatedAt:   summary.UpdatedAt,
 		Validity:    toJSONSummaryValidity(summary),
 	}
+}
+
+// jsonRecordEdit is `brain record edit --json`.
+type jsonRecordEdit struct {
+	Kind      string    `json:"kind"`
+	ID        string    `json:"id"`
+	ProjectID string    `json:"project_id"`
+	Title     string    `json:"title"`
+	UpdatedAt time.Time `json:"updated_at,omitzero"`
+	Changed   bool      `json:"changed"`
+	DryRun    bool      `json:"dry_run"`
 }
 
 // jsonTrashedRecord is one entry of `brain record trash-list --json`.

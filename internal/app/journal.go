@@ -17,7 +17,9 @@ const (
 	JournalDecision = "decision"
 	JournalAttempt  = "attempt"
 	JournalHandoff  = "handoff"
-	JournalCommit   = "commit"
+	// JournalEdit marks a text edit of an existing record.
+	JournalEdit   = "edit"
+	JournalCommit = "commit"
 	// JournalReview marks a provenance review of one record (quarantine
 	// cleared by `brain record review` or brain_review_record).
 	JournalReview = "review"

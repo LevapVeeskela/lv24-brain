@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/levapveeskela/lv24-brain/internal/domain"
 	"github.com/levapveeskela/lv24-brain/internal/markdown"
@@ -38,7 +39,13 @@ func (s *Store) LockTopic(ctx context.Context, projectID, kind, topicKey string)
 // ReplaceNote rewrites one marker entry of its daily notes file in place,
 // keeping the entry ID, creation time and provenance. The caller supplies the
 // new text and the bounded history; the store never invents history itself.
+// It is the last-write-wins form of replaceNote; UpdateRecordText adds the
+// compare-and-swap used by record editing.
 func (s *Store) ReplaceNote(ctx context.Context, note domain.Note) (domain.Note, error) {
+	return s.replaceNote(ctx, note, time.Time{})
+}
+
+func (s *Store) replaceNote(ctx context.Context, note domain.Note, expectedUpdatedAt time.Time) (domain.Note, error) {
 	if err := contextError(ctx); err != nil {
 		return domain.Note{}, err
 	}
@@ -62,12 +69,16 @@ func (s *Store) ReplaceNote(ctx context.Context, note domain.Note) (domain.Note,
 		if err != nil {
 			return err
 		}
+		if err := checkRecordRevision(ports.RecordNote, note.ID, frontmatter.UpdatedAt, expectedUpdatedAt); err != nil {
+			return err
+		}
+		updatedAt := nextRecordUpdatedAt(frontmatter.UpdatedAt, now)
 		start, end, current, err := findNoteEntry(lines, note.ID)
 		if err != nil {
 			return err
 		}
 		note.CreatedAt = current.CreatedAt
-		note.UpdatedAt = now
+		note.UpdatedAt = updatedAt
 		entry := renderNoteEntry(noteMetadata{
 			provenanceFrontmatter: provenanceToFrontmatter(current.Provenance),
 			validityFrontmatter:   validityToFrontmatter(note.Validity, current.CreatedAt),
@@ -90,7 +101,7 @@ func (s *Store) ReplaceNote(ctx context.Context, note domain.Note) (domain.Note,
 		next = append(next, lines[:start]...)
 		next = append(next, replacement...)
 		next = append(next, lines[end:]...)
-		frontmatter.UpdatedAt = now
+		frontmatter.UpdatedAt = updatedAt
 		frontmatter.SchemaVersion = SchemaVersion
 		rendered, err := markdown.Render(frontmatter, strings.Join(next, "\n"))
 		if err != nil {
@@ -112,6 +123,10 @@ func (s *Store) ReplaceNote(ctx context.Context, note domain.Note) (domain.Note,
 // creation time and provenance. The body is re-rendered with the bounded
 // history the caller supplies.
 func (s *Store) ReplaceDecision(ctx context.Context, decision domain.Decision) (domain.Decision, error) {
+	return s.replaceDecision(ctx, decision, time.Time{})
+}
+
+func (s *Store) replaceDecision(ctx context.Context, decision domain.Decision, expectedUpdatedAt time.Time) (domain.Decision, error) {
 	if err := contextError(ctx); err != nil {
 		return domain.Decision{}, err
 	}
@@ -138,14 +153,18 @@ func (s *Store) ReplaceDecision(ctx context.Context, decision domain.Decision) (
 		if err != nil {
 			return fmt.Errorf("fsstore: read decision %q: %w", decision.ID, err)
 		}
+		if err := checkRecordRevision(ports.RecordDecision, decision.ID, current.UpdatedAt, expectedUpdatedAt); err != nil {
+			return err
+		}
+		updatedAt := nextRecordUpdatedAt(current.UpdatedAt, now)
 		decision.ProjectID = current.ProjectID
 		decision.CreatedAt = current.CreatedAt
-		decision.UpdatedAt = now
+		decision.UpdatedAt = updatedAt
 		frontmatter := decisionFrontmatter{
 			Frontmatter: markdown.Frontmatter{
 				ProjectID:     current.ProjectID,
 				Kind:          "decision",
-				UpdatedAt:     now,
+				UpdatedAt:     updatedAt,
 				SchemaVersion: SchemaVersion,
 				Permalink:     decision.Permalink,
 			},
@@ -180,6 +199,10 @@ func (s *Store) ReplaceDecision(ctx context.Context, decision domain.Decision) (
 // ReplaceAttempt rewrites one attempt file in place, keeping its ID, creation
 // time and provenance.
 func (s *Store) ReplaceAttempt(ctx context.Context, attempt domain.Attempt) (domain.Attempt, error) {
+	return s.replaceAttempt(ctx, attempt, time.Time{})
+}
+
+func (s *Store) replaceAttempt(ctx context.Context, attempt domain.Attempt, expectedUpdatedAt time.Time) (domain.Attempt, error) {
 	if err := contextError(ctx); err != nil {
 		return domain.Attempt{}, err
 	}
@@ -203,14 +226,18 @@ func (s *Store) ReplaceAttempt(ctx context.Context, attempt domain.Attempt) (dom
 		if err != nil {
 			return fmt.Errorf("fsstore: read attempt %q: %w", attempt.ID, err)
 		}
+		if err := checkRecordRevision(ports.RecordAttempt, attempt.ID, current.UpdatedAt, expectedUpdatedAt); err != nil {
+			return err
+		}
+		updatedAt := nextRecordUpdatedAt(current.UpdatedAt, now)
 		attempt.ProjectID = current.ProjectID
 		attempt.CreatedAt = current.CreatedAt
-		attempt.UpdatedAt = now
+		attempt.UpdatedAt = updatedAt
 		frontmatter := attemptFrontmatter{
 			Frontmatter: markdown.Frontmatter{
 				ProjectID:     current.ProjectID,
 				Kind:          "attempt",
-				UpdatedAt:     now,
+				UpdatedAt:     updatedAt,
 				SchemaVersion: SchemaVersion,
 				Permalink:     attempt.Permalink,
 			},
@@ -244,6 +271,10 @@ func (s *Store) ReplaceAttempt(ctx context.Context, attempt domain.Attempt) (dom
 // ReplaceHandoff rewrites one handoff file in place, keeping its ID, creation
 // time and provenance.
 func (s *Store) ReplaceHandoff(ctx context.Context, handoff domain.Handoff) (domain.Handoff, error) {
+	return s.replaceHandoff(ctx, handoff, time.Time{})
+}
+
+func (s *Store) replaceHandoff(ctx context.Context, handoff domain.Handoff, expectedUpdatedAt time.Time) (domain.Handoff, error) {
 	if err := contextError(ctx); err != nil {
 		return domain.Handoff{}, err
 	}
@@ -267,13 +298,24 @@ func (s *Store) ReplaceHandoff(ctx context.Context, handoff domain.Handoff) (dom
 		if err != nil {
 			return fmt.Errorf("fsstore: read handoff %q: %w", handoff.ID, err)
 		}
+		// A handoff written before updated_at existed has no revision of its
+		// own; its summary falls back to created_at, so the CAS uses it too.
+		currentUpdatedAt := current.UpdatedAt
+		if currentUpdatedAt.IsZero() {
+			currentUpdatedAt = current.CreatedAt
+		}
+		if err := checkRecordRevision(ports.RecordHandoff, handoff.ID, currentUpdatedAt, expectedUpdatedAt); err != nil {
+			return err
+		}
+		updatedAt := nextRecordUpdatedAt(currentUpdatedAt, now)
 		handoff.ProjectID = current.ProjectID
 		handoff.CreatedAt = current.CreatedAt
+		handoff.UpdatedAt = updatedAt
 		frontmatter := handoffFrontmatter{
 			Frontmatter: markdown.Frontmatter{
 				ProjectID:     current.ProjectID,
 				Kind:          "handoff",
-				UpdatedAt:     now,
+				UpdatedAt:     updatedAt,
 				SchemaVersion: SchemaVersion,
 				Permalink:     handoff.Permalink,
 			},
@@ -301,4 +343,31 @@ func (s *Store) ReplaceHandoff(ctx context.Context, handoff domain.Handoff) (dom
 	}
 	handoff.TopicHistory = domain.TopicHistory{History: domain.BoundedHistory(handoff.History)}
 	return handoff, nil
+}
+
+// checkRecordRevision enforces a record edit compare-and-swap. A zero expected
+// revision is last-write-wins; otherwise the stored updated_at must still match
+// the value the caller read. The caller runs this while holding the record
+// lock, so the check and the write are one step.
+func checkRecordRevision(kind, id string, current, expected time.Time) error {
+	if expected.IsZero() {
+		return nil
+	}
+	if expected.UTC().Equal(current.UTC()) {
+		return nil
+	}
+	return domain.NewRevisionConflictError(kind, id, current)
+}
+
+// nextRecordUpdatedAt advances the revision of an edit. Store timestamps keep
+// whole seconds, so two edits in one second would otherwise write the same
+// updated_at and a compare-and-swap could not tell them apart. The edit
+// revision advances by one nanosecond instead.
+func nextRecordUpdatedAt(current, now time.Time) time.Time {
+	current = current.UTC()
+	now = now.UTC()
+	if now.After(current) {
+		return now
+	}
+	return current.Add(time.Nanosecond)
 }

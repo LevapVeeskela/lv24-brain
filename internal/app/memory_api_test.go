@@ -39,7 +39,7 @@ func newMemoryAPIFixture(t *testing.T) *memoryAPIFixture {
 	cfg := config.Default()
 	cfg.Mode = config.ModeLocal
 	fixture := &memoryAPIFixture{
-		app:     app.New(cfg, app.Dependencies{Store: store, Index: index, Now: func() time.Time { return clock }}),
+		app:     app.New(cfg, app.Dependencies{Store: store, Index: index, Proposals: store, Now: func() time.Time { return clock }}),
 		store:   store,
 		clock:   clock,
 		dataDir: dataDir,

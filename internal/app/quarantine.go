@@ -1,9 +1,11 @@
 package app
 
 import (
+	"context"
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/levapveeskela/lv24-brain/internal/domain"
 )
@@ -111,4 +113,82 @@ func trustedHandoffs(values []domain.Handoff) []domain.Handoff {
 		}
 	}
 	return out
+}
+
+// Reasons a record is quarantined. They are stable wire values.
+const (
+	// QuarantineReasonUnreviewed is a valid non-human write whose review has
+	// not happened yet; reviewing it clears the quarantine.
+	QuarantineReasonUnreviewed = "unreviewed"
+	// QuarantineReasonUnknownOrigin is a malformed origin this engine does not
+	// know. Review cannot repair it; the file needs a hand edit.
+	QuarantineReasonUnknownOrigin = "unknown_origin"
+)
+
+// QuarantinedRecord is one quarantined record as a review inbox lists it.
+// Bodies never leave the store through this type.
+type QuarantinedRecord struct {
+	ID        string
+	Kind      string
+	ProjectID string
+	Title     string
+	Reason    string
+	Origin    string
+	Trust     string
+	CreatedAt time.Time
+	UpdatedAt time.Time
+}
+
+// ListQuarantined returns the records excluded from trusted context, newest
+// first, bounded by limit (<= 0 uses 50). Only identity, provenance and the
+// reason are returned; a caller reads a body through the record route after it
+// passes the normal read policy.
+func (a *App) ListQuarantined(ctx context.Context, projectID string, limit int) ([]QuarantinedRecord, error) {
+	if err := a.requireStore(); err != nil {
+		return nil, err
+	}
+	project, err := a.ensureProject(ctx, projectID, false)
+	if err != nil {
+		return nil, err
+	}
+	if limit <= 0 {
+		limit = 50
+	}
+	records, err := a.projectRecords(ctx, project.ID)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]QuarantinedRecord, 0, len(records))
+	for _, record := range records {
+		provenance := record.Provenance()
+		if !provenance.Quarantined() {
+			continue
+		}
+		summary := record.Summary()
+		out = append(out, QuarantinedRecord{
+			ID: summary.ID, Kind: summary.Kind, ProjectID: summary.ProjectID,
+			Title: summary.Title, Reason: quarantineReason(provenance), Origin: string(provenance.Origin),
+			Trust: string(provenance.Trust), CreatedAt: summary.CreatedAt, UpdatedAt: summary.UpdatedAt,
+		})
+	}
+	sort.SliceStable(out, func(i, j int) bool {
+		if !out[i].CreatedAt.Equal(out[j].CreatedAt) {
+			return out[i].CreatedAt.After(out[j].CreatedAt)
+		}
+		return out[i].ID < out[j].ID
+	})
+	if len(out) > limit {
+		out = out[:limit]
+	}
+	return out, nil
+}
+
+// quarantineReason names why a record is quarantined. An origin this engine
+// does not know needs a hand edit, so it is reported separately from a merely
+// unreviewed write.
+func quarantineReason(provenance domain.Provenance) string {
+	if provenance.Origin != "" && !provenance.Origin.Valid() {
+		return QuarantineReasonUnknownOrigin
+	}
+	return QuarantineReasonUnreviewed
 }

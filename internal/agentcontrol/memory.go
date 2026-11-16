@@ -20,19 +20,29 @@ type MemoryApp interface {
 	ListRecords(context.Context, app.ListRecordsOptions) ([]app.RecordSummary, error)
 	RecordBody(context.Context, string, string, int) (app.RecordBody, error)
 	RecordLinks(context.Context, string, string) (app.RecordLinks, error)
+	EditRecord(context.Context, app.RecordEdit) (app.RecordEditResult, error)
 	Timeline(context.Context, string, string, int) (app.TimelineResult, error)
 	Summarize(app.Record) app.RecordSummary
 	QuarantinedCount(context.Context, string) (int, error)
+	ListQuarantined(context.Context, string, int) ([]app.QuarantinedRecord, error)
+	ReviewRecords(context.Context, app.ReviewRecordOptions) (app.ReviewRecordResult, error)
 	SearchWithReport(context.Context, app.SearchOptions) (app.SearchReport, error)
 	GetState(context.Context, string) (domain.Project, domain.State, error)
 	SetStateIfRevision(context.Context, app.StateInput, string) (domain.State, error)
 	Findings(context.Context, string) ([]app.Finding, error)
 	ProposalFindings(context.Context, string) ([]app.Finding, error)
+	PlanFixFindings(context.Context, string, []app.FindingKind) (app.FixPlan, error)
+	FixFindings(context.Context, string, []app.FindingKind) (app.FixResult, error)
 	DueReviews(context.Context, string) ([]app.DueReview, error)
 	PendingProposals(context.Context, string) ([]app.ProposalListItem, int, error)
 	ListProposals(context.Context, app.ProposalQuery) (app.ProposalListing, error)
+	ProposalBody(context.Context, string, string, int) (app.ProposalBody, error)
 	Promote(context.Context, app.PromoteOptions) (app.PromoteResult, error)
 	Catchup(context.Context, app.CatchupOptions) (app.CatchupResult, error)
+	ResolveSelector(context.Context, string) (app.Resolved, error)
+	ListProjects(context.Context) ([]domain.Project, error)
+	TrashRecord(context.Context, string, string) (app.Record, error)
+	RestoreRecord(context.Context, string, string) (app.Record, error)
 }
 
 // memoryService maps the brain use cases onto the local API's memory views. It
@@ -59,11 +69,43 @@ func (s *memoryService) ListRecords(ctx context.Context, query localapi.RecordQu
 	if limit <= 0 {
 		limit = 50
 	}
+	now := s.now().UTC()
+	if !query.AllProjects {
+		records, err := s.listProjectRecords(ctx, query, query.ProjectID, limit)
+		if err != nil {
+			return nil, err
+		}
+		return recordViewsOf(records, now), nil
+	}
+	projects, err := s.scopeProjects(ctx, query.ProjectIDs)
+	if err != nil {
+		return nil, err
+	}
+	views := make([]localapi.RecordView, 0, limit)
+	for _, projectID := range projects {
+		records, err := s.listProjectRecords(ctx, query, projectID, limit)
+		if err != nil {
+			return nil, err
+		}
+		for _, record := range records {
+			views = append(views, recordView(record, now))
+		}
+	}
+	sortRecords(views)
+	if len(views) > limit {
+		views = views[:limit]
+	}
+	return views, nil
+}
+
+// listProjectRecords lists one project's newest matching records. With a due
+// filter it scans the whole window so a filtered record cannot hide a due one.
+func (s *memoryService) listProjectRecords(ctx context.Context, query localapi.RecordQuery, projectID string, limit int) ([]app.RecordSummary, error) {
 	scan := limit
 	var due map[string]bool
 	if query.DueReview {
 		scan = localapi.RecordScanWindow
-		reviews, err := s.app.DueReviews(ctx, query.ProjectID)
+		reviews, err := s.app.DueReviews(ctx, projectID)
 		if err != nil {
 			return nil, err
 		}
@@ -75,25 +117,63 @@ func (s *memoryService) ListRecords(ctx context.Context, query localapi.RecordQu
 		}
 	}
 	records, err := s.app.ListRecords(ctx, app.ListRecordsOptions{
-		ProjectID: query.ProjectID, Kinds: query.Kinds, Status: query.Status,
+		ProjectID: projectID, Kinds: query.Kinds, Status: query.Status,
 		Subtype: query.Subtype, Scope: query.Scope, TopicKey: query.TopicKey,
 		Since: query.Since, Limit: scan,
 	})
 	if err != nil {
 		return nil, err
 	}
-	now := s.now().UTC()
-	views := make([]localapi.RecordView, 0, len(records))
+	if due == nil {
+		return records, nil
+	}
+	filtered := make([]app.RecordSummary, 0, len(records))
 	for _, record := range records {
-		if due != nil && !due[record.ID] {
-			continue
-		}
-		views = append(views, recordView(record, now))
-		if len(views) == limit {
-			break
+		if due[record.ID] {
+			filtered = append(filtered, record)
+			if len(filtered) == limit {
+				break
+			}
 		}
 	}
-	return views, nil
+	return filtered, nil
+}
+
+// scopeProjects resolves the project scope of an all-projects read. Empty ids
+// mean every registered project; the result is bounded by the registry.
+func (s *memoryService) scopeProjects(ctx context.Context, projectIDs []string) ([]string, error) {
+	if len(projectIDs) > 0 {
+		return append([]string(nil), projectIDs...), nil
+	}
+	projects, err := s.app.ListProjects(ctx)
+	if err != nil {
+		return nil, err
+	}
+	ids := make([]string, 0, len(projects))
+	for _, project := range projects {
+		ids = append(ids, project.ID)
+	}
+	return ids, nil
+}
+
+// recordViewsOf maps a project's records to listing rows.
+func recordViewsOf(records []app.RecordSummary, now time.Time) []localapi.RecordView {
+	views := make([]localapi.RecordView, 0, len(records))
+	for _, record := range records {
+		views = append(views, recordView(record, now))
+	}
+	return views
+}
+
+// sortRecords orders rows newest first with the record id as the tie-break, so
+// an all-projects page is deterministic.
+func sortRecords(views []localapi.RecordView) {
+	sort.SliceStable(views, func(i, j int) bool {
+		if !views[i].CreatedAt.Equal(views[j].CreatedAt) {
+			return views[i].CreatedAt.After(views[j].CreatedAt)
+		}
+		return views[i].ID < views[j].ID
+	})
 }
 
 // RecordDetail returns one record with its body, links, relations and optional
@@ -137,8 +217,9 @@ func (s *memoryService) RecordDetail(ctx context.Context, query localapi.RecordD
 	for _, relation := range links.Record.Relations() {
 		normalized := relation.Normalize()
 		detail.Relations = append(detail.Relations, localapi.RelationView{
-			Target: normalized.Target, Relation: string(normalized.Relation),
-			Reason: normalized.Reason, Confidence: normalized.Confidence,
+			Target: normalized.Target, TargetKind: links.TargetKinds[normalized.Target],
+			Relation: string(normalized.Relation),
+			Reason:   normalized.Reason, Confidence: normalized.Confidence,
 			Status: string(normalized.Status), JudgedAt: normalized.JudgedAt,
 			VerdictBy: string(normalized.VerdictBy),
 		})
@@ -163,14 +244,69 @@ func (s *memoryService) RecordDetail(ctx context.Context, query localapi.RecordD
 	return detail, nil
 }
 
+// EditRecord applies one text edit and returns the record detail after the
+// write, so the desktop can refresh the row and body in one round trip.
+func (s *memoryService) EditRecord(ctx context.Context, request localapi.RecordEditRequest) (localapi.RecordDetailView, error) {
+	if _, err := s.app.EditRecord(ctx, app.RecordEdit{
+		ProjectID: request.ProjectID, ID: request.ID,
+		Title: request.Title, Body: request.Body, Tags: request.Tags,
+		ExpectedUpdatedAt: request.ExpectedUpdatedAt, AllowDuplicate: request.AllowDuplicate,
+	}); err != nil {
+		return localapi.RecordDetailView{}, err
+	}
+	return s.RecordDetail(ctx, localapi.RecordDetailQuery{
+		ProjectID: request.ProjectID, ID: request.ID,
+		MaxTokens: localapi.RecordBodyDefaultTokens,
+	})
+}
+
 // Search runs a curated search. Raw-zone kinds are refused here as well as in
 // the engine: the local API never returns raw item text without a grant.
 func (s *memoryService) Search(ctx context.Context, query localapi.SearchQuery) (localapi.SearchResult, error) {
 	if err := validateSearchKinds(query.Kinds); err != nil {
 		return localapi.SearchResult{}, err
 	}
+	if !query.AllProjects {
+		return s.searchOne(ctx, query, query.ProjectID)
+	}
+	// Without an explicit allowlist the index itself answers the unscoped
+	// query, which is bounded by the requested window. With an allowlist the
+	// scope is exactly its projects, so every hit is inside the policy.
+	if len(query.ProjectIDs) == 0 {
+		return s.searchOne(ctx, query, "")
+	}
+	merged := localapi.SearchResult{Hits: make([]localapi.SearchHitView, 0, query.Limit)}
+	for _, projectID := range query.ProjectIDs {
+		part, err := s.searchOne(ctx, query, projectID)
+		if err != nil {
+			return localapi.SearchResult{}, err
+		}
+		merged.Relaxed = merged.Relaxed || part.Relaxed
+		if merged.Notice == "" {
+			merged.Notice = part.Notice
+		}
+		merged.Hits = append(merged.Hits, part.Hits...)
+	}
+	sort.SliceStable(merged.Hits, func(i, j int) bool {
+		if merged.Hits[i].Score != merged.Hits[j].Score {
+			return merged.Hits[i].Score > merged.Hits[j].Score
+		}
+		if merged.Hits[i].ProjectID != merged.Hits[j].ProjectID {
+			return merged.Hits[i].ProjectID < merged.Hits[j].ProjectID
+		}
+		return merged.Hits[i].ID < merged.Hits[j].ID
+	})
+	if query.Limit > 0 && len(merged.Hits) > query.Limit {
+		merged.Hits = merged.Hits[:query.Limit]
+	}
+	return merged, nil
+}
+
+// searchOne runs one curated search in one project (empty means every project
+// the index serves).
+func (s *memoryService) searchOne(ctx context.Context, query localapi.SearchQuery, projectID string) (localapi.SearchResult, error) {
 	report, err := s.app.SearchWithReport(ctx, app.SearchOptions{
-		Text: query.Text, ProjectID: query.ProjectID, Kinds: query.Kinds,
+		Text: query.Text, ProjectID: projectID, Kinds: query.Kinds,
 		Limit: query.Limit, MatchMode: query.Mode, MinScore: query.MinScore, Explain: query.Explain,
 	})
 	if err != nil {
@@ -248,8 +384,54 @@ func (s *memoryService) SetState(ctx context.Context, projectID string, write lo
 	return stateView(state), nil
 }
 
-// Review builds the read-only review report.
-func (s *memoryService) Review(ctx context.Context, projectID string) (localapi.ReviewView, error) {
+// Review builds the read-only review report. An all-projects review aggregates
+// the same report over the allowed scope, caps the combined lists and names the
+// project of every finding, due review and proposal.
+func (s *memoryService) Review(ctx context.Context, query localapi.ReviewQuery) (localapi.ReviewView, error) {
+	if !query.AllProjects {
+		return s.reviewOne(ctx, query.ProjectID)
+	}
+	projects, err := s.scopeProjects(ctx, query.ProjectIDs)
+	if err != nil {
+		return localapi.ReviewView{}, err
+	}
+	view := localapi.ReviewView{
+		ProjectID:   localapi.AllProjectsProjectID,
+		ProjectIDs:  projects,
+		AllProjects: true,
+		Findings:    make([]localapi.FindingView, 0, 16),
+		DueReviews:  make([]localapi.DueReviewView, 0, 16),
+		Proposals:   localapi.ProposalSummaryView{Items: make([]localapi.ProposalView, 0, 16)},
+	}
+	for _, projectID := range projects {
+		one, err := s.reviewOne(ctx, projectID)
+		if err != nil {
+			return localapi.ReviewView{}, err
+		}
+		view.Findings = append(view.Findings, one.Findings...)
+		view.DueReviews = append(view.DueReviews, one.DueReviews...)
+		view.Proposals.PendingCount += one.Proposals.PendingCount
+		view.Proposals.Items = append(view.Proposals.Items, one.Proposals.Items...)
+		view.QuarantinedCount += one.QuarantinedCount
+	}
+	sortFindings(view.Findings)
+	if len(view.Findings) > localapi.AllProjectsFindingsCap {
+		view.Findings = view.Findings[:localapi.AllProjectsFindingsCap]
+		view.FindingsTruncated = true
+	}
+	if len(view.DueReviews) > localapi.AllProjectsDueReviewsCap {
+		view.DueReviews = view.DueReviews[:localapi.AllProjectsDueReviewsCap]
+		view.DueReviewsTruncated = true
+	}
+	if len(view.Proposals.Items) > localapi.AllProjectsProposalsCap {
+		view.Proposals.Items = view.Proposals.Items[:localapi.AllProjectsProposalsCap]
+		view.ProposalsTruncated = true
+	}
+	return view, nil
+}
+
+// reviewOne builds the review report of exactly one project.
+func (s *memoryService) reviewOne(ctx context.Context, projectID string) (localapi.ReviewView, error) {
 	findings, err := s.app.Findings(ctx, projectID)
 	if err != nil {
 		return localapi.ReviewView{}, err
@@ -279,33 +461,87 @@ func (s *memoryService) Review(ctx context.Context, projectID string) (localapi.
 	}
 	for _, finding := range findings {
 		view.Findings = append(view.Findings, localapi.FindingView{
-			Kind: string(finding.Kind), Severity: string(finding.Severity), Message: finding.Message,
+			ProjectID: projectID,
+			Kind:      string(finding.Kind), Severity: string(finding.Severity), Message: finding.Message,
 			Why: finding.Why, Next: finding.Next, Confirm: finding.Confirm,
 			Evidence: finding.Evidence, Fixable: finding.Fixable, Fix: finding.Fix,
 		})
 	}
-	sort.SliceStable(view.Findings, func(i, j int) bool {
-		left, right := severityRank(view.Findings[i].Severity), severityRank(view.Findings[j].Severity)
-		if left != right {
-			return left < right
-		}
-		if view.Findings[i].Kind != view.Findings[j].Kind {
-			return view.Findings[i].Kind < view.Findings[j].Kind
-		}
-		return view.Findings[i].Message < view.Findings[j].Message
-	})
+	sortFindings(view.Findings)
 	for _, review := range due {
 		overdue := review.Overdue
 		if overdue < 0 {
 			overdue = 0
 		}
 		view.DueReviews = append(view.DueReviews, localapi.DueReviewView{
-			Kind: review.Kind, ID: review.ID, Title: review.Title,
+			ProjectID: projectID,
+			Kind:      review.Kind, ID: review.ID, Title: review.Title,
 			ReviewAfter: review.ReviewAfter, OverdueSeconds: int64(overdue.Seconds()),
 			Source: review.Source,
 		})
 	}
 	view.Proposals = localapi.ProposalSummaryView{PendingCount: pendingCount, Items: proposalViews(pending)}
+	return view, nil
+}
+
+// sortFindings orders findings error -> warn -> info, then by kind and message.
+func sortFindings(findings []localapi.FindingView) {
+	sort.SliceStable(findings, func(i, j int) bool {
+		left, right := severityRank(findings[i].Severity), severityRank(findings[j].Severity)
+		if left != right {
+			return left < right
+		}
+		if findings[i].Kind != findings[j].Kind {
+			return findings[i].Kind < findings[j].Kind
+		}
+		return findings[i].Message < findings[j].Message
+	})
+}
+
+// ReviewFix plans or applies the same safe fixes as `brain review --fix`. It
+// never performs a semantic repair: only adopting a later handoff's next action
+// and removing an open question a later record answers.
+func (s *memoryService) ReviewFix(ctx context.Context, request localapi.ReviewFixRequest) (localapi.ReviewFixView, error) {
+	kinds, err := app.ParseFindingKinds(strings.Join(request.Kinds, ","))
+	if err != nil {
+		return localapi.ReviewFixView{}, err
+	}
+	view := localapi.ReviewFixView{
+		ProjectID: request.ProjectID, DryRun: request.DryRun,
+		Findings: make([]localapi.FindingView, 0, 4),
+		Changes:  make([]localapi.ReviewFixChange, 0, 4),
+	}
+	var applied []app.Finding
+	var changes []app.FixChange
+	var state domain.State
+	if request.Apply {
+		result, err := s.app.FixFindings(ctx, request.ProjectID, kinds)
+		if err != nil {
+			return localapi.ReviewFixView{}, err
+		}
+		applied, changes, state = result.Applied, result.Changes, result.State
+	} else {
+		plan, err := s.app.PlanFixFindings(ctx, request.ProjectID, kinds)
+		if err != nil {
+			return localapi.ReviewFixView{}, err
+		}
+		applied, changes, state = plan.Findings, plan.Changes, plan.State
+	}
+	for _, finding := range applied {
+		view.Findings = append(view.Findings, localapi.FindingView{
+			ProjectID: request.ProjectID,
+			Kind:      string(finding.Kind), Severity: string(finding.Severity), Message: finding.Message,
+			Why: finding.Why, Next: finding.Next, Confirm: finding.Confirm,
+			Evidence: finding.Evidence, Fixable: finding.Fixable, Fix: finding.Fix,
+		})
+	}
+	for _, change := range changes {
+		view.Changes = append(view.Changes, localapi.ReviewFixChange{
+			Kind: string(change.Kind), Action: change.Action, Field: change.Field,
+			Value: change.Value, Evidence: change.Evidence,
+		})
+	}
+	view.State = stateView(state)
 	return view, nil
 }
 
@@ -321,17 +557,47 @@ func severityRank(severity string) int {
 	}
 }
 
-// ListProposals returns one window of candidates with their source health.
+// ListProposals returns one window of candidates with their source health and,
+// when asked, a bounded body per candidate. The combined body budget bounds the
+// response: items that do not fit are marked body_omitted instead of silently
+// shrinking the page.
 func (s *memoryService) ListProposals(ctx context.Context, query localapi.ProposalQuery) (localapi.ProposalPage, error) {
 	listing, err := s.app.ListProposals(ctx, app.ProposalQuery{
 		ProjectID: query.ProjectID, Statuses: proposalStatuses(query.Statuses),
 		Kind: domain.ProposalKind(strings.TrimSpace(query.Kind)), Limit: query.Limit,
+		IncludeBody: query.IncludeBody, BodyTokens: query.BodyTokens,
 	})
 	if err != nil {
 		return localapi.ProposalPage{}, err
 	}
-	return localapi.ProposalPage{
-		ProjectID: listing.ProjectID, Items: proposalViews(listing.Items), Total: listing.Total,
+	views := proposalViews(listing.Items)
+	if query.IncludeBody {
+		spent := 0
+		for index := range views {
+			if spent+views[index].BodyTokens > localapi.ProposalBodiesBudgetTokens {
+				views[index].Body = ""
+				views[index].BodyTruncated = false
+				views[index].BodyTokens = 0
+				views[index].MaxTokens = 0
+				views[index].BodyOmitted = true
+				continue
+			}
+			spent += views[index].BodyTokens
+		}
+	}
+	return localapi.ProposalPage{ProjectID: listing.ProjectID, Items: views, Total: listing.Total}, nil
+}
+
+// ProposalDetail returns one candidate with its bounded body.
+func (s *memoryService) ProposalDetail(ctx context.Context, query localapi.ProposalDetailQuery) (localapi.ProposalDetailView, error) {
+	body, err := s.app.ProposalBody(ctx, query.ProjectID, query.ID, query.MaxTokens)
+	if err != nil {
+		return localapi.ProposalDetailView{}, err
+	}
+	return localapi.ProposalDetailView{
+		ID: body.ID, ProjectID: body.ProjectID, Kind: string(body.Kind),
+		Title: body.Title, Status: string(body.Status),
+		Body: body.Body, BodyTruncated: body.Truncated, BodyTokens: body.Tokens, MaxTokens: body.MaxTokens,
 	}, nil
 }
 
@@ -401,6 +667,86 @@ func (s *memoryService) Catchup(ctx context.Context, query localapi.CatchupQuery
 		view.Journal = append(view.Journal, journalView(entry))
 	}
 	return view, nil
+}
+
+// ListQuarantined returns the records excluded from trusted context, newest
+// first, without their bodies.
+func (s *memoryService) ListQuarantined(ctx context.Context, query localapi.QuarantineQuery) ([]localapi.QuarantineItemView, error) {
+	records, err := s.app.ListQuarantined(ctx, query.ProjectID, query.Limit)
+	if err != nil {
+		return nil, err
+	}
+	now := s.now().UTC()
+	views := make([]localapi.QuarantineItemView, 0, len(records))
+	for _, record := range records {
+		views = append(views, localapi.QuarantineItemView{
+			ID: record.ID, Kind: record.Kind, ProjectID: record.ProjectID,
+			Title: record.Title, Reason: record.Reason, Origin: record.Origin,
+			Trust: record.Trust, CreatedAt: record.CreatedAt,
+			AgeSeconds: ageSeconds(now, record.CreatedAt),
+		})
+	}
+	return views, nil
+}
+
+// ReviewQuarantine marks one quarantined record reviewed, optionally replacing
+// its trust, and returns the record after the write.
+func (s *memoryService) ReviewQuarantine(ctx context.Context, decision localapi.QuarantineReviewDecision) (localapi.QuarantineReviewView, error) {
+	trust := domain.Trust(strings.TrimSpace(decision.Trust))
+	if _, err := s.app.ReviewRecords(ctx, app.ReviewRecordOptions{
+		ProjectID: decision.ProjectID, ID: decision.ID, Trust: trust,
+	}); err != nil {
+		return localapi.QuarantineReviewView{}, err
+	}
+	links, err := s.app.RecordLinks(ctx, decision.ProjectID, decision.ID)
+	if err != nil {
+		return localapi.QuarantineReviewView{}, err
+	}
+	summary := s.app.Summarize(links.Record)
+	return localapi.QuarantineReviewView{
+		Record:     recordView(summary, s.now().UTC()),
+		Provenance: provenanceView(summary.Provenance),
+	}, nil
+}
+
+// ResolveProject maps a project id, alias or path to its registered project,
+// using the same rules as every CLI command.
+func (s *memoryService) ResolveProject(ctx context.Context, selector string) (localapi.Project, error) {
+	resolved, err := s.app.ResolveSelector(ctx, selector)
+	if err != nil {
+		return localapi.Project{}, err
+	}
+	return localapi.Project{ID: resolved.Project.ID, Name: resolved.Project.Name}, nil
+}
+
+// TrashRecord moves one record to the project trash; it never deletes a file.
+func (s *memoryService) TrashRecord(ctx context.Context, projectID, id string) (localapi.RecordView, error) {
+	record, err := s.app.TrashRecord(ctx, projectID, id)
+	if err != nil {
+		return localapi.RecordView{}, err
+	}
+	return recordView(s.app.Summarize(record), s.now().UTC()), nil
+}
+
+// RestoreRecord brings one trashed record back.
+func (s *memoryService) RestoreRecord(ctx context.Context, projectID, id string) (localapi.RecordView, error) {
+	record, err := s.app.RestoreRecord(ctx, projectID, id)
+	if err != nil {
+		return localapi.RecordView{}, err
+	}
+	return recordView(s.app.Summarize(record), s.now().UTC()), nil
+}
+
+// ageSeconds is the whole-second age of a timestamp, never negative.
+func ageSeconds(now, at time.Time) int64 {
+	if at.IsZero() {
+		return 0
+	}
+	age := now.Sub(at)
+	if age < 0 {
+		return 0
+	}
+	return int64(age.Seconds())
 }
 
 // recordViews renders a record list as wire rows.
@@ -503,6 +849,8 @@ func proposalViews(items []app.ProposalListItem) []localapi.ProposalView {
 			ConnectionID: item.ConnectionID, CreatedAt: item.CreatedAt, UpdatedAt: item.UpdatedAt,
 			SourceStale: item.Stale, SourceOrphan: item.Orphan, LocalOnly: item.LocalOnly,
 			SourceHealth: item.HealthReason,
+			Body:         item.Body, BodyTruncated: item.BodyTruncated,
+			BodyTokens: item.BodyTokens, MaxTokens: item.MaxTokens,
 		})
 	}
 	return views

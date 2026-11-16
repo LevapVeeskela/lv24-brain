@@ -49,6 +49,9 @@ type RecordLinks struct {
 	Record    Record
 	Links     []ResolvedLink
 	Backlinks []Backlink
+	// TargetKinds maps every live record id of the project to its kind, so a
+	// relation target can be rendered with its kind for deep linking.
+	TargetKinds map[string]string
 }
 
 // BrokenLink is a reference to a record that does not exist.
@@ -213,6 +216,11 @@ func (a *App) RecordLinks(ctx context.Context, projectID, id string) (RecordLink
 		result.Links = append(result.Links, resolver.resolve(ctx, raw))
 	}
 	result.Backlinks = backlinksTo(records, project.ID, id)
+	result.TargetKinds = make(map[string]string, len(records))
+	for _, record := range records {
+		summary := record.Summary()
+		result.TargetKinds[summary.ID] = summary.Kind
+	}
 	return result, nil
 }
 

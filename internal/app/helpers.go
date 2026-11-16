@@ -296,7 +296,7 @@ func handoffDocument(handoff domain.Handoff) ports.Document {
 		Kind:         "handoff",
 		Title:        handoffTitle(handoff),
 		Body:         joinText(handoff.Summary, handoff.GitContext, handoff.NextAction),
-		UpdatedAt:    handoff.CreatedAt,
+		UpdatedAt:    updatedOrCreated(handoff.UpdatedAt, handoff.CreatedAt),
 		ValidFrom:    handoff.Validity.EffectiveFrom(handoff.CreatedAt),
 		ValidTo:      handoff.Validity.ValidTo,
 		SupersededBy: handoff.Validity.SupersededBy,
