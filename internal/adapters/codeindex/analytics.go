@@ -864,7 +864,24 @@ func (i *Index) singletonCommunityCount(ctx context.Context) (int, error) {
 // preserves the id of a community whose member signature did not change. A new
 // or changed community gets the next free id, so a reference to a community
 // stays valid while its members do.
+//
+// The graph digest is checked first: when the symbol set and the distinct
+// dependency pairs are identical to the snapshot that produced the stored
+// partition, the rows are left untouched and the stored count is returned.
+// This is what keeps community ids and signatures byte-identical across a
+// repeated sync in which only comments or function bodies changed.
 func rebuildCommunities(ctx context.Context, tx *sql.Tx) (int, error) {
+	digest, err := graphDigest(ctx, tx)
+	if err != nil {
+		return 0, err
+	}
+	previousDigest, previousCount, err := readGraphDigest(ctx, tx)
+	if err != nil {
+		return 0, err
+	}
+	if digest != "" && digest == previousDigest && previousCount > 0 {
+		return previousCount, nil
+	}
 	graph, err := loadSymbolGraphFrom(ctx, tx)
 	if err != nil {
 		return 0, err
@@ -955,6 +972,9 @@ func rebuildCommunities(ctx context.Context, tx *sql.Tx) (int, error) {
 				return 0, fmt.Errorf("codeindex: write community %d member: %w", id, err)
 			}
 		}
+	}
+	if err := setMeta(ctx, tx, map[string]string{metaGraphDigest: digest}); err != nil {
+		return 0, err
 	}
 	return len(partition.Communities), nil
 }

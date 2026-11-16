@@ -165,6 +165,12 @@ func (i *Index) impactFromSymbol(ctx context.Context, root ports.GraphSymbol, de
 // loadSymbols loads the given symbol ids in one batch, ordered by file and
 // line.
 func (i *Index) loadSymbols(ctx context.Context, ids []string) ([]ports.GraphSymbol, error) {
+	return loadSymbolsFrom(ctx, i.db, ids)
+}
+
+// loadSymbolsFrom loads symbol ids from any store handle. A diff uses it for
+// the base index, which is opened separately.
+func loadSymbolsFrom(ctx context.Context, db queryer, ids []string) ([]ports.GraphSymbol, error) {
 	if len(ids) == 0 {
 		return nil, nil
 	}
@@ -172,7 +178,7 @@ func (i *Index) loadSymbols(ctx context.Context, ids []string) ([]ports.GraphSym
 	out := make([]ports.GraphSymbol, 0, len(ids))
 	for _, chunk := range chunkStrings(ids, sqlChunk) {
 		query := `SELECT ` + symbolColumns + ` FROM symbols WHERE id IN (` + placeholders(len(chunk)) + `)`
-		rows, err := i.db.QueryContext(ctx, query, stringsToAny(chunk)...)
+		rows, err := db.QueryContext(ctx, query, stringsToAny(chunk)...)
 		if err != nil {
 			return nil, fmt.Errorf("codeindex: load symbols: %w", err)
 		}

@@ -1,5 +1,5 @@
-// Package codeindex builds and queries a native code graph for Go and
-// TypeScript/JavaScript checkouts.
+// Package codeindex builds and queries a native code graph for Go,
+// TypeScript/JavaScript and Python checkouts.
 //
 // The store is derived data: one SQLite file per checkout under the brain data
 // directory, never inside the checkout and never in git. It holds files,

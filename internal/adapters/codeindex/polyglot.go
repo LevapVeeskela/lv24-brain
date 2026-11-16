@@ -22,13 +22,15 @@ type polyglotBatch struct {
 
 // polyglotFile is one parsed script file and its resolved lookup tables.
 type polyglotFile struct {
-	path     string
-	moduleID string
-	lines    int
-	symbols  []symbolRow
-	bindings map[string]polyglotBinding
-	ranges   []byteSpan
-	result   tsFileResult
+	path       string
+	moduleID   string
+	lines      int
+	python     bool
+	symbols    []symbolRow
+	symbolByID map[string]symbolRow
+	bindings   map[string]polyglotBinding
+	ranges     []byteSpan
+	result     syntaxResult
 }
 
 // polyglotBinding is one local import name bound to an indexed module.
@@ -55,32 +57,45 @@ type polyglotSymbolRef struct {
 
 // polyglotResolver maps a repository path to the definitions another file can
 // import. A full index fills it from the current batch; an incremental sync
-// seeds it from the store and replaces the re-extracted files.
+// seeds it from the store and replaces the re-extracted files. byID answers an
+// exact qualified-name lookup for Python `self.method()` sites, which need the
+// enclosing class rather than a bare method name.
 type polyglotResolver struct {
-	files  map[string]bool
-	byPath map[string]map[string][]polyglotSymbolRef
+	files     map[string]bool
+	byPath    map[string]map[string][]polyglotSymbolRef
+	byID      map[string]polyglotSymbolRef
+	idsByPath map[string][]string
 }
 
 // newPolyglotResolver returns an empty resolver.
 func newPolyglotResolver() *polyglotResolver {
-	return &polyglotResolver{files: map[string]bool{}, byPath: map[string]map[string][]polyglotSymbolRef{}}
+	return &polyglotResolver{
+		files:     map[string]bool{},
+		byPath:    map[string]map[string][]polyglotSymbolRef{},
+		byID:      map[string]polyglotSymbolRef{},
+		idsByPath: map[string][]string{},
+	}
 }
 
 // addFile replaces every definition known for one path.
 func (r *polyglotResolver) addFile(file *polyglotFile) {
+	r.removeFile(file.path)
 	r.files[file.path] = true
 	names := map[string][]polyglotSymbolRef{}
 	for _, symbol := range file.symbols {
 		if symbol.Kind == "module" {
 			continue
 		}
-		names[symbol.Name] = append(names[symbol.Name], polyglotSymbolRef{
+		ref := polyglotSymbolRef{
 			id:        symbol.ID,
 			kind:      symbol.Kind,
 			signature: symbol.Signature,
 			exported:  symbol.Exported,
 			defaulted: strings.HasPrefix(symbol.Signature, "export default "),
-		})
+		}
+		names[symbol.Name] = append(names[symbol.Name], ref)
+		r.byID[symbol.ID] = ref
+		r.idsByPath[file.path] = append(r.idsByPath[file.path], symbol.ID)
 	}
 	r.byPath[file.path] = names
 }
@@ -89,6 +104,10 @@ func (r *polyglotResolver) addFile(file *polyglotFile) {
 func (r *polyglotResolver) removeFile(filePath string) {
 	delete(r.files, filePath)
 	delete(r.byPath, filePath)
+	for _, id := range r.idsByPath[filePath] {
+		delete(r.byID, id)
+	}
+	delete(r.idsByPath, filePath)
 }
 
 // addBatch replaces the definitions of every file in the batch.
@@ -144,6 +163,17 @@ func (r *polyglotResolver) findDefault(file string, kinds ...string) (string, bo
 		}
 	}
 	return found.id, count == 1
+}
+
+// findQualified resolves one exact qualified name in one file. Python uses it
+// for `self.method()` and `Class.method()` sites, where a bare-name match could
+// pick a same-named method of an unrelated class.
+func (r *polyglotResolver) findQualified(file, qual string, kinds ...string) (string, bool) {
+	ref, ok := r.byID[SymbolID(file, qual)]
+	if !ok || !kindMatches(ref.kind, kinds) {
+		return "", false
+	}
+	return ref.id, true
 }
 
 // kindMatches reports whether a definition kind is in the allowed set.
@@ -229,7 +259,7 @@ func (i *Index) extractPolyglot(ctx context.Context, states map[string]fileState
 		if err != nil {
 			return polyglotBatch{}, fmt.Errorf("codeindex: extract %s: %w", filePath, err)
 		}
-		file := buildPolyglotFile(filePath, result, source)
+		file := buildPolyglotFile(filePath, spec, result, source)
 		batch.Files = append(batch.Files, file)
 		batch.Symbols = append(batch.Symbols, file.symbols...)
 		if result.Partial {
@@ -246,15 +276,17 @@ func (i *Index) extractPolyglot(ctx context.Context, states map[string]fileState
 
 // buildPolyglotFile converts syntax-level declarations into symbol rows and
 // keeps the byte ranges that locate the symbol enclosing a reference.
-func buildPolyglotFile(filePath string, result tsFileResult, source []byte) *polyglotFile {
+func buildPolyglotFile(filePath string, spec polyglotSpec, result syntaxResult, source []byte) *polyglotFile {
 	lines := strings.Count(string(source), "\n") + 1
 	moduleID := SymbolID(filePath, filePath)
 	file := &polyglotFile{
-		path:     filePath,
-		moduleID: moduleID,
-		lines:    lines,
-		bindings: map[string]polyglotBinding{},
-		result:   result,
+		path:       filePath,
+		moduleID:   moduleID,
+		lines:      lines,
+		python:     spec.Language == pythonLanguage,
+		bindings:   map[string]polyglotBinding{},
+		symbolByID: map[string]symbolRow{},
+		result:     result,
 	}
 	file.symbols = append(file.symbols, symbolRow{
 		ID:        moduleID,
@@ -296,6 +328,7 @@ func buildPolyglotFile(filePath string, result tsFileResult, source []byte) *pol
 		}
 		span := spans[symbol.ID]
 		file.ranges = append(file.ranges, span)
+		file.symbolByID[symbol.ID] = symbol
 	}
 	sort.Slice(file.ranges, func(left, right int) bool {
 		if file.ranges[left].start != file.ranges[right].start {
@@ -309,7 +342,7 @@ func buildPolyglotFile(filePath string, result tsFileResult, source []byte) *pol
 // polyglotSymbolRow renders one declaration row. A default export is marked in
 // the stored signature so an incremental resolver can find it without a new
 // schema column.
-func polyglotSymbolRow(filePath string, symbol tsSymbol) symbolRow {
+func polyglotSymbolRow(filePath string, symbol syntaxSymbol) symbolRow {
 	signature := symbol.Signature
 	if symbol.Default {
 		signature = "export default " + signature
@@ -331,21 +364,10 @@ func polyglotSymbolRow(filePath string, symbol tsSymbol) symbolRow {
 
 // resolvePolyglotFile turns the syntax facts of one file into edges.
 func (i *Index) resolvePolyglotFile(file *polyglotFile, resolver *polyglotResolver, batch *polyglotBatch) {
-	for _, item := range file.result.Imports {
-		target, ok := resolver.resolveSpecifier(file.path, item.Specifier)
-		if !ok {
-			if strings.HasPrefix(item.Specifier, "./") || strings.HasPrefix(item.Specifier, "../") {
-				batch.Unresolved[file.path]++
-			}
-			continue
-		}
-		batch.addEdge(file.moduleID, SymbolID(target, target), "imports", item.Line, 1.0)
-		for _, binding := range item.Bindings {
-			if binding.Local == "" || binding.Imported == "" {
-				continue
-			}
-			file.bindings[binding.Local] = polyglotBinding{Target: target, Imported: binding.Imported}
-		}
+	i.resolvePolyglotImports(file, resolver, batch)
+	if file.python {
+		i.resolvePythonFile(file, resolver, batch)
+		return
 	}
 	for _, call := range file.result.Calls {
 		source := file.enclosing(call.Byte)
@@ -425,6 +447,33 @@ func (i *Index) resolvePolyglotFile(file *polyglotFile, resolver *polyglotResolv
 	}
 }
 
+// resolvePolyglotImports turns import statements into module edges and local
+// bindings. TypeScript/JavaScript resolve relative specifiers; Python resolves
+// dotted and relative module paths and rebinds `from pkg import submodule` to
+// the submodule file.
+func (i *Index) resolvePolyglotImports(file *polyglotFile, resolver *polyglotResolver, batch *polyglotBatch) {
+	for _, item := range file.result.Imports {
+		if file.python {
+			i.resolvePythonImport(file, item, resolver, batch)
+			continue
+		}
+		target, ok := resolver.resolveSpecifier(file.path, item.Specifier)
+		if !ok {
+			if strings.HasPrefix(item.Specifier, "./") || strings.HasPrefix(item.Specifier, "../") {
+				batch.Unresolved[file.path]++
+			}
+			continue
+		}
+		batch.addEdge(file.moduleID, SymbolID(target, target), "imports", item.Line, 1.0)
+		for _, binding := range item.Bindings {
+			if binding.Local == "" || binding.Imported == "" {
+				continue
+			}
+			file.bindings[binding.Local] = polyglotBinding{Target: target, Imported: binding.Imported}
+		}
+	}
+}
+
 // resolveBinding maps one import binding to a target definition.
 func (file *polyglotFile) resolveBinding(binding polyglotBinding, kind string, resolver *polyglotResolver) (string, bool) {
 	if binding.Imported == "default" {
@@ -455,6 +504,27 @@ func (file *polyglotFile) resolveType(name string, resolver *polyglotResolver) (
 // enclosing returns the smallest indexed declaration containing a byte
 // offset, or the module node of the file.
 func (file *polyglotFile) enclosing(offset uint32) string {
+	best := file.enclosingID(offset)
+	if best != "" {
+		return best
+	}
+	return file.moduleID
+}
+
+// enclosingSymbol returns the symbol row of the enclosing declaration. Python
+// call resolution needs its qualified name to resolve `self.method()`.
+func (file *polyglotFile) enclosingSymbol(offset uint32) (symbolRow, bool) {
+	id := file.enclosingID(offset)
+	if id == "" {
+		return symbolRow{}, false
+	}
+	row, ok := file.symbolByID[id]
+	return row, ok
+}
+
+// enclosingID returns the id of the smallest indexed declaration containing a
+// byte offset, or an empty string when the offset is at module level.
+func (file *polyglotFile) enclosingID(offset uint32) string {
 	index := sort.Search(len(file.ranges), func(index int) bool {
 		return file.ranges[index].start > offset
 	}) - 1
@@ -474,10 +544,7 @@ func (file *polyglotFile) enclosing(offset uint32) string {
 			bestSpan = span
 		}
 	}
-	if best != "" {
-		return best
-	}
-	return file.moduleID
+	return best
 }
 
 // addEdge records one deduplicated edge. The highest confidence at a site wins.

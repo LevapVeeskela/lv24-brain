@@ -47,7 +47,7 @@ func (i *Index) indexLocked(ctx context.Context, project string, reason string) 
 	}
 	if len(scan.Files) == 0 {
 		return ports.GraphSyncResult{}, fmt.Errorf(
-			"%w: the native engine indexes Go, TypeScript, TSX, JavaScript and JSX; no supported source file was found under %s",
+			"%w: the native engine indexes Go, TypeScript, TSX, JavaScript, JSX and Python; no supported source file was found under %s",
 			domain.ErrUnsupported, i.root)
 	}
 	goFiles := 0
@@ -125,7 +125,7 @@ func (i *Index) indexLocked(ctx context.Context, project string, reason string) 
 		"indexed %d file(s), %d symbol(s), %d edge(s) in %s",
 		len(files), len(batch.Symbols), len(batch.Edges), time.Since(started).Round(time.Millisecond)))
 	if len(polyBatch.Files) > 0 {
-		note := fmt.Sprintf("%d TypeScript/JavaScript file(s) extracted with tree-sitter", len(polyBatch.Files))
+		note := fmt.Sprintf("%d TypeScript/JavaScript/Python file(s) extracted with tree-sitter", len(polyBatch.Files))
 		if polyBatch.Partial > 0 {
 			note += fmt.Sprintf("; %d had syntax errors and their ERROR-span declarations were skipped", polyBatch.Partial)
 		}

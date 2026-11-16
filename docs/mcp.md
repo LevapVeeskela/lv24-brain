@@ -183,7 +183,7 @@ its `readOnlyHint` is false while `x-lv24-read-actions` names the reads.
 | `brain_projects` | read | `list` (default), `current`, `register`, `merge` | project registry; `current` reports the resolution source |
 | `brain_prompt` | destructive | `save`, `search`, `discard` | opt-in local-only prompt zone |
 | `brain_code` | mixed | `status` (default), `search`, `node`, `explore`, `impact`, `index`, `sync` | query or index one checkout's code graph |
-| `brain_graph` | read | `stats` (default), `neighbors`, `path`, `communities`, `god_nodes`, `pr_impact` | graph counts, neighbours, communities, degree ranking, path and local-diff impact |
+| `brain_graph` | read | `stats` (default), `neighbors`, `path`, `communities`, `god_nodes`, `cycles`, `diff`, `pr_impact` | graph counts, neighbours, communities, degree ranking, path, import cycles, index deltas and local-diff impact |
 | `brain_capabilities` | read | – | profile, engine, tools, features, limits, gaps, refusal codes, endpoints |
 
 The write postures are exact: **9 read, 5 non-destructive writes, 3
@@ -232,8 +232,9 @@ Typed refusals, never empty answers:
 ### 6.2 `brain_graph`
 
 `brain_graph` exposes the graph as a graph rather than as a symbol reader. All
-six actions are read-only; `pr_impact` runs `git diff` against two local refs
-and never fetches or stores pull-request data.
+eight actions are read-only; `pr_impact` runs `git diff` against two local refs
+and `diff` reads a second index, and neither fetches or stores pull-request
+data.
 
 | Action | Answer |
 |---|---|
@@ -242,6 +243,8 @@ and never fetches or stores pull-request data.
 | `path` | the shortest chain between two symbols, its hops, direction and weakest confidence |
 | `communities` | the detected communities by size, or one community with its members, cohesion and signature |
 | `god_nodes` | definitions ranked by distinct dependency relationships, with both degree directions and centrality |
+| `cycles` | import cycles (Tarjan SCC) of Go packages and TypeScript/Python modules, with members and self-import count |
+| `diff` | file, symbol, edge and (native) community deltas between this index and `base_project` |
 | `pr_impact` | changed files → changed symbols → reverse blast radius, risk tier and test files for `base..head` |
 
 Algorithms, limits and the risk tiers are documented in
@@ -249,15 +252,18 @@ Algorithms, limits and the risk tiers are documented in
 
 Inputs: `project` (required), `symbol`, `file`, `engine` (`native`/`codegraph`,
 default `graph.engine`), `limit` (neighbours ≤100, communities ≤100, god nodes
-≤50), `community_id`, `member_limit` ≤200, `depth` (path hops, 1–16, default 8),
-`base` (required for `pr_impact`) and `head` (default `HEAD`). Answers are
+≤50, cycles ≤50, diff samples ≤100), `community_id`, `member_limit` (≤200 for a
+community, ≤50 for a cycle), `depth` (path hops, 1–16, default 8), `base`
+(required for `pr_impact`), `head` (default `HEAD`) and `base_project` (required
+for `diff`; a second checkout or worktree of the same repository). Answers are
 enveloped as `{action, project, stats|analytics|neighbors|path|communities|
-god_nodes|pr_impact}` and the inner object mirrors the port DTO.
+god_nodes|cycles|diff|pr_impact}` and the inner object mirrors the port DTO.
 
 Caps are applied by the engine and disclosed, never silent: 100 communities,
-200 members of one community, 50 god nodes, 20 path nodes, 200 changed files,
-500 changed or reachable PR symbols. A cap that cuts an answer sets
-`truncated` and adds a note.
+200 members of one community, 50 god nodes, 50 cycles, 50 members of one cycle,
+100 diff samples per side, 20 path nodes, 200 changed files, 500 changed or
+reachable PR symbols. A cap that cuts an answer sets `truncated` and adds a
+note; `cycles.total` and the diff counts stay exact.
 
 Typed refusals, never empty answers:
 
@@ -268,6 +274,8 @@ Typed refusals, never empty answers:
 | unknown community id | `NOT_FOUND` | `communities` lists ids |
 | unknown symbol, ambiguous name | `NOT_FOUND` / `INVALID_ARGUMENTS` | `brain_graph(neighbors)`, `brain_code(search)` or add `file` |
 | `base` missing, ref malformed or unknown | `INVALID_ARGUMENTS` | pass two refs such as `base=HEAD~1 head=HEAD` |
+| `base_project` missing or equal to `project` | `INVALID_ARGUMENTS` | name a second checkout or worktree of the same repository |
+| base index of another engine or schema | `UNSUPPORTED` | index the base checkout with the same engine and rebuild it |
 | an argument above its cap | `INVALID_ARGUMENTS` | lower it to the documented maximum |
 
 
@@ -568,6 +576,12 @@ and echoed in `ignored_fields`; `--strict` refuses them.
 The D names refuse with a typed `UNSUPPORTED` and a working alternative. Their
 `target`/`action` still record the intended mapping, so a later release can
 serve them without renaming a profile.
+
+`brain_graph(action=cycles)` and `brain_graph(action=diff)` are native actions
+of the `brain_graph` tool. Graphify publishes no cycle or graph-diff tool in its
+ten-name vocabulary (its `graph_diff` is an internal snapshot helper), so no
+alias is invented for them; a graphify client reaches them through the native
+`brain_graph` name. The `codegraph` profile keeps its eight names unchanged.
 
 ## 14. Resources
 

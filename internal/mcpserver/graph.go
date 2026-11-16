@@ -13,8 +13,9 @@ import (
 
 // graphActions is the closed action vocabulary of brain_graph, in output
 // order. stats and neighbors read the symbol graph; path, communities,
-// god_nodes and pr_impact read the optional analytics half of the same engine.
-var graphActions = []string{"stats", "neighbors", "path", "communities", "god_nodes", "pr_impact"}
+// god_nodes, cycles, diff and pr_impact read the optional analytics half of
+// the same engine.
+var graphActions = []string{"stats", "neighbors", "path", "communities", "god_nodes", "cycles", "diff", "pr_impact"}
 
 // graphAnalyticsUnavailable is the refusal of an engine that serves symbol
 // navigation but not analytics. It is a property of the engine, not of the
@@ -36,6 +37,7 @@ type graphArgs struct {
 	Depth       int    `json:"depth"`
 	Base        string `json:"base"`
 	Head        string `json:"head"`
+	BaseProject string `json:"base_project"`
 }
 
 func (s *Server) graphTool() tool {
@@ -45,23 +47,26 @@ func (s *Server) graphTool() tool {
 		Description: "Inspect the code knowledge graph of one checkout. " +
 			"stats reports the index identity, counts, communities and orphans; neighbors lists the direct edges of one symbol. " +
 			"path finds the shortest chain between two symbols; communities lists detected communities or one with its members; " +
-			"god_nodes ranks definitions by degree; pr_impact maps a local git diff to changed symbols, reverse impact, a risk tier and tests. " +
-			"Analytics is read-only: pr_impact runs git diff against two refs and never fetches or stores pull-request data. " +
+			"god_nodes ranks definitions by degree; cycles lists import cycles (Tarjan SCC) of Go packages and TS/Python modules; " +
+			"diff compares this checkout's index with the index of base_project (file, symbol and edge deltas); " +
+			"pr_impact maps a local git diff to changed symbols, reverse impact, a risk tier and tests. " +
+			"Analytics is read-only: pr_impact runs git diff against two refs and diff reads a second index; neither writes. " +
 			"An engine that cannot answer analytics, or an off/absent index, answers with a typed UNSUPPORTED, never an empty collection.",
 		InputSchema: objectSchema(nil, map[string]any{
-			"action":       enumProp("stats (default), neighbors, path, communities, god_nodes or pr_impact.", graphActions),
+			"action":       enumProp("stats (default), neighbors, path, communities, god_nodes, cycles, diff or pr_impact.", graphActions),
 			"project":      stringProp("Project id, alias or checkout path. Required: a graph belongs to one checkout."),
 			"symbol":       stringProp("Symbol name or node id (neighbors)."),
 			"source":       stringProp("Start symbol of a path query (path)."),
 			"target":       stringProp("End symbol of a path query (path)."),
 			"file":         stringProp("Repository-relative path that narrows a symbol to one file."),
 			"engine":       enumProp("Graph engine for this call: native or codegraph. Omit to use graph.engine.", []string{ports.GraphEngineNative, ports.GraphEngineCodeGraph}),
-			"limit":        intProp("Neighbours per side (neighbors, ≤100), communities listed (≤100) or definitions ranked (god_nodes, ≤50).", 0),
+			"limit":        intProp("Neighbours per side (neighbors, ≤100), communities listed (≤100), definitions ranked (god_nodes, ≤50), import cycles (≤50) or diff samples (≤100).", 0),
 			"community_id": intProp("Select one community by its 1-based id (communities); 0 lists the largest.", 0),
-			"member_limit": intProp("Members listed for a selected community, at most "+strconv.Itoa(ports.MaxGraphCommunityMembers)+"; 0 selects "+strconv.Itoa(ports.DefaultGraphCommunityMembers)+".", 0),
+			"member_limit": intProp("Members listed for a selected community (≤"+strconv.Itoa(ports.MaxGraphCommunityMembers)+") or one import cycle (≤"+strconv.Itoa(ports.MaxGraphCycleMembers)+"); 0 selects the default.", 0),
 			"depth":        intProp("Hop limit of path, 1.."+strconv.Itoa(ports.MaxGraphPathDepth)+"; 0 selects "+strconv.Itoa(ports.DefaultGraphPathDepth)+".", 0),
 			"base":         stringProp("Base git ref of pr_impact, for example HEAD~1 or origin/main."),
 			"head":         stringProp("Head git ref of pr_impact; empty selects HEAD."),
+			"base_project": stringProp("Project whose index is the base side of diff; must differ from project and be a second checkout or worktree of the same repository."),
 		}),
 		OutputSchema: graphOutputSchema(),
 		Limits: map[string]int{
@@ -69,10 +74,13 @@ func (s *Server) graphTool() tool {
 			"communities":       ports.MaxGraphCommunities,
 			"community_members": ports.MaxGraphCommunityMembers,
 			"god_nodes":         ports.MaxGraphGodNodes,
+			"cycles":            ports.MaxGraphCycles,
+			"cycle_members":     ports.MaxGraphCycleMembers,
 			"path_depth":        ports.MaxGraphPathDepth,
 			"path_nodes":        ports.MaxGraphPathNodes,
 			"pr_symbols":        ports.MaxGraphPRSymbols,
 			"pr_files":          ports.MaxGraphPRFiles,
+			"diff_samples":      ports.MaxGraphDiffSamples,
 		},
 		ReadActions: graphActions,
 		run:         s.graph,
@@ -91,6 +99,8 @@ func graphOutputSchema() map[string]any {
 		"path":        objectProp("Shortest chain between two symbols (path): ports.GraphPath."),
 		"communities": objectProp("Community listing or one community (communities): ports.CommunityView."),
 		"god_nodes":   objectProp("Degree ranking (god_nodes): ports.GodNodesView."),
+		"cycles":      objectProp("Import cycles (cycles): ports.CyclesView."),
+		"diff":        objectProp("Index-to-index deltas (diff): ports.GraphDiffView."),
 		"pr_impact":   objectProp("Read-only diff impact (pr_impact): ports.PRImpactView."),
 	})
 }
@@ -120,6 +130,10 @@ func (s *Server) graph(ctx context.Context, raw json.RawMessage) (toolResult, er
 		return s.graphCommunities(ctx, args, engine)
 	case "god_nodes":
 		return s.graphGodNodes(ctx, args, engine)
+	case "cycles":
+		return s.graphCycles(ctx, args, engine)
+	case "diff":
+		return s.graphDiff(ctx, args, engine)
 	case "pr_impact":
 		return s.graphPRImpact(ctx, args, engine)
 	default:
@@ -304,6 +318,91 @@ func (s *Server) graphGodNodes(ctx context.Context, args graphArgs, engine strin
 	}, nil
 }
 
+// graphCycles lists import cycles: strongly connected components of the Go
+// package and TS/Python module import graph.
+func (s *Server) graphCycles(ctx context.Context, args graphArgs, engine string) (toolResult, error) {
+	if args.Limit < 0 || args.Limit > ports.MaxGraphCycles {
+		return toolResult{}, refusalInvalidf("limit must be between 0 and %d (0 selects %d)", ports.MaxGraphCycles, ports.DefaultGraphCycles)
+	}
+	if args.MemberLimit < 0 || args.MemberLimit > ports.MaxGraphCycleMembers {
+		return toolResult{}, refusalInvalidf("member_limit must be between 0 and %d (0 selects %d)", ports.MaxGraphCycleMembers, ports.DefaultGraphCycleMembers)
+	}
+	projectID, index, analytics, err := s.openGraphAnalytics(ctx, args, engine)
+	if err != nil {
+		return toolResult{}, err
+	}
+	defer closeGraph(index)
+	view, err := analytics.Cycles(ctx, projectID, ports.CycleQuery{Limit: args.Limit, MemberLimit: args.MemberLimit})
+	if err != nil {
+		return toolResult{}, graphFailure(projectID, err)
+	}
+	return toolResult{
+		Text:       renderGraphCycles(view),
+		Structured: map[string]any{"action": "cycles", "project": projectID, "cycles": view},
+	}, nil
+}
+
+// graphDiff compares the project's index with the index of base_project. Both
+// indexes are read-only; the base side is opened by the backend and only its
+// file path is handed to the head engine.
+func (s *Server) graphDiff(ctx context.Context, args graphArgs, engine string) (toolResult, error) {
+	baseSelector := strings.TrimSpace(args.BaseProject)
+	if baseSelector == "" {
+		return toolResult{}, refusalInvalid("base_project is required for action=diff; name a second checkout or worktree of the same repository")
+	}
+	if args.Limit < 0 || args.Limit > ports.MaxGraphDiffSamples {
+		return toolResult{}, refusalInvalidf("limit must be between 0 and %d (0 selects %d)", ports.MaxGraphDiffSamples, ports.DefaultGraphDiffSamples)
+	}
+	headProject, err := s.graphProject(ctx, args.Project)
+	if err != nil {
+		return toolResult{}, err
+	}
+	baseProject, err := s.graphProject(ctx, baseSelector)
+	if err != nil {
+		return toolResult{}, err
+	}
+	if baseProject == headProject {
+		return toolResult{}, refusalInvalid("base_project must differ from project: a diff compares two indexes")
+	}
+	baseIndex, err := s.openGraph(ctx, baseProject, engine, "diff")
+	if err != nil {
+		return toolResult{}, err
+	}
+	basePath, ok := graphIndexPath(baseIndex)
+	closeGraph(baseIndex)
+	if !ok {
+		return toolResult{}, refusalUnsupported(
+			"the base engine does not report its index file, so it cannot be diffed",
+			"use the native or codegraph engine, which both report DBPath")
+	}
+	projectID, index, analytics, err := s.openGraphAnalytics(ctx, args, engine)
+	if err != nil {
+		return toolResult{}, err
+	}
+	defer closeGraph(index)
+	view, err := analytics.Diff(ctx, projectID, ports.GraphDiffQuery{
+		BaseProject: baseProject, BaseIndexPath: basePath, Limit: args.Limit,
+	})
+	if err != nil {
+		return toolResult{}, graphFailure(projectID, err)
+	}
+	return toolResult{
+		Text:       renderGraphDiff(view),
+		Structured: map[string]any{"action": "diff", "project": projectID, "diff": view},
+	}, nil
+}
+
+// graphIndexPath reads the index file of an open graph index. Both shipped
+// engines expose DBPath; the optional interface keeps the port free of files.
+func graphIndexPath(index ports.GraphIndex) (string, bool) {
+	provider, ok := index.(interface{ DBPath() string })
+	if !ok {
+		return "", false
+	}
+	path := strings.TrimSpace(provider.DBPath())
+	return path, path != ""
+}
+
 // graphPRImpact maps a local git diff to changed symbols and their reverse
 // blast radius.
 func (s *Server) graphPRImpact(ctx context.Context, args graphArgs, engine string) (toolResult, error) {
@@ -329,7 +428,11 @@ func (s *Server) graphPRImpact(ctx context.Context, args graphArgs, engine strin
 // renderGraphStats renders the whole-graph counts below the index envelope.
 func renderGraphStats(view ports.GraphStatsView) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "analytics: %d communities, %d orphan definition(s)\n", view.Communities, view.Orphans)
+	cached := ""
+	if view.Cached {
+		cached = " (cached in-process partition)"
+	}
+	fmt.Fprintf(&b, "analytics: %d communities, %d orphan definition(s)%s\n", view.Communities, view.Orphans, cached)
 	if len(view.Languages) > 0 {
 		b.WriteString("languages: ")
 		b.WriteString(renderCountPairs(view.Languages, 6))
@@ -421,6 +524,9 @@ func renderGraphCommunities(view ports.CommunityView) string {
 		}
 	} else {
 		fmt.Fprintf(&b, "%d communities", view.Total)
+		if view.Cached {
+			b.WriteString(" (cached in-process partition)")
+		}
 		if view.Truncated {
 			fmt.Fprintf(&b, " (showing %d)", len(view.Communities))
 		}
@@ -452,6 +558,83 @@ func renderGraphGodNodes(view ports.GodNodesView) string {
 		fmt.Fprintf(&b, "%d. %s %s  %s\n   degree %d (in %d, out %d), centrality %.4f%s%s\n   why: %s\n",
 			index+1, node.Kind, node.Name, symbolLocation(node.GraphSymbol),
 			node.Degree, node.InDegree, node.OutDegree, node.Centrality, community, test, node.Why)
+	}
+	for _, note := range view.Notes {
+		fmt.Fprintf(&b, "note: %s\n", note)
+	}
+	return strings.TrimRight(b.String(), "\n")
+}
+
+// renderGraphCycles renders the import-cycle report. A cycle is shown as its
+// member chain, not as a generic component: an agent reads it as "these
+// packages import each other".
+func renderGraphCycles(view ports.CyclesView) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "%d import cycle(s), %d node(s) in cycles", view.Total, view.Nodes)
+	if view.SelfLoops > 0 {
+		fmt.Fprintf(&b, ", %d self-import(s) ignored", view.SelfLoops)
+	}
+	b.WriteString("\n")
+	for index, cycle := range view.Cycles {
+		fmt.Fprintf(&b, "#%d (%d member(s)):\n", index+1, cycle.Size)
+		for _, member := range cycle.Members {
+			fmt.Fprintf(&b, "- %s %s  %s\n", member.Kind, member.Name, symbolLocation(member))
+		}
+		if cycle.MembersTruncated {
+			b.WriteString("  (member list clipped; raise member_limit)\n")
+		}
+	}
+	for _, note := range view.Notes {
+		fmt.Fprintf(&b, "note: %s\n", note)
+	}
+	return strings.TrimRight(b.String(), "\n")
+}
+
+// renderGraphDiff renders the counts and the samples of two indexes.
+func renderGraphDiff(view ports.GraphDiffView) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "%s (%s) <- %s (%s)\n", view.HeadProject, view.HeadIndex, view.BaseProject, view.BaseIndex)
+	if view.HeadCommit != "" || view.BaseCommit != "" {
+		fmt.Fprintf(&b, "commits: %s <- %s\n", orUnknown(view.HeadCommit), orUnknown(view.BaseCommit))
+	}
+	fmt.Fprintf(&b, "files: +%d -%d; symbols: +%d -%d; edges: +%d -%d; communities: +%d -%d\n",
+		view.Files.Added, view.Files.Removed, view.Symbols.Added, view.Symbols.Removed,
+		view.Edges.Added, view.Edges.Removed, view.Communities.Added, view.Communities.Removed)
+	if len(view.AddedFiles) > 0 || len(view.RemovedFiles) > 0 {
+		b.WriteString("files changed:\n")
+		for _, path := range view.AddedFiles {
+			fmt.Fprintf(&b, "+ %s\n", path)
+		}
+		for _, path := range view.RemovedFiles {
+			fmt.Fprintf(&b, "- %s\n", path)
+		}
+	}
+	if len(view.AddedSymbols) > 0 || len(view.RemovedSymbols) > 0 {
+		b.WriteString("symbols changed:\n")
+		for _, symbol := range view.AddedSymbols {
+			fmt.Fprintf(&b, "+ %s %s  %s\n", symbol.Kind, symbol.Name, symbolLocation(symbol))
+		}
+		for _, symbol := range view.RemovedSymbols {
+			fmt.Fprintf(&b, "- %s %s  %s\n", symbol.Kind, symbol.Name, symbolLocation(symbol))
+		}
+	}
+	if len(view.AddedEdges) > 0 || len(view.RemovedEdges) > 0 {
+		b.WriteString("edges changed:\n")
+		for _, edge := range view.AddedEdges {
+			fmt.Fprintf(&b, "+ %s -[%s]-> %s\n", edge.From, edge.Kind, edge.To)
+		}
+		for _, edge := range view.RemovedEdges {
+			fmt.Fprintf(&b, "- %s -[%s]-> %s\n", edge.From, edge.Kind, edge.To)
+		}
+	}
+	if len(view.AddedCommunities) > 0 || len(view.RemovedCommunities) > 0 {
+		b.WriteString("community signatures:\n")
+		for _, signature := range view.AddedCommunities {
+			fmt.Fprintf(&b, "+ %s\n", signature)
+		}
+		for _, signature := range view.RemovedCommunities {
+			fmt.Fprintf(&b, "- %s\n", signature)
+		}
 	}
 	for _, note := range view.Notes {
 		fmt.Fprintf(&b, "note: %s\n", note)

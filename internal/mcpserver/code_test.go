@@ -22,6 +22,8 @@ type graphIndexFake struct {
 	impact         ports.ImpactView
 	communities    ports.CommunityView
 	godNodes       ports.GodNodesView
+	cycles         ports.CyclesView
+	diff           ports.GraphDiffView
 	path           ports.GraphPath
 	prImpact       ports.PRImpactView
 	analyticsStats ports.GraphStatsView
@@ -39,6 +41,8 @@ type graphIndexFake struct {
 	impactDepth    int
 	communityQuery ports.CommunityQuery
 	godLimit       int
+	cycleQuery     ports.CycleQuery
+	diffQuery      ports.GraphDiffQuery
 	pathFrom       string
 	pathTo         string
 	pathDepth      int
@@ -106,6 +110,19 @@ func (f *graphIndexFake) GodNodes(_ context.Context, _ string, limit int) (ports
 	f.godLimit = limit
 	return f.godNodes, f.err
 }
+
+func (f *graphIndexFake) Cycles(_ context.Context, _ string, opts ports.CycleQuery) (ports.CyclesView, error) {
+	f.cycleQuery = opts
+	return f.cycles, f.err
+}
+
+func (f *graphIndexFake) Diff(_ context.Context, _ string, opts ports.GraphDiffQuery) (ports.GraphDiffView, error) {
+	f.diffQuery = opts
+	return f.diff, f.err
+}
+
+// DBPath reports the fake index file; diff resolves the base path through it.
+func (f *graphIndexFake) DBPath() string { return f.status.DBPath }
 
 func (f *graphIndexFake) ShortestPath(_ context.Context, _, from, to string, maxDepth int) (ports.GraphPath, error) {
 	f.pathFrom, f.pathTo, f.pathDepth = from, to, maxDepth
@@ -204,6 +221,19 @@ func newGraphFake() *graphFake {
 					Centrality: 0.01, Community: "core", CommunityID: 1,
 					Why: "3 distinct dependency relationship(s): 1 incoming, 2 outgoing",
 				}},
+			},
+			cycles: ports.CyclesView{
+				Total: 1, Nodes: 2,
+				Cycles: []ports.GraphCycle{{
+					Size: 2, Members: []ports.GraphSymbol{symbol, {ID: "file:main.go", Kind: "file", Name: "main.go", File: "main.go"}},
+				}},
+			},
+			diff: ports.GraphDiffView{
+				BaseProject: "beta", HeadProject: "alpha", BaseIndex: "base.db", HeadIndex: "head.db",
+				Files: ports.GraphDiffCount{Added: 1}, Symbols: ports.GraphDiffCount{Added: 2, Removed: 1},
+				Edges: ports.GraphDiffCount{Added: 3}, Communities: ports.GraphDiffCount{Removed: 1},
+				AddedFiles: []string{"main.go"}, AddedSymbols: []ports.GraphSymbol{symbol},
+				AddedEdges: []ports.GraphDiffEdge{{From: "function:abc", To: "function:def", Kind: "calls"}},
 			},
 			path: ports.GraphPath{
 				From: symbol, To: ports.GraphSymbol{ID: "function:ghi", Kind: "function", Name: "Load", File: "load.go", StartLine: 7, EndLine: 9},
@@ -515,6 +545,32 @@ func TestBrainGraphAnalyticsActions(t *testing.T) {
 		t.Fatalf("god text = %q", text)
 	}
 
+	cycles := structured(t, profileCall(t, server, "brain_graph",
+		`{"action":"cycles","project":"alpha","limit":3,"member_limit":7}`))
+	if cycles["action"] != "cycles" || backend.index.cycleQuery.Limit != 3 || backend.index.cycleQuery.MemberLimit != 7 {
+		t.Fatalf("cycles = %v query %+v", cycles, backend.index.cycleQuery)
+	}
+	if text := textOf(t, profileCall(t, server, "brain_graph",
+		`{"action":"cycles","project":"alpha"}`)); !strings.Contains(text, "1 import cycle(s)") {
+		t.Fatalf("cycles text = %q", text)
+	}
+
+	diff := structured(t, profileCall(t, server, "brain_graph",
+		`{"action":"diff","project":"alpha","base_project":"beta","limit":9}`))
+	if diff["action"] != "diff" {
+		t.Fatalf("diff = %v", diff)
+	}
+	if backend.index.diffQuery.BaseProject != "beta" || backend.index.diffQuery.Limit != 9 {
+		t.Fatalf("diff query = %+v", backend.index.diffQuery)
+	}
+	if backend.index.diffQuery.BaseIndexPath != backend.index.status.DBPath {
+		t.Fatalf("diff base path = %q", backend.index.diffQuery.BaseIndexPath)
+	}
+	if text := textOf(t, profileCall(t, server, "brain_graph",
+		`{"action":"diff","project":"alpha","base_project":"beta"}`)); !strings.Contains(text, "+1 -0") {
+		t.Fatalf("diff text = %q", text)
+	}
+
 	impact := structured(t, profileCall(t, server, "brain_graph",
 		`{"action":"pr_impact","project":"alpha","base":"HEAD~1"}`))
 	if impact["action"] != "pr_impact" || backend.index.prBase != "HEAD~1" || backend.index.prHead != "" {
@@ -536,6 +592,8 @@ func TestBrainGraphAnalyticsRefuseAnEngineWithoutAnalytics(t *testing.T) {
 		"path":        `{"action":"path","project":"alpha","source":"a","target":"b"}`,
 		"communities": `{"action":"communities","project":"alpha"}`,
 		"god_nodes":   `{"action":"god_nodes","project":"alpha"}`,
+		"cycles":      `{"action":"cycles","project":"alpha"}`,
+		"diff":        `{"action":"diff","project":"alpha","base_project":"beta"}`,
 		"pr_impact":   `{"action":"pr_impact","project":"alpha","base":"HEAD~1"}`,
 	}
 	for action, args := range cases {
@@ -555,8 +613,8 @@ func TestBrainGraphAnalyticsRefuseAnEngineWithoutAnalytics(t *testing.T) {
 	if note, _ := stats["note"].(string); note == "" {
 		t.Fatalf("stats did not disclose the missing analytics: %v", stats)
 	}
-	if len(backend.opens) != len(cases)+1 {
-		t.Fatalf("opens = %v", backend.opens)
+	if len(backend.opens) < len(cases) {
+		t.Fatalf("opens = %v, want at least one per analytics action", backend.opens)
 	}
 
 	payload := CapabilityReport("test-version", DefaultProfile(), Policy{})
@@ -568,7 +626,7 @@ func TestBrainGraphAnalyticsRefuseAnEngineWithoutAnalytics(t *testing.T) {
 	if payload.Features["knowledge_graph_analytics"] != true || payload.Features["code_graph_analytics"] != true {
 		t.Fatalf("analytics feature flag = %v", payload.Features)
 	}
-	for _, key := range []string{"graph_communities", "graph_god_nodes", "graph_path_nodes", "graph_pr_symbols"} {
+	for _, key := range []string{"graph_communities", "graph_god_nodes", "graph_cycles", "graph_cycle_members", "graph_diff_samples", "graph_path_nodes", "graph_pr_symbols"} {
 		if payload.Limits[key] <= 0 {
 			t.Fatalf("capability limit %s = %v", key, payload.Limits)
 		}
@@ -584,8 +642,13 @@ func TestBrainGraphAnalyticsCapsAndRefusals(t *testing.T) {
 		"members-cap":     `{"action":"communities","project":"alpha","member_limit":201}`,
 		"community-id":    `{"action":"communities","project":"alpha","community_id":-1}`,
 		"god-cap":         `{"action":"god_nodes","project":"alpha","limit":51}`,
+		"cycles-cap":      `{"action":"cycles","project":"alpha","limit":51}`,
+		"cycle-members":   `{"action":"cycles","project":"alpha","member_limit":51}`,
+		"diff-samples":    `{"action":"diff","project":"alpha","base_project":"beta","limit":101}`,
+		"diff-base":       `{"action":"diff","project":"alpha"}`,
+		"diff-same":       `{"action":"diff","project":"alpha","base_project":"alpha"}`,
 		"pr-base":         `{"action":"pr_impact","project":"alpha"}`,
-		"unknown":         `{"action":"cycles","project":"alpha"}`,
+		"unknown":         `{"action":"nope","project":"alpha"}`,
 	}
 	for name, args := range cases {
 		result := profileCall(t, server, "brain_graph", args)

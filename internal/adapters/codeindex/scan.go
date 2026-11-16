@@ -19,6 +19,7 @@ import (
 var skippedDirs = map[string]bool{
 	".git": true, ".hg": true, ".svn": true,
 	"vendor": true, "node_modules": true, "testdata": true,
+	"venv": true, "__pycache__": true, "site-packages": true,
 }
 
 // fileState is one indexed source file.
@@ -38,10 +39,10 @@ type scanResult struct {
 	Notes   []string
 }
 
-// scan walks the checkout and hashes every Go, TypeScript, TSX, JavaScript and
-// JSX file that belongs to the platform build. known supplies the previous
-// size and mtime so an unchanged file is not read again; a size or mtime
-// difference forces a hash.
+// scan walks the checkout and hashes every Go, TypeScript, TSX, JavaScript,
+// JSX and Python file that belongs to the platform build. known supplies the
+// previous size and mtime so an unchanged file is not read again; a size or
+// mtime difference forces a hash.
 func (i *Index) scan(ctx context.Context, known map[string]fileState) (scanResult, error) {
 	result := scanResult{Files: map[string]fileState{}}
 	buildCtx := build.Default
@@ -72,7 +73,13 @@ func (i *Index) scan(ctx context.Context, known map[string]fileState) (scanResul
 			if isNestedRepo(path, root) {
 				return fs.SkipDir
 			}
-			if skippedDirs[name] || strings.HasPrefix(name, ".") || strings.HasPrefix(name, "_") {
+			if skippedDirs[name] || strings.HasPrefix(name, ".") {
+				return fs.SkipDir
+			}
+			// The Go tool ignores underscore-prefixed directories, but a Python
+			// package may legitimately use that spelling; keep it when it is a
+			// package, not a build directory.
+			if strings.HasPrefix(name, "_") && !pythonPackageDir(path) {
 				return fs.SkipDir
 			}
 			if rel, ok := i.relPath(path); ok && i.excluded(rel) {
@@ -86,15 +93,20 @@ func (i *Index) scan(ctx context.Context, known map[string]fileState) (scanResul
 		if !entry.Type().IsRegular() {
 			return nil
 		}
-		if strings.HasPrefix(name, ".") || strings.HasPrefix(name, "_") {
-			return nil
-		}
-		rel, ok := i.relPath(path)
-		if !ok || i.excluded(rel) {
+		if strings.HasPrefix(name, ".") {
 			return nil
 		}
 		language := LanguageForPath(name)
 		if language == "" {
+			return nil
+		}
+		// The Go tool ignores underscore-prefixed files; a TypeScript or Python
+		// module with that spelling is still importable and is indexed.
+		if strings.HasPrefix(name, "_") && language == Language {
+			return nil
+		}
+		rel, ok := i.relPath(path)
+		if !ok || i.excluded(rel) {
 			return nil
 		}
 		if language == Language {
@@ -137,6 +149,13 @@ func (i *Index) scan(ctx context.Context, known map[string]fileState) (scanResul
 		result.Notes = append(result.Notes, fmt.Sprintf("%d file(s) skipped: oversize, unreadable or build-constraint excluded", result.Skipped))
 	}
 	return result, nil
+}
+
+// pythonPackageDir reports whether a directory is an importable Python package,
+// which keeps an underscore-prefixed package in the walk.
+func pythonPackageDir(dir string) bool {
+	_, err := os.Stat(filepath.Join(dir, "__init__.py"))
+	return err == nil
 }
 
 // excluded reports whether a repository path matches an exclude prefix.

@@ -7,7 +7,7 @@ contract:
 
 | Engine | Direction | Store | When |
 | --- | --- | --- | --- |
-| `native` | builds and reads its own index | `<brain-data>/index/graph/` | Go, TypeScript, TSX, JavaScript and JSX checkouts; the default choice |
+| `native` | builds and reads its own index | `<brain-data>/index/graph/` | Go, TypeScript, TSX, JavaScript, JSX and Python checkouts; the default choice |
 | `codegraph` | reads an external CodeGraph index in place | `<checkout>/.codegraph/codegraph.db` | a repo already indexed by the CodeGraph CLI |
 | `off` | disabled | none | the default until a workspace opts in |
 
@@ -57,7 +57,7 @@ for a data directory that is itself a git repository. It can be deleted at any
 time and rebuilt from source.
 
 One SQLite file per checkout, WAL mode, `synchronous=NORMAL`, schema `2`,
-extractor `2`. The file name includes a short hash of the canonical checkout
+extractor `3`. The file name includes a short hash of the canonical checkout
 path so a worktree and its main tree never share a path-keyed index.
 
 | Table | Columns | Purpose |
@@ -67,14 +67,14 @@ path so a worktree and its main tree never share a path-keyed index.
 | `edges` | `source, target, kind, line, confidence, provenance` | `imports`, `calls`, `implements`, `extends`, `embeds`, `references` |
 | `communities` | `id, name, top_symbol, size, cohesion, signature` | one row per detected community, ordered by size at query time |
 | `community_members` | `community_id, symbol_id` | the partition: every symbol belongs to exactly one community |
-| `meta` | `key, value` | `schema_version`, `extractor_version`, `engine`, `module`, `git_sha`, `indexed_at`, `index_state`, `unresolved_refs`, `skipped_files`, `package_errors`, `communities`, `community_algorithm` |
+| `meta` | `key, value` | `schema_version`, `extractor_version`, `engine`, `module`, `git_sha`, `indexed_at`, `index_state`, `unresolved_refs`, `skipped_files`, `package_errors`, `communities`, `community_algorithm`, `graph_digest` |
 | `symbols_fts` | FTS5 over name, qualname, signature, doc | full-text tier of search |
 
 Symbol ids are `sym_<sha256(namespace key + qualname)[:20]>`: the key is the Go
-package path for Go and the repository file path for TypeScript/JavaScript, so
-ids never collide across languages. Package ids are `pkg_<sha256(import
-path)[:16]>`. The id never contains a line number, so an edit that only shifts
-lines keeps every incoming edge valid.
+package path for Go and the repository file path for TypeScript, JavaScript and
+Python, so ids never collide across languages. Package ids are
+`pkg_<sha256(import path)[:16]>`. The id never contains a line number, so an
+edit that only shifts lines keeps every incoming edge valid.
 
 **No source is stored.** A symbol row keeps its line range, declaration
 signature and doc comment; the body is re-read from the checkout at query time.
@@ -105,9 +105,10 @@ inside the usual `{schema, data}` envelope.
 `codegraph` cannot be written through `brain code index`: the command explains
 that the CodeGraph CLI owns that index.
 
-The analytics actions (`communities`, `god_nodes`, `path`, `pr_impact`, and
-`stats` with its `analytics` block) are served by the `brain_graph` MCP tool
-over both engines; they read the same store `brain code` reads.
+The analytics actions (`communities`, `god_nodes`, `path`, `cycles`, `diff`,
+`pr_impact`, and `stats` with its `analytics` block) are served by the
+`brain_graph` MCP tool over both engines; they read the same store `brain code`
+reads. `diff` needs the index of a second checkout, named as `base_project`.
 
 ### Paths and line anchors
 
@@ -182,15 +183,14 @@ asset is embedded; nothing is downloaded or compiled at run time.
 | TypeScript | `.ts` | tree-sitter-typescript | `v0.23.2` / `f975a62` | 14 |
 | TSX | `.tsx` | tree-sitter-typescript `tsx/` | `v0.23.2` / `f975a62` | 14 |
 | JavaScript | `.js`, `.jsx` | tree-sitter-javascript | `v0.25.0` / `44c892e` | 15 |
+| Python | `.py` | tree-sitter-python | `v0.25.0` / `293fdc0` | 15 |
 
 Core is tree-sitter `v0.27.2` (`3fb7be4`). All sources are MIT. The asset is
 `internal/adapters/codeindex/wasm/ts.wasm.gz`:
 **444,436 bytes gzip / 3,851,887 bytes raw**, SHA-256 recorded in
 `wasm/PROVENANCE.md` and verified at startup together with the language ABI
 version and every compiled query. A mismatch fails the index instead of
-returning a partial symbol set. The same reactor also carries the
-tree-sitter-python grammar from the spike build; it is exported but not queried
-until the Python extractor lands, so Python is not a claimed language.
+returning a partial symbol set.
 
 Declarations are mapped onto the shared symbol kinds:
 
@@ -234,6 +234,59 @@ missing project symbol. Ambiguous names are skipped, never guessed. There is no
 type checker behind the script extractor, so it never emits a type-resolved
 `calls` edge or an `implements` edge derived from a method set.
 
+### Python
+
+Python uses the same reactor and the same file-scoped write path, with its own
+declaration and reference queries. Extraction is syntax-only: it never imports
+or executes the module and never infers a receiver type.
+
+| Python declaration | Stored kind |
+| --- | --- |
+| `class` | `type` |
+| module-level `def` | `func` |
+| `def` in a class body, including `@property`, `@staticmethod`, `@classmethod` | `method` |
+| PEP 695 `type Alias = ...` | `type` |
+| module/class assignment with an upper-case name | `const` |
+| other module/class assignment | `var` |
+| the file itself, including `__init__.py` | `module` (name and qualified name are the repository path) |
+
+Qualified names are `Class.method` and, for nested classes,
+`Outer.Inner.method`. A function nested inside another function is local and is
+not a symbol. Decorators are part of the declaration range and signature, and a
+class/function docstring becomes `doc` (a contiguous `#` comment block above the
+declaration is the fallback). `exported` follows the naming convention: a
+leading underscore is non-public except for dunder names such as `__init__`.
+Declarations intersecting an ERROR span are dropped and the file is counted as
+partial. `__init__.py` and `__main__.py` are indexed despite the Go-tool rule
+that skips underscore-prefixed files; that rule now applies only to Go files,
+and an underscore-prefixed directory is kept when it is a Python package (it has
+`__init__.py`). `__pycache__/`, `venv/` and `site-packages/` are not walked, and
+`.pyi` stubs are not indexed.
+
+| Edge | Meaning | Confidence |
+| --- | --- | --- |
+| `imports` | a dotted or relative module specifier resolves to an indexed `.py` or `__init__.py` file; `from pkg import submodule` also links the submodule | 1.0 (`tree-sitter`) |
+| `calls` | a bare call, `self.method()`/`cls.method()`, or `Class.method()` matches one same-file function/method | 0.6 (`tree-sitter`) |
+| `calls` | a call through an imported name resolves to the exported function | 0.5 (`tree-sitter`) |
+| `calls` | a call through an imported module (`util.slug()`) resolves to its exported function | 0.4 (`tree-sitter`) |
+| `calls` | a call through an imported class name resolves to that class's method | 0.5 (`tree-sitter`) |
+| `extends` | a base class names a unique same-file type | 0.7 (`tree-sitter`) |
+| `extends` | a base class names a resolved imported type | 0.5 (`tree-sitter`) |
+| `references` | a constructor call (`Widget()`) names a local/imported class | 0.6 / 0.4 (`tree-sitter`) |
+| `references` | a parameter, return, variable or alias annotation names a local/imported type | 0.5 / 0.4 (`tree-sitter`) |
+
+Absolute imports resolve from the repository root; a modified `sys.path`, a
+`src/` layout alias or a namespace package is not guessed. Relative imports
+(`.`, `..pkg`) resolve from the importing file's package, so `from . import x`
+links both the package initializer and `pkg/x.py`. An unresolved relative
+specifier increments `unresolved`; an unresolved absolute name is normally the
+standard library or a third-party package and is not counted. The extractor does
+not resolve inherited methods through the MRO, metaclass-provided attributes,
+`importlib`/`__import__` calls, decorator behavior, function-local shadowing or
+any type inference; `a.b.c()` and calls on a local variable's attribute are
+skipped rather than guessed. Dynamic annotations that are not a bare or dotted
+name (for example `Literal["x"]` contents) are not references.
+
 Runtime cost measured on Windows 11 (the asset is platform-neutral; wazero
 supports windows/darwin/linux amd64+arm64): first use in the product is about
 **370–530 ms** (engine init, one compiled query set per language, first parse).
@@ -248,9 +301,9 @@ memory while indexing.
 
 `brain code sync` is the cheap path:
 
-1. Walk the checkout and hash every Go, TypeScript, TSX, JavaScript and JSX
-   file. A file whose size and mtime match the `files` row reuses its stored
-   SHA-256 without being read.
+1. Walk the checkout and hash every Go, TypeScript, TSX, JavaScript, JSX and
+   Python file. A file whose size and mtime match the `files` row reuses its
+   stored SHA-256 without being read.
 2. Compare hashes. Files with changed content and files that disappeared are
    the change set; a path argument limits the set to that prefix.
 3. Go changes: group changed files by directory and load only those packages
@@ -331,10 +384,34 @@ are down-weighted; test files are down-weighted but never hidden.
 `brain_graph` serves the analytics half of the same graph through the optional
 `ports.GraphAnalytics` interface. The native engine stores the partition; the
 codegraph adapter computes it in memory from the stored edges and caches it per
-index file identity (size and mtime), because a CodeGraph index has no
-community table. Both engines use the same deterministic kernel
+index file identity, because a CodeGraph index has no community table. Both
+engines use the same deterministic kernel
 (`internal/adapters/graphalgo`), so a native and a codegraph answer on the same
 edges choose the same communities and the same path.
+
+### Partition cache and determinism
+
+- **Native:** the partition is a table, so a read never recomputes it. A sync
+  hashes the symbol id set and the distinct dependency pairs into
+  `meta.graph_digest`; when the digest matches the stored partition, the rows are
+  left untouched. A comment-only edit or a body edit that adds no edge therefore
+  keeps every community id, name, cohesion and signature byte-identical. A
+  digest change (a new or removed symbol, a new or removed pair) recomputes;
+  a community whose member signature still exists keeps its id, and a new one
+  gets the next free id.
+- **Codegraph:** the partition is cached in process, keyed by the database path
+  plus the size and mtime of `codegraph.db` and its `-wal` file. A checkpoint or
+  a resync changes the key, so a stale partition is never served. The cache
+  holds at most **2** partitions and at most **256 MiB** estimated; a larger
+  partition is answered and discarded, and the note says so instead of growing
+  the server. `communities`, `god_nodes` and `stats` carry `cached:true` when
+  the partition came from the cache; the first call in a server process reports
+  `false`. On the audited `lv24` index the first call is about **5.6 s** and a
+  cached call is about **90 ms**.
+- **Id stability:** ids follow the member signature, not size order, after the
+  first build. They change only when a community's member set changes or when
+  the algorithm name changes (`community_algorithm` is part of the native
+  digest). A removed community id is never reused for different members.
 
 ### Communities
 
@@ -362,8 +439,10 @@ edges choose the same communities and the same path.
 - `signature = sha256(sorted member ids)[:16]`. Ids are stable while the member
   set is unchanged: an index rebuild or an incremental sync reuses the id of
   every community whose signature still exists, and a new community gets the
-  next free id. On a fresh store, ids follow size order. Ordering is by size,
-  not by id.
+  next free id. A sync whose symbol set and distinct dependency pairs match the
+  stored graph leaves the whole partition untouched (see the digest above), so
+  a no-change or comment-only sync keeps ids, names and signatures identical.
+  On a fresh store, ids follow size order. Ordering is by size, not by id.
 - `name` is the highest-degree member (the graphify hub-label fallback); `top`
   is that symbol. No LLM naming pass exists.
 - Limits: **100** communities per listing, **200** members of one selected
@@ -431,6 +510,57 @@ files, symbols, edges, communities, orphans, languages and node kinds. An
 (structural file/import nodes are excluded on codegraph); it is the honest
 "knowledge gap" count.
 
+### Import cycles
+
+`cycles` reports strongly connected components of the **import** subgraph:
+a Go package import cycle or a TypeScript/Python module cycle. It reads only
+`imports` edges, so a recursive function or a mutual call is not reported as an
+import cycle. Native stores package/module nodes for Go imports and module nodes
+for scripts; codegraph stores file-to-module imports, so both answer the same
+shape.
+
+- The kernel is an **iterative Tarjan** walk in `graphalgo`; it does not recurse,
+  so a deep graph cannot overflow the goroutine stack. Adjacency lists are
+  sorted and roots are visited in index order, which makes the component order
+  and member order deterministic.
+- A self-import is counted and disclosed separately (`self_loops`); it is not a
+  cycle between modules. A node outside every cycle is not listed.
+- Components are ordered by size (largest first), then by the smallest member.
+  Members are ordered by file and line in the answer.
+- Limits: **50** cycles (default 10), **50** members per cycle (default 20).
+  `total` and `nodes` are the true counts even when the listing is clipped;
+  `truncated` and a note disclose the cut.
+- The answer is not cached: the import subgraph is small (73k edges on the
+  audited `lv24` index) and the walk is linear. On `lv24` it takes about
+  **230 ms** and finds 25 cycles (the largest is a 120-file Dart import cycle);
+  the Go-only `lv24-brain` index is acyclic and answers in about **45 ms**.
+
+### Index diff
+
+`diff` compares the index of `project` with the index of `base_project`: two
+checkouts or worktrees of the same repository at different commits, or a
+snapshot copy of an index. It is read-only on both sides; the base index is
+opened with SQLite `mode=ro` and `query_only=1`, and the answer never writes a
+row.
+
+- The delta is keyed by symbol id, file path and `(source, target, kind)` over
+  the dependency edges. A line shift, a comment, or another call site of the
+  same pair is not a change. `files`, `symbols`, `edges` and (native only)
+  `communities` each report exact `added` and `removed` counts.
+- Up to **100** samples per side per category (default 20) are rendered; a cut
+  sets `truncated` and adds a note, and the counts stay exact.
+- The kernel is a merge of two ordered key streams, so two 185k-node indexes are
+  compared with one key of state per side instead of loading both id sets into
+  memory. On the audited `lv24` codegraph index (185k nodes, 525k edges) a diff
+  takes about **2.4 s**; on the native `lv24-brain` index (11.6k symbols, 58k
+  edges) it takes about **140 ms**.
+- Communities are diffed by signature on the native engine, because it stores
+  them. A codegraph partition is computed in memory and is not stored, so a
+  codegraph diff reports zero community deltas and says so in `notes`.
+- The two sides must use the same engine and schema; a mismatched base index is
+  refused with `UNSUPPORTED`. `base_project` must differ from `project`, and the
+  base index must be an absolute path to a regular file, not a symlink.
+
 ## Codegraph adapter
 
 The `codegraph` engine stays available for a repository that already has an
@@ -457,11 +587,11 @@ index from the CodeGraph CLI:
 ## Limits and remaining gaps
 
 - **Go is type-checked; scripts are syntax-only.** The native extractor
-  understands Go modules and TypeScript/TSX/JavaScript/JSX files. Python, Rust
-  and the rest still need the external CodeGraph index or a future extractor.
-  Script edges never claim type resolution, and a checkout with no indexed
-  symbols at all still answers `UNSUPPORTED` for analytics instead of an empty
-  ranking.
+  understands Go modules and TypeScript/TSX/JavaScript/JSX and Python files.
+  Rust and the rest still need the external CodeGraph index or a future
+  extractor. Script edges never claim type resolution, and a checkout with no
+  indexed symbols at all still answers `UNSUPPORTED` for analytics instead of an
+  empty ranking.
 - One module and one checkout per store. A nested `go.mod`, a nested Git
   checkout/submodule below the root is skipped, a second checkout gets its own
   file, and cross-repository queries do not exist.
@@ -472,14 +602,17 @@ index from the CodeGraph CLI:
   types; reflection, `unsafe` and runtime dispatch are not followed. Script
   resolution is syntactic: tsconfig aliases, re-export chains, `export { X as Y }`
   alias lists, CommonJS destructuring, dynamic imports and type-only dispatch
-  are not followed.
+  are not followed. Python adds its own syntax-only limits: no MRO or inherited
+  method lookup, no metaclass attributes, no `importlib`/`__import__`, no
+  `sys.path`/src-layout aliasing and no type inference; `a.b.c()` and attribute
+  calls on local variables are skipped.
 - A script file with a syntax error is partial: clean declarations are indexed,
   declarations intersecting ERROR spans are skipped, and `status` reports the
   partial count. A Go package that fails to type-check keeps its syntax edges at
   0.8/0.5.
-- No import-cycle report, surprising-connection score or coupled
-  test-coverage view yet; communities, god nodes, paths, PR impact and orphan
-  counts are served.
+- Import cycles and index-to-index diffs are served; a surprising-connection
+  score and a coupled test-coverage view are still missing. Communities, god
+  nodes, paths, PR impact and orphan counts are served.
 - Search is lexical: exact name, FTS5, then substring. A semantic query still
   belongs to `brain search`.
 - `codegraph` cannot be refreshed through this binary; use `brain graphs` for
@@ -507,6 +640,26 @@ Measured on Windows 11, Go 1.27, the `lv24-brain` checkout itself (765 Go files,
 | `brain_graph(pr_impact)` on a 20-file commit | 83 ms, 500 changed symbols (capped), 225 reachable, risk high |
 | full index including the partition | 7.6 s (the partition itself is about 70 ms) |
 
+Graph analytics measured for 0.19 on the same checkout (native index: 808
+files, 11,639 symbols, 58,321 edges, 153 communities) and on the audited
+`lv24` codegraph index (184,902 nodes, 524,553 edges; one server process):
+
+| Metric | Native `lv24-brain` | Codegraph `lv24` |
+| --- | --- | --- |
+| `stats` (fresh MCP process) | 95 ms | 8.4 s cold |
+| `communities` (first call) | 28 ms (stored partition) | 5.6 s (partition computed) |
+| `communities` (cached call) | — | ~90 ms |
+| `cycles` | 44 ms, 0 cycles | 228 ms, 25 cycles / 210 nodes |
+| `diff` (adapter call) | 137 ms (+22 files, +186 / −7 symbols, +832 / −43 edges) | 2.4 s |
+| `diff` samples / cache budget | 20 / 2 entries | 20 / 2 entries, 256 MiB |
+
+The native diff compared the working tree with `HEAD~1` of this repository
+(22 files, 186 new and 7 removed symbols). The codegraph diff compared the
+audited index with a copy of itself plus one synthetic node and edge, which is
+why it reports no files and a single removed symbol and edge; it measures the
+full 185k/525k scan, not a merge policy. The `cycles` count on `lv24` is real:
+the largest is a 120-file Dart import cycle.
+
 A synthetic 924-line module (12 packages, 120 symbols) indexes in about 0.5 s
 into a 94 KiB database (~102 KB per 1k LOC), measured by
 `TestIndexMeasurement`. For comparison, the audited CodeGraph index was about
@@ -526,6 +679,8 @@ two large TypeScript sources:
 | 769 KB TypeScript file, full extraction | 404 ms (1.9 MB/s); declarations-only spike: 195.2 ms |
 | 160-file desktop checkout, full index | 1.24 s (872 symbols, 1,093 edges) |
 | no-change sync of that checkout | 71 ms |
+| Python 3.13 stdlib (`Lib/`, 1,760 files, 34.8 MB), full index | 70.2 s (76,276 symbols, 84,091 edges; 18,990 unresolved call sites, mostly re-exports, C extensions and dynamic receivers) |
+| Python stdlib, no-change sync | 68 ms |
 | peak RSS while indexing | 48–90 MB |
 | binary growth (wazero + asset) | about 5 MB |
 
@@ -537,19 +692,21 @@ two large TypeScript sources:
 | `no native graph index at …` | index absent | run `brain code index --project <id>` |
 | `graph index is empty` | store exists, no files indexed | run `brain code index`; check `--root` |
 | `graph index schema mismatch` | the binary's schema/extractor moved | run `brain code index --rebuild` |
-| `no supported source file was found` | the checkout contains only Python, Rust or another language the native engine does not parse | use the `codegraph` engine or wait for that language pack |
+| `no supported source file was found` | the checkout contains only Rust, Ruby or another language the native engine does not parse | use the `codegraph` engine or wait for that language pack |
 | `no Go packages were loaded` | a Go checkout has no `go.mod`, or all Go files are excluded by build tags; a script-only checkout legitimately has no Go packages | check the checkout and `--tags`; this is a note, not an index failure |
 | `… package(s) reported load or type errors` | dependencies missing or Go code does not type-check | run `go mod download` / fix the reported package; syntax edges remain at 0.8/0.5 |
-| `… file(s) had syntax errors` | a TypeScript/JavaScript file does not parse | fix the reported file; clean declarations around the ERROR span are still indexed |
+| `… file(s) had syntax errors` | a TypeScript, JavaScript or Python file does not parse | fix the reported file; clean declarations around the ERROR span are still indexed |
 | `no matching symbol` after a rename | sync escalated to a rebuild | re-run the query; check `brain code status` |
 | `… changed since the index was built` | the checkout is newer than the index | run `brain code sync` |
 | `opened immutable without WAL replay` | codegraph writer held the WAL | stop the writer or accept the last checkpoint |
 
-## Next: Python and graph analytics
+## Next: deeper Python coverage
 
 The store, query layer, budgeted explore and impact walk are
-language-independent. TypeScript, TSX, JavaScript and JSX now write the same
-`symbols`/`edges` rows as Go, so one store answers across a mixed repository
-while the Go extractor keeps its `go/types` precision. Python is the next
-tree-sitter grammar to wire into the same reactor; it stays pending until the
-wasm rebuild and its golden tests land.
+language-independent. Go, TypeScript, TSX, JavaScript, JSX and Python now write
+the same `symbols`/`edges` rows, so one store answers across a mixed repository
+while the Go extractor keeps its `go/types` precision and the script extractor
+stays syntax-only. The remaining Python gaps are explicit rather than silent:
+`.pyi` stubs, a `src/` layout or custom `sys.path`, inherited-method and
+metaclass resolution, dynamic imports, and function-local shadowing. Closing
+them needs either configuration or a type checker, not another query tweak.

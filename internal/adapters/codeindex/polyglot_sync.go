@@ -10,10 +10,10 @@ import (
 	"github.com/levapveeskela/lv24-brain/internal/ports"
 )
 
-// syncPolyglotLocked refreshes TypeScript and JavaScript files without touching
-// the Go half of the store. A changed file is re-extracted together with the
-// files that import it, so an import edge and a cross-file call edge are
-// re-resolved instead of pointing at a removed definition.
+// syncPolyglotLocked refreshes TypeScript, JavaScript and Python files without
+// touching the Go half of the store. A changed file is re-extracted together
+// with the files that import it, so an import edge and a cross-file call edge
+// are re-resolved instead of pointing at a removed definition.
 func (i *Index) syncPolyglotLocked(ctx context.Context, scan scanResult, changed, deleted []string, result ports.GraphSyncResult, started time.Time) (ports.GraphSyncResult, error) {
 	reextract := map[string]bool{}
 	for _, filePath := range changed {
@@ -66,7 +66,7 @@ func (i *Index) syncPolyglotLocked(ctx context.Context, scan scanResult, changed
 		return ports.GraphSyncResult{}, err
 	}
 	result.Notes = append(result.Notes, fmt.Sprintf(
-		"re-extracted %d TypeScript/JavaScript file(s) for %d changed and %d removed, plus %d importer(s) relinked in %s",
+		"re-extracted %d TypeScript/JavaScript/Python file(s) for %d changed and %d removed, plus %d importer(s) relinked in %s",
 		len(batch.Files), len(changed), len(deleted), len(dependents), time.Since(started).Round(time.Millisecond)))
 	if batch.Partial > 0 {
 		result.Notes = append(result.Notes, fmt.Sprintf(
@@ -140,13 +140,16 @@ func (i *Index) loadPolyglotResolver(ctx context.Context) (*polyglotResolver, er
 		if resolver.byPath[path] == nil {
 			resolver.byPath[path] = map[string][]polyglotSymbolRef{}
 		}
-		resolver.byPath[path][name] = append(resolver.byPath[path][name], polyglotSymbolRef{
+		ref := polyglotSymbolRef{
 			id:        id,
 			kind:      kind,
 			signature: signature,
 			exported:  exported != 0,
 			defaulted: strings.HasPrefix(signature, "export default "),
-		})
+		}
+		resolver.byPath[path][name] = append(resolver.byPath[path][name], ref)
+		resolver.byID[id] = ref
+		resolver.idsByPath[path] = append(resolver.idsByPath[path], id)
 	}
 	return resolver, rows.Err()
 }

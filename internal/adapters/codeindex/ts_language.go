@@ -32,6 +32,8 @@ const (
 	jsLanguage = "javascript"
 	// jsxLanguage is the display name of JSX files.
 	jsxLanguage = "jsx"
+	// pythonLanguage is the display name of Python files.
+	pythonLanguage = "python"
 )
 
 // polyglotSpecs is the language registry of the native extractor. The order is
@@ -81,6 +83,17 @@ var polyglotSpecs = []polyglotSpec{
 		Extensions:       []string{".jsx"},
 		DeclarationKinds: javascriptDeclarationKinds,
 	},
+	{
+		Language:         pythonLanguage,
+		Grammar:          "tree_sitter_python",
+		ABI:              15,
+		Declarations:     pythonDeclarationsQuery,
+		Imports:          pythonImportsQuery,
+		Calls:            pythonCallsQuery,
+		References:       pythonReferencesQuery,
+		Extensions:       []string{".py"},
+		DeclarationKinds: pythonDeclarationKinds,
+	},
 }
 
 // typeScriptDeclarationKinds maps the capture suffix of the TypeScript
@@ -104,6 +117,17 @@ var javascriptDeclarationKinds = map[string]string{
 	"decl_const":  "const",
 }
 
+// pythonDeclarationKinds maps the Python capture suffix. The final kind of a
+// function is decided after the ancestor walk: a function in a class body is a
+// method, not a module function. A module-level assignment is a const only when
+// its name is upper-case.
+var pythonDeclarationKinds = map[string]string{
+	"decl_func":   "func",
+	"decl_class":  "type",
+	"decl_type":   "type",
+	"decl_assign": "var",
+}
+
 // polyglotSpecForPath resolves a repository-relative path to its language
 // spec. It reports false for Go and for every unsupported language, so a
 // caller never claims a language it cannot extract.
@@ -123,9 +147,9 @@ func polyglotSpecForPath(name string) (polyglotSpec, bool) {
 }
 
 // LanguageForPath reports the indexed language of one repository path. Go is
-// the only language with a type-checked extractor; TypeScript, TSX, JavaScript
-// and JSX are syntax-only. An unsupported extension returns an empty string,
-// which is what keeps such files out of the store.
+// the only language with a type-checked extractor; TypeScript, TSX, JavaScript,
+// JSX and Python are syntax-only. An unsupported extension returns an empty
+// string, which is what keeps such files out of the store.
 func LanguageForPath(name string) string {
 	if strings.EqualFold(filepath.Ext(name), ".go") {
 		return Language
@@ -157,7 +181,8 @@ func polyglotPathIndexable(rel string) bool {
 	}
 	for _, segment := range strings.Split(normalized, "/") {
 		switch segment {
-		case "node_modules", "dist", "build", "out", "coverage", ".next", ".turbo":
+		case "node_modules", "dist", "build", "out", "coverage", ".next", ".turbo",
+			"venv", "__pycache__", "site-packages":
 			return false
 		}
 	}

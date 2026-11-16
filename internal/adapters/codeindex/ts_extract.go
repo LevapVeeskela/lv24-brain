@@ -11,22 +11,22 @@ import (
 // an unknown token and mark the first declaration as an ERROR span.
 var utf8BOM = []byte{0xEF, 0xBB, 0xBF}
 
-// tsFileResult is the syntax-level extraction of one TypeScript, TSX or
-// JavaScript file. It contains declaration facts and reference sites only; the
-// resolver in polyglot.go turns them into rows and edges.
-type tsFileResult struct {
-	Symbols    []tsSymbol
-	Imports    []tsImport
-	Calls      []tsCall
-	Heritage   []tsHeritage
-	TypeRefs   []tsTypeRef
+// syntaxResult is the syntax-level extraction of one TypeScript, TSX,
+// JavaScript, JSX or Python file. It contains declaration facts and reference
+// sites only; the resolver in polyglot.go turns them into rows and edges.
+type syntaxResult struct {
+	Symbols    []syntaxSymbol
+	Imports    []syntaxImport
+	Calls      []syntaxCall
+	Heritage   []syntaxHeritage
+	TypeRefs   []syntaxTypeRef
 	TypeParams map[string]bool
 	Partial    bool
 	Skipped    int
 }
 
-// tsSymbol is one declaration.
-type tsSymbol struct {
+// syntaxSymbol is one declaration.
+type syntaxSymbol struct {
 	Kind      string
 	Name      string
 	Qual      string
@@ -40,22 +40,22 @@ type tsSymbol struct {
 	Default   bool
 }
 
-// tsBinding maps one local import name to the name it imports.
-type tsBinding struct {
+// syntaxBinding maps one local import name to the name it imports.
+type syntaxBinding struct {
 	Local    string
 	Imported string
 }
 
-// tsImport is one module specifier with the names it binds locally.
-type tsImport struct {
+// syntaxImport is one module specifier with the names it binds locally.
+type syntaxImport struct {
 	Specifier string
 	Line      int
-	Bindings  []tsBinding
+	Bindings  []syntaxBinding
 }
 
-// tsCall is one call or constructor site. Receiver is set for `object.method()`
-// and empty for a bare identifier call.
-type tsCall struct {
+// syntaxCall is one call site. Receiver is set for `object.method()` and empty
+// for a bare identifier call. New is only set by JavaScript/TypeScript.
+type syntaxCall struct {
 	Name     string
 	Receiver string
 	Line     int
@@ -63,16 +63,16 @@ type tsCall struct {
 	New      bool
 }
 
-// tsHeritage is an extends or implements clause.
-type tsHeritage struct {
+// syntaxHeritage is a base-class clause.
+type syntaxHeritage struct {
 	Target string
 	Kind   string
 	Line   int
 	Byte   uint32
 }
 
-// tsTypeRef is one type identifier in an annotation or alias value.
-type tsTypeRef struct {
+// syntaxTypeRef is one type identifier in an annotation or alias value.
+type syntaxTypeRef struct {
 	Name string
 	Line int
 	Byte uint32
@@ -90,29 +90,34 @@ type tsAncestry struct {
 // extractScript parses one file and runs the four extraction queries. The
 // engine lock is held for the whole parse: one wasm parser is shared by every
 // file of the index run.
-func (i *Index) extractScript(spec polyglotSpec, source []byte) (tsFileResult, error) {
+func (i *Index) extractScript(spec polyglotSpec, source []byte) (syntaxResult, error) {
 	source = bytes.TrimPrefix(source, utf8BOM)
 	engine, err := i.polyglotEngine()
 	if err != nil {
-		return tsFileResult{}, err
+		return syntaxResult{}, err
 	}
 	engine.mu.Lock()
 	defer engine.mu.Unlock()
 	if engine.closed {
-		return tsFileResult{}, fmt.Errorf("codeindex: the tree-sitter runtime is closed")
+		return syntaxResult{}, fmt.Errorf("codeindex: the tree-sitter runtime is closed")
 	}
 	language, ok := engine.languages[spec.Language]
 	if !ok {
-		return tsFileResult{}, fmt.Errorf("codeindex: language %q is not loaded", spec.Language)
+		return syntaxResult{}, fmt.Errorf("codeindex: language %q is not loaded", spec.Language)
 	}
 	parsed, err := engine.parse(language, source)
 	if err != nil {
-		return tsFileResult{}, err
+		return syntaxResult{}, err
 	}
 	defer parsed.close()
-	result := tsFileResult{Partial: parsed.hasError}
-	if err := parsed.collectMatches(spec, language.all, &result); err != nil {
-		return tsFileResult{}, err
+	result := syntaxResult{Partial: parsed.hasError}
+	if spec.Language == pythonLanguage {
+		err = parsed.collectPythonMatches(spec, language.all, &result)
+	} else {
+		err = parsed.collectMatches(spec, language.all, &result)
+	}
+	if err != nil {
+		return syntaxResult{}, err
 	}
 	if len(result.TypeParams) > 0 {
 		refs := result.TypeRefs[:0]
@@ -129,7 +134,7 @@ func (i *Index) extractScript(spec polyglotSpec, source []byte) (tsFileResult, e
 // collectMatches runs the one extraction query and routes each match to its
 // handler. One pass over the tree keeps throughput near the parser limit: four
 // independent queries would scan every node four times.
-func (p *tsParse) collectMatches(spec polyglotSpec, query *tsQuery, result *tsFileResult) error {
+func (p *tsParse) collectMatches(spec polyglotSpec, query *tsQuery, result *syntaxResult) error {
 	if err := query.exec(uint64(p.root)); err != nil {
 		return err
 	}
@@ -176,7 +181,7 @@ func hasCapture(captures []tsCapture, names ...string) bool {
 // symbol. A declaration that contains an ERROR span is skipped; a local
 // declaration (one inside a function) is not a namespace member and is skipped
 // as well.
-func (p *tsParse) collectDeclaration(spec polyglotSpec, captures []tsCapture, bySite map[string]int, result *tsFileResult) error {
+func (p *tsParse) collectDeclaration(spec polyglotSpec, captures []tsCapture, bySite map[string]int, result *syntaxResult) error {
 	kindCapture := ""
 	var declaration, nameNode tsNode
 	for _, capture := range captures {
@@ -220,7 +225,7 @@ func (p *tsParse) collectDeclaration(spec polyglotSpec, captures []tsCapture, by
 	if kind == "method" {
 		exported = ancestry.accessibility != "private" && ancestry.accessibility != "protected"
 	}
-	symbol := tsSymbol{
+	symbol := syntaxSymbol{
 		Kind:      kind,
 		Name:      name,
 		Qual:      qual,
@@ -467,7 +472,7 @@ func (p *tsParse) jsDocBefore(startLine int) string {
 // require call. The module specifier is kept verbatim; resolution against
 // indexed files happens later so a bare package name is never invented as a
 // local module.
-func (p *tsParse) collectImport(captures []tsCapture, seen map[string]bool, result *tsFileResult) error {
+func (p *tsParse) collectImport(captures []tsCapture, seen map[string]bool, result *syntaxResult) error {
 	var statement, requireName tsNode
 	specifier := ""
 	commonjs := false
@@ -502,7 +507,7 @@ func (p *tsParse) collectImport(captures []tsCapture, seen map[string]bool, resu
 		return nil
 	}
 	seen[key] = true
-	item := tsImport{Specifier: specifier, Line: line}
+	item := syntaxImport{Specifier: specifier, Line: line}
 	if !commonjs {
 		raw := strings.TrimSpace(p.engine.nodeText(p.source, statement))
 		item.Bindings = parseImportBindings(raw)
@@ -513,7 +518,7 @@ func (p *tsParse) collectImport(captures []tsCapture, seen map[string]bool, resu
 
 // parseImportBindings reads the local names of one import statement. A
 // re-export has no local binding; a side-effect import has none either.
-func parseImportBindings(raw string) []tsBinding {
+func parseImportBindings(raw string) []syntaxBinding {
 	text := strings.TrimSpace(raw)
 	if text == "" || strings.HasPrefix(text, "export") || !strings.HasPrefix(text, "import") {
 		return nil
@@ -532,7 +537,7 @@ func parseImportBindings(raw string) []tsBinding {
 	if clause == "" {
 		return nil
 	}
-	var bindings []tsBinding
+	var bindings []syntaxBinding
 	if open := strings.Index(clause, "{"); open >= 0 {
 		if close := strings.Index(clause[open:], "}"); close >= 0 {
 			for _, entry := range strings.Split(clause[open+1:open+close], ",") {
@@ -544,9 +549,9 @@ func parseImportBindings(raw string) []tsBinding {
 				parts := strings.Fields(entry)
 				switch {
 				case len(parts) == 3 && parts[1] == "as":
-					bindings = append(bindings, tsBinding{Local: parts[2], Imported: parts[0]})
+					bindings = append(bindings, syntaxBinding{Local: parts[2], Imported: parts[0]})
 				case len(parts) == 1:
-					bindings = append(bindings, tsBinding{Local: parts[0], Imported: parts[0]})
+					bindings = append(bindings, syntaxBinding{Local: parts[0], Imported: parts[0]})
 				}
 			}
 		}
@@ -555,14 +560,14 @@ func parseImportBindings(raw string) []tsBinding {
 	if star := strings.Index(clause, "*"); star >= 0 {
 		rest := strings.Fields(strings.TrimSpace(clause[star:]))
 		if len(rest) == 3 && rest[0] == "*" && rest[1] == "as" {
-			bindings = append(bindings, tsBinding{Local: rest[2], Imported: "*"})
+			bindings = append(bindings, syntaxBinding{Local: rest[2], Imported: "*"})
 		}
 		clause = strings.TrimSpace(clause[:star])
 	}
 	if fields := strings.Fields(strings.Trim(clause, ",")); len(fields) > 0 {
 		name := fields[0]
 		if name != "type" && isIdentifier(name) {
-			bindings = append(bindings, tsBinding{Local: name, Imported: "default"})
+			bindings = append(bindings, syntaxBinding{Local: name, Imported: "default"})
 		}
 	}
 	return bindings
@@ -590,7 +595,7 @@ func isIdentifier(value string) bool {
 }
 
 // collectCall records one call, member-call or constructor site.
-func (p *tsParse) collectCall(captures []tsCapture, result *tsFileResult) error {
+func (p *tsParse) collectCall(captures []tsCapture, result *syntaxResult) error {
 	var site tsNode
 	var name, receiver string
 	newExpression := false
@@ -617,7 +622,7 @@ func (p *tsParse) collectCall(captures []tsCapture, result *tsFileResult) error 
 	if err != nil {
 		return err
 	}
-	result.Calls = append(result.Calls, tsCall{
+	result.Calls = append(result.Calls, syntaxCall{
 		Name:     name,
 		Receiver: receiver,
 		Line:     p.lineAt(start),
@@ -630,7 +635,7 @@ func (p *tsParse) collectCall(captures []tsCapture, result *tsFileResult) error 
 // collectReference records an inheritance clause, a type parameter name or one
 // type identifier. Uses that name a parameter are filtered after the whole file
 // is read, so declaration order cannot leak a generic parameter as a reference.
-func (p *tsParse) collectReference(captures []tsCapture, result *tsFileResult) error {
+func (p *tsParse) collectReference(captures []tsCapture, result *syntaxResult) error {
 	var heritage, typeParam, typeRef tsNode
 	var target string
 	targetKind := ""
@@ -655,7 +660,7 @@ func (p *tsParse) collectReference(captures []tsCapture, result *tsFileResult) e
 		if err != nil {
 			return err
 		}
-		result.Heritage = append(result.Heritage, tsHeritage{
+		result.Heritage = append(result.Heritage, syntaxHeritage{
 			Target: target,
 			Kind:   targetKind,
 			Line:   p.lineAt(start),
@@ -684,7 +689,7 @@ func (p *tsParse) collectReference(captures []tsCapture, result *tsFileResult) e
 	if err != nil {
 		return err
 	}
-	result.TypeRefs = append(result.TypeRefs, tsTypeRef{Name: name, Line: p.lineAt(start), Byte: start})
+	result.TypeRefs = append(result.TypeRefs, syntaxTypeRef{Name: name, Line: p.lineAt(start), Byte: start})
 	return nil
 }
 

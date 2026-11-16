@@ -32,6 +32,12 @@ const communityHubPercentile = 0.05
 // cover a usual worktree plus its main tree without holding an unbounded graph.
 const codeGraphCacheEntries = 2
 
+// codeGraphCacheBytes bounds the estimated memory of all cached partitions.
+// The audited lv24 index (184,902 nodes, 524,553 edges) estimates at about
+// 60 MiB, so two trees fit; a larger index is answered without being cached
+// instead of growing the server without limit.
+const codeGraphCacheBytes = 256 << 20
+
 // structuralKinds are node kinds that carry files and imports rather than
 // definitions. They stay in the community partition (they connect it) but are
 // not ranked as god nodes, counted as changed symbols or listed as orphans.
@@ -65,6 +71,8 @@ type codeGraph struct {
 	partition   graphalgo.Partition
 	names       []string
 	tops        []int
+	// bytes is the estimated retained size used by the cache budget.
+	bytes int
 }
 
 // graphCache is process-wide because the MCP server opens a fresh Index per
@@ -74,28 +82,31 @@ var graphCache struct {
 	mu      sync.Mutex
 	entries map[string]*codeGraph
 	order   []string
+	bytes   int
 }
 
-// loadAnalyticsGraph returns the cached partition of this index file, computing
-// it when the file changed or the cache is cold.
-func (i *Index) loadAnalyticsGraph(ctx context.Context) (*codeGraph, error) {
-	var nodes int
-	if err := i.db.QueryRowContext(ctx, `SELECT count(*) FROM nodes`).Scan(&nodes); err != nil {
-		return nil, fmt.Errorf("codegraph: count nodes for analytics: %w", err)
-	}
-	if nodes == 0 {
-		return nil, fmt.Errorf("%w: the codegraph index holds no nodes; run codegraph index in the checkout", domain.ErrUnsupported)
-	}
+// loadAnalyticsGraph returns the cached partition of this index file,
+// computing it when the file changed or the cache is cold. The second result
+// reports whether the partition came from the cache; a partition larger than
+// the cache budget is answered and then discarded.
+func (i *Index) loadAnalyticsGraph(ctx context.Context) (*codeGraph, bool, error) {
 	key := i.cacheKey()
 	if cached := cachedCodeGraph(key); cached != nil {
-		return cached, nil
+		return cached, true, nil
+	}
+	var nodes int
+	if err := i.db.QueryRowContext(ctx, `SELECT count(*) FROM nodes`).Scan(&nodes); err != nil {
+		return nil, false, fmt.Errorf("codegraph: count nodes for analytics: %w", err)
+	}
+	if nodes == 0 {
+		return nil, false, fmt.Errorf("%w: the codegraph index holds no nodes; run codegraph index in the checkout", domain.ErrUnsupported)
 	}
 	graph, err := i.computeCodeGraph(ctx)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	storeCodeGraph(key, graph)
-	return graph, nil
+	return graph, false, nil
 }
 
 // cacheKey identifies one index snapshot. The WAL file is part of the identity
@@ -123,21 +134,77 @@ func cachedCodeGraph(key string) *codeGraph {
 	return graphCache.entries[key]
 }
 
+// storeCodeGraph inserts one partition and evicts the oldest until both the
+// entry count and the estimated byte budget hold. A graph larger than the whole
+// budget is not cached: answering it once is better than letting one index
+// consume the server.
 func storeCodeGraph(key string, graph *codeGraph) {
+	if graph == nil {
+		return
+	}
+	graph.bytes = estimateCodeGraphBytes(graph)
+	if graph.bytes > codeGraphCacheBytes {
+		return
+	}
 	graphCache.mu.Lock()
 	defer graphCache.mu.Unlock()
 	if graphCache.entries == nil {
 		graphCache.entries = map[string]*codeGraph{}
 	}
-	if _, exists := graphCache.entries[key]; !exists {
+	if previous, exists := graphCache.entries[key]; exists {
+		graphCache.bytes -= previous.bytes
+	} else {
 		graphCache.order = append(graphCache.order, key)
 	}
 	graphCache.entries[key] = graph
-	for len(graphCache.order) > codeGraphCacheEntries {
+	graphCache.bytes += graph.bytes
+	for len(graphCache.order) > codeGraphCacheEntries || graphCache.bytes > codeGraphCacheBytes {
 		oldest := graphCache.order[0]
 		graphCache.order = graphCache.order[1:]
-		delete(graphCache.entries, oldest)
+		if evicted, ok := graphCache.entries[oldest]; ok {
+			graphCache.bytes -= evicted.bytes
+			delete(graphCache.entries, oldest)
+		}
 	}
+}
+
+// resetCodeGraphCache clears the process cache. Only tests call it: a test that
+// asserts the cached flag must start cold, and a fixture path can be reused by
+// a later test in the same process.
+func resetCodeGraphCache() {
+	graphCache.mu.Lock()
+	defer graphCache.mu.Unlock()
+	graphCache.entries = nil
+	graphCache.order = nil
+	graphCache.bytes = 0
+}
+
+// estimateCodeGraphBytes approximates the retained size of one partition:
+// the node strings, the id index, both degree arrays, the assignment, the
+// community headers and the member lists. It is a cache budget, not a heap
+// profile; it deliberately overestimates rather than growing without bound.
+func estimateCodeGraphBytes(graph *codeGraph) int {
+	bytes := len(graph.nodes) * 96 // codeNode struct and slice header
+	for _, node := range graph.nodes {
+		bytes += len(node.ID) + len(node.Kind) + len(node.Name) + len(node.QualName) + len(node.File)
+		bytes += 48 // id map entry: string header, index and bucket overhead
+	}
+	bytes += len(graph.outDegree)*8 + len(graph.inDegree)*8 + len(graph.communityOf)*8
+	bytes += len(graph.partition.Communities) * 72 // Community struct and slice header
+	bytes += len(graph.nodes) * 8                  // member ints
+	bytes += len(graph.names)*24 + len(graph.tops)*8
+	return bytes
+}
+
+// analyticsCacheNote discloses an answer whose partition is too large for the
+// in-process cache. A cached answer needs no note: the typed cached flag says
+// the same thing without making two identical calls render differently.
+func analyticsCacheNote(graph *codeGraph, cached bool) string {
+	if graph == nil || cached || graph.bytes <= codeGraphCacheBytes {
+		return ""
+	}
+	return fmt.Sprintf("the partition of %d node(s) is about %d MiB, above the %d MiB in-process cache budget; it is recomputed for each analytics call and not retained",
+		len(graph.nodes), graph.bytes>>20, codeGraphCacheBytes>>20)
 }
 
 // computeCodeGraph loads the node index and the dependency edges, deduplicates
@@ -245,9 +312,13 @@ func (g *codeGraph) singletonCommunities() int {
 // Communities lists the computed partition, or one community with members.
 func (i *Index) Communities(ctx context.Context, project string, opts ports.CommunityQuery) (ports.CommunityView, error) {
 	view := ports.CommunityView{Communities: []ports.GraphCommunity{}}
-	graph, err := i.loadAnalyticsGraph(ctx)
+	graph, cached, err := i.loadAnalyticsGraph(ctx)
 	if err != nil {
 		return view, err
+	}
+	view.Cached = cached
+	if note := analyticsCacheNote(graph, cached); note != "" {
+		view.Notes = append(view.Notes, note)
 	}
 	total := len(graph.partition.Communities)
 	view.Total = total
@@ -348,9 +419,13 @@ func communitySignature(graph *codeGraph, members []int) string {
 // GodNodes ranks definitions by total degree over dependency edges.
 func (i *Index) GodNodes(ctx context.Context, project string, limit int) (ports.GodNodesView, error) {
 	view := ports.GodNodesView{Nodes: []ports.GraphGodNode{}}
-	graph, err := i.loadAnalyticsGraph(ctx)
+	graph, cached, err := i.loadAnalyticsGraph(ctx)
 	if err != nil {
 		return view, err
+	}
+	view.Cached = cached
+	if note := analyticsCacheNote(graph, cached); note != "" {
+		view.Notes = append(view.Notes, note)
 	}
 	limit = clampLimit(limit, ports.DefaultGraphGodNodes, ports.MaxGraphGodNodes)
 	structural := map[string]bool{}
@@ -811,7 +886,7 @@ func (i *Index) GraphStats(ctx context.Context, project string) (ports.GraphStat
 	if err != nil {
 		return view, err
 	}
-	graph, err := i.loadAnalyticsGraph(ctx)
+	graph, cached, err := i.loadAnalyticsGraph(ctx)
 	if err != nil {
 		return view, err
 	}
@@ -837,6 +912,10 @@ func (i *Index) GraphStats(ctx context.Context, project string) (ports.GraphStat
 		Files: status.Files, Symbols: status.Nodes, Edges: status.Edges,
 		Communities: len(graph.partition.Communities), Orphans: orphans,
 		Languages: languages, NodesByKind: status.NodesByKind,
+		Cached: cached,
+	}
+	if note := analyticsCacheNote(graph, cached); note != "" {
+		view.Notes = append(view.Notes, note)
 	}
 	view.Notes = append(view.Notes, "communities are computed in memory from the stored edges; a codegraph index carries no community table")
 	if singletons := graph.singletonCommunities(); singletons > 0 {

@@ -20,8 +20,8 @@ const SchemaVersion = 2
 // rebuild because symbol identity or edge kinds may have changed.
 //
 // Version 2 adds the tree-sitter TypeScript/TSX/JavaScript/JSX extractor and
-// the module symbol kind.
-const ExtractorVersion = 2
+// the module symbol kind. Version 3 adds the syntax-only Python extractor.
+const ExtractorVersion = 3
 
 // metaKeys are the keys stored in the meta table.
 const (
@@ -39,6 +39,7 @@ const (
 	metaPkgErrors     = "package_errors"
 	metaCommunities   = "communities"
 	metaCommunityAlgo = "community_algorithm"
+	metaGraphDigest   = "graph_digest"
 	metaPartial       = "partial_files"
 )
 

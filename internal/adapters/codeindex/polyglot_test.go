@@ -176,6 +176,13 @@ type scriptFixture struct {
 // newScriptFixture writes the fixture checkout and opens an empty store.
 func newScriptFixture(t *testing.T) *scriptFixture {
 	t.Helper()
+	return newCodeFixture(t, scriptFixtures, "scripts")
+}
+
+// newCodeFixture writes a path-to-content fixture checkout and opens an empty
+// store. Language fixtures share it so the helper behavior stays identical.
+func newCodeFixture(t *testing.T, files map[string]string, project string) *scriptFixture {
+	t.Helper()
 	t.Setenv("GOWORK", "off")
 	t.Setenv("GOFLAGS", "")
 	base := t.TempDir()
@@ -183,16 +190,16 @@ func newScriptFixture(t *testing.T) *scriptFixture {
 	if err := os.MkdirAll(root, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	writeScriptFiles(t, root, scriptFixtures)
+	writeScriptFiles(t, root, files)
 	now := time.Unix(1_700_000_000, 0).UTC()
-	dbPath, err := DefaultDBPath(filepath.Join(base, "brain"), "scripts", root)
+	dbPath, err := DefaultDBPath(filepath.Join(base, "brain"), project, root)
 	if err != nil {
 		t.Fatal(err)
 	}
 	index, err := Open(context.Background(), Options{
 		Root:    root,
 		DBPath:  dbPath,
-		Project: "scripts",
+		Project: project,
 		Create:  true,
 		Now:     func() time.Time { return now },
 	})
@@ -731,12 +738,12 @@ func (f *scriptFixture) snapshot(t *testing.T) ([]string, []string) {
 // four advertised extensions are indexed, and generated/declaration output is
 // not.
 func TestScriptExtractorSkippedClaims(t *testing.T) {
-	for _, path := range []string{"a.ts", "a.tsx", "a.js", "a.jsx"} {
+	for _, path := range []string{"a.ts", "a.tsx", "a.js", "a.jsx", "a.py"} {
 		if !IsPolyglotPath(path) || LanguageForPath(path) == "" {
 			t.Fatalf("%s is not claimed", path)
 		}
 	}
-	for _, path := range []string{"a.py", "a.rs", "a.go", "a.d.ts", "a.min.js", "dist/a.ts"} {
+	for _, path := range []string{"a.rs", "a.go", "a.d.ts", "a.min.js", "dist/a.ts"} {
 		if IsPolyglotPath(path) && polyglotPathIndexable(path) {
 			t.Fatalf("%s is claimed by the script extractor", path)
 		}
@@ -751,10 +758,10 @@ func TestScriptExtractorSkippedClaims(t *testing.T) {
 func TestScriptUnsupportedLanguageIsRefused(t *testing.T) {
 	t.Setenv("GOWORK", "off")
 	root := t.TempDir()
-	if err := os.WriteFile(filepath.Join(root, "main.py"), []byte("def main():\n    pass\n"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(root, "main.rs"), []byte("fn main() {}\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	dbPath, err := DefaultDBPath(filepath.Join(t.TempDir(), "brain"), "python", root)
+	dbPath, err := DefaultDBPath(filepath.Join(t.TempDir(), "brain"), "rust", root)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -763,8 +770,8 @@ func TestScriptUnsupportedLanguageIsRefused(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = index.Close() }()
-	if _, err := index.Index(context.Background(), "python"); !errors.Is(err, domain.ErrUnsupported) {
-		t.Fatalf("Python-only checkout = %v, want ErrUnsupported", err)
+	if _, err := index.Index(context.Background(), "rust"); !errors.Is(err, domain.ErrUnsupported) {
+		t.Fatalf("Rust-only checkout = %v, want ErrUnsupported", err)
 	}
 }
 
