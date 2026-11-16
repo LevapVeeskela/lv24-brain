@@ -189,6 +189,10 @@ func runCommand(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return runAgent(rest, stdout, stderr)
 	case "migrate":
 		return runMigrate(rest, stdout, stderr)
+	case "export":
+		return runExport(rest, stdout, stderr)
+	case "import":
+		return runImport(rest, stdout, stderr)
 	case "secret":
 		return runSecret(rest, stdin, stdout, stderr)
 	case "login":
@@ -269,6 +273,8 @@ Commands:
   connection Manage local/git connections, credentials and provider descriptors
   agent      Run, inspect or stop the background connection agent
   migrate    Import a legacy .brain data directory or engram; --rollback reverts an import
+  export     Export curated records to an LV24 Exchange bundle (directory or .zip)
+  import     Import curated records from an LV24 Exchange bundle
   secret     Manage OS-backed secrets (set, list, remove)
   login      Authenticate against a server-mode brain
   logout     Revoke the server session and clear stored tokens (--all: every session)

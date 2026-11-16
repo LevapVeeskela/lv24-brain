@@ -429,6 +429,7 @@ by `.github/workflows/release.yml` on `v*` tags. See
 - [Update](docs/update.md)
 - [Server deploy](docs/deploy.md)
 - [Migration from the legacy Company Brain](docs/migration.md)
+- [LV24 Exchange Format](docs/exchange.md)
 - [Architecture](docs/architecture.md)
 - [MCP server contract](docs/mcp.md)
 - [Team runbook](docs/runbook.md)
