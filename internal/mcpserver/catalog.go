@@ -7,25 +7,27 @@ import (
 	"fmt"
 	"slices"
 	"strings"
+
+	"github.com/levapveeskela/lv24-brain/internal/ports"
 )
 
 // Tool profiles. A profile is a vocabulary, not an add-on: tools/list in a
 // profile never lists two names for the same intent. The native profile serves
-// the 15 tools of 0.17; the migration profiles serve a peer vocabulary whose
+// the 17 tools of 0.18; the migration profiles serve a peer vocabulary whose
 // calls are translated to the native tool that does the work.
 const (
-	// ProfileLV24 is the native 15-tool profile and the default.
+	// ProfileLV24 is the native 17-tool profile and the default.
 	ProfileLV24 = "lv24"
-	// ProfileLV24Legacy is the 22-name bridge for clients written against
-	// 0.16: the 15 native names plus the seven retired ones.
+	// ProfileLV24Legacy is the 24-name bridge for clients written against
+	// 0.16: the 17 native names plus the seven retired ones.
 	ProfileLV24Legacy = "lv24-legacy"
 	// ProfileEngram is the 27-name engram-compatible vocabulary.
 	ProfileEngram = "engram"
-	// ProfileCodegraph is the 8-name codegraph vocabulary. Until 0.18 it
-	// answers honestly: status/files report indexed=false, queries refuse.
+	// ProfileCodegraph is the 8-name codegraph vocabulary, mapped to
+	// brain_code wherever the semantics match.
 	ProfileCodegraph = "codegraph"
-	// ProfileGraphify is the 10-name graphify vocabulary, with the same
-	// honest stub behaviour.
+	// ProfileGraphify is the 10-name graphify vocabulary, mapped to brain_code
+	// and brain_graph; the analytics names refuse honestly.
 	ProfileGraphify = "graphify"
 	// ProfileVersion is the additive-compatible revision of every profile. A
 	// minor bump adds names or fields; a major bump changes what an existing
@@ -35,8 +37,7 @@ const (
 
 // Compatibility grades. A and B preserve the facts of the legacy call; C
 // approximates and says so; D cannot be served at all. GradeStub marks a
-// placeholder tool of the codegraph/graphify profiles, which is neither A nor
-// D: it answers with an honest "not indexed" object or refuses a query.
+// placeholder tool; this release serves no code-graph stub.
 const (
 	GradeExact          = "A"
 	GradeEnvelope       = "B"
@@ -172,11 +173,16 @@ type ToolSpec struct {
 	// ReadActions names the actions that never mutate, for a mixed tool whose
 	// destructiveHint covers the other actions. Clients ignore it.
 	ReadActions []string `json:"x-lv24-read-actions,omitempty"`
-	// Legacy marks a migration alias. Target and Grade describe what it calls
-	// and how faithfully; Unsupported lists the dropped legacy arguments.
+	// WriteActions names the mutating actions of a mixed tool, so a read-only
+	// catalogue can list the read half and refuse the rest.
+	WriteActions []string `json:"x-lv24-write-actions,omitempty"`
+	// Legacy marks a migration alias. Target, Action and Grade describe what
+	// it calls and how faithfully; Unsupported lists the dropped legacy
+	// arguments.
 	Legacy      bool     `json:"legacy,omitempty"`
 	Deprecated  bool     `json:"deprecated,omitempty"`
 	Target      string   `json:"target,omitempty"`
+	Action      string   `json:"action,omitempty"`
 	Grade       string   `json:"grade,omitempty"`
 	Unsupported []string `json:"unsupported,omitempty"`
 	Note        string   `json:"note,omitempty"`
@@ -237,9 +243,11 @@ func specsOf(tools []tool) []ToolSpec {
 			Limits:       t.Limits,
 			Policy:       toolPolicy(t),
 			ReadActions:  t.ReadActions,
+			WriteActions: t.WriteActions,
 			Legacy:       t.Legacy,
 			Deprecated:   t.Deprecated,
 			Target:       t.Target,
+			Action:       t.Action,
 			Grade:        t.Grade,
 			Unsupported:  t.Unsupported,
 			Note:         t.Note,
@@ -383,6 +391,12 @@ func (s *Server) capabilities() Capabilities {
 			"resource_state_bytes":    resourceStateMaxBytes,
 			"resource_projects_bytes": resourceProjectsMaxBytes,
 			"resource_review_bytes":   resourceReviewMaxBytes,
+			"resource_symbol_bytes":   resourceSymbolMaxBytes,
+			"graph_search":            ports.MaxGraphSearchLimit,
+			"graph_impact_depth":      ports.MaxGraphImpactDepth,
+			"graph_explore_files":     ports.MaxGraphExploreFiles,
+			"graph_explore_bytes":     ports.MaxGraphExploreBytes,
+			"graph_neighbors":         ports.MaxGraphSearchLimit,
 		},
 		Gaps:         s.profileGaps(),
 		RefusalCodes: RefusalCodes(),
@@ -395,7 +409,9 @@ func (s *Server) capabilities() Capabilities {
 
 // featureFlags reports what the profile can do, including the approximations
 // of a migration vocabulary. A flag is never a promise the backend cannot
-// keep: codeGraph and knowledgeGraph stay false in 0.17.
+// keep: code_graph is true only where the profile serves brain_code, and the
+// analytics half of the knowledge graph is reported separately because five of
+// its six actions answer UNSUPPORTED in this release.
 func (s *Server) featureFlags() map[string]any {
 	features := map[string]any{
 		"full_text":       true,
@@ -419,12 +435,31 @@ func (s *Server) featureFlags() map[string]any {
 		features["pinning"] = "approximate"
 		features["sessions"] = "synthetic"
 		features["consolidation"] = "refused"
-	case ProfileCodegraph:
-		features["code_graph_index"] = "0.18"
+	}
+	switch s.profile.Name {
+	case ProfileLV24, ProfileLV24Legacy, ProfileCodegraph:
+		features["code_graph"] = true
+		features["code_graph_analytics"] = false
 	case ProfileGraphify:
-		features["knowledge_graph_index"] = "0.18"
+		features["code_graph"] = true
+		features["knowledge_graph"] = "partial"
+		features["code_graph_analytics"] = false
+	}
+	if s.servesGraphTool("brain_graph") {
+		features["knowledge_graph"] = "partial"
+		features["knowledge_graph_analytics"] = false
 	}
 	return features
+}
+
+// servesGraphTool reports whether the effective profile lists the named tool.
+func (s *Server) servesGraphTool(name string) bool {
+	for _, t := range s.tools {
+		if t.Name == name {
+			return true
+		}
+	}
+	return false
 }
 
 // capabilityGaps lists the native actions this release accepts but cannot
@@ -438,6 +473,10 @@ func capabilityGaps() []CapabilityGap {
 		{Tool: "brain_judge", Action: "pin", Reason: "pinning needs additive frontmatter and ranking weight (0.18)", Remediation: "brain note \"<why this record matters>\""},
 		{Tool: "brain_judge", Action: "unpin", Reason: "pinning needs additive frontmatter and ranking weight (0.18)", Remediation: "brain note \"<why this record matters>\""},
 		{Tool: "brain_judge", Action: "consolidate", Reason: "two-phase consolidation is not exposed over MCP in 0.17", Remediation: "brain record supersede <old-id> --by <new-id>"},
+		graphUnsupported["path"],
+		graphUnsupported["communities"],
+		graphUnsupported["god_nodes"],
+		graphUnsupported["pr_impact"],
 	}
 }
 

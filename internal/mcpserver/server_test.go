@@ -228,7 +228,8 @@ func TestMCPServerToolsListSchemas(t *testing.T) {
 	want := []string{
 		"brain_open", "brain_context", "brain_search", "brain_record", "brain_note",
 		"brain_decision", "brain_attempt", "brain_handoff", "brain_state", "brain_catchup",
-		"brain_review", "brain_judge", "brain_projects", "brain_prompt", "brain_capabilities",
+		"brain_review", "brain_judge", "brain_projects", "brain_prompt", "brain_code",
+		"brain_graph", "brain_capabilities",
 	}
 	if len(tools) != len(want) {
 		t.Fatalf("tools = %d, want %d", len(tools), len(want))

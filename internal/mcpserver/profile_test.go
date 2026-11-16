@@ -46,12 +46,12 @@ func TestProfilesExposeTheExactVocabulary(t *testing.T) {
 	}
 	codegraph := []string{
 		"codegraph_explore", "codegraph_search", "codegraph_node", "codegraph_callers",
-		"codegraph_callees", "codegraph_impact", "codegraph_files", "codegraph_status",
+		"codegraph_callees", "codegraph_impact", "codegraph_status", "codegraph_files",
 		"brain_capabilities",
 	}
 	graphify := []string{
-		"query_graph", "get_node", "get_neighbors", "get_community", "shortest_path",
-		"god_nodes", "graph_stats", "list_prs", "get_pr_impact", "triage_prs",
+		"query_graph", "get_node", "get_neighbors", "graph_stats", "shortest_path",
+		"get_community", "god_nodes", "list_prs", "get_pr_impact", "triage_prs",
 		"brain_capabilities",
 	}
 	cases := []struct {
@@ -341,64 +341,110 @@ func TestEngramDroppedArgumentsAreReportedAndStrictRefuses(t *testing.T) {
 	}
 }
 
-func TestCodeGraphStubsNeverFakeResults(t *testing.T) {
+func TestCodegraphProfileIsHonestWithoutAGraph(t *testing.T) {
 	server := newProfileServer(t, newSurfaceFake(), ProfileCodegraph, false, Policy{})
-	status := profileCall(t, server, "codegraph_status", `{}`)
-	obj := structured(t, status)
-	if obj["indexed"] != false || obj["engine"] != "codegraph" || obj["hint"] == "" {
-		t.Fatalf("status = %v", obj)
-	}
-	for _, forbidden := range []string{"indexed_at", "indexedAt", "files", "file_count", "nodes", "edges", "count"} {
-		if _, ok := obj[forbidden]; ok {
-			t.Fatalf("status fabricates %s: %v", forbidden, obj)
-		}
-		if strings.Contains(strings.ToLower(textOf(t, status)), "fresh") {
-			t.Fatalf("status claims freshness: %v", textOf(t, status))
-		}
-	}
-	files := profileCall(t, server, "codegraph_files", `{}`)
-	fileObj := structured(t, files)
-	if fileObj["indexed"] != false || fileObj["engine"] != "codegraph" {
-		t.Fatalf("files = %v", fileObj)
-	}
-	if list, _ := fileObj["files"].([]any); len(list) != 0 {
-		t.Fatalf("files is not empty: %v", fileObj["files"])
-	}
 	for _, name := range []string{
-		"codegraph_explore", "codegraph_search", "codegraph_node",
-		"codegraph_callers", "codegraph_callees", "codegraph_impact",
+		"codegraph_explore", "codegraph_search", "codegraph_node", "codegraph_callers",
+		"codegraph_callees", "codegraph_impact", "codegraph_files", "codegraph_status",
 	} {
-		result := profileCall(t, server, name, `{}`)
+		result := profileCall(t, server, name, `{"project":"alpha","symbol":"Run","query":"run"}`)
 		refusal := structured(t, result)
 		if result["isError"] != true || refusal["code"] != RefusalUnsupported {
 			t.Fatalf("%s = %v", name, result)
 		}
 		if tryInstead, _ := refusal["try_instead"].(string); tryInstead == "" {
-			t.Fatalf("%s has no hint", name)
+			t.Fatalf("%s has no hint: %v", name, refusal)
+		}
+	}
+	// Nothing is fabricated: no indexed:true, no zero count, no empty list.
+	for _, name := range []string{"codegraph_status", "codegraph_files"} {
+		if text := strings.ToLower(textOf(t, profileCall(t, server, name, `{}`))); strings.Contains(text, "indexed: true") {
+			t.Fatalf("%s claims an index: %q", name, text)
 		}
 	}
 }
 
-func TestGraphifyStubsNeverFakeResults(t *testing.T) {
-	server := newProfileServer(t, newSurfaceFake(), ProfileGraphify, false, Policy{})
-	stats := profileCall(t, server, "graph_stats", `{}`)
-	obj := structured(t, stats)
-	if obj["indexed"] != false || obj["engine"] != "graphify" || obj["reason"] == "" {
-		t.Fatalf("graph_stats = %v", obj)
+func TestCodegraphProfilePublishesItsMapping(t *testing.T) {
+	catalogue := BuildCatalogue("test-version", mustProfile(t, ProfileCodegraph), Policy{})
+	if len(catalogue.Aliases) != 8 {
+		t.Fatalf("aliases = %d, want 8", len(catalogue.Aliases))
 	}
-	for _, key := range []string{"nodes", "edges", "communities"} {
-		if obj[key] != float64(0) {
-			t.Fatalf("graph_stats.%s = %v", key, obj[key])
+	want := map[string]struct {
+		target string
+		action string
+		grade  string
+	}{
+		"codegraph_explore": {target: "brain_code", action: "explore", grade: GradeEnvelope},
+		"codegraph_search":  {target: "brain_code", action: "search", grade: GradeEnvelope},
+		"codegraph_node":    {target: "brain_code", action: "node", grade: GradeEnvelope},
+		"codegraph_callers": {target: "brain_code", action: "node", grade: GradeApproximate},
+		"codegraph_callees": {target: "brain_code", action: "node", grade: GradeApproximate},
+		"codegraph_impact":  {target: "brain_code", action: "impact", grade: GradeEnvelope},
+		"codegraph_status":  {target: "brain_code", action: "status", grade: GradeEnvelope},
+		"codegraph_files":   {target: "brain_code", action: "status", grade: GradeApproximate},
+	}
+	for _, alias := range catalogue.Aliases {
+		expect, ok := want[alias.Legacy]
+		if !ok {
+			t.Fatalf("unexpected alias %s", alias.Legacy)
+		}
+		if alias.Target != expect.target || alias.Action != expect.action || alias.Grade != expect.grade {
+			t.Fatalf("%s = %+v, want %+v", alias.Legacy, alias, expect)
 		}
 	}
+	if catalogue.Capabilities.Tools.Total != 9 || catalogue.Capabilities.Tools.Stubs != 0 {
+		t.Fatalf("codegraph tools = %+v", catalogue.Capabilities.Tools)
+	}
+}
+
+func TestGraphifyProfileIsHonestWithoutAGraph(t *testing.T) {
+	server := newProfileServer(t, newSurfaceFake(), ProfileGraphify, false, Policy{})
 	for _, name := range []string{
 		"query_graph", "get_node", "get_neighbors", "get_community", "shortest_path",
-		"god_nodes", "list_prs", "get_pr_impact", "triage_prs",
+		"god_nodes", "graph_stats", "list_prs", "get_pr_impact", "triage_prs",
 	} {
-		result := profileCall(t, server, name, `{}`)
+		result := profileCall(t, server, name, `{"project":"alpha","question":"run","label":"Run","symbol":"Run"}`)
 		refusal := structured(t, result)
 		if result["isError"] != true || refusal["code"] != RefusalUnsupported {
 			t.Fatalf("%s = %v", name, result)
+		}
+		if tryInstead, _ := refusal["try_instead"].(string); tryInstead == "" {
+			t.Fatalf("%s has no hint: %v", name, refusal)
+		}
+	}
+}
+
+func TestGraphifyProfilePublishesItsMapping(t *testing.T) {
+	catalogue := BuildCatalogue("test-version", mustProfile(t, ProfileGraphify), Policy{})
+	if len(catalogue.Aliases) != 10 {
+		t.Fatalf("aliases = %d, want 10", len(catalogue.Aliases))
+	}
+	want := map[string]struct {
+		target string
+		action string
+		grade  string
+	}{
+		"query_graph":   {target: "brain_code", action: "search", grade: GradeApproximate},
+		"get_node":      {target: "brain_code", action: "node", grade: GradeEnvelope},
+		"get_neighbors": {target: "brain_graph", action: "neighbors", grade: GradeApproximate},
+		"graph_stats":   {target: "brain_graph", action: "stats", grade: GradeEnvelope},
+		"shortest_path": {target: "brain_graph", action: "path", grade: GradeUnsupported},
+		"get_community": {target: "brain_graph", action: "communities", grade: GradeUnsupported},
+		"god_nodes":     {target: "brain_graph", action: "god_nodes", grade: GradeUnsupported},
+		"list_prs":      {grade: GradeUnsupported},
+		"get_pr_impact": {target: "brain_graph", action: "pr_impact", grade: GradeUnsupported},
+		"triage_prs":    {grade: GradeUnsupported},
+	}
+	for _, alias := range catalogue.Aliases {
+		expect, ok := want[alias.Legacy]
+		if !ok {
+			t.Fatalf("unexpected alias %s", alias.Legacy)
+		}
+		if alias.Target != expect.target || alias.Action != expect.action || alias.Grade != expect.grade {
+			t.Fatalf("%s = %+v, want %+v", alias.Legacy, alias, expect)
+		}
+		if alias.Grade == GradeUnsupported && alias.Remediation == "" {
+			t.Fatalf("%s has no remediation", alias.Legacy)
 		}
 	}
 }
@@ -411,11 +457,11 @@ func TestCapabilitiesReflectTheActiveProfile(t *testing.T) {
 		stubs    int
 		wantGaps int
 	}{
-		{ProfileLV24, 15, 0, 0, 7},
-		{ProfileLV24Legacy, 22, 7, 0, 7},
+		{ProfileLV24, 17, 0, 0, 11},
+		{ProfileLV24Legacy, 24, 7, 0, 11},
 		{ProfileEngram, 28, 27, 0, 10},
-		{ProfileCodegraph, 9, 0, 8, 8},
-		{ProfileGraphify, 11, 0, 10, 10},
+		{ProfileCodegraph, 9, 8, 0, 3},
+		{ProfileGraphify, 11, 10, 0, 8},
 	}
 	for _, test := range cases {
 		payload := CapabilityReport("test-version", mustProfile(t, test.profile), Policy{})
@@ -428,8 +474,16 @@ func TestCapabilitiesReflectTheActiveProfile(t *testing.T) {
 		if payload.Profile != test.profile || payload.ProfileVersion != ProfileVersion {
 			t.Fatalf("%s identity = %+v", test.profile, payload)
 		}
-		if payload.Features["code_graph"] != false || payload.Features["knowledge_graph"] != false {
-			t.Fatalf("%s features = %v", test.profile, payload.Features)
+		wantCodeGraph := test.profile != ProfileEngram
+		if payload.Features["code_graph"] != wantCodeGraph {
+			t.Fatalf("%s code_graph = %v, want %v", test.profile, payload.Features["code_graph"], wantCodeGraph)
+		}
+		var wantKnowledge any = "partial"
+		if test.profile != ProfileLV24 && test.profile != ProfileLV24Legacy && test.profile != ProfileGraphify {
+			wantKnowledge = false
+		}
+		if payload.Features["knowledge_graph"] != wantKnowledge {
+			t.Fatalf("%s knowledge_graph = %v, want %v", test.profile, payload.Features["knowledge_graph"], wantKnowledge)
 		}
 		if payload.Features["resources"] != true {
 			t.Fatalf("%s does not advertise resources", test.profile)

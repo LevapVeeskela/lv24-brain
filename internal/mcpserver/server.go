@@ -290,6 +290,9 @@ type toolInfo struct {
 	// ReadActions marks the non-mutating actions of a mixed tool; clients
 	// ignore unknown fields, hosts and docs use it.
 	ReadActions []string `json:"x-lv24-read-actions,omitempty"`
+	// WriteActions marks the mutating actions of a mixed tool, so a host can
+	// be precise without interpreting the four hints.
+	WriteActions []string `json:"x-lv24-write-actions,omitempty"`
 }
 
 func (s *Server) listTools(params json.RawMessage) (json.RawMessage, *rpcError) {
@@ -314,6 +317,7 @@ func (s *Server) listTools(params json.RawMessage) (json.RawMessage, *rpcError) 
 			OutputSchema: t.OutputSchema,
 			Annotations:  t.Annotations,
 			ReadActions:  t.ReadActions,
+			WriteActions: t.WriteActions,
 		})
 	}
 	return marshalResult(struct {
@@ -376,6 +380,9 @@ func (s *Server) callTool(ctx context.Context, env envelope, params json.RawMess
 			})
 		}
 		return nil, invalidParams("unknown tool: " + p.Name)
+	}
+	if refusal := s.refusedWriteAction(t, p.Arguments); refusal != nil {
+		return refusalResult(*refusal)
 	}
 	outcome := s.checkInput(env, t, p)
 	if outcome.refusal != nil {

@@ -1,6 +1,7 @@
 package mcpserver
 
 import (
+	"encoding/json"
 	"fmt"
 	"slices"
 	"strings"
@@ -60,14 +61,21 @@ func (p Policy) Info() PolicyInfo {
 }
 
 // ToolListed reports whether the policy exposes a tool. Read-only tools are
-// always listed; every other tool needs a writable server.
+// always listed; a mixed tool is listed for its read actions only; every other
+// tool needs a writable server.
 func (p Policy) ToolListed(spec ToolSpec) bool {
-	return !p.ReadOnly || spec.Annotations.ReadOnlyHint
+	if !p.ReadOnly || spec.Annotations.ReadOnlyHint {
+		return true
+	}
+	return len(spec.ReadActions) > 0 && len(spec.WriteActions) > 0 && !spec.Annotations.DestructiveHint
 }
 
 // listsTool is ToolListed for the internal tool type.
 func (p Policy) listsTool(t tool) bool {
-	return !p.ReadOnly || t.Annotations.ReadOnlyHint
+	if !p.ReadOnly || t.Annotations.ReadOnlyHint {
+		return true
+	}
+	return len(t.ReadActions) > 0 && len(t.WriteActions) > 0 && !t.Annotations.DestructiveHint
 }
 
 // allowsProject reports whether a project is inside the allowlist.
@@ -144,4 +152,27 @@ func (p Policy) filterProjects(projects []Project) []Project {
 		}
 	}
 	return out
+}
+
+// refusedWriteAction refuses the mutating action of a mixed tool on a read-only
+// server, before the backend sees the call. A malformed argument object is left
+// to the tool, which reports it against the schema.
+func (s *Server) refusedWriteAction(t tool, raw json.RawMessage) *Refusal {
+	if !s.policy.ReadOnly || len(t.WriteActions) == 0 {
+		return nil
+	}
+	var probe struct {
+		Action string `json:"action"`
+	}
+	if err := json.Unmarshal(raw, &probe); err != nil {
+		return nil
+	}
+	action := strings.ToLower(strings.TrimSpace(probe.Action))
+	if !slices.Contains(t.WriteActions, action) {
+		return nil
+	}
+	refusal := refusalUnsupported(
+		t.Name+" action "+action+" writes the local code index; this server runs read-only",
+		t.Name+"(action="+strings.Join(t.ReadActions, "|")+"), or run brain code "+action+" in a shell")
+	return &refusal.Refusal
 }

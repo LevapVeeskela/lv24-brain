@@ -303,8 +303,8 @@ func TestMCPListToolsReportsTheEffectivePolicy(t *testing.T) {
 			}
 		}
 	}
-	if len(catalogue.Tools)+len(catalogue.OmittedTools) != 15 {
-		t.Fatalf("tools = %d listed + %d omitted, want 15", len(catalogue.Tools), len(catalogue.OmittedTools))
+	if len(catalogue.Tools)+len(catalogue.OmittedTools) != 17 {
+		t.Fatalf("tools = %d listed + %d omitted, want 17", len(catalogue.Tools), len(catalogue.OmittedTools))
 	}
 }
 
@@ -329,7 +329,7 @@ func TestMCPListToolsDefaultPolicyIsUnrestricted(t *testing.T) {
 	if catalogue.Policy.ReadOnly || catalogue.Policy.AllowWrite || !catalogue.Policy.AllProjects {
 		t.Fatalf("policy = %+v", catalogue.Policy)
 	}
-	if len(catalogue.Tools) != 15 || len(catalogue.OmittedTools) != 0 {
+	if len(catalogue.Tools) != 17 || len(catalogue.OmittedTools) != 0 {
 		t.Fatalf("tools = %d, omitted = %v", len(catalogue.Tools), catalogue.OmittedTools)
 	}
 }

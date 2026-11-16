@@ -6,10 +6,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/levapveeskela/lv24-brain/internal/domain"
+	"github.com/levapveeskela/lv24-brain/internal/ports"
 )
 
 // buildTools assembles the tool list of the profile. The native 15 are always
@@ -32,9 +34,9 @@ func (s *Server) buildTools() {
 	case ProfileEngram:
 		s.allTools = s.aliasProfileTools(engramAliasSpecs())
 	case ProfileCodegraph:
-		s.allTools = s.stubProfileTools(codegraphStubTools())
+		s.allTools = s.aliasProfileTools(codegraphAliasSpecs())
 	case ProfileGraphify:
-		s.allTools = s.stubProfileTools(graphifyStubTools())
+		s.allTools = s.aliasProfileTools(graphifyAliasSpecs())
 	default:
 		s.allTools = s.nativeTools
 	}
@@ -59,17 +61,6 @@ func (s *Server) aliasProfileTools(specs []aliasSpec) []tool {
 	for _, spec := range specs {
 		tools = append(tools, s.aliasTool(spec))
 	}
-	if capabilities, ok := s.nativeByName["brain_capabilities"]; ok {
-		tools = append(tools, capabilities)
-	}
-	return tools
-}
-
-// stubProfileTools renders the honest code-graph placeholders plus the native
-// introspection tool.
-func (s *Server) stubProfileTools(stubs []tool) []tool {
-	tools := make([]tool, 0, len(stubs)+1)
-	tools = append(tools, stubs...)
 	if capabilities, ok := s.nativeByName["brain_capabilities"]; ok {
 		tools = append(tools, capabilities)
 	}
@@ -116,6 +107,7 @@ func (s *Server) aliasTool(spec aliasSpec) tool {
 		Legacy:       true,
 		Deprecated:   s.profile.Deprecated,
 		Target:       spec.Target,
+		Action:       spec.Action,
 		Grade:        spec.Grade,
 		Unsupported:  spec.Unsupported,
 		Note:         spec.Note,
@@ -389,11 +381,11 @@ func (a aliasArgs) list(key string) ([]string, bool, error) {
 	return nil, true, refusalInvalidf("%s must be a string or an array of strings", key)
 }
 
-// projectFromArgs resolves the engram spellings of a project selector. A
+// projectFromArgs resolves the project spellings of the migration profiles. A
 // directory is only a selector, never a project name: the registry still has
 // to know it.
 func projectFromArgs(a aliasArgs) (string, error) {
-	for _, key := range []string{"project", "project_id", "directory", "cwd"} {
+	for _, key := range []string{"project", "project_id", "projectPath", "directory", "cwd"} {
 		value, ok, err := a.text(key)
 		if err != nil {
 			return "", err
@@ -2134,140 +2126,380 @@ func statsAlias(ctx context.Context, s *Server, _ aliasArgs) (toolResult, error)
 }
 
 // ---------------------------------------------------------------------------
-// codegraph and graphify placeholders
+// codegraph and graphify compatibility profiles
+//
+// Both vocabularies are translated to brain_code and brain_graph. A name whose
+// semantics match is graded B: the facts are the same, the envelope differs. A
+// name that can only approximate the legacy answer is graded C and says so. An
+// analytics name without an implementation is graded D and refuses with a
+// working alternative -- never with an empty collection.
 
-// codegraphStubTools is the 8-name codegraph vocabulary. Queries refuse with a
-// reason; status and files return an honest indexed=false object. No query
-// returns an empty collection as if it were an answer.
-func codegraphStubTools() []tool {
-	querySchema := stubSchema(map[string]any{
-		"query": stringProp("What to look up."), "path": stringProp("Checkout path."),
-		"file": stringProp("File path."), "symbol": stringProp("Symbol name."),
-		"node": stringProp("Node id."), "id": stringProp("Node id."),
-		"depth": intProp("Traversal depth.", 0), "limit": intProp("Row limit.", 0),
+// codegraphAliasSpecs is the 8-name codegraph vocabulary.
+func codegraphAliasSpecs() []aliasSpec {
+	project := stringProp("Checkout path the index belongs to.")
+	base := func(extra map[string]any) map[string]any {
+		properties := map[string]any{"projectPath": project, "project": project}
+		for key, value := range extra {
+			properties[key] = value
+		}
+		return legacySchema(nil, properties)
+	}
+	exploreSchema := base(map[string]any{
+		"query": stringProp("What to look up."), "kind": stringProp("Node kind filter."),
+		"maxFiles": intProp("Maximum files to render.", 0), "limit": intProp("Row limit.", 0),
 	})
-	refuse := func(name string) toolFunc {
-		return func(context.Context, json.RawMessage) (toolResult, error) {
-			return toolResult{}, refusalUnsupported(
-				name+" is not available: no code index exists in 0.17",
-				"brain_search (memory) or brain graphs (checkout)")
-		}
-	}
-	read := func(name, title, description string, run toolFunc) tool {
-		return tool{
-			Name: name, Description: description, Annotations: readOnlyAnnotations(title),
-			InputSchema: querySchema, OutputSchema: outputObject(map[string]any{}),
-			Stub: true, Note: "code index lands in 0.18", run: run,
-		}
-	}
-	tools := []tool{
-		read("codegraph_explore", "Explore code", "Explore a symbol and its neighbours. Refused in 0.17: no code index.", refuse("codegraph_explore")),
-		read("codegraph_search", "Search code", "Search code symbols. Refused in 0.17: no code index.", refuse("codegraph_search")),
-		read("codegraph_node", "Read a code node", "Read one code node. Refused in 0.17: no code index.", refuse("codegraph_node")),
-		read("codegraph_callers", "List callers", "List callers of a symbol. Refused in 0.17: no code index.", refuse("codegraph_callers")),
-		read("codegraph_callees", "List callees", "List callees of a symbol. Refused in 0.17: no code index.", refuse("codegraph_callees")),
-		read("codegraph_impact", "Report impact", "Report the blast radius of a change. Refused in 0.17: no code index.", refuse("codegraph_impact")),
-	}
-	status := tool{
-		Name: "codegraph_status", Description: "Report whether a code graph is indexed. 0.17 has no code index, so indexed is always false; no timestamp or count is fabricated.",
-		Annotations: readOnlyAnnotations("Code index status"), InputSchema: querySchema,
-		OutputSchema: outputObject(map[string]any{
-			"indexed": boolProp("Whether a code index exists."), "engine": stringProp("Graph engine."),
-			"hint": stringProp("How to build the index."), "reason": stringProp("Why it is not indexed."),
-		}, "indexed", "engine"),
-		Stub: true, Note: "code index lands in 0.18",
-		run: func(context.Context, json.RawMessage) (toolResult, error) {
-			structured := map[string]any{
-				"indexed": false, "engine": "codegraph", "hint": "run brain code index",
-				"reason": "no code index in 0.17",
-			}
-			return toolResult{Text: "codegraph: not indexed (no code index in 0.17)", Structured: structured}, nil
-		},
-	}
-	files := tool{
-		Name: "codegraph_files", Description: "List indexed code files. 0.17 has no code index, so the list is empty and indexed is false.",
-		Annotations: readOnlyAnnotations("Code index files"), InputSchema: querySchema,
-		OutputSchema: outputObject(map[string]any{
-			"files":   arrayProp("Indexed files; empty because nothing is indexed.", stringProp("File path.")),
-			"indexed": boolProp("Whether a code index exists."), "engine": stringProp("Graph engine."),
-			"hint": stringProp("How to build the index."), "reason": stringProp("Why it is not indexed."),
-		}, "files", "indexed"),
-		Stub: true, Note: "code index lands in 0.18",
-		run: func(context.Context, json.RawMessage) (toolResult, error) {
-			structured := map[string]any{
-				"files": []string{}, "indexed": false, "engine": "codegraph",
-				"hint": "run brain code index", "reason": "no code index in 0.17",
-			}
-			return toolResult{Text: "codegraph: not indexed (no code index in 0.17)", Structured: structured}, nil
-		},
-	}
-	tools = append(tools, files, status)
-	return tools
-}
-
-// graphifyStubTools is the 10-name graphify vocabulary. graph_stats returns an
-// honest indexed=false object with zero counts; every query refuses.
-func graphifyStubTools() []tool {
-	querySchema := stubSchema(map[string]any{
-		"query": stringProp("Graph query."), "node": stringProp("Node id."),
-		"id": stringProp("Node id."), "source": stringProp("Source node."),
-		"target": stringProp("Target node."), "community": stringProp("Community id."),
-		"depth": intProp("Traversal depth.", 0), "limit": intProp("Row limit.", 0),
+	searchSchema := base(map[string]any{
+		"query": stringProp("What to look up."), "file": stringProp("File path."),
+		"kind": stringProp("Node kind filter."), "limit": intProp("Row limit.", 0),
 	})
-	refuse := func(name, reason string) toolFunc {
-		return func(context.Context, json.RawMessage) (toolResult, error) {
-			return toolResult{}, refusalUnsupported(name+" is not available: "+reason, "brain graphs (checkout) or brain_search (memory)")
-		}
-	}
-	read := func(name, title, description string, run toolFunc) tool {
-		return tool{
-			Name: name, Description: description, Annotations: readOnlyAnnotations(title),
-			InputSchema: querySchema, OutputSchema: outputObject(map[string]any{}),
-			Stub: true, Note: "knowledge graph lands in 0.18", run: run,
-		}
-	}
-	return []tool{
-		read("query_graph", "Query the knowledge graph", "Query the knowledge graph. Refused in 0.17: no graph index.", refuse("query_graph", "no knowledge graph exists in 0.17")),
-		read("get_node", "Read a graph node", "Read one graph node. Refused in 0.17: no graph index.", refuse("get_node", "no knowledge graph exists in 0.17")),
-		read("get_neighbors", "List graph neighbours", "List the neighbours of a node. Refused in 0.17: no graph index.", refuse("get_neighbors", "no knowledge graph exists in 0.17")),
-		read("get_community", "Read a graph community", "Read one community. Refused in 0.17: no graph index.", refuse("get_community", "no knowledge graph exists in 0.17")),
-		read("shortest_path", "Shortest path", "Find the shortest path between two nodes. Refused in 0.17: no graph index.", refuse("shortest_path", "no knowledge graph exists in 0.17")),
-		read("god_nodes", "Central graph nodes", "Report the most connected nodes. Refused in 0.17: no graph index.", refuse("god_nodes", "no knowledge graph exists in 0.17")),
+	nodeSchema := base(map[string]any{
+		"symbol": stringProp("Symbol name."), "file": stringProp("File path."),
+		"limit": intProp("Row limit.", 0), "includeCode": boolProp("Include the body."),
+		"offset": intProp("Line offset.", 0), "symbolsOnly": boolProp("Symbols only."),
+		"line": intProp("Line anchor.", 0),
+	})
+	neighborsSchema := base(map[string]any{
+		"symbol": stringProp("Symbol name."), "file": stringProp("File path."),
+		"limit": intProp("Row limit.", 0),
+	})
+	impactSchema := base(map[string]any{
+		"symbol": stringProp("Symbol name."), "file": stringProp("File path."),
+		"depth": intProp("Traversal depth.", 0),
+	})
+	statusSchema := base(nil)
+	filesSchema := base(map[string]any{
+		"path": stringProp("Path prefix."), "pattern": stringProp("Glob pattern."),
+		"format": stringProp("tree, flat or grouped."), "includeMetadata": boolProp("Include file metadata."),
+	})
+	return []aliasSpec{
 		{
-			Name:        "graph_stats",
-			Description: "Report graph size. 0.17 has no knowledge graph, so indexed is false and every count is zero; the reason says so.",
-			Annotations: readOnlyAnnotations("Graph statistics"), InputSchema: querySchema,
-			OutputSchema: outputObject(map[string]any{
-				"indexed": boolProp("Whether a graph index exists."), "engine": stringProp("Graph engine."),
-				"nodes": intProp("Node count.", 0), "edges": intProp("Edge count.", 0),
-				"communities": intProp("Community count.", 0),
-				"hint":        stringProp("How to build the graph."), "reason": stringProp("Why it is not indexed."),
-			}, "indexed", "engine", "nodes", "edges", "communities"),
-			Stub: true, Note: "knowledge graph lands in 0.18",
-			run: func(context.Context, json.RawMessage) (toolResult, error) {
-				structured := map[string]any{
-					"indexed": false, "engine": "graphify", "nodes": 0, "edges": 0, "communities": 0,
-					"hint": "run brain graphs index", "reason": "no knowledge graph in 0.17",
-				}
-				return toolResult{Text: "graphify: not indexed (no knowledge graph in 0.17)", Structured: structured}, nil
+			AliasSpec: AliasSpec{Legacy: "codegraph_explore", Target: "brain_code", Action: "explore", Grade: GradeEnvelope,
+				Unsupported: []string{"kind"}, Note: "returns the explore view: source under a byte budget, flow and blast radius"},
+			Title: "Explore code", Description: "Explore the symbols that answer a query, their source, the flow and the blast radius. Calls brain_code(action=explore).",
+			Kind: "read", InputSchema: exploreSchema,
+			translate: func(a aliasArgs) (nativeArgs, error) {
+				return translateGraphCall("explore", a, []string{"query"}, []string{"maxFiles:limit"})
 			},
 		},
-		read("list_prs", "List pull requests", "List pull requests. Refused permanently: connector PR dumps are not a graph.", refuse("list_prs", "pull requests are not part of this graph")),
-		read("get_pr_impact", "Pull request impact", "Report the impact of a pull request. Refused permanently: connector PR dumps are not a graph.", refuse("get_pr_impact", "pull requests are not part of this graph")),
-		read("triage_prs", "Triage pull requests", "Triage pull requests. Refused permanently: connector PR dumps are not a graph.", refuse("triage_prs", "pull requests are not part of this graph")),
+		{
+			AliasSpec: AliasSpec{Legacy: "codegraph_search", Target: "brain_code", Action: "search", Grade: GradeEnvelope,
+				Unsupported: []string{"kind"}, Note: "returns ranked symbol hits; the codegraph kind filter is not applied"},
+			Title: "Search code", Description: "Find symbols by name. Calls brain_code(action=search).",
+			Kind: "read", InputSchema: searchSchema,
+			translate: func(a aliasArgs) (nativeArgs, error) {
+				return translateGraphCall("search", a, []string{"query", "file"}, []string{"limit:limit"})
+			},
+		},
+		{
+			AliasSpec: AliasSpec{Legacy: "codegraph_node", Target: "brain_code", Action: "node", Grade: GradeEnvelope,
+				Unsupported: []string{"includeCode", "offset", "symbolsOnly", "line"}, Note: "returns the symbol with its source and both neighbour lists"},
+			Title: "Read a code node", Description: "Read one symbol with its source and neighbours. Calls brain_code(action=node).",
+			Kind: "read", InputSchema: nodeSchema,
+			translate: func(a aliasArgs) (nativeArgs, error) {
+				return translateGraphCall("node", a, []string{"symbol", "file"}, []string{"limit:limit"})
+			},
+		},
+		{
+			AliasSpec: AliasSpec{Legacy: "codegraph_callers", Target: "brain_code", Action: "node", Grade: GradeApproximate,
+				Note: "returns the callers under node.callers; the callee list is included too, because node answers both directions"},
+			Title: "List callers", Description: "List the direct callers of a symbol. Calls brain_code(action=node) and projects its callers.",
+			Kind: "read", InputSchema: neighborsSchema, ReadActions: []string{"callers"},
+			translate: func(a aliasArgs) (nativeArgs, error) {
+				return translateGraphCall("node", a, []string{"symbol", "file"}, []string{"limit:limit"})
+			},
+			augment: projectNeighbors("callers"),
+		},
+		{
+			AliasSpec: AliasSpec{Legacy: "codegraph_callees", Target: "brain_code", Action: "node", Grade: GradeApproximate,
+				Note: "returns the callees under node.callees; the caller list is included too, because node answers both directions"},
+			Title: "List callees", Description: "List the direct callees of a symbol. Calls brain_code(action=node) and projects its callees.",
+			Kind: "read", InputSchema: neighborsSchema, ReadActions: []string{"callees"},
+			translate: func(a aliasArgs) (nativeArgs, error) {
+				return translateGraphCall("node", a, []string{"symbol", "file"}, []string{"limit:limit"})
+			},
+			augment: projectNeighbors("callees"),
+		},
+		{
+			AliasSpec: AliasSpec{Legacy: "codegraph_impact", Target: "brain_code", Action: "impact", Grade: GradeEnvelope,
+				Note: "returns the reverse blast radius with the test files it reaches"},
+			Title: "Report impact", Description: "Report what a change to one symbol can reach. Calls brain_code(action=impact).",
+			Kind: "read", InputSchema: impactSchema,
+			translate: func(a aliasArgs) (nativeArgs, error) {
+				return translateGraphCall("impact", a, []string{"symbol", "file"}, []string{"depth:depth"})
+			},
+		},
+		{
+			AliasSpec: AliasSpec{Legacy: "codegraph_status", Target: "brain_code", Action: "status", Grade: GradeEnvelope,
+				Note: "returns the index identity, counts and age; indexed is true only when the engine answered"},
+			Title: "Code index status", Description: "Report whether a code graph is indexed, with its counts and age. Calls brain_code(action=status).",
+			Kind: "read", InputSchema: statusSchema,
+			translate: func(a aliasArgs) (nativeArgs, error) {
+				return translateGraphCall("status", a, nil, nil)
+			},
+			augment: func(out toolResult) toolResult { return statusLegacyFields(out, "codegraph") },
+		},
+		{
+			AliasSpec: AliasSpec{Legacy: "codegraph_files", Target: "brain_code", Action: "status", Grade: GradeApproximate,
+				Unsupported: []string{"path", "pattern", "format", "includeMetadata"},
+				Note:        "returns the indexed file count and the index path; a per-file tree is not served by this engine, so no empty list is returned"},
+			Title: "Code index files", Description: "Report how many files the code index holds. Calls brain_code(action=status); the per-file tree is not served.",
+			Kind: "read", InputSchema: filesSchema,
+			translate: func(a aliasArgs) (nativeArgs, error) {
+				return translateGraphCall("status", a, nil, nil)
+			},
+			augment: func(out toolResult) toolResult { return filesLegacyFields(out) },
+		},
 	}
 }
 
-// stubSchema accepts the usual code-graph arguments and ignores them. A stub
-// must reach its refusal, not fail on an unknown field.
-func stubSchema(properties map[string]any) map[string]any {
-	schema := objectSchema(nil, properties)
-	schema["additionalProperties"] = true
-	return schema
+// graphifyAliasSpecs is the 10-name graphify vocabulary. The three PR tools are
+// permanently D: this server stores no pull-request graph.
+func graphifyAliasSpecs() []aliasSpec {
+	project := stringProp("Checkout path the graph belongs to.")
+	base := func(extra map[string]any) map[string]any {
+		properties := map[string]any{"projectPath": project, "project": project}
+		for key, value := range extra {
+			properties[key] = value
+		}
+		return legacySchema(nil, properties)
+	}
+	querySchema := base(map[string]any{
+		"question": stringProp("Graph question."), "label": stringProp("Node label."),
+		"node_id": stringProp("Node id."), "symbol": stringProp("Symbol name."),
+		"mode": stringProp("bfs or dfs."), "depth": intProp("Traversal depth.", 0),
+		"token_budget": intProp("Answer budget in tokens.", 0), "context_filter": stringArrayProp("Edge contexts to keep."),
+		"limit": intProp("Row limit.", 0),
+	})
+	nodeSchema := base(map[string]any{
+		"label": stringProp("Node label."), "node_id": stringProp("Node id."),
+		"symbol": stringProp("Symbol name."), "limit": intProp("Row limit.", 0),
+	})
+	neighborsSchema := base(map[string]any{
+		"label": stringProp("Node label."), "node_id": stringProp("Node id."),
+		"symbol": stringProp("Symbol name."), "limit": intProp("Row limit.", 0),
+		"relation_filter": stringArrayProp("Relations to keep."), "token_budget": intProp("Answer budget in tokens.", 0),
+	})
+	statsSchema := base(nil)
+	path := base(map[string]any{
+		"source": stringProp("Start node."), "target": stringProp("End node."),
+		"max_hops": intProp("Hop limit.", 0), "undirected": boolProp("Ignore edge direction."),
+	})
+	community := base(map[string]any{"community_id": intProp("Community id.", 0)})
+	god := base(map[string]any{
+		"top_n": intProp("How many nodes.", 0), "exclude_hubs_percentile": intProp("Hub percentile to drop.", 0),
+	})
+	pr := base(map[string]any{
+		"pr_number": intProp("Pull request number.", 0), "repo": stringProp("Repository."), "base": stringProp("Base branch."),
+	})
+	return []aliasSpec{
+		{
+			AliasSpec: AliasSpec{Legacy: "query_graph", Target: "brain_code", Action: "search", Grade: GradeApproximate,
+				Unsupported: []string{"mode", "depth", "token_budget", "context_filter"},
+				Note:        "returns ranked symbol hits for the question, not a rendered subgraph; traversal and budget arguments are dropped"},
+			Title: "Query the knowledge graph", Description: "Find the symbols a question names. Calls brain_code(action=search).",
+			Kind: "read", InputSchema: querySchema,
+			translate: func(a aliasArgs) (nativeArgs, error) {
+				native, err := translateGraphCall("search", a, []string{"question:query", "label:symbol", "node_id:symbol", "symbol:symbol"}, []string{"limit:limit"})
+				if err != nil {
+					return nil, err
+				}
+				return native, nil
+			},
+		},
+		{
+			AliasSpec: AliasSpec{Legacy: "get_node", Target: "brain_code", Action: "node", Grade: GradeEnvelope,
+				Note: "returns the symbol, its source and its direct neighbours"},
+			Title: "Read a graph node", Description: "Read one symbol. Calls brain_code(action=node).",
+			Kind: "read", InputSchema: nodeSchema,
+			translate: func(a aliasArgs) (nativeArgs, error) {
+				return translateGraphCall("node", a, []string{"label:symbol", "node_id:symbol", "symbol:symbol"}, []string{"limit:limit"})
+			},
+		},
+		{
+			AliasSpec: AliasSpec{Legacy: "get_neighbors", Target: "brain_graph", Action: "neighbors", Grade: GradeApproximate,
+				Unsupported: []string{"relation_filter", "token_budget"},
+				Note:        "returns callers and callees with their edge kind; the relation filter and token budget are dropped"},
+			Title: "List graph neighbours", Description: "List the direct neighbours of one symbol. Calls brain_graph(action=neighbors).",
+			Kind: "read", InputSchema: neighborsSchema,
+			translate: func(a aliasArgs) (nativeArgs, error) {
+				return translateGraphCall("neighbors", a, []string{"label:symbol", "node_id:symbol", "symbol:symbol"}, []string{"limit:limit"})
+			},
+		},
+		{
+			AliasSpec: AliasSpec{Legacy: "graph_stats", Target: "brain_graph", Action: "stats", Grade: GradeEnvelope,
+				Note: "returns the symbol-graph identity and counts; community data is not available"},
+			Title: "Graph statistics", Description: "Report the graph size and age. Calls brain_graph(action=stats).",
+			Kind: "read", InputSchema: statsSchema,
+			translate: func(a aliasArgs) (nativeArgs, error) {
+				return translateGraphCall("stats", a, nil, nil)
+			},
+			augment: func(out toolResult) toolResult { return statsLegacyFields(out) },
+		},
+		{
+			AliasSpec: AliasSpec{Legacy: "shortest_path", Target: "brain_graph", Action: "path", Grade: GradeUnsupported,
+				Reason:      "path search over the symbol graph is not implemented; brain_graph(path) answers UNSUPPORTED",
+				Remediation: graphUnsupported["path"].Remediation},
+			Title: "Shortest path", Description: "Find a path between two symbols. UNSUPPORTED in this release.",
+			Kind: "read", InputSchema: path,
+		},
+		{
+			AliasSpec: AliasSpec{Legacy: "get_community", Target: "brain_graph", Action: "communities", Grade: GradeUnsupported,
+				Reason:      "community detection is not implemented; no community is invented",
+				Remediation: graphUnsupported["communities"].Remediation},
+			Title: "Read a graph community", Description: "Read one community. UNSUPPORTED in this release.",
+			Kind: "read", InputSchema: community,
+		},
+		{
+			AliasSpec: AliasSpec{Legacy: "god_nodes", Target: "brain_graph", Action: "god_nodes", Grade: GradeUnsupported,
+				Reason:      "degree ranking is not implemented; a list built from record links would not be a code graph",
+				Remediation: graphUnsupported["god_nodes"].Remediation},
+			Title: "Central graph nodes", Description: "Report the most connected symbols. UNSUPPORTED in this release.",
+			Kind: "read", InputSchema: god,
+		},
+		{
+			AliasSpec: AliasSpec{Legacy: "list_prs", Grade: GradeUnsupported, Deprecated: false,
+				Reason:      "this server fetches and stores no pull-request data",
+				Remediation: "brain_code(action=impact) for the blast radius of a change, or gh pr list in the checkout"},
+			Title: "List pull requests", Description: "List pull requests. UNSUPPORTED permanently: no PR data is stored.",
+			Kind: "read", InputSchema: pr,
+		},
+		{
+			AliasSpec: AliasSpec{Legacy: "get_pr_impact", Target: "brain_graph", Action: "pr_impact", Grade: GradeUnsupported,
+				Reason:      graphUnsupported["pr_impact"].Reason,
+				Remediation: graphUnsupported["pr_impact"].Remediation},
+			Title: "Pull request impact", Description: "Report the impact of a pull request. UNSUPPORTED permanently: no PR data is stored.",
+			Kind: "read", InputSchema: pr,
+		},
+		{
+			AliasSpec: AliasSpec{Legacy: "triage_prs", Grade: GradeUnsupported,
+				Reason:      "this server fetches and stores no pull-request data",
+				Remediation: "brain_code(action=impact) for the blast radius of a change, or gh pr list in the checkout"},
+			Title: "Triage pull requests", Description: "Triage pull requests. UNSUPPORTED permanently: no PR data is stored.",
+			Kind: "read", InputSchema: pr,
+		},
+	}
 }
 
-// Aliases returns the public alias table of a profile. The native profile and
-// the two code-graph placeholders have no A-D aliases.
+// translateGraphCall builds one brain_code or brain_graph call from a legacy
+// argument object. texts are same-name fields; numbers are "legacy:native"
+// pairs and may rename a field, which explore and impact need.
+func translateGraphCall(action string, a aliasArgs, texts, numbers []string) (nativeArgs, error) {
+	native := newNativeArgs()
+	native.set("action", action)
+	setProjectFromAlias(native, a)
+	for _, pair := range texts {
+		legacy, target, renamed := strings.Cut(pair, ":")
+		if !renamed {
+			target = legacy
+		}
+		if value, ok, err := a.text(legacy); err != nil {
+			return nil, err
+		} else if ok && strings.TrimSpace(value) != "" {
+			native.set(target, strings.TrimSpace(value))
+		}
+	}
+	for _, pair := range numbers {
+		legacy, target, renamed := strings.Cut(pair, ":")
+		if !renamed {
+			target = legacy
+		}
+		if value, ok, err := a.integer(legacy); err != nil {
+			return nil, err
+		} else if ok {
+			native.set(target, value)
+		}
+	}
+	return native, nil
+}
+
+// projectNeighbors projects one direction of a NodeView under its legacy name,
+// so a codegraph caller reads callers or callees without parsing the node.
+func projectNeighbors(side string) func(toolResult) toolResult {
+	return func(out toolResult) toolResult {
+		data, err := json.Marshal(out.Structured)
+		if err != nil {
+			return out
+		}
+		var payload struct {
+			Node ports.NodeView `json:"node"`
+		}
+		if err := json.Unmarshal(data, &payload); err != nil {
+			return out
+		}
+		neighbors := payload.Node.Callers
+		if side == "callees" {
+			neighbors = payload.Node.Callees
+		}
+		if neighbors == nil {
+			neighbors = []ports.GraphNeighbor{}
+		}
+		return addStructuredFields(out, map[string]any{side: neighbors, "symbol": payload.Node.Symbol})
+	}
+}
+
+// statusLegacyFields adds the fields a codegraph_status caller reads next to the
+// native status envelope.
+func statusLegacyFields(out toolResult, engine string) toolResult {
+	data, err := json.Marshal(out.Structured)
+	if err != nil {
+		return out
+	}
+	var payload struct {
+		Status ports.GraphStatus `json:"status"`
+	}
+	if err := json.Unmarshal(data, &payload); err != nil {
+		return out
+	}
+	return addStructuredFields(out, map[string]any{
+		"indexed": true, "engine": engine, "files": payload.Status.Files,
+		"nodes": payload.Status.Nodes, "edges": payload.Status.Edges,
+		"db_path": payload.Status.DBPath, "indexed_at": payload.Status.IndexedAt,
+	})
+}
+
+// filesLegacyFields answers codegraph_files from the status without inventing a
+// file tree: the count and the index path are facts, an empty list is not.
+func filesLegacyFields(out toolResult) toolResult {
+	data, err := json.Marshal(out.Structured)
+	if err != nil {
+		return out
+	}
+	var payload struct {
+		Status ports.GraphStatus `json:"status"`
+	}
+	if err := json.Unmarshal(data, &payload); err != nil {
+		return out
+	}
+	out = addStructuredFields(out, map[string]any{
+		"indexed": true, "engine": "codegraph", "file_count": payload.Status.Files,
+		"db_path": payload.Status.DBPath,
+		"note":    "the engine serves counts, not a per-file tree; no empty list is returned",
+	})
+	out.Text = out.Text + "\nfile_count: " + strconv.Itoa(payload.Status.Files) + "\nnote: the per-file tree is not served"
+	return out
+}
+
+// statsLegacyFields adds the graphify graph_stats fields that the symbol graph
+// can answer. Community data is not invented and is reported as unavailable.
+func statsLegacyFields(out toolResult) toolResult {
+	data, err := json.Marshal(out.Structured)
+	if err != nil {
+		return out
+	}
+	var payload struct {
+		Stats ports.GraphStatus `json:"stats"`
+	}
+	if err := json.Unmarshal(data, &payload); err != nil {
+		return out
+	}
+	return addStructuredFields(out, map[string]any{
+		"indexed": true, "engine": "graphify", "nodes": payload.Stats.Nodes,
+		"edges": payload.Stats.Edges, "communities_available": false,
+	})
+}
+
+// Aliases returns the public alias table of a profile. The native profile has
+// no A-D aliases; the four migration vocabularies publish their mapping.
 func Aliases(profile Profile) []AliasSpec {
 	var specs []aliasSpec
 	switch profile.Name {
@@ -2275,6 +2507,10 @@ func Aliases(profile Profile) []AliasSpec {
 		specs = legacyAliasSpecs()
 	case ProfileEngram:
 		specs = engramAliasSpecs()
+	case ProfileCodegraph:
+		specs = codegraphAliasSpecs()
+	case ProfileGraphify:
+		specs = graphifyAliasSpecs()
 	default:
 		return nil
 	}
@@ -2332,32 +2568,36 @@ func engramGaps() []CapabilityGap {
 
 func codegraphGaps() []CapabilityGap {
 	gaps := make([]CapabilityGap, 0, 8)
-	for _, tool := range codegraphStubTools() {
-		reason := "UNSUPPORTED: no code index in 0.17"
-		remediation := "brain_search (memory) or brain graphs (checkout)"
-		switch tool.Name {
-		case "codegraph_status", "codegraph_files":
-			reason = "honest stub: no code index in 0.17"
-			remediation = "run brain code index (0.18)"
+	for _, spec := range codegraphAliasSpecs() {
+		switch spec.Grade {
+		case GradeApproximate:
+			gaps = append(gaps, CapabilityGap{
+				Tool: spec.Legacy, Grade: spec.Grade, Reason: spec.Note,
+				Remediation: spec.Target + "(action=" + spec.Action + ") without --strict",
+			})
+		case GradeUnsupported:
+			gaps = append(gaps, CapabilityGap{
+				Tool: spec.Legacy, Grade: spec.Grade, Reason: spec.Reason, Remediation: spec.Remediation,
+			})
 		}
-		gaps = append(gaps, CapabilityGap{Tool: tool.Name, Grade: GradeStub, Reason: reason, Remediation: remediation})
 	}
 	return gaps
 }
 
 func graphifyGaps() []CapabilityGap {
 	gaps := make([]CapabilityGap, 0, 10)
-	for _, tool := range graphifyStubTools() {
-		reason := "UNSUPPORTED: no knowledge graph in 0.17"
-		remediation := "brain graphs (checkout) or brain_search (memory)"
-		switch tool.Name {
-		case "graph_stats":
-			reason = "honest stub: no knowledge graph in 0.17"
-			remediation = "run brain graphs index (0.18)"
-		case "list_prs", "get_pr_impact", "triage_prs":
-			reason = "UNSUPPORTED permanently: connector PR dumps are not a graph"
+	for _, spec := range graphifyAliasSpecs() {
+		switch spec.Grade {
+		case GradeApproximate:
+			gaps = append(gaps, CapabilityGap{
+				Tool: spec.Legacy, Grade: spec.Grade, Reason: spec.Note,
+				Remediation: spec.Target + "(action=" + spec.Action + ") without --strict",
+			})
+		case GradeUnsupported:
+			gaps = append(gaps, CapabilityGap{
+				Tool: spec.Legacy, Grade: spec.Grade, Reason: spec.Reason, Remediation: spec.Remediation,
+			})
 		}
-		gaps = append(gaps, CapabilityGap{Tool: tool.Name, Grade: GradeStub, Reason: reason, Remediation: remediation})
 	}
 	return gaps
 }

@@ -6,10 +6,11 @@ handshake clients both work: **`2026-07-28`** (stateless, per-request metadata)
 and **`2025-06-18`** (handshake). This page is the contract for hosts, for
 `skills` and for anyone pinning our tool definitions.
 
-The default profile is `lv24`: **15 tools** plus the read-only `memory://`
-resources. Migration profiles (`lv24-legacy`, `engram`), the code-graph
-placeholders (`codegraph`, `graphify`) and the resources are described in
-§10–§14. Stdout carries protocol messages only; diagnostics go to stderr.
+The default profile is `lv24`: **17 tools** plus the read-only `memory://`
+resources and the `code://` symbol resource. Migration profiles (`lv24-legacy`,
+`engram`), the code-graph vocabularies (`codegraph`, `graphify`) and the
+resources are described in §10–§14. Stdout carries protocol messages only;
+diagnostics go to stderr.
 
 ## 1. Revisions
 
@@ -64,7 +65,7 @@ a client that does not know the key ignores it.
 3600000 for discovery). `server/discover` is `cacheScope: "public"`: every
 profile advertises the same revisions and capabilities. `tools/list` is
 `public` for a writable server and `private` under `--read-only`, because a
-read-only profile lists eight tools where a writable one lists fifteen (§9).
+read-only profile lists ten tools where a writable one lists seventeen (§9).
 Tool results are never cached: each reflects current state. `resources/list`
 carries `ttlMs` 30000 and `resources/read` carries a per-resource TTL, always
 with `cacheScope: "private"` because the allowlist is part of the answer (§14).
@@ -148,16 +149,21 @@ CLI `try_instead`, never a silent no-op. The gaps are:
 | `brain_projects` | `merge` | `brain project set <id> --alias <old-id>` or `brain import --map-project` |
 | `brain_judge` | `pin`, `unpin` | `brain note "<why this record matters>"` (pinning lands in 0.18) |
 | `brain_judge` | `consolidate` | `brain record supersede <old-id> --by <new-id>` |
+| `brain_graph` | `path` | `brain_code(action=impact)`; `brain code explore` for the flow |
+| `brain_graph` | `communities`, `god_nodes` | `brain_code(action=search)` now; the analytics slice later |
+| `brain_graph` | `pr_impact` | `brain_code(action=impact)`; no PR data is stored |
 
 `brain_capabilities` returns the same list, so a host can discover a gap
 without calling it. A migration profile adds its own gaps to the payload: every
 grade-C alias names the approximation and every grade-D alias names the CLI
 path that can do the work (§12).
 
-## 6. The 15 tools
+## 6. The 17 tools
 
 Each tool has one intent; a write action never hides inside a tool annotated
-read-only. `action` defaults to the historical read behaviour.
+read-only. `action` defaults to the historical read behaviour. `brain_code` is
+the one mixed tool: five read actions and two idempotent local index writes, so
+its `readOnlyHint` is false while `x-lv24-read-actions` names the reads.
 
 | Tool | Policy | Actions | Intent |
 |---|---|---|---|
@@ -175,14 +181,75 @@ read-only. `action` defaults to the historical read behaviour.
 | `brain_judge` | destructive | `judge` (default), `list`, `judge_many`, `compare`, `review`, `accept`, `reject`, `supersede`, `pin`, `unpin`, `consolidate` | change the status of existing knowledge |
 | `brain_projects` | read | `list` (default), `current`, `register`, `merge` | project registry; `current` reports the resolution source |
 | `brain_prompt` | destructive | `save`, `search`, `discard` | opt-in local-only prompt zone |
+| `brain_code` | mixed | `status` (default), `search`, `node`, `explore`, `impact`, `index`, `sync` | query or index one checkout's code graph |
+| `brain_graph` | read | `stats` (default), `neighbors`, `path`, `communities`, `god_nodes`, `pr_impact` | symbol-graph counts and neighbours; the analytics actions refuse |
 | `brain_capabilities` | read | – | profile, engine, tools, features, limits, gaps, refusal codes, endpoints |
 
-The write postures are exact: **8 read, 4 append-only, 3 destructive**
-(`brain_state`, `brain_judge`, `brain_prompt`). `brain_projects` is read-only:
-`register` is gated by the write scope and `merge` is refused; on a read-only
-server every write action of a mixed tool is refused before the backend.
-`x-lv24-read-actions` names the actions of a mixed tool that never mutate, so a
-host does not have to infer it from the four hints.
+The write postures are exact: **9 read, 5 non-destructive writes, 3
+destructive** (`brain_state`, `brain_judge`, `brain_prompt`). `brain_projects`
+is read-only: `register` is gated by the write scope and `merge` is refused; on
+a read-only server every write action of a mixed tool is refused before the
+backend. `x-lv24-read-actions` and `x-lv24-write-actions` name the actions of a
+mixed tool, so a host does not have to infer them from the four hints.
+
+### 6.1 `brain_code`
+
+`brain_code` answers from `ports.GraphIndex`: the native Go index or an
+external codegraph index, chosen by `graph.engine` or the per-call `engine`.
+
+| Action | Required | Reads | Answer |
+|---|---|---|---|
+| `status` (default) | `project` | index identity | engine, root, schema, counts, age, notes |
+| `search` | `query` | symbols | exact-first hits with kind, location and match tier |
+| `node` | `symbol` | symbol + source + edges | declaration, numbered source, callers, callees |
+| `explore` | `query` | symbols + source | ranked symbols, rendered files, flow, blast radius |
+| `impact` | `symbol` | reverse edges | hits by distance, files and test files |
+| `index` | `project` | native writer | full/incremental index; `changed` |
+| `sync` | `project` | native writer | refresh changed files; `changed` |
+
+Inputs: `project` (required — a graph belongs to one checkout), `query`,
+`symbol`, `file`, `engine` (`native`/`codegraph`), `depth` 1–10 (default 2),
+`limit` (hits ≤100, neighbours ≤100, explore files ≤24), `max_bytes` ≤24576.
+The action answers are enveloped as `{action, project, status|sync|search|node|
+explore|impact}`, and the inner object mirrors the port DTO.
+
+`index` and `sync` are `idempotent`, `destructive:false` and local: they write a
+derived index, never the Markdown truth, and a read-only server lists
+`brain_code` for its reads while refusing both actions with `UNSUPPORTED`
+before the backend runs.
+
+Typed refusals, never empty answers:
+
+| Condition | Code | `try_instead` |
+|---|---|---|
+| `graph.engine: off` | `UNSUPPORTED` | set `graph.engine: native`, pass `engine=codegraph`, or `brain code status` |
+| no checkout or no index file | `UNSUPPORTED` | `brain code index --project <id>` or `codegraph index` |
+| index empty or written by another schema | `UNSUPPORTED` | rebuild with `brain code index --project <id>` |
+| `index`/`sync` on the codegraph engine | `UNSUPPORTED` | `codegraph index` in the checkout, or switch to native |
+| answer above `max_bytes` | `UNSUPPORTED` | raise `max_bytes` (≤24576) or lower `limit` |
+
+### 6.2 `brain_graph`
+
+`brain_graph` exposes the graph as a graph rather than as a symbol reader.
+
+| Action | State | Answer |
+|---|---|---|
+| `stats` (default) | served | the same index envelope as `brain_code(status)`; no community count is invented |
+| `neighbors` | served | one symbol with both edge directions, no source |
+| `path` | `UNSUPPORTED` | traversal is the analytics slice; use `brain_code(action=impact)` |
+| `communities` | `UNSUPPORTED` | community detection is not implemented |
+| `god_nodes` | `UNSUPPORTED` | degree ranking is not implemented |
+| `pr_impact` | `UNSUPPORTED` | no pull-request data is fetched or stored |
+
+The four unsupported actions are listed in `brain_capabilities.gaps`, so a host
+can see them without a call. None of them returns an empty collection, a zero
+count or a ranking derived from memory links.
+
+Inputs: `project` (required), `symbol`, `file`, `engine` (`native`/`codegraph`,
+default `graph.engine`), `limit` (neighbours per side, ≤100) and — accepted for
+the refused `path` action — `source`/`target`. Answers are enveloped as
+`{action, project, stats|neighbors}`.
+
 
 ## 7. Pagination
 
@@ -213,27 +280,30 @@ and a timeline has at most five neighbours per side.
 ## 8. Tool annotations
 
 Every tool in `tools/list` carries `title`, `annotations`, `outputSchema`, and
-`x-lv24-read-actions` when it mixes read and write actions. The four hints are
-always present (MCP defaults would otherwise apply):
+`x-lv24-read-actions`/`x-lv24-write-actions` when it mixes read and write
+actions. The four hints are always present (MCP defaults would otherwise apply):
 
 | Group | Tools | readOnly | destructive | idempotent | openWorld |
 |---|---|---|---|---|---|
-| Read | `brain_open`, `brain_context`, `brain_search`, `brain_record`, `brain_catchup`, `brain_review`, `brain_projects`, `brain_capabilities` | true | false | true | false |
+| Read | `brain_open`, `brain_context`, `brain_search`, `brain_record`, `brain_catchup`, `brain_review`, `brain_projects`, `brain_graph`, `brain_capabilities` | true | false | true | false |
 | Append | `brain_note`, `brain_decision`, `brain_attempt`, `brain_handoff` | false | false | false | false |
+| Mixed | `brain_code` | false | false | true | false |
 | Destructive | `brain_state`, `brain_judge` | false | true | true | false |
 | Destructive | `brain_prompt` | false | true | false | false |
 
 `openWorldHint` is false everywhere: no tool reaches the network.
 `idempotentHint` is false for the append tools because a repeated call creates a
 second record — use `brain_record` to check before retrying. `brain_prompt` is
-not idempotent because `save` appends and `discard` removes. Hosts must still
-treat annotations as untrusted unless they trust this server, and pin the
-definitions they approved.
+not idempotent because `save` appends and `discard` removes. `brain_code` is
+idempotent and non-destructive: `index`/`sync` rewrite a derived local index,
+and repeating them changes nothing. Hosts must still treat annotations as
+untrusted unless they trust this server, and pin the definitions they approved.
 
 A read-only server (`--read-only`, see §9) omits the Append and Destructive rows
-entirely, so `tools/list` differs from a writable server. That is why the tool
-list is `cacheScope: private` for a read-only profile (`public` otherwise): a
-cache must not serve one profile's list to another.
+entirely and keeps `brain_code` for its read actions only, so `tools/list`
+differs from a writable server. That is why the tool list is
+`cacheScope: private` for a read-only profile (`public` otherwise): a cache must
+not serve one profile's list to another.
 
 Agent writes carry `origin: agent`; with `security.quarantine_agent: true` they
 are unreviewed and stay out of `brain_open`/`brain_context` until
@@ -276,10 +346,12 @@ Rules:
   every registered project.
 - `--read-only` removes `brain_note`, `brain_decision`, `brain_attempt`,
   `brain_handoff`, `brain_state`, `brain_judge` and `brain_prompt` from
-  `tools/list`; exactly the eight read tools remain. A call to a omitted tool is
-  refused before the store is touched, and the read action of a writable-only
-  tool (for example `brain_judge(action=list)`) is not served either: use
-  `brain_record(action=relations)`.
+  `tools/list`; the nine read tools and the mixed `brain_code` remain. A call
+  to an omitted tool is refused before the store is touched, and the read action
+  of a writable-only tool (for example `brain_judge(action=list)`) is not served
+  either: use `brain_record(action=relations)`. `brain_code` keeps
+  `status`/`search`/`node`/`explore`/`impact` and refuses `index`/`sync` with
+  `UNSUPPORTED` before the engine is opened.
 
 Refusal shapes (the §5 envelope):
 
@@ -314,20 +386,20 @@ two names for the same intent. `--profile-version` pins the revision
 or version is a startup error with exit code 2, never a silent downgrade.
 
 ```sh
-brain mcp --profile=lv24                     # default: 15 native tools
-brain mcp --profile=lv24-legacy              # bridge: the 15 plus the seven 0.16 names
+brain mcp --profile=lv24                     # default: 17 native tools
+brain mcp --profile=lv24-legacy              # bridge: the 17 plus the seven 0.16 names
 brain mcp --profile=engram [--strict]        # 27 engram names + brain_capabilities
-brain mcp --profile=codegraph                # 8 honest code-index placeholders + capabilities
-brain mcp --profile=graphify                 # 10 honest graph placeholders + capabilities
+brain mcp --profile=codegraph                # 8 codegraph names mapped to brain_code
+brain mcp --profile=graphify                 # 10 graphify names mapped to brain_code/brain_graph
 ```
 
-| Profile | Listed names | Read | Append | Destructive | Aliases | Stubs |
-|---|---:|---:|---:|---:|---|---:|
-| `lv24` (default) | 15 | 8 | 4 | 3 | – | – |
-| `lv24-legacy` (deprecated bridge) | 22 | 12 | 4 | 6 | 7 (A 6, B 1) | – |
-| `engram` | 28 | 12 | 7 | 9 | 27 (A 3, B 15, C 7, D 2) | – |
-| `codegraph` | 9 | 9 | 0 | 0 | – | 8 |
-| `graphify` | 11 | 11 | 0 | 0 | – | 10 |
+| Profile | Listed names | Read | Append | Destructive | Aliases | Grades |
+|---|---:|---:|---:|---:|---|---|
+| `lv24` (default) | 17 | 9 | 5 | 3 | – | – |
+| `lv24-legacy` (deprecated bridge) | 24 | 13 | 5 | 6 | 7 | A 6, B 1 |
+| `engram` | 28 | 12 | 7 | 9 | 27 | A 3, B 15, C 7, D 2 |
+| `codegraph` | 9 | 9 | 0 | 0 | 8 | B 5, C 3 |
+| `graphify` | 11 | 11 | 0 | 0 | 10 | B 2, C 2, D 6 |
 
 `brain_capabilities` is the one native name every migration profile keeps: it
 has no peer alias and is how a host reads the profile's grades and gaps. It is
@@ -341,7 +413,9 @@ counted as a native tool, not as an alias.
 | **B** | Inputs accepted, same facts in a different envelope | Translation; dropped fields echoed in `_meta` |
 | **C** | Accepted but approximate | Succeeds outside `--strict` with `degraded:true` and a note |
 | **D** | Cannot be served | `UNSUPPORTED` + CLI remediation, never a no-op |
-| stub | Code-graph placeholder | Honest `indexed:false` or `UNSUPPORTED`; never fake data |
+
+This release serves no stub: the codegraph and graphify names are real
+translations, and the analytics names without an implementation are D.
 
 `--strict` turns every C into an explicit `UNSUPPORTED` and every dropped
 argument into `INVALID_ARGUMENTS` naming the field; D always refuses, with or
@@ -360,10 +434,10 @@ A successful alias call carries the per-call envelope:
 `degraded:true`, `note` and `deprecated` appear only where they apply. Dropped
 fields are never silently ignored.
 
-## 11. `lv24-legacy` and the 22-name bridge
+## 11. `lv24-legacy` and the 24-name bridge
 
 The bridge exists for clients written against 0.16 and is removed in 0.19. It
-lists the 15 native names plus the seven retired ones; each retired name calls
+lists the 17 native names plus the seven retired ones; each retired name calls
 the native action with no semantic loss.
 
 | 0.16 name | 0.17 call | Translation | Grade |
@@ -376,13 +450,13 @@ the native action with no semantic loss.
 | `brain_review_record` | `brain_judge(action=review)` | `all=true`→`ids:["*"]` | A |
 | `brain_decision_status` | `brain_judge(action=accept\|reject\|supersede)` | `superseded_by`→`to`; `status=proposed` is refused | B |
 
-The exact 22-name list, in `tools/list` order, is: the 15 native names
+The exact 24-name list, in `tools/list` order, is: the 17 native names
 (`brain_open`, `brain_context`, `brain_search`, `brain_record`, `brain_note`,
 `brain_decision`, `brain_attempt`, `brain_handoff`, `brain_state`,
 `brain_catchup`, `brain_review`, `brain_judge`, `brain_projects`,
-`brain_prompt`, `brain_capabilities`) followed by `brain_state_get`,
-`brain_state_set`, `brain_journal`, `brain_records`, `brain_relations`,
-`brain_review_record`, `brain_decision_status`.
+`brain_prompt`, `brain_code`, `brain_graph`, `brain_capabilities`) followed by
+`brain_state_get`, `brain_state_set`, `brain_journal`, `brain_records`,
+`brain_relations`, `brain_review_record`, `brain_decision_status`.
 
 `status=proposed` is the one value the 0.17 lifecycle cannot express: the bridge
 refuses it with `UNSUPPORTED` and points at `brain_decision`, because a
@@ -431,30 +505,56 @@ Translation rules that matter to a client:
   `brain record trash <id>` (reversible) and
   `brain import --from engram --map-project <from>=<to>` respectively.
 
-## 13. `codegraph` and `graphify` profiles (0.17 placeholders, 0.18 real)
+## 13. `codegraph` and `graphify` profiles (mapped to the real graph)
 
-Both profiles let a host switch its config before the code graph lands. They are
-honest: a query never returns an empty collection as if it were an answer, and a
-status never fabricates an index time or count.
+Both profiles keep a peer vocabulary working against the same code graph. Every
+name is an alias with a published grade; there are no placeholders and no stub
+answers. A call without a graph backend (or with `graph.engine: off`) is an
+honest `UNSUPPORTED`, never an empty collection.
 
-| Profile | Names | 0.17 answer |
-|---|---|---|
-| `codegraph` | `codegraph_explore`, `codegraph_search`, `codegraph_node`, `codegraph_callers`, `codegraph_callees`, `codegraph_impact` | `UNSUPPORTED` with `try_instead: brain_search (memory) or brain graphs (checkout)` |
-| `codegraph` | `codegraph_status`, `codegraph_files` | `{indexed:false, engine:"codegraph", hint:"run brain code index", reason:"no code index in 0.17"}`; no timestamps or counts |
-| `graphify` | `query_graph`, `get_node`, `get_neighbors`, `get_community`, `shortest_path`, `god_nodes` | `UNSUPPORTED`; no knowledge graph exists |
-| `graphify` | `graph_stats` | `{indexed:false, engine:"graphify", nodes:0, edges:0, communities:0, reason:…}` |
-| `graphify` | `list_prs`, `get_pr_impact`, `triage_prs` | `UNSUPPORTED` permanently: connector PR dumps are not a graph |
+### 13.1 `codegraph` (8 names)
 
-`brain_code` and `brain_graph` do not exist in 0.17 and are not listed in any
-profile. `code://` resources are reserved and **not advertised** until 0.18;
-reading one returns `UNSUPPORTED` with that reason.
+| Name | Calls | Grade | Notes |
+|---|---|---|---|
+| `codegraph_explore` | `brain_code(action=explore)` | B | `maxFiles`→`limit`; source under the byte budget |
+| `codegraph_search` | `brain_code(action=search)` | B | ranked hits; codegraph's `kind` filter is dropped |
+| `codegraph_node` | `brain_code(action=node)` | B | symbol + source + both neighbour lists |
+| `codegraph_callers` | `brain_code(action=node)` | C | returns `node.callers`; callees are included too |
+| `codegraph_callees` | `brain_code(action=node)` | C | returns `node.callees`; callers are included too |
+| `codegraph_impact` | `brain_code(action=impact)` | B | `depth` 1–10 |
+| `codegraph_status` | `brain_code(action=status)` | B | adds `indexed:true`, `files`, `nodes`, `edges`, `db_path` |
+| `codegraph_files` | `brain_code(action=status)` | C | returns `file_count` and `db_path`; no empty file list is invented |
+
+`projectPath` is a project selector: it must name a registered checkout, the
+same rule as `project`. `includeCode`, `kind`, `offset`, `symbolsOnly`, `line`,
+`path`, `pattern`, `format` and `includeMetadata` are documented as unsupported
+and echoed in `ignored_fields`; `--strict` refuses them.
+
+### 13.2 `graphify` (10 names)
+
+| Name | Calls | Grade | Notes |
+|---|---|---|---|
+| `query_graph` | `brain_code(action=search)` | C | symbol hits for the question, not a rendered subgraph; traversal/budget fields dropped |
+| `get_node` | `brain_code(action=node)` | B | `label` or `node_id` selects the symbol |
+| `get_neighbors` | `brain_graph(action=neighbors)` | C | callers and callees with edge kinds; relation filter dropped |
+| `graph_stats` | `brain_graph(action=stats)` | B | adds `indexed:true`, `nodes`, `edges`; `communities_available:false` |
+| `shortest_path` | `brain_graph(action=path)` | D | path search is the analytics slice |
+| `get_community` | `brain_graph(action=communities)` | D | no community detection |
+| `god_nodes` | `brain_graph(action=god_nodes)` | D | no degree ranking |
+| `get_pr_impact` | `brain_graph(action=pr_impact)` | D | no PR data is stored |
+| `list_prs`, `triage_prs` | – | D | no PR data is stored; `try_instead` names `brain_code(action=impact)` and `gh pr list` |
+
+The D names refuse with a typed `UNSUPPORTED` and a working alternative. Their
+`target`/`action` still record the intended mapping, so a later release can
+serve them without renaming a profile.
 
 ## 14. Resources
 
 Resources are host-controlled context, so they are read-only, project-scoped and
 capped. `resources/list` advertises the concrete state resource of every allowed
 project plus the two aggregate resources; `resources/templates/list` advertises
-the two parameterised forms.
+the two parameterised memory forms and, when the backend can open the graph, the
+`code://` symbol form.
 
 | URI | MIME | Returns | Cap | TTL |
 |---|---|---|---:|---:|
@@ -462,6 +562,7 @@ the two parameterised forms.
 | `memory://project/{id}/state` | `text/markdown` | Curated state as Markdown (`state.md` projection) | 16 KiB | 30 s |
 | `memory://record/{id}` | `text/markdown` | One record with YAML frontmatter, body, links and relations | 1 MiB | 300 s |
 | `memory://review` | `application/json` | Stale-knowledge findings, one project with `?project=`, every allowed project otherwise | 64 KiB | 60 s |
+| `code://{project}/symbol/{id}` | `text/markdown` | One indexed symbol: declaration, numbered source, direct callers and callees | 32 KiB | 30 s |
 
 Rules:
 
@@ -476,9 +577,14 @@ Rules:
 - A body above its cap is cut at a UTF-8 boundary, prefixed with
   `[truncated: showing first N of M bytes]`, and the `_meta` entry
   `lv24.brain/resource` repeats `bytes`, `cap` and `truncated`.
-- `?limit=` is clamped, not rejected. An unknown URI is `NOT_FOUND`; `code://`
-  is `UNSUPPORTED`. Resource errors are JSON-RPC `InvalidParams` with the same
-  five-key refusal envelope in `error.data`.
+- `?limit=` is clamped, not rejected. An unknown URI is `NOT_FOUND`. Resource
+  errors are JSON-RPC `InvalidParams` with the same five-key refusal envelope in
+  `error.data`.
+- `code://` is advertised only by a backend that implements the graph capability
+  and serves `Node`; otherwise the template is not listed and a read is
+  `UNSUPPORTED`. The id is a node id or a symbol name the graph resolves; an
+  unknown id is `NOT_FOUND`. A graph engine that is off, absent or unindexed
+  refuses with the same typed envelope as `brain_code`.
 - Prompts are **never** exposed as resources: the prompt zone is local-only and
   the least governed data in the brain.
 
@@ -488,19 +594,24 @@ Rules:
 brain mcp --list-tools --json                          # profile, policy, tools, aliases, capabilities, digest
 brain mcp --list-tools --profile=engram                # the engram vocabulary with grades
 brain mcp --list-tools --json --profile=engram --strict
-brain mcp --list-tools --json --read-only              # the 8 native tools a read-only server exposes
+brain mcp --list-tools --json --profile=codegraph      # the 8 mapped codegraph names
+brain mcp --list-tools --json --read-only              # the 10 tools a read-only server exposes
 ```
 
 The JSON document keeps the 0.16 keys (`server`, `protocol_versions`, `policy`,
 `tools`, `omitted_tools`) and adds:
 
 - `profile`: `{name, version, strict, native, deprecated?}`.
-- `tools[*].policy`: `read`, `append` or `destructive`.
-- `tools[*].legacy`, `target`, `grade`, `unsupported`, `note`: the alias table
-  as tool metadata; `stub:true` marks a code-graph placeholder.
-- `tools[*].x-lv24-read-actions`: the actions of a mixed tool that never mutate.
-- `aliases`: the legacy-to-native table, including D names whose `target` is
-  empty and whose `remediation` is the CLI path.
+- `tools[*].policy`: `read`, `append` or `destructive`; `brain_code` is an
+  idempotent non-destructive write, classified as `append` for the closed
+  vocabulary while `x-lv24-read-actions`/`x-lv24-write-actions` carry the exact
+  split.
+- `tools[*].legacy`, `target`, `action`, `grade`, `unsupported`, `note`: the
+  alias table as tool metadata.
+- `tools[*].x-lv24-read-actions` and `x-lv24-write-actions`: the actions of a
+  mixed tool that never mutate and the ones that do.
+- `aliases`: the legacy-to-native table for every migration profile, including D
+  names whose remediation is the CLI path.
 - `capabilities`: the same payload `brain_capabilities` returns, including
   `tools.grades` (`A`/`B`/`C`/`D` counts) and `gaps`.
 - `digest`: `sha256:…` over the profile, effective tools, aliases and omitted
@@ -513,7 +624,7 @@ reports the same vocabulary.
 
 ## 16. Migration from 0.16
 
-The default profile lists 15 names instead of 19. Calling a retired name in the
+The default profile lists 17 names instead of 19. Calling a retired name in the
 default profile returns `NOT_FOUND` with the replacement in `try_instead`:
 
 | 0.16 name | 0.17 call |
@@ -538,7 +649,7 @@ A host that has not been updated in the same release can keep the old names
 without touching the data:
 
 ```sh
-brain mcp --profile=lv24-legacy                 # 22 names, all callable
+brain mcp --profile=lv24-legacy                 # 24 names, all callable
 brain mcp --profile=engram                      # a client written against engram
 brain import --from engram --dry-run            # preview an engram migration
 ```
@@ -549,9 +660,10 @@ two minor releases after 0.17.
 
 ## 17. Not implemented, and why
 
-- **`brain_code` and `brain_graph`** do not exist; no code graph or knowledge
-  graph is served. The `codegraph`/`graphify` profiles answer with honest
-  `indexed:false` stubs or `UNSUPPORTED`, never with empty collections.
+- **Graph analytics** — `brain_graph(action=path|communities|god_nodes|
+  pr_impact)` — are refused with `UNSUPPORTED` and a working alternative. The
+  symbol graph (`stats`, `neighbors`) and the symbol reader (`brain_code`) are
+  served; no ranking, community or PR fact is invented before that slice.
 - **Pin, unpin, consolidation and prompt discard** are refused with guidance
   (§5); the underlying app methods land later.
 - **In-place record edit, MCP delete and hard delete** stay CLI-only. The
@@ -559,5 +671,6 @@ two minor releases after 0.17.
   lifecycle is `brain_judge`, and removal is `brain record trash` (reversible).
 - **Prompts as resources** are excluded by design; the local prompt zone is
   available only through `brain_prompt` and is never committed or indexed.
-- **`code://` resources** are reserved for the code graph and not advertised in
-  0.17.
+- **Per-file code listings** are not served: the index answers counts and
+  symbol/edge queries, so `codegraph_files` reports `file_count` instead of a
+  fabricated tree.

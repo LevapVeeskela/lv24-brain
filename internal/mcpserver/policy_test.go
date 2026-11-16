@@ -361,9 +361,15 @@ func TestCatalogForPolicySplitsVisibleAndOmitted(t *testing.T) {
 		}
 	}
 	for _, spec := range visible {
-		if !spec.Annotations.ReadOnlyHint {
-			t.Fatalf("read-only catalogue lists %s", spec.Name)
+		if spec.Annotations.ReadOnlyHint {
+			continue
 		}
+		// A mixed tool stays listed for its read actions; its write actions
+		// are refused at call time (brain_code index/sync).
+		if len(spec.ReadActions) > 0 && len(spec.WriteActions) > 0 && !spec.Annotations.DestructiveHint {
+			continue
+		}
+		t.Fatalf("read-only catalogue lists %s", spec.Name)
 	}
 	visible, omitted = CatalogForPolicy("test", DefaultProfile(), Policy{})
 	if len(omitted) != 0 || len(visible) != len(Catalog("test", DefaultProfile())) {

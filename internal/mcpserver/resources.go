@@ -13,17 +13,21 @@ import (
 	"unicode/utf8"
 
 	"github.com/levapveeskela/lv24-brain/internal/domain"
+	"github.com/levapveeskela/lv24-brain/internal/ports"
 )
 
 // Resource URIs. Resources are host-controlled read-only context: every URI
 // is project-scoped and capped, and every project is checked against the same
-// allowlist as the tools. code:// is reserved for 0.18 and never advertised.
+// allowlist as the tools. code:// serves one indexed symbol and is advertised
+// only by a backend that can open the graph.
 const (
 	ResourceProjectsURI    = "memory://projects"
 	ResourceReviewURI      = "memory://review"
 	ResourceStateTemplate  = "memory://project/{id}/state"
 	ResourceRecordTemplate = "memory://record/{id}"
+	ResourceSymbolTemplate = "code://{project}/symbol/{id}"
 	resourceScheme         = "memory"
+	resourceCodeScheme     = "code"
 )
 
 // Resource cache hints, in milliseconds.
@@ -41,8 +45,10 @@ const (
 	resourceStateMaxBytes    = 16 << 10
 	resourceRecordMaxBytes   = 1 << 20
 	resourceReviewMaxBytes   = 64 << 10
+	resourceSymbolMaxBytes   = 32 << 10
 	resourceMaxProjects      = 64
 	resourceMaxReviewItems   = 50
+	resourceSymbolNeighbors  = 20
 )
 
 // RecordQuarantineBackend is implemented by backends that can say whether a
@@ -141,6 +147,12 @@ func (s *Server) listResourceTemplates(params json.RawMessage) (json.RawMessage,
 			Description: "One record with frontmatter; an explicit id is an explicit request.", MIMEType: "text/markdown",
 		},
 	}
+	if s.servesCodeResource() {
+		templates = append(templates, resourceTemplate{
+			URITemplate: ResourceSymbolTemplate, Name: "code-symbol",
+			Description: "One indexed symbol of a project's code graph, with its source and direct neighbours.", MIMEType: "text/markdown",
+		})
+	}
 	return marshalResult(struct {
 		ResourceTemplates []resourceTemplate `json:"resourceTemplates"`
 		TTLMs             int                `json:"ttlMs"`
@@ -166,10 +178,8 @@ func (s *Server) readResource(ctx context.Context, params json.RawMessage) (json
 	if err != nil {
 		return nil, resourceError(refusalInvalid("resource uri: " + err.Error()))
 	}
-	if parsed.Scheme == "code" {
-		return nil, resourceError(refusalUnsupported(
-			"code:// resources are not advertised in 0.17: no code graph is served",
-			"memory://projects; code resources land in 0.18"))
+	if parsed.Scheme == resourceCodeScheme {
+		return s.readCodeSymbolResource(ctx, parsed.Host, parsed.Path)
 	}
 	if parsed.Scheme != resourceScheme {
 		return nil, resourceError(refusalNotFound("unknown resource scheme "+parsed.Scheme, "memory://projects"))
@@ -189,6 +199,51 @@ func (s *Server) readResource(ctx context.Context, params json.RawMessage) (json
 			"unknown resource "+uri,
 			"memory://projects, memory://project/<id>/state, memory://record/<id>, memory://review"))
 	}
+}
+
+// servesCodeResource reports whether this server can serve code:// at all: the
+// backend must be able to open a graph and answer Node.
+func (s *Server) servesCodeResource() bool {
+	_, ok := s.backend.(GraphBackend)
+	return ok
+}
+
+// readCodeSymbolResource serves code://{project}/symbol/{id} from the code
+// graph: one indexed symbol with its source and direct neighbours, capped and
+// scoped to the same project allowlist as every other resource.
+func (s *Server) readCodeSymbolResource(ctx context.Context, projectID, path string) (json.RawMessage, *rpcError) {
+	projectID = strings.TrimSpace(projectID)
+	if projectID == "" {
+		return nil, resourceError(refusalNotFound("a code resource needs a project", ResourceSymbolTemplate))
+	}
+	backend, ok := s.backend.(GraphBackend)
+	if !ok {
+		return nil, resourceError(refusalUnsupported(
+			"code:// is not available: the configured backend does not serve a code graph",
+			"memory://projects"))
+	}
+	parts := strings.Split(strings.Trim(path, "/"), "/")
+	if len(parts) != 2 || parts[0] != "symbol" || strings.TrimSpace(parts[1]) == "" {
+		return nil, resourceError(refusalNotFound("unknown code resource "+path, ResourceSymbolTemplate))
+	}
+	if err := s.checkResourceProject(ctx, projectID); err != nil {
+		return nil, resourceError(err)
+	}
+	index, err := backend.OpenGraph(ctx, projectID, "")
+	if err != nil {
+		return nil, resourceError(graphFailure(projectID, err))
+	}
+	defer closeGraph(index)
+	view, err := index.Node(ctx, projectID, parts[1], "", ports.NodeOpts{
+		IncludeSource: true, IncludeCallers: true, IncludeCallees: true, Limit: resourceSymbolNeighbors,
+	})
+	if err != nil {
+		return nil, resourceError(graphFailure(projectID, err))
+	}
+	text := renderCodeNode(view)
+	body, truncated := truncateResource(text, resourceSymbolMaxBytes)
+	return resourceResult(resourceCodeScheme+"://"+projectID+"/symbol/"+url.PathEscape(parts[1]),
+		"text/markdown", body, len(text), resourceSymbolMaxBytes, truncated, resourceStateTTLMs)
 }
 
 // readProjectsResource returns the allowed project registry.

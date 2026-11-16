@@ -3,13 +3,17 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"os"
 	"strings"
 	"time"
 
+	"github.com/levapveeskela/lv24-brain/internal/adapters/codeindex"
 	"github.com/levapveeskela/lv24-brain/internal/app"
 	"github.com/levapveeskela/lv24-brain/internal/bootstrap"
+	"github.com/levapveeskela/lv24-brain/internal/config"
 	"github.com/levapveeskela/lv24-brain/internal/domain"
 	"github.com/levapveeskela/lv24-brain/internal/gitinfo"
 	"github.com/levapveeskela/lv24-brain/internal/mcpserver"
@@ -83,7 +87,7 @@ func runMCP(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	if !policy.ReadOnly && !policy.AllowWrite && policy.DefaultProject == "" {
 		fmt.Fprintln(stderr, "brain mcp: no project resolved from the working directory; write tools will refuse until the server is started with --allow-write")
 	}
-	backend := mcpBackend{app: useCase.App, quarantineAgent: cfg.Security.QuarantineAgent, promptsEnabled: cfg.Prompts.Enabled}
+	backend := mcpBackend{app: useCase.App, cfg: cfg, quarantineAgent: cfg.Security.QuarantineAgent, promptsEnabled: cfg.Prompts.Enabled}
 	server := mcpserver.NewWithProfile(backend, version.Version, profile, policy)
 	if err := server.Serve(ctx, stdin, stdout); err != nil {
 		return reportError(stderr, "mcp", err)
@@ -203,6 +207,8 @@ func printMCPTools(stdout, stderr io.Writer, asJSON bool, profile mcpserver.Prof
 		for _, tool := range contract.Tools {
 			suffix := ""
 			switch {
+			case tool.Legacy && tool.Target != "" && tool.Action != "":
+				suffix = " [" + tool.Grade + " -> " + tool.Target + "(" + tool.Action + ")]"
 			case tool.Legacy && tool.Target != "":
 				suffix = " [" + tool.Grade + " -> " + tool.Target + "]"
 			case tool.Legacy:
@@ -254,12 +260,190 @@ func printMCPTools(stdout, stderr io.Writer, asJSON bool, profile mcpserver.Prof
 // selection follows the CLI rules (resolveTarget) and never creates projects.
 type mcpBackend struct {
 	app *app.App
+	// cfg is the loaded instance configuration: the graph tools resolve the
+	// engine, checkout and index path from it exactly as `brain code` does.
+	cfg config.BrainConfig
 	// quarantineAgent makes MCP writes unreviewed (security.quarantine_agent).
 	quarantineAgent bool
 	// promptsEnabled mirrors config.prompts.enabled; the prompt tool refuses
 	// every action while it is false.
 	promptsEnabled bool
 }
+
+// OpenGraph implements mcpserver.GraphBackend: it resolves the engine, checkout
+// and index file of one project the way `brain code` does, then opens the engine
+// read-only. The adapter errors are classified into the graph refusal
+// vocabulary so the tool never reports a bare SQLite message.
+func (b mcpBackend) OpenGraph(ctx context.Context, projectID, engine string) (ports.GraphIndex, error) {
+	return b.openGraph(ctx, projectID, engine, false)
+}
+
+// OpenGraphWriter implements mcpserver.GraphBackend for index and sync. Only the
+// native engine writes; codegraph answers ErrGraphReadOnly.
+func (b mcpBackend) OpenGraphWriter(ctx context.Context, projectID, engine string) (mcpserver.GraphWriter, error) {
+	opened, err := b.openGraph(ctx, projectID, engine, true)
+	if err != nil {
+		return nil, err
+	}
+	writer, ok := opened.(mcpserver.GraphWriter)
+	if !ok {
+		_ = closeGraphIndex(opened)
+		return nil, mcpserver.ErrGraphReadOnly
+	}
+	return writer, nil
+}
+
+// openGraph resolves one project checkout and opens its code graph. A write
+// creates a native store; a read leaves a missing store missing.
+func (b mcpBackend) openGraph(ctx context.Context, projectID, engineOverride string, writable bool) (ports.GraphIndex, error) {
+	engine := strings.ToLower(strings.TrimSpace(engineOverride))
+	if engine == "" {
+		engine = b.cfg.Graph.EffectiveEngine()
+	}
+	switch engine {
+	case ports.GraphEngineOff:
+		return nil, mcpserver.ErrGraphOff
+	case ports.GraphEngineNative:
+	case ports.GraphEngineCodeGraph:
+		if writable {
+			return nil, mcpserver.ErrGraphReadOnly
+		}
+	default:
+		return nil, domain.NewValidationError("graph.engine",
+			fmt.Sprintf("unknown engine %q; use %q or %q", engine, ports.GraphEngineNative, ports.GraphEngineCodeGraph))
+	}
+	resolved, err := resolveTarget(ctx, b.app, projectID, "", io.Discard)
+	if err != nil {
+		return nil, err
+	}
+	root := codeRoot("", resolved)
+	if root == "" {
+		return nil, fmt.Errorf("%w: project %s has no local checkout", mcpserver.ErrGraphAbsent, projectID)
+	}
+	dbPath, err := bootstrap.GraphDBPath(b.cfg, engine, root, projectID, "")
+	if err != nil {
+		return nil, err
+	}
+	if !writable {
+		if _, statErr := os.Stat(dbPath); statErr != nil {
+			return nil, fmt.Errorf("%w: %s", mcpserver.ErrGraphAbsent, dbPath)
+		}
+	}
+	runtime, err := bootstrap.OpenGraph(ctx, bootstrap.GraphOptions{
+		Engine:  engine,
+		Root:    root,
+		Project: projectID,
+		DBPath:  dbPath,
+		Create:  writable,
+	})
+	if err != nil {
+		return nil, graphStoreError(err)
+	}
+	if writable {
+		return &graphStoreWriter{GraphWriter: runtime.Native}, nil
+	}
+	return graphStoreIndex{GraphIndex: runtime.Index}, nil
+}
+
+// closeGraphIndex releases an engine that opened a database handle.
+func closeGraphIndex(index ports.GraphIndex) error {
+	if closer, ok := index.(interface{ Close() error }); ok {
+		return closer.Close()
+	}
+	return nil
+}
+
+// graphStoreError turns the native store conditions into the graph refusals the
+// tools speak; every other error keeps its meaning.
+func graphStoreError(err error) error {
+	switch {
+	case err == nil:
+		return nil
+	case errors.Is(err, codeindex.ErrIndexMissing),
+		errors.Is(err, codeindex.ErrIndexEmpty),
+		errors.Is(err, codeindex.ErrSchemaMismatch):
+		return fmt.Errorf("%w: %v", mcpserver.ErrGraphIndexMissing, err)
+	default:
+		return err
+	}
+}
+
+// graphStoreIndex classifies the read errors of one engine. The codegraph
+// adapter already unwraps its schema error onto domain.ErrUnsupported, which
+// needs no translation, so the same wrapper serves both engines.
+type graphStoreIndex struct{ ports.GraphIndex }
+
+func (g graphStoreIndex) Status(ctx context.Context, project string) (ports.GraphStatus, error) {
+	status, err := g.GraphIndex.Status(ctx, project)
+	return status, graphStoreError(err)
+}
+
+func (g graphStoreIndex) Search(ctx context.Context, query ports.GraphQuery) ([]ports.SymbolHit, error) {
+	hits, err := g.GraphIndex.Search(ctx, query)
+	return hits, graphStoreError(err)
+}
+
+func (g graphStoreIndex) Node(ctx context.Context, project, symbol, file string, opts ports.NodeOpts) (ports.NodeView, error) {
+	view, err := g.GraphIndex.Node(ctx, project, symbol, file, opts)
+	return view, graphStoreError(err)
+}
+
+func (g graphStoreIndex) Explore(ctx context.Context, project, query string, maxFiles int) (ports.ExploreView, error) {
+	view, err := g.GraphIndex.Explore(ctx, project, query, maxFiles)
+	return view, graphStoreError(err)
+}
+
+func (g graphStoreIndex) Impact(ctx context.Context, project, symbol, file string, depth int) (ports.ImpactView, error) {
+	view, err := g.GraphIndex.Impact(ctx, project, symbol, file, depth)
+	return view, graphStoreError(err)
+}
+
+// Close forwards to the engine; the port does not require it but both adapters
+// hold a database handle.
+func (g graphStoreIndex) Close() error { return closeGraphIndex(g.GraphIndex) }
+
+// graphStoreWriter adds the writable half on top of the classified reader.
+type graphStoreWriter struct {
+	mcpserver.GraphWriter
+}
+
+func (g graphStoreWriter) Status(ctx context.Context, project string) (ports.GraphStatus, error) {
+	status, err := g.GraphWriter.Status(ctx, project)
+	return status, graphStoreError(err)
+}
+
+func (g graphStoreWriter) Search(ctx context.Context, query ports.GraphQuery) ([]ports.SymbolHit, error) {
+	hits, err := g.GraphWriter.Search(ctx, query)
+	return hits, graphStoreError(err)
+}
+
+func (g graphStoreWriter) Node(ctx context.Context, project, symbol, file string, opts ports.NodeOpts) (ports.NodeView, error) {
+	view, err := g.GraphWriter.Node(ctx, project, symbol, file, opts)
+	return view, graphStoreError(err)
+}
+
+func (g graphStoreWriter) Explore(ctx context.Context, project, query string, maxFiles int) (ports.ExploreView, error) {
+	view, err := g.GraphWriter.Explore(ctx, project, query, maxFiles)
+	return view, graphStoreError(err)
+}
+
+func (g graphStoreWriter) Impact(ctx context.Context, project, symbol, file string, depth int) (ports.ImpactView, error) {
+	view, err := g.GraphWriter.Impact(ctx, project, symbol, file, depth)
+	return view, graphStoreError(err)
+}
+
+func (g graphStoreWriter) Index(ctx context.Context, project string) (ports.GraphSyncResult, error) {
+	result, err := g.GraphWriter.Index(ctx, project)
+	return result, graphStoreError(err)
+}
+
+func (g graphStoreWriter) Sync(ctx context.Context, project string, paths []string) (ports.GraphSyncResult, error) {
+	result, err := g.GraphWriter.Sync(ctx, project, paths)
+	return result, graphStoreError(err)
+}
+
+// Close forwards to the native store.
+func (g graphStoreWriter) Close() error { return closeGraphIndex(g.GraphWriter) }
 
 // writeProvenance is the provenance of every record an agent writes through
 // MCP. Agent writes are reviewed immediately unless the instance asks to

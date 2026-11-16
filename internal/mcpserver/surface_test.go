@@ -97,7 +97,8 @@ func newSurfaceFake() *surfaceFake {
 var nativeToolNames = []string{
 	"brain_open", "brain_context", "brain_search", "brain_record", "brain_note",
 	"brain_decision", "brain_attempt", "brain_handoff", "brain_state", "brain_catchup",
-	"brain_review", "brain_judge", "brain_projects", "brain_prompt", "brain_capabilities",
+	"brain_review", "brain_judge", "brain_projects", "brain_prompt", "brain_code",
+	"brain_graph", "brain_capabilities",
 }
 
 var retiredToolNames = []string{
@@ -105,7 +106,7 @@ var retiredToolNames = []string{
 	"brain_relations", "brain_review_record", "brain_decision_status",
 }
 
-func TestSurfaceListsExactlyFifteenTools(t *testing.T) {
+func TestSurfaceListsTheNativeTools(t *testing.T) {
 	result := listToolsWith(t, newSurfaceFake())
 	tools := result["tools"].([]any)
 	if len(tools) != len(nativeToolNames) {
@@ -358,15 +359,16 @@ func TestSurfaceHistoryWithoutBackendIsTyped(t *testing.T) {
 	}
 }
 
-func TestSurfaceReadOnlyListsEightAndRefusesWrites(t *testing.T) {
+func TestSurfaceReadOnlyListsReadActionsAndRefusesWrites(t *testing.T) {
 	backend := newSurfaceFake()
 	names := policyTools(t, backend, Policy{ReadOnly: true})
-	if len(names) != 8 {
-		t.Fatalf("read-only tools = %d, want 8: %v", len(names), names)
+	if len(names) != 10 {
+		t.Fatalf("read-only tools = %d, want 10: %v", len(names), names)
 	}
 	for _, name := range []string{
 		"brain_open", "brain_context", "brain_search", "brain_record",
-		"brain_catchup", "brain_review", "brain_projects", "brain_capabilities",
+		"brain_catchup", "brain_review", "brain_projects", "brain_code",
+		"brain_graph", "brain_capabilities",
 	} {
 		if !names[name] {
 			t.Fatalf("read-only server dropped %s", name)
@@ -381,6 +383,8 @@ func TestSurfaceReadOnlyListsEightAndRefusesWrites(t *testing.T) {
 		{"brain_state", `{"action":"set","goal":"x"}`},
 		{"brain_judge", `{"action":"accept","id":"decision-alpha-1"}`},
 		{"brain_prompt", `{"action":"save","content":"x"}`},
+		{"brain_code", `{"action":"index","project":"alpha"}`},
+		{"brain_code", `{"action":"sync","project":"alpha"}`},
 	} {
 		result := policyCall(t, backend, Policy{ReadOnly: true}, call.name, call.args)
 		if result["isError"] != true || structured(t, result)["code"] != RefusalUnsupported {
@@ -457,8 +461,8 @@ func TestSurfaceCapabilitiesPayload(t *testing.T) {
 		t.Fatalf("identity = %v", payload)
 	}
 	tools := payload["tools"].(map[string]any)
-	if tools["total"] != float64(15) || tools["read_only"] != float64(8) ||
-		tools["append_only"] != float64(4) || tools["destructive"] != float64(3) {
+	if tools["total"] != float64(17) || tools["read_only"] != float64(9) ||
+		tools["append_only"] != float64(5) || tools["destructive"] != float64(3) {
 		t.Fatalf("tools = %v", tools)
 	}
 	codes, _ := payload["refusal_codes"].([]any)
@@ -474,7 +478,8 @@ func TestSurfaceCapabilitiesPayload(t *testing.T) {
 		t.Fatalf("endpoints = %v", endpoints)
 	}
 	features := payload["features"].(map[string]any)
-	if features["code_graph"] != false || features["semantic_search"] != false || features["resources"] != true {
+	if features["code_graph"] != true || features["knowledge_graph"] != "partial" ||
+		features["semantic_search"] != false || features["resources"] != true {
 		t.Fatalf("features = %v", features)
 	}
 	if _, ok := payload["tools_detail"]; ok {
@@ -483,8 +488,8 @@ func TestSurfaceCapabilitiesPayload(t *testing.T) {
 
 	verbose := toolCall(t, backend, "brain_capabilities", `{"verbose":true}`)
 	details, _ := structured(t, verbose)["tools_detail"].([]any)
-	if len(details) != 15 {
-		t.Fatalf("tools_detail = %d, want 15", len(details))
+	if len(details) != 17 {
+		t.Fatalf("tools_detail = %d, want 17", len(details))
 	}
 
 	// No side effects: nothing was written or read from the knowledge store.
@@ -496,7 +501,7 @@ func TestSurfaceCapabilitiesPayload(t *testing.T) {
 
 func TestSurfaceCapabilitiesMatchTheCatalogue(t *testing.T) {
 	capabilities := CapabilityReport("test-version", DefaultProfile(), Policy{ReadOnly: true})
-	if capabilities.Tools.Total != 8 || capabilities.Tools.ReadOnly != 8 {
+	if capabilities.Tools.Total != 10 || capabilities.Tools.ReadOnly != 9 {
 		t.Fatalf("read-only capabilities = %+v", capabilities.Tools)
 	}
 	visible, omitted := CatalogForPolicy("test-version", DefaultProfile(), Policy{ReadOnly: true})

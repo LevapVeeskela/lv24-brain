@@ -233,10 +233,17 @@ type tool struct {
 	Limits map[string]int
 	// ReadActions names the actions of a mixed tool that never mutate.
 	ReadActions []string
-	// Legacy, Target, Grade, Unsupported and Note describe a migration alias.
+	// WriteActions names the mutating actions of a mixed tool. A read-only
+	// server still lists the tool for its read actions and refuses these
+	// before the backend runs; a tool without WriteActions is listed only
+	// when it is read-only.
+	WriteActions []string
+	// Legacy, Target, Action, Grade, Unsupported and Note describe a migration
+	// alias.
 	Legacy      bool
 	Deprecated  bool
 	Target      string
+	Action      string
 	Grade       string
 	Unsupported []string
 	Note        string
@@ -251,9 +258,9 @@ type tool struct {
 	run     toolFunc
 }
 
-// nativeToolList is the 15-tool native surface, in a fixed order: session
-// start, task context, search, one-record access, the four appends, then the
-// curation and introspection tools.
+// nativeToolList is the 17-tool native surface, in a fixed order: session
+// start, task context, search, one-record access, the four appends, the
+// curation tools, the code graph, then introspection.
 func (s *Server) nativeToolList() []tool {
 	return []tool{
 		s.openTool(),
@@ -270,6 +277,8 @@ func (s *Server) nativeToolList() []tool {
 		s.judgeTool(),
 		s.projectsTool(),
 		s.promptTool(),
+		s.codeTool(),
+		s.graphTool(),
 		s.capabilitiesTool(),
 	}
 }
