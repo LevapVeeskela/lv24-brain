@@ -39,6 +39,8 @@ flags empty it. Omitted fields keep their stored values.
 		return runStateGet(args[1:], stdout, stderr)
 	case "set":
 		return runStateSet(args[1:], stdout, stderr)
+	case "review":
+		return runStateReview(args[1:], stdout, stderr)
 	case "help", "-h", "--help":
 		usage(stdout)
 		return 0
@@ -177,6 +179,45 @@ func stateTarget(ctx context.Context, cfgPath, project string, positional []stri
 		return nil, app.Resolved{}, reportError(stderr, name, err)
 	}
 	return runtime, target, 0
+}
+
+func runStateReview(args []string, stdout, stderr io.Writer) int {
+	fs := newFlagSet("state review", stderr)
+	project := fs.String("project", "", "project id or alias")
+	trust := fs.String("trust", "", "set the trust level: verified, stated or inferred")
+	asJSON := fs.Bool("json", false, "print the resulting state as JSON")
+	cfgPath := configFlag(fs)
+	positional, err := parseInterspersed(fs, args)
+	if err != nil {
+		return 2
+	}
+	if len(positional) > 0 {
+		fmt.Fprintf(stderr, "brain state review: unexpected arguments: %s\n", strings.Join(positional, " "))
+		return 2
+	}
+	trustValue := domain.Trust(strings.TrimSpace(*trust))
+	if trustValue != "" && !trustValue.Valid() {
+		fmt.Fprintf(stderr, "brain state review: unknown trust %q (verified, stated, inferred)\n", *trust)
+		return 2
+	}
+	ctx := context.Background()
+	runtime, target, code := stateTarget(ctx, *cfgPath, *project, nil, stderr, "state review")
+	if code != 0 {
+		return code
+	}
+	defer func() { _ = runtime.Close() }()
+	state, changed, err := runtime.App.ReviewState(ctx, app.ReviewStateOptions{
+		ProjectID: target.Project.ID, Trust: trustValue,
+	})
+	if err != nil {
+		return reportError(stderr, "state review", err)
+	}
+	if !changed {
+		fmt.Fprintln(stdout, "state already reviewed")
+	} else {
+		fmt.Fprintf(stdout, "reviewed state %s\n", target.Project.ID)
+	}
+	return printState(stdout, stderr, state, *asJSON)
 }
 
 func printState(stdout, stderr io.Writer, state domain.State, asJSON bool) int {

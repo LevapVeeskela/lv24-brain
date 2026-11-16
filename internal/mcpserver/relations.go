@@ -213,8 +213,10 @@ func (s *Server) judge(ctx context.Context, raw json.RawMessage) (toolResult, er
 			return toolResult{}, refusalInvalid("to is required with action=supersede: it is the decision that replaces id")
 		}
 		return s.applyDecisionStatus(ctx, decisionStatusArgs{ID: args.ID, SupersededBy: args.To, Project: args.Project})
-	case "pin", "unpin", "consolidate":
+	case "consolidate":
 		return toolResult{}, refusedGap("brain_judge", action)
+	case "pin", "unpin":
+		return s.applyPin(ctx, args, action == "pin")
 	default:
 		return toolResult{}, refusalInvalidf("unknown action %q", action)
 	}

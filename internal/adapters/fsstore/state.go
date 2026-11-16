@@ -14,8 +14,9 @@ import (
 )
 
 type stateFrontmatter struct {
-	markdown.Frontmatter `yaml:",inline"`
-	FreshUntil           *time.Time `yaml:"fresh_until,omitempty"`
+	markdown.Frontmatter  `yaml:",inline"`
+	provenanceFrontmatter `yaml:",inline"`
+	FreshUntil            *time.Time `yaml:"fresh_until,omitempty"`
 }
 
 // GetState loads projects/<id>/state.md.
@@ -55,6 +56,7 @@ func (s *Store) GetState(ctx context.Context, projectID string) (domain.State, e
 		NextAction:    sections.nextAction,
 		OpenQuestions: sections.openQuestions,
 		UpdatedAt:     frontmatter.UpdatedAt.UTC(),
+		Provenance:    provenanceFromFrontmatter(frontmatter.provenanceFrontmatter),
 	}
 	if frontmatter.FreshUntil != nil {
 		state.FreshUntil = frontmatter.FreshUntil.UTC()
@@ -102,6 +104,7 @@ func (s *Store) putStateLocked(ctx context.Context, dir string, state domain.Sta
 	} else {
 		state.UpdatedAt = state.UpdatedAt.UTC()
 	}
+	state.Provenance = state.Provenance.Normalized()
 
 	frontmatter := stateFrontmatter{
 		Frontmatter: markdown.Frontmatter{
@@ -110,6 +113,7 @@ func (s *Store) putStateLocked(ctx context.Context, dir string, state domain.Sta
 			UpdatedAt:     state.UpdatedAt,
 			SchemaVersion: SchemaVersion,
 		},
+		provenanceFrontmatter: provenanceToFrontmatter(state.Provenance),
 	}
 	if !state.FreshUntil.IsZero() {
 		freshUntil := state.FreshUntil.UTC()

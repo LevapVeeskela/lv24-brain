@@ -387,7 +387,7 @@ func (r contextRanking) background(kind string, exclude map[string]bool) []Conte
 		}
 		record.Path = contextRecordPath(r.projectID, record.Kind, record.ID)
 		if kind == ContextKindDecision {
-			record.Score = decisionContextScore(record.Status)
+			record.Score = decisionContextScore(record.Status, record.Pinned)
 		}
 		out = append(out, record)
 	}
@@ -458,6 +458,7 @@ func contextRecordFromRecord(record Record) ContextRecord {
 		ID: summary.ID, Kind: summary.Kind, Title: summary.Title, Status: summary.Status,
 		CreatedAt: summary.CreatedAt, UpdatedAt: summary.UpdatedAt,
 		Validity: record.Validity(), Quarantined: recordQuarantined(record),
+		Pinned: record.Pinned(),
 	}
 	out.Path = contextRecordPath(summary.ProjectID, summary.Kind, summary.ID)
 	switch {
@@ -489,17 +490,21 @@ func recordQuarantined(record Record) bool {
 
 // decisionContextScore ranks current decisions: an accepted decision is
 // pinned, a proposal is current but weaker, and the rest sit behind them.
-func decisionContextScore(status string) float64 {
+// An explicitly pinned record ranks above its unpinned peers.
+func decisionContextScore(status string, pinned bool) float64 {
+	base := 0.25
 	switch status {
 	case string(domain.DecisionAccepted):
-		return 1
+		base = 1
 	case string(domain.DecisionProposed):
-		return 0.5
+		base = 0.5
 	case string(domain.DecisionSuperseded):
-		return 0.1
-	default:
-		return 0.25
+		base = 0.1
 	}
+	if pinned {
+		base += 2
+	}
+	return base
 }
 
 // splitQuerySection splits the packed query layer back into ranked records and

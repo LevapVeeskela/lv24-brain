@@ -251,6 +251,9 @@ func (a *API) routes() {
 	a.authed("GET /v1/handoffs/{id}", a.getHandoff, domain.RoleViewer, false)
 	a.authed("DELETE /v1/handoffs/{id}", a.deleteHandoff, domain.RoleMember, false)
 
+	a.authed("POST /v1/projects/{project}/records/{kind}/{id}/review", a.reviewRecord, domain.RoleMember, false)
+	a.authed("POST /v1/records/{kind}/{id}/review", a.reviewRecord, domain.RoleMember, false)
+
 	a.authed("GET /v1/search", a.search, domain.RoleViewer, false)
 	a.authed("GET /v1/revisions", a.listRevisions, domain.RoleViewer, false)
 	a.authed("GET /v1/audit", a.listAudit, domain.RoleAdmin, false)

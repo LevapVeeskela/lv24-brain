@@ -106,8 +106,8 @@ inside the usual `{schema, data}` envelope.
 that the CodeGraph CLI owns that index.
 
 The analytics actions (`communities`, `god_nodes`, `path`, `cycles`, `diff`,
-`pr_impact`, and `stats` with its `analytics` block) are served by the
-`brain_graph` MCP tool over both engines; they read the same store `brain code`
+`pr_impact`, `surprises`, and `stats` with its `analytics` block) are served by
+the `brain_graph` MCP tool over both engines; they read the same store `brain code`
 reads. `diff` needs the index of a second checkout, named as `base_project`.
 
 ### Paths and line anchors
@@ -610,9 +610,9 @@ index from the CodeGraph CLI:
   declarations intersecting ERROR spans are skipped, and `status` reports the
   partial count. A Go package that fails to type-check keeps its syntax edges at
   0.8/0.5.
-- Import cycles and index-to-index diffs are served; a surprising-connection
-  score and a coupled test-coverage view are still missing. Communities, god
-  nodes, paths, PR impact and orphan counts are served.
+- Import cycles, index-to-index diffs and surprising cross-community edges are
+  served. Communities, god nodes, paths, PR impact and orphan counts are
+  served.
 - Search is lexical: exact name, FTS5, then substring. A semantic query still
   belongs to `brain search`.
 - `codegraph` cannot be refreshed through this binary; use `brain graphs` for

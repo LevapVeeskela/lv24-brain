@@ -73,6 +73,7 @@ type noteMetadata struct {
 	ID        string            `json:"id"`
 	Title     string            `json:"title"`
 	Tags      []string          `json:"tags,omitempty"`
+	Pinned    bool              `json:"pinned,omitempty"`
 	Permalink string            `json:"permalink,omitempty"`
 	Source    *domain.SourceRef `json:"source,omitempty"`
 	CreatedAt time.Time         `json:"created_at"`
@@ -89,6 +90,7 @@ type decisionFrontmatter struct {
 	ID                    string                `yaml:"id,omitempty"`
 	Title                 string                `yaml:"title,omitempty"`
 	Status                domain.DecisionStatus `yaml:"status,omitempty"`
+	Pinned                bool                  `yaml:"pinned,omitempty"`
 	Source                *sourceRefFrontmatter `yaml:"source,omitempty"`
 	CreatedAt             time.Time             `yaml:"created_at,omitempty"`
 }
@@ -103,6 +105,7 @@ type attemptFrontmatter struct {
 	taxonomyFrontmatter   `yaml:",inline"`
 	ID                    string                `yaml:"id,omitempty"`
 	Title                 string                `yaml:"title,omitempty"`
+	Pinned                bool                  `yaml:"pinned,omitempty"`
 	Source                *sourceRefFrontmatter `yaml:"source,omitempty"`
 	CreatedAt             time.Time             `yaml:"created_at,omitempty"`
 }
@@ -278,6 +281,7 @@ type handoffFrontmatter struct {
 	reviewFrontmatter     `yaml:",inline"`
 	taxonomyFrontmatter   `yaml:",inline"`
 	ID                    string                `yaml:"id,omitempty"`
+	Pinned                bool                  `yaml:"pinned,omitempty"`
 	Source                *sourceRefFrontmatter `yaml:"source,omitempty"`
 	CreatedAt             time.Time             `yaml:"created_at,omitempty"`
 }
@@ -307,7 +311,12 @@ func (s *Store) AppendNote(ctx context.Context, note domain.Note) (domain.SyncRe
 		createdAt = createdAt.UTC()
 	}
 	date := createdAt.Format("2006-01-02")
-	updatedAt := s.nowUTC()
+	updatedAt := note.UpdatedAt
+	if updatedAt.IsZero() {
+		updatedAt = s.nowUTC()
+	} else {
+		updatedAt = updatedAt.UTC()
+	}
 	path := filepath.Join(dir, notesDir, date+".md")
 
 	// The daily file is read, extended and rewritten as one step. The lock keeps
@@ -450,6 +459,7 @@ func noteFileWithEntryContent(raw []byte, note domain.Note, date string, created
 		ID:                    id,
 		Title:                 note.Title,
 		Tags:                  nonNilStrings(note.Tags),
+		Pinned:                note.Pinned,
 		Permalink:             note.Permalink,
 		Source:                note.Source,
 		CreatedAt:             createdAt,
@@ -490,7 +500,12 @@ func (s *Store) AppendDecision(ctx context.Context, decision domain.Decision) (d
 		return domain.SyncRevision{}, err
 	}
 	createdAt := recordCreatedAt(decision.CreatedAt, s.nowUTC())
-	updatedAt := s.nowUTC()
+	updatedAt := decision.UpdatedAt
+	if updatedAt.IsZero() {
+		updatedAt = s.nowUTC()
+	} else {
+		updatedAt = updatedAt.UTC()
+	}
 
 	_, err = publishRecord(
 		filepath.Join(dir, decisionsDir),
@@ -519,6 +534,7 @@ func (s *Store) AppendDecision(ctx context.Context, decision domain.Decision) (d
 				ID:                    id,
 				Title:                 decision.Title,
 				Status:                decision.Status,
+				Pinned:                decision.Pinned,
 				Source:                sourceRefToFrontmatter(decision.Source),
 				CreatedAt:             createdAt,
 			}
@@ -551,7 +567,12 @@ func (s *Store) AppendAttempt(ctx context.Context, attempt domain.Attempt) (doma
 		return domain.SyncRevision{}, err
 	}
 	createdAt := recordCreatedAt(attempt.CreatedAt, s.nowUTC())
-	updatedAt := s.nowUTC()
+	updatedAt := attempt.UpdatedAt
+	if updatedAt.IsZero() {
+		updatedAt = s.nowUTC()
+	} else {
+		updatedAt = updatedAt.UTC()
+	}
 
 	_, err = publishRecord(
 		filepath.Join(dir, attemptsDir),
@@ -579,6 +600,7 @@ func (s *Store) AppendAttempt(ctx context.Context, attempt domain.Attempt) (doma
 				taxonomyFrontmatter:   taxonomyToFrontmatter(attempt.Taxonomy),
 				ID:                    id,
 				Title:                 attempt.Title,
+				Pinned:                attempt.Pinned,
 				Source:                sourceRefToFrontmatter(attempt.Source),
 				CreatedAt:             createdAt,
 			}
@@ -622,11 +644,17 @@ func (s *Store) AppendHandoff(ctx context.Context, handoff domain.Handoff) (doma
 			if id == "" {
 				id = "handoff-" + stem
 			}
+			handoffUpdatedAt := handoff.UpdatedAt
+			if handoffUpdatedAt.IsZero() {
+				handoffUpdatedAt = createdAt
+			} else {
+				handoffUpdatedAt = handoffUpdatedAt.UTC()
+			}
 			frontmatter := handoffFrontmatter{
 				Frontmatter: markdown.Frontmatter{
 					ProjectID:     handoff.ProjectID,
 					Kind:          "handoff",
-					UpdatedAt:     createdAt,
+					UpdatedAt:     handoffUpdatedAt,
 					SchemaVersion: SchemaVersion,
 					Permalink:     handoff.Permalink,
 				},
@@ -637,6 +665,7 @@ func (s *Store) AppendHandoff(ctx context.Context, handoff domain.Handoff) (doma
 				reviewFrontmatter:     reviewToFrontmatter(handoff.ReviewSchedule),
 				taxonomyFrontmatter:   taxonomyToFrontmatter(handoff.Taxonomy),
 				ID:                    id,
+				Pinned:                handoff.Pinned,
 				Source:                sourceRefToFrontmatter(handoff.Source),
 				CreatedAt:             createdAt,
 			}

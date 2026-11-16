@@ -789,6 +789,7 @@ func toRecordSummary(summary app.RecordSummary) mcpserver.RecordSummary {
 		ProjectID: summary.ProjectID,
 		Title:     summary.Title,
 		Status:    summary.Status,
+		Pinned:    summary.Pinned,
 		CreatedAt: summary.CreatedAt,
 		UpdatedAt: summary.UpdatedAt,
 	}

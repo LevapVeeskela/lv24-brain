@@ -35,7 +35,7 @@ The map is strictly increasing, so it never changes the order: it only makes
 | `bm25` | 0.55 | FTS5 BM25 with field weights `title=3.0`, `body=1.0`, sign flipped and floored at 0. Unbounded above: a strong lexical match can own most of the score. |
 | `recency` | 0.20 | `0.5 ^ (age_days / 30)`. A record 30 days old scores half of one written now; a future timestamp counts as now. |
 | `importance` | 0.15 | `decision=1.0`, `attempt=0.8`, `handoff=0.7`, `note=0.5`, anything else (`state`, `dump`, `item`) `=0.3`. |
-| `pin` | 0.05 | `max(accepted decision, author confidence)`: an accepted decision scores 1.0; otherwise the record's `confidence` in `[0, 1]`; otherwise 0. |
+| `pin` | 0.05 | `max(pinned, accepted decision, author confidence)`: an explicitly pinned record or an accepted decision scores 1.0; otherwise the record's `confidence` in `[0, 1]`; otherwise 0. |
 | `link` | 0.05 | 1.0 when the record's text references another record with `[[id]]`, else 0. This is the link-graph signal search owns; 1-hop expansion of a result set belongs to the context packer. |
 
 Ties are broken by `updated_at DESC`, then `id ASC`. The order is total and
@@ -56,7 +56,7 @@ Each hit carries `match_reasons`: only the signals that fired.
 | `bm25` | the document matched at least one query term (always for a hit). |
 | `recency` | the record is younger than one half-life (30 days). |
 | `importance` | the kind's importance is `>= 0.7` (decision, attempt). |
-| `pin` | the record is an accepted decision or has a stated confidence. |
+| `pin` | the record is explicitly pinned, an accepted decision, or has a stated confidence. |
 | `link` | the record references another record with `[[id]]`. |
 
 `--explain` additionally returns the weighted contribution of every signal.

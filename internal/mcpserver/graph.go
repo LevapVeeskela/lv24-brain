@@ -15,7 +15,7 @@ import (
 // order. stats and neighbors read the symbol graph; path, communities,
 // god_nodes, cycles, diff and pr_impact read the optional analytics half of
 // the same engine.
-var graphActions = []string{"stats", "neighbors", "path", "communities", "god_nodes", "cycles", "diff", "pr_impact"}
+var graphActions = []string{"stats", "neighbors", "path", "communities", "god_nodes", "cycles", "diff", "pr_impact", "surprises"}
 
 // graphAnalyticsUnavailable is the refusal of an engine that serves symbol
 // navigation but not analytics. It is a property of the engine, not of the
@@ -49,7 +49,8 @@ func (s *Server) graphTool() tool {
 			"path finds the shortest chain between two symbols; communities lists detected communities or one with its members; " +
 			"god_nodes ranks definitions by degree; cycles lists import cycles (Tarjan SCC) of Go packages and TS/Python modules; " +
 			"diff compares this checkout's index with the index of base_project (file, symbol and edge deltas); " +
-			"pr_impact maps a local git diff to changed symbols, reverse impact, a risk tier and tests. " +
+			"pr_impact maps a local git diff to changed symbols, reverse impact, a risk tier and tests; " +
+			"surprises lists dependency edges whose endpoints live in different communities. " +
 			"Analytics is read-only: pr_impact runs git diff against two refs and diff reads a second index; neither writes. " +
 			"An engine that cannot answer analytics, or an off/absent index, answers with a typed UNSUPPORTED, never an empty collection.",
 		InputSchema: objectSchema(nil, map[string]any{
@@ -81,6 +82,7 @@ func (s *Server) graphTool() tool {
 			"pr_symbols":        ports.MaxGraphPRSymbols,
 			"pr_files":          ports.MaxGraphPRFiles,
 			"diff_samples":      ports.MaxGraphDiffSamples,
+			"surprises":         ports.MaxGraphSurprises,
 		},
 		ReadActions: graphActions,
 		run:         s.graph,
@@ -102,6 +104,7 @@ func graphOutputSchema() map[string]any {
 		"cycles":      objectProp("Import cycles (cycles): ports.CyclesView."),
 		"diff":        objectProp("Index-to-index deltas (diff): ports.GraphDiffView."),
 		"pr_impact":   objectProp("Read-only diff impact (pr_impact): ports.PRImpactView."),
+		"surprises":   objectProp("Surprising cross-community edges (surprises): ports.SurprisesView."),
 	})
 }
 
@@ -136,6 +139,8 @@ func (s *Server) graph(ctx context.Context, raw json.RawMessage) (toolResult, er
 		return s.graphDiff(ctx, args, engine)
 	case "pr_impact":
 		return s.graphPRImpact(ctx, args, engine)
+	case "surprises":
+		return s.graphSurprises(ctx, args, engine)
 	default:
 		return toolResult{}, refusalInvalidf("unknown action %q (%s)", action, strings.Join(graphActions, ", "))
 	}
@@ -425,6 +430,26 @@ func (s *Server) graphPRImpact(ctx context.Context, args graphArgs, engine strin
 	}, nil
 }
 
+// graphSurprises lists surprising cross-community edges.
+func (s *Server) graphSurprises(ctx context.Context, args graphArgs, engine string) (toolResult, error) {
+	if args.Limit < 0 || args.Limit > ports.MaxGraphSurprises {
+		return toolResult{}, refusalInvalidf("limit must be between 0 and %d (0 selects %d)", ports.MaxGraphSurprises, ports.DefaultGraphSurprises)
+	}
+	projectID, index, analytics, err := s.openGraphAnalytics(ctx, args, engine)
+	if err != nil {
+		return toolResult{}, err
+	}
+	defer closeGraph(index)
+	view, err := analytics.Surprises(ctx, projectID, args.Limit)
+	if err != nil {
+		return toolResult{}, graphFailure(projectID, err)
+	}
+	return toolResult{
+		Text:       renderGraphSurprises(view),
+		Structured: map[string]any{"action": "surprises", "project": projectID, "surprises": view},
+	}, nil
+}
+
 // renderGraphStats renders the whole-graph counts below the index envelope.
 func renderGraphStats(view ports.GraphStatsView) string {
 	var b strings.Builder
@@ -672,6 +697,26 @@ func renderGraphPRImpact(view ports.PRImpactView) string {
 	}
 	if len(view.Tests) > 0 {
 		fmt.Fprintf(&b, "tests: %s\n", strings.Join(view.Tests, ", "))
+	}
+	for _, note := range view.Notes {
+		fmt.Fprintf(&b, "note: %s\n", note)
+	}
+	return strings.TrimRight(b.String(), "\n")
+}
+
+// renderGraphSurprises renders the surprising cross-community edges.
+func renderGraphSurprises(view ports.SurprisesView) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "%d surprising edge(s)\n", view.Total)
+	for index, edge := range view.Surprises {
+		fmt.Fprintf(&b, "%d. %s -> %s  [%s] score %.3f (communities %d -> %d)\n",
+			index+1, edge.Source.Name, edge.Target.Name, edge.Edge, edge.Score, edge.SourceCommunity, edge.TargetCommunity)
+		if edge.Why != "" {
+			fmt.Fprintf(&b, "   why: %s\n", edge.Why)
+		}
+	}
+	if view.Truncated {
+		b.WriteString("(list clipped; raise limit)\n")
 	}
 	for _, note := range view.Notes {
 		fmt.Fprintf(&b, "note: %s\n", note)

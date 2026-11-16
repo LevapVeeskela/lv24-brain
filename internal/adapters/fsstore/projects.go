@@ -74,7 +74,11 @@ func (s *Store) PutProject(ctx context.Context, project domain.Project) error {
 		} else {
 			project.CreatedAt = project.CreatedAt.UTC()
 		}
-		project.UpdatedAt = now
+		if project.UpdatedAt.IsZero() {
+			project.UpdatedAt = now
+		} else {
+			project.UpdatedAt = project.UpdatedAt.UTC()
+		}
 		record := registryProjectFromDomain(project)
 		if index >= 0 {
 			registry.Projects[index] = record

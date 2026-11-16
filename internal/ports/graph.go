@@ -91,6 +91,10 @@ const (
 	DefaultGraphDiffSamples = 20
 	// MaxGraphDiffSamples bounds the samples of one graph diff answer.
 	MaxGraphDiffSamples = 100
+	// DefaultGraphSurprises is the number of surprising edges one answer lists.
+	DefaultGraphSurprises = 10
+	// MaxGraphSurprises bounds the surprising edges one answer lists.
+	MaxGraphSurprises = 50
 )
 
 // Risk tiers of a PR impact answer, from least to most likely to break a
@@ -348,6 +352,9 @@ type GraphAnalytics interface {
 	// reports file, symbol and dependency-edge deltas. Both sides are read
 	// only; no index is rewritten.
 	Diff(ctx context.Context, project string, opts GraphDiffQuery) (GraphDiffView, error)
+	// Surprises lists dependency edges whose endpoints live in different
+	// communities, scored by confidence, degree and rarity. It is read-only.
+	Surprises(ctx context.Context, project string, limit int) (SurprisesView, error)
 	// GraphStats reports counts that need the whole graph: communities,
 	// orphan definitions and the language mix.
 	GraphStats(ctx context.Context, project string) (GraphStatsView, error)
@@ -467,6 +474,19 @@ type PRFileImpact struct {
 	Symbols int `json:"symbols"`
 }
 
+// PRCommunityDelta summarises the community membership change implied by a
+// pull-request diff: the communities of the changed symbols and of the symbols
+// they reach, plus the communities gained and lost and the cohesion change.
+type PRCommunityDelta struct {
+	Changed        []int   `json:"changed,omitempty"`
+	Reachable      []int   `json:"reachable,omitempty"`
+	Gained         []int   `json:"gained,omitempty"`
+	Lost           []int   `json:"lost,omitempty"`
+	CohesionChange float64 `json:"cohesion_change,omitempty"`
+	CohesionBefore float64 `json:"cohesion_before,omitempty"`
+	CohesionAfter  float64 `json:"cohesion_after,omitempty"`
+}
+
 // PRImpactView is the read-only impact of a git diff. It is not a pull-request
 // answer: no GitHub or GitLab API is called, and no PR metadata is stored.
 type PRImpactView struct {
@@ -492,6 +512,16 @@ type PRImpactView struct {
 	Tests     []string `json:"tests,omitempty"`
 	Truncated bool     `json:"truncated,omitempty"`
 	Notes     []string `json:"notes,omitempty"`
+
+	// Community membership delta for the changed and reachable symbols, when
+	// the graph has communities. CommunitiesGained and CommunitiesLost are
+	// relative to the changed-symbol set and the reachable-symbol set.
+	ChangedCommunities   []int            `json:"changed_communities,omitempty"`
+	ReachableCommunities []int            `json:"reachable_communities,omitempty"`
+	CommunitiesGained    []int            `json:"communities_gained,omitempty"`
+	CommunitiesLost      []int            `json:"communities_lost,omitempty"`
+	CohesionChange       float64          `json:"cohesion_change,omitempty"`
+	CommunityDelta       PRCommunityDelta `json:"community_delta,omitempty"`
 }
 
 // GraphStatsView reports the counts that need the whole graph.
@@ -604,4 +634,38 @@ type GraphDiffView struct {
 	RemovedCommunities []string        `json:"removed_communities,omitempty"`
 	Truncated          bool            `json:"truncated,omitempty"`
 	Notes              []string        `json:"notes,omitempty"`
+}
+
+// GraphSurprise is one dependency edge whose endpoints live in different
+// communities. Score, the two communities and the edge confidence explain why
+// it is reported.
+type GraphSurprise struct {
+	Source            GraphSymbol `json:"source"`
+	Target            GraphSymbol `json:"target"`
+	From              GraphSymbol `json:"from,omitempty"`
+	To                GraphSymbol `json:"to,omitempty"`
+	SourceID          string      `json:"source_id,omitempty"`
+	TargetID          string      `json:"target_id,omitempty"`
+	FromID            string      `json:"from_id,omitempty"`
+	ToID              string      `json:"to_id,omitempty"`
+	Edge              string      `json:"edge,omitempty"`
+	Relation          string      `json:"relation,omitempty"`
+	Kind              string      `json:"kind,omitempty"`
+	Confidence        float64     `json:"confidence,omitempty"`
+	SourceCommunity   int         `json:"source_community,omitempty"`
+	TargetCommunity   int         `json:"target_community,omitempty"`
+	SourceCommunityID int         `json:"source_community_id,omitempty"`
+	TargetCommunityID int         `json:"target_community_id,omitempty"`
+	Score             float64     `json:"score"`
+	Why               string      `json:"why,omitempty"`
+}
+
+// SurprisesView is the list of surprising cross-community edges.
+type SurprisesView struct {
+	Surprises   []GraphSurprise `json:"surprises"`
+	Edges       []GraphSurprise `json:"edges"`
+	Connections []GraphSurprise `json:"connections"`
+	Total       int             `json:"total"`
+	Truncated   bool            `json:"truncated,omitempty"`
+	Notes       []string        `json:"notes,omitempty"`
 }

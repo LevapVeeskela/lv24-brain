@@ -53,7 +53,9 @@ type TaskContext struct {
 	// Quarantined lists the ids of records excluded from trusted context.
 	Quarantined []string `json:"quarantined"`
 	// QuarantinedCount is len(Quarantined), kept for a cheap budget report.
-	QuarantinedCount int      `json:"quarantined_count"`
+	QuarantinedCount int `json:"quarantined_count"`
+	// StateQuarantined reports that the project state is quarantined.
+	StateQuarantined bool     `json:"state_quarantined"`
 	Skipped          []string `json:"skipped"`
 	Summary          string   `json:"summary"`
 	Explain          []string `json:"explain,omitempty"`

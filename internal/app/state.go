@@ -26,12 +26,15 @@ type StateInput struct {
 	// FreshUntil marks until when the state is considered current; a zero
 	// time clears it.
 	FreshUntil *time.Time
+	// Provenance optionally replaces the state's provenance. The zero value
+	// keeps the stored value; a non-zero value explicitly changes it.
+	Provenance domain.Provenance
 }
 
 // Empty reports whether the input changes nothing.
 func (in StateInput) Empty() bool {
 	return in.Goal == nil && in.Active == nil && in.Blocked == nil && in.NextAction == nil &&
-		in.OpenQuestions == nil && in.FreshUntil == nil
+		in.OpenQuestions == nil && in.FreshUntil == nil && in.Provenance == (domain.Provenance{})
 }
 
 // GetState returns a project's state; a project without state.md yields an
@@ -139,7 +142,11 @@ func (a *App) writeState(ctx context.Context, projectID string, change func(*dom
 // applyStateInput copies the non-nil fields of input onto state and returns
 // the names of the changed fields.
 func applyStateInput(state *domain.State, input StateInput, now time.Time) []string {
-	changed := make([]string, 0, 6)
+	changed := make([]string, 0, 7)
+	if input.Provenance != (domain.Provenance{}) {
+		state.Provenance = input.Provenance
+		changed = append(changed, "provenance")
+	}
 	if input.Goal != nil {
 		state.Goal = strings.TrimSpace(*input.Goal)
 		changed = append(changed, "goal")
@@ -166,6 +173,72 @@ func applyStateInput(state *domain.State, input StateInput, now time.Time) []str
 	}
 	state.UpdatedAt = now
 	return changed
+}
+
+// ReviewStateOptions clears the quarantine of a project's state and optionally
+// sets its trust level.
+type ReviewStateOptions struct {
+	ProjectID string
+	Trust     domain.Trust
+}
+
+// ReviewState marks the project state reviewed and optionally sets its trust.
+// It is idempotent: a state that is already reviewed (and already carries the
+// requested trust) is left untouched.
+func (a *App) ReviewState(ctx context.Context, opts ReviewStateOptions) (domain.State, bool, error) {
+	if err := a.requireStore(); err != nil {
+		return domain.State{}, false, err
+	}
+	trust := opts.Trust
+	if trust != "" && !trust.Valid() {
+		return domain.State{}, false, domain.NewValidationError("trust",
+			fmt.Sprintf("unknown trust %q (verified, stated, inferred)", trust))
+	}
+	project, err := a.ensureProject(ctx, opts.ProjectID, false)
+	if err != nil {
+		return domain.State{}, false, err
+	}
+	before, err := a.deps.Store.GetState(ctx, project.ID)
+	if err != nil && !errors.Is(err, domain.ErrNotFound) {
+		return domain.State{}, false, err
+	}
+	if errors.Is(err, domain.ErrNotFound) {
+		before = domain.State{ProjectID: project.ID}
+	}
+	updated, err := a.writeState(ctx, project.ID, func(state *domain.State) error {
+		if state.ProjectID == "" {
+			state.ProjectID = project.ID
+		}
+		current := state.Provenance
+		if alreadyReviewedState(current, trust) {
+			return nil
+		}
+		state.Provenance = reviewedStateProvenance(current, trust)
+		return nil
+	})
+	if err != nil {
+		return domain.State{}, false, err
+	}
+	changed := before.Provenance != updated.Provenance
+	return updated, changed, nil
+}
+
+func alreadyReviewedState(provenance domain.Provenance, trust domain.Trust) bool {
+	if !provenance.ReviewedState() {
+		return false
+	}
+	return trust == "" || provenance.Trust == trust
+}
+
+func reviewedStateProvenance(provenance domain.Provenance, trust domain.Trust) domain.Provenance {
+	provenance.Reviewed = true
+	if provenance.Origin == "" {
+		provenance.Origin = domain.OriginHuman
+	}
+	if trust != "" {
+		provenance.Trust = trust
+	}
+	return provenance
 }
 
 func cleanItems(items []string) []string {

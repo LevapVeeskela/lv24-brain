@@ -10,7 +10,7 @@ import (
 	"github.com/levapveeskela/lv24-brain/internal/ports"
 )
 
-const noteColumns = `id, project_id, title, body, tags, permalink, revision, created_at, updated_at, created_by`
+const noteColumns = `id, project_id, title, body, tags, permalink, origin, reviewed, trust, revision, created_at, updated_at, created_by`
 
 // NoteRecord is a note plus its current server revision.
 type NoteRecord struct {
@@ -55,9 +55,10 @@ func (s *Store) CreateNote(ctx context.Context, note domain.Note) (NoteRecord, d
 		record.Revision = revisionID
 		if _, err := tx.Exec(
 			ctx,
-			`INSERT INTO notes (id, project_id, title, body, tags, permalink, revision, created_at, updated_at, created_by)
-			 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+			`INSERT INTO notes (id, project_id, title, body, tags, permalink, origin, reviewed, trust, revision, created_at, updated_at, created_by)
+			 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)`,
 			note.ID, note.ProjectID, note.Title, note.Body, note.Tags, note.Permalink,
+			note.Provenance.Origin, note.Provenance.Reviewed, note.Provenance.Trust,
 			revisionID, note.CreatedAt, note.UpdatedAt, record.CreatedBy,
 		); err != nil {
 			return mapPgError("create note", err)
@@ -212,7 +213,7 @@ func scanNote(row rowScanner) (NoteRecord, error) {
 	var record NoteRecord
 	if err := row.Scan(
 		&record.ID, &record.ProjectID, &record.Title, &record.Body, &record.Tags,
-		&record.Permalink, &record.Revision, &record.CreatedAt, &record.UpdatedAt, &record.CreatedBy,
+		&record.Permalink, &record.Origin, &record.Reviewed, &record.Trust, &record.Revision, &record.CreatedAt, &record.UpdatedAt, &record.CreatedBy,
 	); err != nil {
 		return NoteRecord{}, err
 	}

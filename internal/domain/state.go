@@ -12,9 +12,13 @@ type State struct {
 	OpenQuestions []string  `json:"openQuestions,omitempty"`
 	UpdatedAt     time.Time `json:"updatedAt"`
 	FreshUntil    time.Time `json:"freshUntil,omitempty"`
+	Provenance
 }
 
 // Validate checks the state owner.
 func (s State) Validate() error {
-	return ValidateRequired("state.projectId", s.ProjectID)
+	if err := ValidateRequired("state.projectId", s.ProjectID); err != nil {
+		return err
+	}
+	return s.Provenance.Validate()
 }

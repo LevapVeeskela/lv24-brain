@@ -259,6 +259,14 @@ func applySchema(ctx context.Context, db schemaExecer) error {
 	return nil
 }
 
+// boolToInt converts a boolean to its SQLite integer form.
+func boolToInt(value bool) int {
+	if value {
+		return 1
+	}
+	return 0
+}
+
 // Close releases the database handle.
 func (i *Index) Close() error {
 	return i.db.Close()
@@ -305,6 +313,7 @@ func (i *Index) upsertOnce(ctx context.Context, doc ports.Document) error {
 		normalizedScope(doc.Scope),
 		doc.TopicKey,
 		normalizedOccurrences(doc.Occurrences),
+		boolToInt(doc.Pinned),
 	); err != nil {
 		return fmt.Errorf("sqliteindex: upsert %q: %w", doc.ID, err)
 	}
@@ -486,12 +495,13 @@ func (i *Index) runSearch(ctx context.Context, query ports.Query, match string) 
 			scope        string
 			topicKey     string
 			occurrences  int
+			pinnedFlag   int
 			updatedAt    int64
 		)
 		if err := rows.Scan(&hit.ID, &hit.ProjectID, &hit.Kind, &hit.Title, &snippet, &body, &score,
 			&contrib[0], &contrib[1], &contrib[2], &contrib[3], &contrib[4],
 			&validFrom, &validTo, &supersededBy, &status, &confidence,
-			&subtype, &scope, &topicKey, &occurrences, &updatedAt); err != nil {
+			&subtype, &scope, &topicKey, &occurrences, &pinnedFlag, &updatedAt); err != nil {
 			return nil, fmt.Errorf("sqliteindex: scan hit: %w", err)
 		}
 		hit.ID = recordID(hit.ProjectID, hit.ID)
@@ -503,7 +513,7 @@ func (i *Index) runSearch(ctx context.Context, query ports.Query, match string) 
 		hit.TopicKey = topicKey
 		hit.Occurrences = normalizedOccurrences(occurrences)
 		fresh := isFresh(time.Unix(0, updatedAt), now)
-		hit.MatchReasons = matchReasons(hit.Kind, contributions(contrib), fresh, pinned(hit.Kind, status, confidence))
+		hit.MatchReasons = matchReasons(hit.Kind, contributions(contrib), fresh, pinned(hit.Kind, status, confidence, pinnedFlag == 1))
 		if query.Explain {
 			hit.Explain = &ports.Explain{
 				BM25:       contrib[0],

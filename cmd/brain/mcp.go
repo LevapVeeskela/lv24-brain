@@ -660,6 +660,7 @@ func (b mcpBackend) SetState(ctx context.Context, in mcpserver.StateInput) (mcps
 	state, err := b.app.SetState(ctx, app.StateInput{
 		ProjectID: in.ProjectID, Goal: in.Goal, NextAction: in.NextAction,
 		Active: in.Active, Blocked: in.Blocked, OpenQuestions: in.OpenQuestions, FreshUntil: in.FreshUntil,
+		Provenance: b.writeProvenance(),
 	})
 	if err != nil {
 		return mcpserver.State{}, err
@@ -789,6 +790,42 @@ func (b mcpBackend) RecordQuarantined(ctx context.Context, projectID, id string)
 	default:
 		return false, nil
 	}
+}
+
+// SetPinned implements mcpserver.RecordPinner.
+func (b mcpBackend) SetPinned(ctx context.Context, projectID, id string, pinned bool) (mcpserver.RecordSummary, error) {
+	record, err := b.app.SetRecordPinned(ctx, projectID, id, pinned)
+	if err != nil {
+		return mcpserver.RecordSummary{}, err
+	}
+	return toRecordSummary(record.Summary()), nil
+}
+
+// SetRecordPinned implements mcpserver.RecordPinSetter.
+func (b mcpBackend) SetRecordPinned(ctx context.Context, projectID, id string, pinned bool) (mcpserver.RecordSummary, error) {
+	return b.SetPinned(ctx, projectID, id, pinned)
+}
+
+// PinRecord implements mcpserver.RecordPinToggler and RecordPinActioner.
+func (b mcpBackend) PinRecord(ctx context.Context, projectID, id string, pinned ...bool) (mcpserver.RecordSummary, error) {
+	flag := true
+	if len(pinned) > 0 {
+		flag = pinned[0]
+	}
+	record, err := b.app.SetRecordPinned(ctx, projectID, id, flag)
+	if err != nil {
+		return mcpserver.RecordSummary{}, err
+	}
+	return toRecordSummary(record.Summary()), nil
+}
+
+// UnpinRecord implements mcpserver.RecordPinActioner.
+func (b mcpBackend) UnpinRecord(ctx context.Context, projectID, id string) (mcpserver.RecordSummary, error) {
+	record, err := b.app.SetRecordPinned(ctx, projectID, id, false)
+	if err != nil {
+		return mcpserver.RecordSummary{}, err
+	}
+	return toRecordSummary(record.Summary()), nil
 }
 
 // SetDecisionStatus implements mcpserver.RecordBackend.

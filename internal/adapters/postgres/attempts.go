@@ -10,7 +10,7 @@ import (
 	"github.com/levapveeskela/lv24-brain/internal/ports"
 )
 
-const attemptColumns = `id, project_id, title, hypothesis, result, reason, permalink, revision, created_at, updated_at, created_by`
+const attemptColumns = `id, project_id, title, hypothesis, result, reason, permalink, origin, reviewed, trust, revision, created_at, updated_at, created_by`
 
 // AttemptRecord is an attempt plus its current server revision.
 type AttemptRecord struct {
@@ -54,10 +54,11 @@ func (s *Store) CreateAttempt(ctx context.Context, attempt domain.Attempt) (Atte
 		if _, err := tx.Exec(
 			ctx,
 			`INSERT INTO attempts
-			 (id, project_id, title, hypothesis, result, reason, permalink, revision, created_at, updated_at, created_by)
-			 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
+			 (id, project_id, title, hypothesis, result, reason, permalink, origin, reviewed, trust, revision, created_at, updated_at, created_by)
+			 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)`,
 			attempt.ID, attempt.ProjectID, attempt.Title, attempt.Hypothesis, attempt.Result,
-			attempt.Reason, attempt.Permalink, revisionID, attempt.CreatedAt, attempt.UpdatedAt, record.CreatedBy,
+			attempt.Reason, attempt.Permalink, attempt.Provenance.Origin, attempt.Provenance.Reviewed, attempt.Provenance.Trust,
+			revisionID, attempt.CreatedAt, attempt.UpdatedAt, record.CreatedBy,
 		); err != nil {
 			return mapPgError("create attempt", err)
 		}
@@ -212,7 +213,7 @@ func scanAttempt(row rowScanner) (AttemptRecord, error) {
 	var record AttemptRecord
 	if err := row.Scan(
 		&record.ID, &record.ProjectID, &record.Title, &record.Hypothesis, &record.Result,
-		&record.Reason, &record.Permalink, &record.Revision, &record.CreatedAt, &record.UpdatedAt, &record.CreatedBy,
+		&record.Reason, &record.Permalink, &record.Origin, &record.Reviewed, &record.Trust, &record.Revision, &record.CreatedAt, &record.UpdatedAt, &record.CreatedBy,
 	); err != nil {
 		return AttemptRecord{}, err
 	}

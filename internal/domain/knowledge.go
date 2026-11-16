@@ -105,6 +105,7 @@ type Note struct {
 	Title     string     `json:"title"`
 	Body      string     `json:"body"`
 	Tags      []string   `json:"tags,omitempty"`
+	Pinned    bool       `json:"pinned,omitempty"`
 	Permalink string     `json:"permalink,omitempty"`
 	Source    *SourceRef `json:"source,omitempty"`
 	Provenance
@@ -180,6 +181,7 @@ type Decision struct {
 	Evidence     []string       `json:"evidence,omitempty"`
 	// Paths are repo-relative files or directories the decision governs.
 	Paths     []string   `json:"paths,omitempty"`
+	Pinned    bool       `json:"pinned,omitempty"`
 	Permalink string     `json:"permalink,omitempty"`
 	Source    *SourceRef `json:"source,omitempty"`
 	Provenance
@@ -259,6 +261,7 @@ type Attempt struct {
 	Hypothesis string     `json:"hypothesis,omitempty"`
 	Result     string     `json:"result,omitempty"`
 	Reason     string     `json:"reason,omitempty"`
+	Pinned     bool       `json:"pinned,omitempty"`
 	Permalink  string     `json:"permalink,omitempty"`
 	Source     *SourceRef `json:"source,omitempty"`
 	Provenance
@@ -308,6 +311,7 @@ type Handoff struct {
 	Summary    string `json:"summary"`
 	GitContext string `json:"gitContext,omitempty"`
 	NextAction string `json:"nextAction,omitempty"`
+	Pinned     bool   `json:"pinned,omitempty"`
 	Permalink  string `json:"permalink,omitempty"`
 	// Source records the external item a handoff came from. Handoffs written
 	// by a session hook have none.

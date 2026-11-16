@@ -137,6 +137,7 @@ func toMCPContext(result app.ContextResult, explain bool) mcpserver.TaskContext 
 		Sections:         mapAll(result.Pack.Sections, toMCPContextSection),
 		Truncated:        mapAll(result.Pack.Truncated, toMCPContextTruncation),
 		QuarantinedCount: len(result.Quarantined),
+		StateQuarantined: result.StateQuarantined,
 		Findings: mapAll(result.Findings, func(finding app.Finding) mcpserver.ReviewFinding {
 			return mcpserver.ReviewFinding{
 				Kind: string(finding.Kind), Severity: string(finding.Severity),

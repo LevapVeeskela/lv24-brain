@@ -327,8 +327,6 @@ func TestSurfaceUnsupportedActionsAreTyped(t *testing.T) {
 		tool string
 		args string
 	}{
-		{"brain_judge", `{"action":"pin","id":"decision-alpha-1"}`},
-		{"brain_judge", `{"action":"unpin","id":"decision-alpha-1"}`},
 		{"brain_judge", `{"action":"consolidate"}`},
 		{"brain_judge", `{"from":"a","to":"b","verdict":"relates_to","reason":"x","expected_revision":"1"}`},
 		{"brain_prompt", `{"action":"discard"}`},

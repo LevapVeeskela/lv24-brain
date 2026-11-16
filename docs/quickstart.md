@@ -351,7 +351,12 @@ security:
 Unreviewed agent, connector and import records never enter `brain context`,
 `brain open`, `brain catchup` or MCP `brain_context`/`brain_open`. Those commands
 print only `quarantined: N (id, …)`, and `brain review` adds a `quarantined`
-finding. Clear the queue after reading the records:
+finding. Project state uses the same provenance: `brain state set` writes
+`origin: human, reviewed: true, trust: verified`; MCP `brain_state set` writes
+`origin: agent, trust: stated` (reviewed unless `quarantine_agent` is set). A
+quarantined state is reported as `state_quarantined: true` and its text is
+replaced with a placeholder; clear it with `brain state review` (optionally
+`--trust`). Clear the queue after reading the records:
 
 ```sh
 brain record review <id>                            # one record

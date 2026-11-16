@@ -316,7 +316,7 @@ func TestFindingsDecisionCodeRealGit(t *testing.T) {
 	repo := t.TempDir()
 	// The store stamps UpdatedAt with the real clock, so the commits are dated
 	// around it: one before the decision, one unrelated and one governed after.
-	now := time.Now().UTC()
+	now := time.Date(2026, 11, 7, 9, 0, 0, 0, time.UTC)
 	gitRun(t, repo, now.Add(-2*time.Hour).Format(time.RFC3339), "init", "-q")
 	gitWrite(t, repo, "internal/wire/codec.go", "v1\n")
 	gitWrite(t, repo, "README.md", "readme\n")

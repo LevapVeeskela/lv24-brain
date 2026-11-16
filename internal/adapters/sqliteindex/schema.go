@@ -20,7 +20,8 @@ var schemaStatements = []string{
 		subtype TEXT NOT NULL DEFAULT '',
 		scope TEXT NOT NULL DEFAULT 'project',
 		topic_key TEXT NOT NULL DEFAULT '',
-		occurrences INTEGER NOT NULL DEFAULT 1
+		occurrences INTEGER NOT NULL DEFAULT 1,
+		pinned INTEGER NOT NULL DEFAULT 0
 	)`,
 	`CREATE INDEX IF NOT EXISTS documents_project_idx ON documents(project_id)`,
 	`CREATE INDEX IF NOT EXISTS documents_valid_idx ON documents(kind, valid_to)`,
@@ -68,8 +69,8 @@ var schemaStatements = []string{
 	END`,
 }
 
-const upsertSQL = `INSERT INTO documents (id, project_id, kind, title, body, updated_at, valid_from, valid_to, superseded_by, supersedes, status, confidence, subtype, scope, topic_key, occurrences)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+const upsertSQL = `INSERT INTO documents (id, project_id, kind, title, body, updated_at, valid_from, valid_to, superseded_by, supersedes, status, confidence, subtype, scope, topic_key, occurrences, pinned)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(id) DO UPDATE SET
 	project_id = excluded.project_id,
 	kind = excluded.kind,
@@ -85,7 +86,8 @@ ON CONFLICT(id) DO UPDATE SET
 	subtype = excluded.subtype,
 	scope = excluded.scope,
 	topic_key = excluded.topic_key,
-	occurrences = excluded.occurrences`
+	occurrences = excluded.occurrences,
+	pinned = excluded.pinned`
 
 const deleteSQL = `DELETE FROM documents WHERE id = ?`
 
@@ -111,7 +113,8 @@ ON CONFLICT(source_id, target_id, relation) DO UPDATE SET
 // Version 5 adds the derived relations table for listings and backlinks.
 // Version 6 adds the engram-compatible classification (subtype, scope,
 // topic_key, occurrences) and its filters.
-const schemaVersion = 6
+// Version 7 adds the pinned flag used by the pin ranking signal.
+const schemaVersion = 7
 
 // dropStatements remove everything schemaStatements creates. Triggers go
 // first because they reference the tables.

@@ -748,6 +748,90 @@ func (i *Index) PRImpact(ctx context.Context, project, base, head string) (ports
 		return view.Impact[left].StartLine < view.Impact[right].StartLine
 	})
 	view.TotalImpact = len(view.Impact)
+
+	// Community membership delta for changed and reachable symbols.
+	changedComms := map[int]bool{}
+	reachableComms := map[int]bool{}
+	changedCohesion, changedN := 0.0, 0
+	reachableCohesion, reachableN := 0.0, 0
+	if comms, err := i.communitiesFor(ctx, allIDs); err == nil {
+		for _, id := range allIDs {
+			if ref, ok := comms[id]; ok && ref.id != 0 {
+				changedComms[ref.id] = true
+			}
+		}
+	}
+	if comms, err := i.communitiesFor(ctx, impactIDs); err == nil {
+		for _, id := range impactIDs {
+			if ref, ok := comms[id]; ok && ref.id != 0 {
+				reachableComms[ref.id] = true
+			}
+		}
+	}
+	cohesionMap, _ := i.communityCohesionMap(ctx)
+	for id := range changedComms {
+		changedCohesion += cohesionMap[id]
+		changedN++
+	}
+	for id := range reachableComms {
+		reachableCohesion += cohesionMap[id]
+		reachableN++
+	}
+	changedList := make([]int, 0, len(changedComms))
+	for id := range changedComms {
+		changedList = append(changedList, id)
+	}
+	sort.Ints(changedList)
+	reachableList := make([]int, 0, len(reachableComms))
+	for id := range reachableComms {
+		reachableList = append(reachableList, id)
+	}
+	sort.Ints(reachableList)
+	gained := make([]int, 0)
+	lost := make([]int, 0)
+	reachableSet := map[int]bool{}
+	for _, id := range reachableList {
+		reachableSet[id] = true
+	}
+	changedSet := map[int]bool{}
+	for _, id := range changedList {
+		changedSet[id] = true
+	}
+	for _, id := range reachableList {
+		if !changedSet[id] {
+			gained = append(gained, id)
+		}
+	}
+	for _, id := range changedList {
+		if !reachableSet[id] {
+			lost = append(lost, id)
+		}
+	}
+	sort.Ints(gained)
+	sort.Ints(lost)
+	cohesionBefore := 0.0
+	if changedN > 0 {
+		cohesionBefore = changedCohesion / float64(changedN)
+	}
+	cohesionAfter := 0.0
+	if reachableN > 0 {
+		cohesionAfter = reachableCohesion / float64(reachableN)
+	}
+	view.ChangedCommunities = changedList
+	view.ReachableCommunities = reachableList
+	view.CommunitiesGained = gained
+	view.CommunitiesLost = lost
+	view.CohesionChange = cohesionAfter - cohesionBefore
+	view.CommunityDelta = ports.PRCommunityDelta{
+		Changed:        changedList,
+		Reachable:      reachableList,
+		Gained:         gained,
+		Lost:           lost,
+		CohesionChange: cohesionAfter - cohesionBefore,
+		CohesionBefore: cohesionBefore,
+		CohesionAfter:  cohesionAfter,
+	}
+
 	view.Tests = make([]string, 0, len(tests))
 	for path := range tests {
 		view.Tests = append(view.Tests, path)
@@ -767,6 +851,218 @@ func (i *Index) PRImpact(ctx context.Context, project, base, head string) (ports
 	view.Notes = append(view.Notes, fmt.Sprintf("risk %s: %d reachable symbol(s), %d changed symbol(s), %d deleted file(s)",
 		view.Risk, len(view.Impact), len(allIDs), deleted))
 	return view, nil
+}
+
+// Surprises lists dependency edges whose endpoints live in different
+// communities, scored by confidence, degree and rarity.
+func (i *Index) Surprises(ctx context.Context, project string, limit int) (ports.SurprisesView, error) {
+	view := ports.SurprisesView{Surprises: []ports.GraphSurprise{}, Edges: []ports.GraphSurprise{}, Connections: []ports.GraphSurprise{}}
+	if err := i.ensureAnalyticsReadable(ctx); err != nil {
+		return view, err
+	}
+	graph, err := i.loadSymbolGraph(ctx)
+	if err != nil {
+		return view, err
+	}
+	limit = clampLimit(limit, ports.DefaultGraphSurprises, ports.MaxGraphSurprises)
+	// community of every node
+	communities, err := i.communitiesFor(ctx, func() []string {
+		ids := make([]string, 0, len(graph.nodes))
+		for _, node := range graph.nodes {
+			ids = append(ids, node.ID)
+		}
+		return ids
+	}())
+	if err != nil {
+		return view, err
+	}
+	cohesion, err := i.communityCohesionMap(ctx)
+	if err != nil {
+		return view, err
+	}
+	// community sizes
+	sizes := map[int]int{}
+	for _, ref := range communities {
+		_ = ref
+	}
+	sizeRows, err := i.db.QueryContext(ctx, `SELECT community_id, count(*) FROM community_members GROUP BY community_id`)
+	if err == nil {
+		defer sizeRows.Close()
+		for sizeRows.Next() {
+			var id, size int
+			if err := sizeRows.Scan(&id, &size); err == nil {
+				sizes[id] = size
+			}
+		}
+	}
+	// edge confidence/kind by pair
+	type edgeInfo struct {
+		kind       string
+		confidence float64
+	}
+	infoByPair := map[string]edgeInfo{}
+	for from, hops := range graph.out {
+		for _, hop := range hops {
+			key := strconv.Itoa(from) + ":" + strconv.Itoa(hop.to)
+			if existing, ok := infoByPair[key]; ok {
+				if hop.confidence > existing.confidence {
+					infoByPair[key] = edgeInfo{kind: hop.edge, confidence: hop.confidence}
+				}
+			} else {
+				infoByPair[key] = edgeInfo{kind: hop.edge, confidence: hop.confidence}
+			}
+		}
+	}
+	type candidate struct {
+		a, b  int
+		score float64
+		kind  string
+		conf  float64
+		commA int
+		commB int
+	}
+	candidates := make([]candidate, 0)
+	for _, edge := range graph.edges {
+		a, b := edge.A, edge.B
+		if a < 0 || b < 0 || a >= len(graph.nodes) || b >= len(graph.nodes) {
+			continue
+		}
+		commA := communities[graph.nodes[a].ID]
+		commB := communities[graph.nodes[b].ID]
+		if commA.id == 0 || commB.id == 0 || commA.id == commB.id {
+			continue
+		}
+		pairKey := strconv.Itoa(a) + ":" + strconv.Itoa(b)
+		revKey := strconv.Itoa(b) + ":" + strconv.Itoa(a)
+		ei, ok := infoByPair[pairKey]
+		if !ok {
+			ei, _ = infoByPair[revKey]
+		}
+		conf := ei.confidence
+		if conf <= 0 {
+			conf = 1
+		}
+		kind := ei.kind
+		degA := graph.degree[a]
+		degB := graph.degree[b]
+		score := conf
+		// peripheral -> hub bonus
+		if (degA <= 2 || degB <= 2) && (degA >= 5 || degB >= 5) {
+			score += 1
+		}
+		// rarity by community size
+		sizeA := sizes[commA.id]
+		sizeB := sizes[commB.id]
+		if sizeA > 0 {
+			score += 1.0 / float64(sizeA)
+		}
+		if sizeB > 0 {
+			score += 1.0 / float64(sizeB)
+		}
+		// degree rarity: low-degree endpoint
+		if degA+degB > 0 {
+			score += 1.0 / float64(degA+degB)
+		}
+		candidates = append(candidates, candidate{a: a, b: b, score: score, kind: kind, conf: conf, commA: commA.id, commB: commB.id})
+	}
+	sort.Slice(candidates, func(left, right int) bool {
+		if candidates[left].score != candidates[right].score {
+			return candidates[left].score > candidates[right].score
+		}
+		// deterministic tie-break
+		la, lb := graph.nodes[candidates[left].a], graph.nodes[candidates[left].b]
+		ra, rb := graph.nodes[candidates[right].a], graph.nodes[candidates[right].b]
+		if la.Name != ra.Name {
+			return la.Name < ra.Name
+		}
+		if lb.Name != rb.Name {
+			return lb.Name < rb.Name
+		}
+		if la.File != ra.File {
+			return la.File < ra.File
+		}
+		if lb.File != rb.File {
+			return lb.File < rb.File
+		}
+		return candidates[left].kind < candidates[right].kind
+	})
+	total := len(candidates)
+	truncated := total > limit
+	if truncated {
+		candidates = candidates[:limit]
+	}
+	// load symbols
+	ids := make([]string, 0, len(candidates)*2)
+	for _, c := range candidates {
+		ids = append(ids, graph.nodes[c.a].ID, graph.nodes[c.b].ID)
+	}
+	symbols, err := i.loadSymbols(ctx, uniqueStrings(ids))
+	if err != nil {
+		return view, err
+	}
+	byID := make(map[string]ports.GraphSymbol, len(symbols))
+	for _, s := range symbols {
+		byID[s.ID] = s
+	}
+	for _, c := range candidates {
+		nodeA := graph.nodes[c.a]
+		nodeB := graph.nodes[c.b]
+		srcSym := byID[nodeA.ID]
+		tgtSym := byID[nodeB.ID]
+		why := "bridges separate communities"
+		surprise := ports.GraphSurprise{
+			Source:            srcSym,
+			Target:            tgtSym,
+			From:              srcSym,
+			To:                tgtSym,
+			SourceID:          nodeA.ID,
+			TargetID:          nodeB.ID,
+			FromID:            nodeA.ID,
+			ToID:              nodeB.ID,
+			Edge:              c.kind,
+			Relation:          c.kind,
+			Kind:              c.kind,
+			Confidence:        c.conf,
+			SourceCommunity:   c.commA,
+			TargetCommunity:   c.commB,
+			SourceCommunityID: c.commA,
+			TargetCommunityID: c.commB,
+			Score:             c.score,
+			Why:               why,
+		}
+		view.Surprises = append(view.Surprises, surprise)
+		view.Edges = append(view.Edges, surprise)
+		view.Connections = append(view.Connections, surprise)
+	}
+	view.Total = total
+	view.Truncated = truncated
+	if total == 0 {
+		view.Notes = append(view.Notes, "no cross-community edges found")
+	}
+	if truncated {
+		view.Notes = append(view.Notes, fmt.Sprintf("showing the %d most surprising of %d cross-community edges; raise limit (at most %d) for more", limit, total, ports.MaxGraphSurprises))
+	}
+	// cohesion note
+	_ = cohesion
+	return view, nil
+}
+
+// communityCohesionMap returns community id -> cohesion.
+func (i *Index) communityCohesionMap(ctx context.Context) (map[int]float64, error) {
+	out := map[int]float64{}
+	rows, err := i.db.QueryContext(ctx, `SELECT id, cohesion FROM communities`)
+	if err != nil {
+		return out, nil
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id int
+		var c float64
+		if err := rows.Scan(&id, &c); err == nil {
+			out[id] = c
+		}
+	}
+	return out, nil
 }
 
 // symbolIDsByFile returns the definitions of every given path, grouped by

@@ -26,6 +26,7 @@ func (a *App) Bootstrap(ctx context.Context, opts BootstrapOptions) (BootstrapRe
 	if err != nil {
 		return BootstrapResult{}, err
 	}
+	stateQuarantined := state.Provenance.Quarantined()
 	now := a.now()
 	decisions, err := a.listDecisions(ctx, project.ID)
 	if err != nil {
@@ -73,11 +74,22 @@ func (a *App) Bootstrap(ctx context.Context, opts BootstrapOptions) (BootstrapRe
 	if line := quarantineLine(quarantined, opts.IncludeUnreviewed); line != "" {
 		out.WriteString(line + "\n")
 	}
-	fmt.Fprintf(&out, "goal: %s\n", valueOr(state.Goal, "not set"))
-	fmt.Fprintf(&out, "next_action: %s\n", valueOr(state.NextAction, "not set"))
-	writePromptList(&out, "active", state.Active)
-	writePromptList(&out, "blocked", state.Blocked)
-	writePromptList(&out, "open_questions", state.OpenQuestions)
+	if stateQuarantined {
+		fmt.Fprintf(&out, "state_quarantined: true\n")
+	}
+	if stateQuarantined && !opts.IncludeUnreviewed {
+		fmt.Fprintf(&out, "goal: (quarantined state omitted)\n")
+		fmt.Fprintf(&out, "next_action: (quarantined state omitted)\n")
+		writePromptList(&out, "active", nil)
+		writePromptList(&out, "blocked", nil)
+		writePromptList(&out, "open_questions", nil)
+	} else {
+		fmt.Fprintf(&out, "goal: %s\n", valueOr(state.Goal, "not set"))
+		fmt.Fprintf(&out, "next_action: %s\n", valueOr(state.NextAction, "not set"))
+		writePromptList(&out, "active", state.Active)
+		writePromptList(&out, "blocked", state.Blocked)
+		writePromptList(&out, "open_questions", state.OpenQuestions)
+	}
 
 	// The latest handoff comes before decisions and attempts: truncation to
 	// the budget cuts from the end, and the newest handoff matters most.
@@ -132,9 +144,10 @@ func (a *App) Bootstrap(ctx context.Context, opts BootstrapOptions) (BootstrapRe
 		budget = DefaultBootstrapBudget
 	}
 	return BootstrapResult{
-		ProjectID:   project.ID,
-		Summary:     truncateSummary(out.String(), budget),
-		Quarantined: quarantined,
+		ProjectID:        project.ID,
+		Summary:          truncateSummary(out.String(), budget),
+		Quarantined:      quarantined,
+		StateQuarantined: stateQuarantined,
 	}, nil
 }
 
@@ -146,17 +159,18 @@ func (a *App) bootstrapPacked(
 	decisions []domain.Decision, attempts []domain.Attempt, handoffs []domain.Handoff,
 	quarantined []string, now time.Time,
 ) (BootstrapResult, error) {
+	stateQuarantined := state.Provenance.Quarantined()
 	budget, err := a.contextTokenBudget(opts.TokenBudget)
 	if err != nil {
 		return BootstrapResult{}, err
 	}
-	header := renderBootstrapHeader(project, a.cfg.Mode, a.revision(ctx), state, opts, quarantined, now)
-	coreText, coreRecords := renderBootstrapCore(state, handoffs, now)
+	header := renderBootstrapHeader(project, a.cfg.Mode, a.revision(ctx), state, opts, quarantined, now, stateQuarantined)
+	coreText, coreRecords := renderBootstrapCore(state, handoffs, now, opts.IncludeUnreviewed)
 
 	decisionRecords := make([]ContextRecord, 0, len(decisions))
 	for i := range decisions {
 		record := contextRecordFromRecord(Record{Kind: ports.RecordDecision, Decision: &decisions[i]})
-		record.Score = decisionContextScore(record.Status)
+		record.Score = decisionContextScore(record.Status, record.Pinned)
 		decisionRecords = append(decisionRecords, record)
 	}
 	attemptRecords := make([]ContextRecord, 0, len(attempts))
@@ -191,14 +205,14 @@ func (a *App) bootstrapPacked(
 	if opts.Budget > 0 {
 		summary = truncateSummary(summary, opts.Budget)
 	}
-	return BootstrapResult{ProjectID: project.ID, Summary: summary, Quarantined: quarantined, Pack: pack}, nil
+	return BootstrapResult{ProjectID: project.ID, Summary: summary, Quarantined: quarantined, StateQuarantined: stateQuarantined, Pack: pack}, nil
 }
 
 // renderBootstrapHeader writes the identity and state metadata of a packed
 // open summary.
 func renderBootstrapHeader(
 	project domain.Project, mode, revision string, state domain.State, opts BootstrapOptions,
-	quarantined []string, now time.Time,
+	quarantined []string, now time.Time, stateQuarantined bool,
 ) string {
 	var out strings.Builder
 	fmt.Fprintf(&out, "# %s — bootstrap\n", project.Name)
@@ -215,14 +229,17 @@ func renderBootstrapHeader(
 	if line := quarantineLine(quarantined, opts.IncludeUnreviewed); line != "" {
 		out.WriteString(line + "\n")
 	}
+	if stateQuarantined {
+		out.WriteString("state_quarantined: true\n")
+	}
 	return out.String()
 }
 
 // renderBootstrapCore renders the state and the latest handoff, the two blocks
 // that are always kept.
-func renderBootstrapCore(state domain.State, handoffs []domain.Handoff, now time.Time) (string, []ContextSectionRecord) {
+func renderBootstrapCore(state domain.State, handoffs []domain.Handoff, now time.Time, includeUnreviewed bool) (string, []ContextSectionRecord) {
 	var out strings.Builder
-	writeContextState(&out, state, now)
+	writeContextState(&out, state, now, includeUnreviewed)
 	stateTokens := textbudget.Tokens(out.String())
 	records := []ContextSectionRecord{{
 		ID: "state", Kind: "state", Title: "Project state", Path: "state.md", Tokens: stateTokens, Score: 1,

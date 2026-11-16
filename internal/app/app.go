@@ -151,6 +151,9 @@ type BootstrapResult struct {
 	// Quarantined lists the ids of records left out of the summary. It is
 	// always populated, whether or not IncludeUnreviewed was set.
 	Quarantined []string
+	// StateQuarantined reports that the project state is quarantined and was
+	// not injected as trusted text.
+	StateQuarantined bool
 	// Pack is the layered budget accounting when TokenBudget was set.
 	Pack ContextPack
 }

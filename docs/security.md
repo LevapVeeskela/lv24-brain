@@ -195,6 +195,11 @@ external text cannot become "truth" in an agent's context on its own.
   `origin: agent` with `reviewed: true`; `brain promote` writes
   `origin: connector, reviewed: true, trust: stated` because promotion is the
   review; an importer writes `origin: import` and may set `reviewed: false`.
+  Project state (`state.md`) carries the same keys: `brain state set` writes
+  `origin: human, reviewed: true, trust: verified` and MCP `brain_state set`
+  writes `origin: agent, trust: stated` (reviewed unless
+  `security.quarantine_agent` is set). Partial field updates keep the stored
+  provenance unless it is explicitly changed.
 - The automatic session-end capture (`brain session end`, including the
   Claude/Codex/OpenCode hooks) is an agent write too: the handoff and any
   decision captured from the final message are `origin: agent, trust: stated`.
@@ -210,6 +215,10 @@ external text cannot become "truth" in an agent's context on its own.
   appear. Pass `--include-unreviewed` (CLI) or `include_unreviewed: true` (MCP
   context/open) to inspect them; the included records are labelled
   `quarantined`.
+- A quarantined state is reported as `state_quarantined: true` and its text is
+  replaced with a minimal placeholder in trusted context; pass
+  `--include-unreviewed` to view it. Clear it with `brain state review`
+  (optionally `--trust`).
 - `brain review` reports a `quarantined` finding with the ids, and
   `brain doctor` reports the queue size. Clear one record with
   `brain record review <id>` or the whole queue with
@@ -224,10 +233,8 @@ external text cannot become "truth" in an agent's context on its own.
 
 Known gaps in 0.15:
 
-- `state.md` has no provenance fields yet. MCP `brain_state_set` and the CLI
-  still write state directly into the session context; state provenance is a
-  later package.
-- `brain record review` (and the temporary `brain_review_record` tool's
+- `brain state review` clears a quarantined state; `brain record review` (and
+  the temporary `brain_review_record` tool's
   backend) is local/git only. Server mode has no provenance-edit route yet; a
   server review endpoint is a later package.
 
@@ -548,3 +555,8 @@ Current limits, stated plainly:
 
 Report a vulnerability privately to the maintainer instead of opening a public
 issue with exploit details. Do not include secrets or personal data in reports.
+
+## Server record provenance review
+
+Server mode exposes POST /v1/projects/{project}/records/{kind}/{id}/review (and /v1/records/{kind}/{id}/review) to update a record's eviewed and 	rust fields without rewriting its body. Access follows the existing owner/member/admin rules, the write bumps the server revision and records an audit event, and optimistic concurrency uses expected_revision. Quarantined (unreviewed) records stay out of trusted context and server search until reviewed.
+

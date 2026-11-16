@@ -212,6 +212,18 @@
     }
   },
   "paths": {
+    "/v1/projects/{project}/records/{kind}/{id}/review": {
+      "post": {
+        "summary": "Review one server record's provenance",
+        "responses": { "200": { "description": "Reviewed record" } }
+      }
+    },
+    "/v1/records/{kind}/{id}/review": {
+      "post": {
+        "summary": "Review one server record's provenance",
+        "responses": { "200": { "description": "Reviewed record" } }
+      }
+    },
     "/health": {
       "get": {
         "summary": "Process liveness",

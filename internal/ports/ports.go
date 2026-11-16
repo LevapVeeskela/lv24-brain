@@ -99,6 +99,9 @@ type Document struct {
 	Status string
 	// Confidence is the optional 0..1 author confidence of the record.
 	Confidence float64
+	// Pinned is an explicit pin set by the owner; it feeds the pin ranking
+	// signal and context preference.
+	Pinned bool
 	// Subtype, Scope and TopicKey are the engram-compatible classification of
 	// the record and are empty for records written before it existed.
 	Subtype  string

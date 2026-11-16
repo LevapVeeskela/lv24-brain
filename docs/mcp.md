@@ -147,7 +147,6 @@ CLI `try_instead`, never a silent no-op. The gaps are:
 | `brain_search` | `include_prompts=true` | `brain_prompt(action=search)` |
 | `brain_prompt` | `discard` | edit `projects/<id>/prompts/<date>.md` by hand |
 | `brain_projects` | `merge` | `brain project set <id> --alias <old-id>` or `brain import --map-project` |
-| `brain_judge` | `pin`, `unpin` | `brain note "<why this record matters>"` (pinning lands in 0.18) |
 | `brain_judge` | `consolidate` | `brain record supersede <old-id> --by <new-id>` |
 
 A graph engine that serves symbol navigation but not analytics refuses the
@@ -183,7 +182,7 @@ its `readOnlyHint` is false while `x-lv24-read-actions` names the reads.
 | `brain_projects` | read | `list` (default), `current`, `register`, `merge` | project registry; `current` reports the resolution source |
 | `brain_prompt` | destructive | `save`, `search`, `discard` | opt-in local-only prompt zone |
 | `brain_code` | mixed | `status` (default), `search`, `node`, `explore`, `impact`, `index`, `sync` | query or index one checkout's code graph |
-| `brain_graph` | read | `stats` (default), `neighbors`, `path`, `communities`, `god_nodes`, `cycles`, `diff`, `pr_impact` | graph counts, neighbours, communities, degree ranking, path, import cycles, index deltas and local-diff impact |
+| `brain_graph` | read | `stats` (default), `neighbors`, `path`, `communities`, `god_nodes`, `cycles`, `diff`, `pr_impact`, `surprises` | graph counts, neighbours, communities, degree ranking, path, import cycles, index deltas, local-diff impact and surprising cross-community edges |
 | `brain_capabilities` | read | – | profile, engine, tools, features, limits, gaps, refusal codes, endpoints |
 
 The write postures are exact: **9 read, 5 non-destructive writes, 3
@@ -246,6 +245,7 @@ data.
 | `cycles` | import cycles (Tarjan SCC) of Go packages and TypeScript/Python modules, with members and self-import count |
 | `diff` | file, symbol, edge and (native) community deltas between this index and `base_project` |
 | `pr_impact` | changed files → changed symbols → reverse blast radius, risk tier and test files for `base..head` |
+| `surprises` | dependency edges whose endpoints live in different communities, scored by confidence, degree and rarity |
 
 Algorithms, limits and the risk tiers are documented in
 [`code-graph.md`](code-graph.md#analytics).

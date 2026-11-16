@@ -205,6 +205,8 @@ var completionTable = []completionCmd{
 		cmdLeaf("auth", valueFlag("client-id"), valueFlag("scopes"), boolFlag("remove"), valueFlag("config")),
 	),
 	cmdLeaf("migrate", valueFlag("from"), valueFlag("db"), valueFlag("data-dir"), boolFlag("dry-run"), boolFlag("include-prompts"), valueFlag("project-map"), boolFlag("json"), valueFlag("rollback"), valueFlag("config")),
+	cmdLeaf("export", valueFlag("out"), valueFlag("project"), valueFlag("since"), boolFlag("json"), valueFlag("config")),
+	cmdLeaf("import", valueFlag("from"), boolFlag("dry-run"), boolFlag("json"), boolFlag("create-projects"), valueFlag("rollback"), valueFlag("config")),
 	cmdGroup("agent",
 		cmdLeaf("run", valueFlag("parent-pid"), valueFlag("projects"), valueFlag("config")),
 		cmdLeaf("status", boolFlag("json"), valueFlag("config")),

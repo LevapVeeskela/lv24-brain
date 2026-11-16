@@ -427,7 +427,7 @@ func (s *Server) featureFlags() map[string]any {
 		"full_text":       true,
 		"semantic_search": false,
 		"topics":          true,
-		"pinning":         false,
+		"pinning":         true,
 		"record_history":  "supersede-chain",
 		"relations":       true,
 		"sessions":        false,
@@ -480,9 +480,9 @@ func capabilityGaps() []CapabilityGap {
 		{Tool: "brain_search", Action: "include_prompts", Reason: "the prompt zone is local-only and never enters the search index", Remediation: "brain_prompt(action=search)"},
 		{Tool: "brain_prompt", Action: "discard", Reason: "no app method deletes a prompt in 0.17", Remediation: "edit projects/<id>/prompts/<date>.md by hand"},
 		{Tool: "brain_projects", Action: "merge", Reason: "no app method merges projects in 0.17", Remediation: "brain project set <id> --alias <old-id> (renames) or brain import --from engram --map-project <from>=<to>"},
-		{Tool: "brain_judge", Action: "pin", Reason: "pinning needs additive frontmatter and ranking weight (0.18)", Remediation: "brain note \"<why this record matters>\""},
-		{Tool: "brain_judge", Action: "unpin", Reason: "pinning needs additive frontmatter and ranking weight (0.18)", Remediation: "brain note \"<why this record matters>\""},
 		{Tool: "brain_judge", Action: "consolidate", Reason: "two-phase consolidation is not exposed over MCP in 0.17", Remediation: "brain record supersede <old-id> --by <new-id>"},
+		{Tool: "brain_judge", Action: "pin", Reason: "pinning needs additive frontmatter and a ranking weight", Remediation: "brain note \"<why this record matters>\""},
+		{Tool: "brain_judge", Action: "unpin", Reason: "pinning needs additive frontmatter and a ranking weight", Remediation: "brain note \"<why this record matters>\""},
 	}
 }
 

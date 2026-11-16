@@ -105,6 +105,8 @@ type ContextRecord struct {
 	// Quarantined marks a record that is shown only because the caller asked
 	// for unreviewed records. Its text is not trusted.
 	Quarantined bool
+	// Pinned is the explicit pin flag set by the owner.
+	Pinned bool
 }
 
 // ContextExcerpt is one raw-zone item body allowed by context-allow.json.
@@ -145,6 +147,9 @@ type ContextResult struct {
 	PendingProposals *int
 	// Quarantined lists the ids of records excluded from trusted context.
 	Quarantined []string
+	// StateQuarantined reports that the project state is quarantined and was
+	// not injected as trusted text.
+	StateQuarantined bool
 	// RawExcerpts are granted raw-zone excerpts, ordered by search relevance.
 	// Empty unless Raw was requested, grants match and curated context is thin.
 	RawExcerpts []ContextExcerpt
@@ -217,6 +222,7 @@ func (a *App) Context(ctx context.Context, opts ContextOptions) (ContextResult, 
 	result := ContextResult{
 		Project: project, Mode: a.cfg.Mode, Query: query, Since: since,
 		Budget: opts.Budget, State: state, Handoff: handoff, Quarantined: quarantined,
+		StateQuarantined:  state.Provenance.Quarantined(),
 		IncludeUnreviewed: opts.IncludeUnreviewed,
 	}
 	if result.Budget < 0 {
@@ -567,9 +573,20 @@ func renderContextHeader(result ContextResult, revision string) string {
 }
 
 // writeContextState writes the project state block of the core layer.
-func writeContextState(out *strings.Builder, state domain.State, now time.Time) {
+func writeContextState(out *strings.Builder, state domain.State, now time.Time, includeUnreviewed bool) {
 	fmt.Fprintf(out, "state_updated: %s (age %s)\n", formatTime(state.UpdatedAt), stateAge(now, state))
 	fmt.Fprintf(out, "freshness: %s\n", freshness(now, state))
+	if state.Provenance.Quarantined() {
+		fmt.Fprintf(out, "state_quarantined: true\n")
+	}
+	if state.Provenance.Quarantined() && !includeUnreviewed {
+		fmt.Fprintf(out, "goal: (quarantined state omitted)\n")
+		fmt.Fprintf(out, "next_action: (quarantined state omitted)\n")
+		writePromptList(out, "active", nil)
+		writePromptList(out, "blocked", nil)
+		writePromptList(out, "open_questions", nil)
+		return
+	}
 	fmt.Fprintf(out, "goal: %s\n", valueOr(state.Goal, "not set"))
 	fmt.Fprintf(out, "next_action: %s\n", valueOr(state.NextAction, "not set"))
 	writePromptList(out, "active", state.Active)
@@ -581,7 +598,7 @@ func writeContextState(out *strings.Builder, state domain.State, now time.Time) 
 // handoff, review findings) and the record metadata that accounts for it.
 func renderContextCore(result ContextResult, now time.Time) (string, []ContextSectionRecord) {
 	var out strings.Builder
-	writeContextState(&out, result.State, now)
+	writeContextState(&out, result.State, now, result.IncludeUnreviewed)
 	stateTokens := textbudget.Tokens(out.String())
 	records := []ContextSectionRecord{{
 		ID: "state", Kind: "state", Title: "Project state", Path: "state.md",

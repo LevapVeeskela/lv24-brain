@@ -55,6 +55,7 @@ const (
 	FindingStateBehindCommits   FindingKind = "state-behind-commits"
 	FindingDecisionCodeChanged  FindingKind = "decision-code-changed"
 	FindingQuarantined          FindingKind = "quarantined"
+	FindingStateQuarantined     FindingKind = "state-quarantined"
 	FindingReviewOverdue        FindingKind = "review-overdue"
 	FindingPendingRelations     FindingKind = "pending-relations"
 )
@@ -63,7 +64,7 @@ var findingKinds = []FindingKind{
 	FindingNextBehindHandoff, FindingNextMaybeDone, FindingQuestionAnswered,
 	FindingDecisionContradicted, FindingStateExpired, FindingStateBehindCommits,
 	FindingDecisionCodeChanged, FindingBrokenLink, FindingNearDuplicate,
-	FindingQuarantined, FindingSupersessionGap, FindingStaleSuperseded,
+	FindingQuarantined, FindingStateQuarantined, FindingSupersessionGap, FindingStaleSuperseded,
 	FindingProposalStale, FindingProposalOrphan, FindingProposalContradicted,
 	FindingReviewOverdue, FindingPendingRelations,
 }
@@ -88,6 +89,12 @@ var findingSpecs = map[FindingKind]findingSpec{
 		Why:      "unreviewed external text is excluded from trusted context, so the brain cannot use what it already stores.",
 		Next:     "read the record, then clear it with `brain record review <id>` (or `brain record review --all`).",
 		Confirm:  "the record says what its source says and is safe to include in context.",
+	},
+	FindingStateQuarantined: {
+		Severity: SeverityError,
+		Why:      "the project state is an unreviewed write, so its goal and next action stay out of trusted context.",
+		Next:     "read the state, then clear it with `brain state review` (optionally `--trust verified|stated|inferred`).",
+		Confirm:  "the state describes the current work and is safe to include in context.",
 	},
 	FindingStateExpired: {
 		Severity: SeverityWarn,
@@ -378,6 +385,7 @@ func (a *App) Findings(ctx context.Context, projectID string) ([]Finding, error)
 	// Quarantine comes first so a short context or session summary never
 	// truncates the one finding that says external text is waiting for review.
 	findings = append(findings, quarantinedFindings(in)...)
+	findings = append(findings, stateQuarantinedFinding(in)...)
 	findings = append(findings, stateFindings(in, now)...)
 	findings = append(findings, nextActionFindings(in)...)
 	findings = append(findings, questionFindings(in)...)
@@ -539,6 +547,15 @@ func quarantinedFindings(in reviewInputs) []Finding {
 	return []Finding{newFinding(FindingQuarantined,
 		fmt.Sprintf("%d quarantined records are excluded from context until reviewed: %s; clear one with `brain record review <id>` or all with `brain record review --all`", len(ids), quarantineIDSample(ids)),
 		strings.Join(ids, ", "))}
+}
+
+func stateQuarantinedFinding(in reviewInputs) []Finding {
+	if !in.state.Provenance.Quarantined() {
+		return nil
+	}
+	return []Finding{newFinding(FindingStateQuarantined,
+		"project state is quarantined and excluded from trusted context until reviewed: clear it with `brain state review`",
+		"state")}
 }
 
 // quarantineIDSample lists at most maxListedItems ids in a finding message; the

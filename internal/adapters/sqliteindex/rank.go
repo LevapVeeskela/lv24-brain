@@ -123,13 +123,13 @@ func rankedSelectPrefix(includeBody bool) string {
 	for _, column := range signalColumns {
 		builder.WriteString("\t\tw_" + column.signal + " / (total + " + floatLiteral(scoreOffset) + ") AS " + column.name + ",\n")
 	}
-	builder.WriteString("\t\tvalid_from, valid_to, superseded_by, status, confidence, subtype, scope, topic_key, occurrences, updated_at\n\tFROM (\n")
+	builder.WriteString("\t\tvalid_from, valid_to, superseded_by, status, confidence, subtype, scope, topic_key, occurrences, pinned, updated_at\n\tFROM (\n")
 	builder.WriteString("\t\tSELECT id, project_id, kind, title, snippet, body,\n")
 	for _, column := range signalColumns {
 		builder.WriteString("\t\t\t" + contributionExpr(column.signal, column.weight) + " AS w_" + column.signal + ",\n")
 	}
 	builder.WriteString("\t\t\t" + totalExpr() + " AS total,\n")
-	builder.WriteString("\t\t\tvalid_from, valid_to, superseded_by, status, confidence, subtype, scope, topic_key, occurrences, updated_at\n\t\tFROM (\n")
+	builder.WriteString("\t\t\tvalid_from, valid_to, superseded_by, status, confidence, subtype, scope, topic_key, occurrences, pinned, updated_at\n\t\tFROM (\n")
 	builder.WriteString("\t\t\tSELECT d.id AS id, d.project_id AS project_id, d.kind AS kind, d.title AS title,\n")
 	builder.WriteString("\t\t\t\tsnippet(documents_fts, -1, ?, ?, ?, ?) AS snippet,\n")
 	builder.WriteString("\t\t\t\t" + body + " AS body,\n")
@@ -142,6 +142,7 @@ func rankedSelectPrefix(includeBody bool) string {
 	}
 	builder.WriteString("\t\t\t\t\tELSE " + floatLiteral(defaultImportance) + "\n\t\t\t\tEND AS imp,\n")
 	builder.WriteString("\t\t\t\tMAX(\n")
+	builder.WriteString("\t\t\t\t\tCASE WHEN d.pinned = 1 THEN 1.0 ELSE 0.0 END,\n")
 	builder.WriteString("\t\t\t\t\tCASE WHEN d.kind = 'decision' AND d.status = 'accepted' THEN 1.0 ELSE 0.0 END,\n")
 	builder.WriteString("\t\t\t\t\tMIN(1.0, COALESCE(d.confidence, 0.0))\n")
 	builder.WriteString("\t\t\t\t) AS pin,\n")
@@ -149,6 +150,7 @@ func rankedSelectPrefix(includeBody bool) string {
 	builder.WriteString("\t\t\t\td.valid_from AS valid_from, d.valid_to AS valid_to, d.superseded_by AS superseded_by,\n")
 	builder.WriteString("\t\t\t\td.status AS status, d.confidence AS confidence,\n")
 	builder.WriteString("\t\t\t\td.subtype AS subtype, d.scope AS scope, d.topic_key AS topic_key, d.occurrences AS occurrences,\n")
+	builder.WriteString("\t\t\t\td.pinned AS pinned,\n")
 	builder.WriteString("\t\t\t\td.updated_at AS updated_at\n")
 	builder.WriteString("\t\t\tFROM documents_fts\n")
 	builder.WriteString("\t\t\tJOIN documents d ON d.rowid = documents_fts.rowid\n")
@@ -191,10 +193,10 @@ func isFresh(updatedAt, now time.Time) bool {
 	return now.Sub(updatedAt) <= time.Duration(reasonFreshDays*24)*time.Hour
 }
 
-// pinned reports whether the pin signal fired: an accepted decision or a
-// record with a stated confidence.
-func pinned(kind, status string, confidence float64) bool {
-	return (kind == ports.RecordDecision && status == "accepted") || confidence > 0
+// pinned reports whether the pin signal fired: an explicitly pinned record, an
+// accepted decision or a record with a stated confidence.
+func pinned(kind, status string, confidence float64, isPinned bool) bool {
+	return isPinned || (kind == ports.RecordDecision && status == "accepted") || confidence > 0
 }
 
 // matchReasons names the signals that fired for a hit, in the documented

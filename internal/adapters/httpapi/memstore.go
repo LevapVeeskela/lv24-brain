@@ -1283,17 +1283,29 @@ func (m *MemoryStore) SearchScoped(_ context.Context, query ports.Query, scope P
 		})
 	}
 	for _, record := range m.notes {
+		if record.Note.Provenance.Quarantined() {
+			continue
+		}
 		appendHit(record.ID, record.ProjectID, "note", record.UpdatedAt, record.Title, record.Body)
 	}
 	for _, record := range m.decisions {
+		if record.Decision.Provenance.Quarantined() {
+			continue
+		}
 		appendHit(record.ID, record.ProjectID, "decision", record.UpdatedAt, record.Title, record.Context,
 			strings.Join(record.Alternatives, "\n"), strings.Join(record.Consequences, "\n"), strings.Join(record.Evidence, "\n"))
 	}
 	for _, record := range m.attempts {
+		if record.Attempt.Provenance.Quarantined() {
+			continue
+		}
 		appendHit(record.ID, record.ProjectID, "attempt", record.UpdatedAt, record.Title,
 			record.Hypothesis+"\n"+record.Result+"\n"+record.Reason)
 	}
 	for _, record := range m.handoffs {
+		if record.Handoff.Provenance.Quarantined() {
+			continue
+		}
 		appendHit(record.ID, record.ProjectID, "handoff", record.CreatedAt, record.Summary,
 			record.GitContext+"\n"+record.NextAction)
 	}

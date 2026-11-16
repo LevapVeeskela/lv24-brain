@@ -48,6 +48,8 @@ type RecordSummary struct {
 	Tags []string
 	// Permalink is the canonical path the record was written with, when any.
 	Permalink string
+	// Pinned is the explicit pin flag set by the owner.
+	Pinned bool
 	// ReviewAfter and ReviewSource hold the effective review date: the
 	// record's frontmatter date ("frontmatter") or its kind default counted
 	// from creation ("default"). Both are empty when the kind has no review
@@ -84,6 +86,20 @@ func (r Record) Permalink() string {
 		return r.Handoff.Permalink
 	}
 	return ""
+}
+
+func (r Record) Pinned() bool {
+	switch {
+	case r.Note != nil:
+		return r.Note.Pinned
+	case r.Decision != nil:
+		return r.Decision.Pinned
+	case r.Attempt != nil:
+		return r.Attempt.Pinned
+	case r.Handoff != nil:
+		return r.Handoff.Pinned
+	}
+	return false
 }
 
 // ListRecordsOptions filters ListRecords.
@@ -151,6 +167,7 @@ func (r Record) Summary() RecordSummary {
 	summary.Subtype, summary.Scope, summary.TopicKey, summary.Occurrences = taxonomyOf(r)
 	summary.Provenance = r.Provenance()
 	summary.Permalink = r.Permalink()
+	summary.Pinned = r.Pinned()
 	if r.Note != nil {
 		summary.Tags = append([]string(nil), r.Note.Tags...)
 	}
@@ -343,6 +360,64 @@ func (a *App) SetDecisionStatus(ctx context.Context, projectID, id string, statu
 		decision.Status = status
 		return nil
 	})
+}
+
+// SetRecordPinned sets or clears the pinned flag of one record of any kind.
+func (a *App) SetRecordPinned(ctx context.Context, projectID, id string, pinned bool) (Record, error) {
+	if err := a.requireStore(); err != nil {
+		return Record{}, err
+	}
+	pinner, ok := a.deps.Store.(ports.RecordPinner)
+	if !ok {
+		return Record{}, fmt.Errorf("%w: pinning records is not supported by this store", domain.ErrUnsupported)
+	}
+	record, err := a.GetRecord(ctx, projectID, id)
+	if err != nil {
+		return Record{}, err
+	}
+	summary := record.Summary()
+	if _, err := pinner.SetRecordPinned(ctx, summary.ProjectID, summary.Kind, summary.ID, pinned); err != nil {
+		return Record{}, err
+	}
+	switch {
+	case record.Note != nil:
+		record.Note.Pinned = pinned
+	case record.Decision != nil:
+		record.Decision.Pinned = pinned
+	case record.Attempt != nil:
+		record.Attempt.Pinned = pinned
+	case record.Handoff != nil:
+		record.Handoff.Pinned = pinned
+	}
+	switch {
+	case record.Note != nil:
+		if err := a.upsertIndex(ctx, noteDocument(*record.Note)); err != nil {
+			return record, fmt.Errorf("record %s was pinned but the search index update failed: %w", record.Summary().ID, err)
+		}
+	case record.Decision != nil:
+		if err := a.upsertIndex(ctx, decisionDocument(*record.Decision)); err != nil {
+			return record, fmt.Errorf("record %s was pinned but the search index update failed: %w", record.Summary().ID, err)
+		}
+	case record.Attempt != nil:
+		if err := a.upsertIndex(ctx, attemptDocument(*record.Attempt)); err != nil {
+			return record, fmt.Errorf("record %s was pinned but the search index update failed: %w", record.Summary().ID, err)
+		}
+	case record.Handoff != nil:
+		if err := a.upsertIndex(ctx, handoffDocument(*record.Handoff)); err != nil {
+			return record, fmt.Errorf("record %s was pinned but the search index update failed: %w", record.Summary().ID, err)
+		}
+	}
+	return record, nil
+}
+
+// PinRecord is a convenience wrapper.
+func (a *App) PinRecord(ctx context.Context, projectID, id string) (Record, error) {
+	return a.SetRecordPinned(ctx, projectID, id, true)
+}
+
+// UnpinRecord is a convenience wrapper.
+func (a *App) UnpinRecord(ctx context.Context, projectID, id string) (Record, error) {
+	return a.SetRecordPinned(ctx, projectID, id, false)
 }
 
 // Supersede is implemented in supersede.go: it links any two records of a

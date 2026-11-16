@@ -88,6 +88,13 @@ type RecordValiditySetter interface {
 	SetRecordValidity(ctx context.Context, projectID, kind, id string, validity domain.Validity) error
 }
 
+// RecordPinner is implemented by stores that can set or clear the pinned flag of
+// one stored record without changing its text. It is optional: a store without
+// it reports that pinning is unavailable.
+type RecordPinner interface {
+	SetRecordPinned(ctx context.Context, projectID, kind, id string, pinned bool) (bool, error)
+}
+
 // TrashedRecord identifies one record in a project's trash.
 type TrashedRecord struct {
 	Kind  string

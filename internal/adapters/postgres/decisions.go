@@ -60,10 +60,11 @@ func (s *Store) CreateDecision(ctx context.Context, decision domain.Decision) (D
 		if _, err := tx.Exec(
 			ctx,
 			`INSERT INTO decisions
-			 (id, project_id, title, status, decision_context, alternatives, consequences, evidence, permalink, revision, created_at, updated_at, created_by)
-			 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)`,
+			 (id, project_id, title, status, decision_context, alternatives, consequences, evidence, permalink, origin, reviewed, trust, revision, created_at, updated_at, created_by)
+			 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)`,
 			decision.ID, decision.ProjectID, decision.Title, string(decision.Status), decision.Context,
 			decision.Alternatives, decision.Consequences, decision.Evidence, decision.Permalink,
+			decision.Provenance.Origin, decision.Provenance.Reviewed, decision.Provenance.Trust,
 			revisionID, decision.CreatedAt, decision.UpdatedAt, record.CreatedBy,
 		); err != nil {
 			return mapPgError("create decision", err)
@@ -234,7 +235,7 @@ func scanDecision(row rowScanner) (DecisionRecord, error) {
 	if err := row.Scan(
 		&record.ID, &record.ProjectID, &record.Title, &status, &record.Context,
 		&record.Alternatives, &record.Consequences, &record.Evidence, &record.Permalink,
-		&record.Revision, &record.CreatedAt, &record.UpdatedAt, &record.CreatedBy,
+		&record.Origin, &record.Reviewed, &record.Trust, &record.Revision, &record.CreatedAt, &record.UpdatedAt, &record.CreatedBy,
 	); err != nil {
 		return DecisionRecord{}, err
 	}

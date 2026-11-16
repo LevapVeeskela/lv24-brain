@@ -788,7 +788,6 @@ left untouched and the command exits non-zero.
 | Raw-zone deletes are not inferred | sources report tombstones only; `Deletes` is false without authoritative tombstones |
 | Curation is local and rule-based | `brain digest --source` and `brain promote` run in local/git mode only, read stored items, and write machine-local git-ignored proposals; server mode has no proposal surface, the local API exposes proposals read/promote/dismiss to the desktop (never automatically), and there is no scheduled digest or proposal merge/trash |
 | Raw context excerpts are local/git only | `brain context --raw` and every raw search path read `context-allow.json`; excerpts exist only in local/git mode, and server search never returns raw items to viewers or members |
-| `state.md` has no provenance | state is always trusted context; only records carry `origin/reviewed/trust`, so `brain_state_set` text is not quarantined (planned with a later state model) |
 | `record review` is local/git only | server mode has no provenance-edit route yet; quarantined server records can only be changed through the ordinary update routes |
 | Relations are store-and-index only | typed relations and the judged graph are persisted and projected, but no read path uses them for neighbour navigation yet; `brain timeline` and the context `linked` layer still follow `[[id]]` only |
 | Merge is CLI-only | `brain record merge` plans, applies and rolls back in local/git mode; no MCP tool and no server route apply, trash or hard-delete records |
@@ -802,3 +801,8 @@ left untouched and the command exits non-zero.
 
 CRDT co-editing, multi-tenant SaaS, billing, mobile app, paid hosting or CI,
 automatic mail body storage, and Rust components (interfaces are reserved).
+
+## Server record provenance review
+
+Server-mode records carry origin, eviewed, and 	rust provenance. POST .../records/{kind}/{id}/review updates only those fields, bumps the revision, and audits the change; httpclient implements RecordReviewer so rain record review works against a server.
+

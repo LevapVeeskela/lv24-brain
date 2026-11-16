@@ -17,6 +17,7 @@ type RecordSummary struct {
 	ProjectID string    `json:"project_id"`
 	Title     string    `json:"title"`
 	Status    string    `json:"status,omitempty"`
+	Pinned    bool      `json:"pinned,omitempty"`
 	CreatedAt time.Time `json:"created_at,omitzero"`
 	UpdatedAt time.Time `json:"updated_at,omitzero"`
 }
@@ -135,6 +136,29 @@ type ReviewRecordResult struct {
 // quarantine.
 type ReviewRecordBackend interface {
 	ReviewRecord(ctx context.Context, in ReviewRecordInput) (ReviewRecordResult, error)
+}
+
+// RecordPinner is implemented by backends that can set or clear the pinned flag
+// of one record.
+type RecordPinner interface {
+	SetPinned(ctx context.Context, projectID, id string, pinned bool) (RecordSummary, error)
+}
+
+// RecordPinSetter is an alternate spelling of RecordPinner.
+type RecordPinSetter interface {
+	SetRecordPinned(ctx context.Context, projectID, id string, pinned bool) (RecordSummary, error)
+}
+
+// RecordPinToggler is an alternate spelling of RecordPinner.
+type RecordPinToggler interface {
+	PinRecord(ctx context.Context, projectID, id string, pinned bool) (RecordSummary, error)
+}
+
+// RecordPinActioner is implemented by backends exposing separate pin/unpin
+// actions.
+type RecordPinActioner interface {
+	PinRecord(ctx context.Context, projectID, id string) (RecordSummary, error)
+	UnpinRecord(ctx context.Context, projectID, id string) (RecordSummary, error)
 }
 
 // RecordList is the structured result of brain_record(action=list).
@@ -527,6 +551,47 @@ func reviewRecordResult(projectID string, result ReviewRecordResult) toolResult 
 
 // checkDecisionStatus rejects a status outside the decision lifecycle; the
 // JSON schema enum is advisory for clients, so the handler enforces it too.
+// applyPin sets or clears the pinned flag of one record.
+func (s *Server) applyPin(ctx context.Context, args judgeArgs, pinned bool) (toolResult, error) {
+	id, err := requireText("id", args.ID)
+	if err != nil {
+		return toolResult{}, err
+	}
+	target, err := s.writeTarget(ctx, strings.TrimSpace(args.Project))
+	if err != nil {
+		return toolResult{}, err
+	}
+	record, err := s.pinRecord(ctx, target.ID, id, pinned)
+	if err != nil {
+		return toolResult{}, err
+	}
+	verb := "unpinned"
+	if pinned {
+		verb = "pinned"
+	}
+	return toolResult{Text: fmt.Sprintf("record %s: %s", record.ID, verb), Structured: record}, nil
+}
+
+// pinRecord dispatches to whichever backend interface is available.
+func (s *Server) pinRecord(ctx context.Context, projectID, id string, pinned bool) (RecordSummary, error) {
+	if p, ok := s.backend.(RecordPinner); ok {
+		return p.SetPinned(ctx, projectID, id, pinned)
+	}
+	if p, ok := s.backend.(RecordPinSetter); ok {
+		return p.SetRecordPinned(ctx, projectID, id, pinned)
+	}
+	if p, ok := s.backend.(RecordPinToggler); ok {
+		return p.PinRecord(ctx, projectID, id, pinned)
+	}
+	if p, ok := s.backend.(RecordPinActioner); ok {
+		if pinned {
+			return p.PinRecord(ctx, projectID, id)
+		}
+		return p.UnpinRecord(ctx, projectID, id)
+	}
+	return RecordSummary{}, unsupportedBackend("brain_judge(action=pin|unpin)", "brain record pin <id>")
+}
+
 func checkDecisionStatus(status string) error {
 	if status == "" {
 		return refusalUnsupported("pass status, or supersede with a target id", "pass status=accepted|rejected, or supersede with to=<decision id>")

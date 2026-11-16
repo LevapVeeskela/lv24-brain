@@ -10,7 +10,7 @@ import (
 	"github.com/levapveeskela/lv24-brain/internal/ports"
 )
 
-const handoffColumns = `id, project_id, summary, git_context, next_action, permalink, revision, created_at, created_by`
+const handoffColumns = `id, project_id, summary, git_context, next_action, permalink, origin, reviewed, trust, revision, created_at, created_by`
 
 // HandoffRecord is a handoff plus its server revision.
 type HandoffRecord struct {
@@ -53,10 +53,11 @@ func (s *Store) CreateHandoff(ctx context.Context, handoff domain.Handoff) (Hand
 		if _, err := tx.Exec(
 			ctx,
 			`INSERT INTO handoffs
-			 (id, project_id, summary, git_context, next_action, permalink, revision, created_at, created_by)
-			 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+			 (id, project_id, summary, git_context, next_action, permalink, origin, reviewed, trust, revision, created_at, created_by)
+			 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
 			handoff.ID, handoff.ProjectID, handoff.Summary, handoff.GitContext,
-			handoff.NextAction, handoff.Permalink, revisionID, handoff.CreatedAt, record.CreatedBy,
+			handoff.NextAction, handoff.Permalink, handoff.Provenance.Origin, handoff.Provenance.Reviewed, handoff.Provenance.Trust,
+			revisionID, handoff.CreatedAt, record.CreatedBy,
 		); err != nil {
 			return mapPgError("create handoff", err)
 		}
@@ -151,7 +152,7 @@ func scanHandoff(row rowScanner) (HandoffRecord, error) {
 	var record HandoffRecord
 	if err := row.Scan(
 		&record.ID, &record.ProjectID, &record.Summary, &record.GitContext,
-		&record.NextAction, &record.Permalink, &record.Revision, &record.CreatedAt, &record.CreatedBy,
+		&record.NextAction, &record.Permalink, &record.Origin, &record.Reviewed, &record.Trust, &record.Revision, &record.CreatedAt, &record.CreatedBy,
 	); err != nil {
 		return HandoffRecord{}, err
 	}

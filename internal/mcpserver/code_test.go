@@ -26,6 +26,7 @@ type graphIndexFake struct {
 	diff           ports.GraphDiffView
 	path           ports.GraphPath
 	prImpact       ports.PRImpactView
+	surprises      ports.SurprisesView
 	analyticsStats ports.GraphStatsView
 	err            error
 	// hideAnalytics makes the index answer stats and neighbors only.
@@ -48,6 +49,7 @@ type graphIndexFake struct {
 	pathDepth      int
 	prBase         string
 	prHead         string
+	surpriseLimit  int
 	closeCount     int
 	indexCalls     int
 	syncCalls      int
@@ -132,6 +134,11 @@ func (f *graphIndexFake) ShortestPath(_ context.Context, _, from, to string, max
 func (f *graphIndexFake) PRImpact(_ context.Context, _, base, head string) (ports.PRImpactView, error) {
 	f.prBase, f.prHead = base, head
 	return f.prImpact, f.err
+}
+
+func (f *graphIndexFake) Surprises(_ context.Context, _ string, limit int) (ports.SurprisesView, error) {
+	f.surpriseLimit = limit
+	return f.surprises, f.err
 }
 
 func (f *graphIndexFake) GraphStats(context.Context, string) (ports.GraphStatsView, error) {

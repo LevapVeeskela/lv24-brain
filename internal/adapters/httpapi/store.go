@@ -256,6 +256,11 @@ type Store interface {
 	ListHandoffs(ctx context.Context, opts ListOptions) ([]HandoffRecord, error)
 	DeleteHandoff(ctx context.Context, id string, expected int64) (domain.SyncRevision, error)
 
+	// UpdateRecordProvenance rewrites only the provenance fields of one record
+	// and bumps its revision. expected is the callers last seen revision;
+	// zero skips the optimistic check.
+	UpdateRecordProvenance(ctx context.Context, kind, id string, provenance domain.Provenance, expected int64) (domain.SyncRevision, error)
+
 	Search(ctx context.Context, query ports.Query) ([]ports.Hit, error)
 	// SearchScoped is Search limited by a project scope, applied before the
 	// result limit.
