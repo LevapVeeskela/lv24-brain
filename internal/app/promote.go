@@ -153,7 +153,7 @@ func (a *App) promoteLocked(ctx context.Context, opts PromoteOptions, proposal d
 		if opts.Dismiss {
 			return PromoteResult{Proposal: proposal, Dismissed: true, Already: true}, nil
 		}
-		return PromoteResult{}, fmt.Errorf("proposal %s is dismissed; rerun with --dismiss to confirm its status", proposal.ID)
+		return PromoteResult{}, fmt.Errorf("%w: proposal %s is dismissed; rerun with --dismiss to confirm its status", domain.ErrConflict, proposal.ID)
 	}
 
 	// Record-first repair: a crash after AppendDecision but before SetStatus
@@ -183,8 +183,8 @@ func (a *App) promoteLocked(ctx context.Context, opts PromoteOptions, proposal d
 				if health.Orphan {
 					kind = "orphaned"
 				}
-				return PromoteResult{}, fmt.Errorf("proposal %s is %s (%s); pass --force to promote it anyway",
-					proposal.ID, kind, health.Reason)
+				return PromoteResult{}, fmt.Errorf("%w: proposal %s is %s (%s); pass --force to promote it anyway",
+					domain.ErrConflict, proposal.ID, kind, health.Reason)
 			}
 		}
 		if health.LocalOnly && !opts.Yes {

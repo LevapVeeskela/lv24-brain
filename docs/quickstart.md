@@ -606,13 +606,17 @@ Endpoints: `GET /v1/health`; `GET|POST /v1/connections`;
 `POST /v1/connections/{id}/credentials/{field}`; `GET /v1/runs`,
 `GET /v1/runs/{id}`, `GET /v1/runs/{id}/log` (SSE); `GET /v1/schedules`,
 `PUT /v1/schedules/{id}`; `GET /v1/projects`; `GET|PUT /v1/settings`;
+`GET /v1/records`, `GET /v1/records/{id}`, `GET /v1/search`, `GET /v1/review`,
+`GET /v1/proposals`, `POST /v1/proposals/{project}/{id}/promote|dismiss`,
+`GET /v1/catchup`, `GET|PUT /v1/projects/{id}/state`;
 `POST /v1/engine/update` (requires `{"confirm":true}`);
 `POST /v1/shutdown`. Requests require exactly one `Authorization: Bearer`
 header, `Host` must be the loopback listener, and any `Origin`/`Referer` is
 rejected (no CORS, no browser access). The API is local-only; server mode has
 its own authenticated HTTP API. The frozen `localapi-v1` contract
 ([localapi-v1.md](localapi-v1.md)) covers the error envelope, 405 `Allow`
-behavior, job/run IDs, the 500-run list cap and SSE snapshot limits.
+behavior, job/run IDs, the 500-run list cap, SSE snapshot limits and the memory
+route caps and state CAS.
 
 ## 2. Git mode
 

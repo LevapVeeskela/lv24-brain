@@ -119,10 +119,10 @@ func pageSearchHits(hits []ports.Hit, offset, size, requested int, filter string
 	case offset+len(items) < returned:
 		// A row beyond this page is present, so another page exists.
 		page.HasMore = true
-	case returned == requested && offset+size >= requested:
-		// The backend filled the whole requested window. When that window was
-		// clamped at the result window, another page may exist; its cursor
-		// either serves it or reports that the window is exhausted.
+	case returned == requested && offset+size >= requested && offset+size < searchMaxWindow:
+		// The backend filled the whole requested window, and the next page
+		// still starts inside the result window. A page that would start at or
+		// past searchMaxWindow is not offered: its cursor would be refused.
 		page.HasMore = true
 	}
 	if page.HasMore {

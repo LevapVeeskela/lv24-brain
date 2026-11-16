@@ -51,6 +51,10 @@ type Options struct {
 	Version     string
 	Now         func() time.Time
 	Agent       *daemon.Agent
+	// App is the curated memory use-case surface. It is optional: an engine
+	// without it keeps serving the connection routes and reports the memory
+	// routes as unavailable.
+	App MemoryApp
 }
 
 // Control owns the loopback server for one agent process.
@@ -109,6 +113,10 @@ func (c *Control) Start(ctx context.Context, runtime daemon.Runtime) (int, error
 		return port, nil
 	}
 	agent := c.opts.Agent
+	var memory localapi.MemoryService
+	if c.opts.App != nil {
+		memory = newMemoryService(c.opts.App, c.opts.Now)
+	}
 	server, err := localapi.NewServer(localapi.Options{
 		Token:       localapi.TokenFunc(func() string { return runtime.Token }),
 		Port:        0,
@@ -118,6 +126,7 @@ func (c *Control) Start(ctx context.Context, runtime daemon.Runtime) (int, error
 		Now:         c.opts.Now,
 		Heartbeat:   15 * time.Second,
 		Status:      "running",
+		Memory:      memory,
 		Connections: connectionService{store: c.opts.Connections, agent: agent, locker: c.opts.Locker},
 		Sources: sourceRegistry{
 			registry: c.opts.Registry,

@@ -1801,7 +1801,7 @@ func runSearch(args []string, stdout, stderr io.Writer) int {
 	if err != nil {
 		return reportError(stderr, "search", err)
 	}
-	runtime, err := bootstrap.Build(cfg)
+	runtime, err := buildRuntime(cfg)
 	if err != nil {
 		return reportError(stderr, "search", err)
 	}
@@ -1856,6 +1856,9 @@ func runSearch(args []string, stdout, stderr io.Writer) int {
 		}
 	}
 	if page.HasMore {
+		// Another page is a normal result, not a failure: the hint tells the
+		// caller how to continue and the command still exits 0, so a script can
+		// page through results without treating pagination as an error.
 		fmt.Fprintf(stderr, "brain search: more results; pass --cursor %q for page %d\n", page.NextCursor, page.Page+1)
 	}
 	return 0

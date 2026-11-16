@@ -31,20 +31,169 @@ Every error response is JSON:
 
 | Status | Codes | Meaning |
 | --- | --- | --- |
-| 400 | `validation`, `invalid_json`, `confirmation_required` | Invalid input or missing explicit confirmation. |
+| 400 | `validation`, `invalid_json`, `confirmation_required`, `unsupported` | Invalid input, missing explicit confirmation, or a capability the current mode cannot serve. |
 | 401 | `unauthorized` | Bearer token missing, duplicated or wrong. |
 | 403 | `forbidden` | Host, `Origin` or `Referer` rejected. |
-| 404 | `not_found` | Unknown route, connection, schedule or run. |
+| 404 | `not_found` | Unknown route, connection, schedule, run, record or proposal. |
 | 405 | `method_not_allowed` | Wrong method; `Allow` lists the supported methods. |
-| 409 | `conflict` | Resource busy or conflicting with existing data. |
+| 409 | `conflict` | Resource busy, conflicting with existing data, or a stale state revision. |
 | 413 | `body_too_large` | Body exceeds the configured limit. |
 | 415 | `unsupported_media_type` | Body is not `application/json`. |
 | 500 | `internal_error`, `unavailable` | Sanitized failure; never contains internal text. |
+
+An unregistered `project` selector is `400 validation`, not `404`: project ids,
+aliases and paths follow the engine's resolution rules, and a typo is invalid
+input rather than a missing record.
 
 `code` is stable and safe to branch on. `message` is diagnostic only; do not
 parse it. Clients must tolerate future codes by falling back to the HTTP status.
 Method mismatches are always `405` with an `Allow` header (for example
 `Allow: GET, PUT`), never `400`.
+
+A refused state compare-and-swap is the one error that carries structured data:
+`409` with `code: "conflict"` and `error.current_revision` set to the revision
+that is stored now.
+
+## Route table
+
+Every operation of `localapi-v1`, pinned by `testdata/localapi-v1.operations`
+and by a test that reads this table. `1.x` may add rows; it may never remove or
+rename one.
+
+| Method | Path |
+| --- | --- |
+| `GET` | `/v1/health` |
+| `GET` | `/v1/connections` |
+| `POST` | `/v1/connections` |
+| `GET` | `/v1/connections/{id}` |
+| `PATCH` | `/v1/connections/{id}` |
+| `DELETE` | `/v1/connections/{id}` |
+| `POST` | `/v1/connections/{id}/credentials/{field}` |
+| `POST` | `/v1/connections/{id}/test` |
+| `POST` | `/v1/connections/{id}/run` |
+| `GET` | `/v1/runs` |
+| `GET` | `/v1/runs/{id}` |
+| `POST` | `/v1/runs/{id}/cancel` |
+| `GET` | `/v1/runs/{id}/log` |
+| `GET` | `/v1/schedules` |
+| `PUT` | `/v1/schedules/{connectionId}` |
+| `GET` | `/v1/projects` |
+| `GET` | `/v1/projects/{id}/state` |
+| `PUT` | `/v1/projects/{id}/state` |
+| `GET` | `/v1/records` |
+| `GET` | `/v1/records/{id}` |
+| `GET` | `/v1/search` |
+| `GET` | `/v1/review` |
+| `GET` | `/v1/proposals` |
+| `POST` | `/v1/proposals/{project}/{id}/promote` |
+| `POST` | `/v1/proposals/{project}/{id}/dismiss` |
+| `GET` | `/v1/catchup` |
+| `GET` | `/v1/settings` |
+| `PUT` | `/v1/settings` |
+| `POST` | `/v1/engine/update` |
+| `POST` | `/v1/shutdown` |
+
+## Memory routes (desktop 1.2)
+
+The memory routes expose the curated record zone, ranked search, project state,
+the review queue and catchup. They are read-only except the state write and the
+explicit proposal promote/dismiss calls.
+
+- Field names are `snake_case` and follow the engine's search-v2 and MCP
+  contract (`match_reasons`, `next_cursor`, `has_more`). The older routes
+  predate that convention and keep their frozen `camelCase` fields.
+- `project` is required on every collection route. There is no "all projects"
+  scope in v1: a client iterates the projects it knows.
+- Raw-zone text is never returned. `/v1/search` refuses `kind=dump` and
+  `kind=item`, `/v1/records` lists curated records only, and every response
+  string passes through the handler redactor.
+
+### Records
+
+`GET /v1/records` lists records newest first. Filters: `kind` (repeated or
+comma-separated note/decision/attempt/handoff), `status`, `scope`, `subtype`,
+`topic`, `since`, `due_review`. A row carries `id`, `project_id`, `kind`,
+`title`, `status`, `path`, `permalink`, the classification, `created_at`,
+`updated_at`, `validity`, `provenance` and `review`. `path` is the logical
+data-directory path (`projects/<project>/<dir>/<id>.md`); the record id is the
+stable file stem even when the physical file also carries a date and slug.
+
+`GET /v1/records/{id}?project=&max_tokens=&history=` adds the `body` bounded by
+`max_tokens` (default 4000, 1–32000) with `body_truncated` and `body_tokens`,
+`links` (resolved `[[...]]` references), `backlinks`, typed `relations` and,
+with `history=1`, the timeline of the same kind around the record (oldest
+first, superseded records included). An unknown record id returns `404`; an
+unregistered project selector returns `400`.
+
+### Search
+
+`GET /v1/search?q=&project=&kind=&limit=&cursor=&mode=&min_score=&explain=`
+returns the search-v2 shape: `query`, `relaxed`, an optional `notice`, `hits`
+(`id`, `kind`, `title`, `preview`, `score`, `match_reasons`, optional
+`explain`, validity) and the page fields. `mode` is `all` or `any`; `min_score`
+is between 0 and 1; `explain` adds the weighted signal contributions.
+
+### State and CAS
+
+`GET /v1/projects/{id}/state` returns the state fields plus `revision`, an
+opaque value derived from the last update (`"none"` before the first write).
+
+`PUT /v1/projects/{id}/state` changes only the given fields; an empty string or
+array clears one and omitting a field keeps it. `fresh_until` is an RFC3339
+time, `""` to clear it, or omitted to keep it. When `expected_revision` is set,
+the write is a compare-and-swap: it runs inside the store's atomic state update
+and a mismatch returns `409` with `error.current_revision` and writes nothing.
+Omitting `expected_revision` keeps the CLI's last-write-wins behaviour.
+
+### Review
+
+`GET /v1/review?project=` is read-only: `findings` (severity, message, why,
+next, confirm, evidence, fixable, fix, ordered error → warn → info),
+`due_reviews`, a `proposals` summary (pending count and up to 20 candidates) and
+`quarantined_count`. Fixing anything is a CLI or agent action; the API exposes
+no `--fix` equivalent.
+
+### Proposals and promotion
+
+`GET /v1/proposals?project=&status=&kind=&limit=&cursor=` lists candidates with
+`source_stale`, `source_orphan`, `local_only` and a diagnostic
+`source_health`. Proposal bodies stay out of the list.
+
+`POST /v1/proposals/{project}/{id}/promote` and `.../dismiss` mirror
+`brain promote`: nothing is ever promoted automatically, `as`/`status`/`title`
+override the created record, `force` allows a stale or orphaned source and
+`yes` confirms a local-only source. Both are idempotent: a repeated promotion
+returns the same record with `already: true`, a repeated dismissal returns
+`already: true` and `dismissed: true`. A terminal proposal never changes state
+again: dismissing a promoted proposal is a no-op receipt (`already: true`,
+`dismissed: false`) and promoting a dismissed one returns `409`.
+
+### Catchup
+
+`GET /v1/catchup?project=&since=&include_unreviewed=&limit=` reports what
+changed since the latest handoff (or `since`, or a seven-day default):
+`since_source` (`handoff`, `explicit`, `default`), the state and whether it
+changed, the new notes/decisions/attempts/handoffs as record rows, journal
+lines (commit branch/head/subject only) and `quarantined_count`.
+
+## Pagination and size caps
+
+- List routes return `items` (`hits` for search) plus `page`, `page_size`,
+  `has_more` and, when another page exists, `next_cursor`.
+- A cursor is opaque and bound to the query that issued it: reusing it with a
+  different project or filter returns `400`. Cursors are additive; a client
+  that loses one restarts from the first page.
+- Caps: records `limit` 1–200 (window 1000), search 1–100 (window 200, the
+  index hit cap), proposals 1–200 (window 200), catchup 1–100, record
+  `max_tokens` 1–32000. A cursor beyond its window returns `400` instead of a
+  silently empty page.
+- No endpoint returns raw-zone bodies, secret fields or internal error text.
+
+## Memory route dependencies
+
+The memory routes answer `500 unavailable` when the engine was started without
+the use-case bundle (for example a connection-only control process). They are
+served by `brain agent` in local and git mode.
 
 ## Jobs, run IDs and the run list
 
@@ -124,3 +273,19 @@ UPDATE_LOCALAPI_CONTRACT=1 go test ./internal/adapters/localapi -run TestLocalAP
 ```
 
 PowerShell: `$env:UPDATE_LOCALAPI_CONTRACT=1; go test ./internal/adapters/localapi -run TestLocalAPIV1OperationSetIsFrozen`.
+
+## Desktop client copy
+
+`lv24-brain-desktop` keeps a byte-identical copy of `openapi.json` at
+`src/shared/api/openapi/localapi-v1.json` and generates its types from it. Do not
+edit the desktop copy by hand; after an engine contract change run, from the
+engine repository:
+
+```sh
+cp internal/adapters/localapi/openapi.json ../lv24-brain-desktop/src/shared/api/openapi/localapi-v1.json
+cd ../lv24-brain-desktop && npm run api:generate && npm run api:check
+```
+
+PowerShell: `Copy-Item internal/adapters/localapi/openapi.json ../lv24-brain-desktop/src/shared/api/openapi/localapi-v1.json`
+followed by `npm run api:generate` in the desktop checkout. Commit the contract
+copy and the regenerated `src/shared/api/generated/schema.d.ts` together.

@@ -172,6 +172,11 @@ type Options struct {
 	Settings    SettingsStore
 	Updater     Updater
 	Shutdown    Shutdown
+	// Memory is the curated record, search, state, review, proposal and
+	// catchup surface. It is optional so an engine without those use cases
+	// keeps serving the connection routes and reports memory routes as
+	// unavailable.
+	Memory MemoryService
 }
 
 // Handler is the protected HTTP handler. Instantiate through NewHandler or

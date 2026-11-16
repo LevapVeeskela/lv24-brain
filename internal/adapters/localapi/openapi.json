@@ -26,14 +26,461 @@
     "/v1/schedules": { "get": { "responses": { "200": { "description": "Persisted schedules" } } } },
     "/v1/schedules/{connectionId}": { "parameters": [{ "name": "connectionId", "in": "path", "required": true, "schema": { "type": "string" } }], "put": { "requestBody": { "$ref": "#/components/requestBodies/JSON" }, "responses": { "200": { "description": "Schedule saved" }, "400": { "$ref": "#/components/responses/Error" }, "404": { "$ref": "#/components/responses/Error" } } } },
     "/v1/projects": { "get": { "responses": { "200": { "description": "Registered project IDs and names" } } } },
+    "/v1/projects/{id}/state": {
+      "parameters": [{ "$ref": "#/components/parameters/ID" }],
+      "get": { "description": "Reads a project's state and its CAS revision.", "responses": { "200": { "description": "Project state with revision", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/State" } } } }, "400": { "$ref": "#/components/responses/Error" }, "404": { "$ref": "#/components/responses/Error" } } },
+      "put": { "description": "Changes the given state fields. expected_revision was returned by a previous read; a mismatch is 409 with the current revision in error.current_revision and writes nothing. Omit expected_revision for an unconditional write.", "requestBody": { "$ref": "#/components/requestBodies/StateWrite" }, "responses": { "200": { "description": "State after the write", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/State" } } } }, "400": { "$ref": "#/components/responses/Error" }, "404": { "$ref": "#/components/responses/Error" }, "409": { "$ref": "#/components/responses/Error" }, "413": { "$ref": "#/components/responses/Error" }, "415": { "$ref": "#/components/responses/Error" } } }
+    },
+    "/v1/records": {
+      "get": {
+        "description": "Newest-first curated records, paginated. project is required; every other filter is optional. due_review keeps records whose review date has passed.",
+        "parameters": [
+          { "$ref": "#/components/parameters/Project" },
+          { "name": "kind", "in": "query", "description": "Repeated or comma-separated: note, decision, attempt, handoff.", "schema": { "type": "array", "items": { "type": "string" } }, "style": "form", "explode": true },
+          { "name": "status", "in": "query", "description": "Decision status (proposed, accepted, rejected, superseded).", "schema": { "type": "string" } },
+          { "name": "scope", "in": "query", "schema": { "type": "string", "enum": ["project", "personal", "global"] } },
+          { "name": "subtype", "in": "query", "schema": { "type": "string" } },
+          { "name": "topic", "in": "query", "schema": { "type": "string" } },
+          { "$ref": "#/components/parameters/Since" },
+          { "$ref": "#/components/parameters/Limit" },
+          { "$ref": "#/components/parameters/Cursor" },
+          { "name": "due_review", "in": "query", "schema": { "type": "boolean", "default": false } }
+        ],
+        "responses": { "200": { "description": "One page of records", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/RecordPage" } } } }, "400": { "$ref": "#/components/responses/Error" }, "404": { "$ref": "#/components/responses/Error" } }
+      }
+    },
+    "/v1/records/{id}": {
+      "parameters": [{ "$ref": "#/components/parameters/ID" }],
+      "get": {
+        "description": "One record with its body, links, backlinks, relations, validity and provenance. max_tokens bounds the body; history adds the timeline of the same kind around the record.",
+        "parameters": [
+          { "$ref": "#/components/parameters/Project" },
+          { "name": "max_tokens", "in": "query", "schema": { "type": "integer", "minimum": 1, "maximum": 32000, "default": 4000 } },
+          { "name": "history", "in": "query", "schema": { "type": "boolean", "default": false } }
+        ],
+        "responses": { "200": { "description": "Record detail", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/RecordDetail" } } } }, "400": { "$ref": "#/components/responses/Error" }, "404": { "$ref": "#/components/responses/Error" } }
+      }
+    },
+    "/v1/search": {
+      "get": {
+        "description": "Ranked search over curated records only. Raw-zone kinds are never returned and kind=dump/item is refused.",
+        "parameters": [
+          { "name": "q", "in": "query", "required": true, "schema": { "type": "string" } },
+          { "$ref": "#/components/parameters/Project" },
+          { "name": "kind", "in": "query", "description": "Repeated or comma-separated: note, decision, attempt, handoff, state.", "schema": { "type": "array", "items": { "type": "string" } }, "style": "form", "explode": true },
+          { "name": "limit", "in": "query", "schema": { "type": "integer", "minimum": 1, "maximum": 100, "default": 20 } },
+          { "$ref": "#/components/parameters/Cursor" },
+          { "name": "mode", "in": "query", "schema": { "type": "string", "enum": ["all", "any"] } },
+          { "name": "min_score", "in": "query", "schema": { "type": "number", "minimum": 0, "maximum": 1 } },
+          { "name": "explain", "in": "query", "schema": { "type": "boolean", "default": false } }
+        ],
+        "responses": { "200": { "description": "One page of ranked hits", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/SearchPage" } } } }, "400": { "$ref": "#/components/responses/Error" }, "404": { "$ref": "#/components/responses/Error" } }
+      }
+    },
+    "/v1/review": {
+      "get": {
+        "description": "Read-only review report: findings with severity/why/next/confirm, due reviews, pending proposals and the quarantined count.",
+        "parameters": [{ "$ref": "#/components/parameters/Project" }],
+        "responses": { "200": { "description": "Review report", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Review" } } } }, "400": { "$ref": "#/components/responses/Error" }, "404": { "$ref": "#/components/responses/Error" } }
+      }
+    },
+    "/v1/proposals": {
+      "get": {
+        "description": "Candidate records with source health. Proposal bodies stay out of the list.",
+        "parameters": [
+          { "$ref": "#/components/parameters/Project" },
+          { "name": "status", "in": "query", "description": "Repeated or comma-separated: pending, stale, promoted, dismissed.", "schema": { "type": "array", "items": { "type": "string" } }, "style": "form", "explode": true },
+          { "name": "kind", "in": "query", "schema": { "type": "string", "enum": ["decision", "attempt", "note"] } },
+          { "$ref": "#/components/parameters/Limit" },
+          { "$ref": "#/components/parameters/Cursor" }
+        ],
+        "responses": { "200": { "description": "One page of proposals", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ProposalPage" } } } }, "400": { "$ref": "#/components/responses/Error" }, "404": { "$ref": "#/components/responses/Error" } }
+      }
+    },
+    "/v1/proposals/{project}/{id}/promote": {
+      "parameters": [{ "name": "project", "in": "path", "required": true, "schema": { "type": "string" } }, { "$ref": "#/components/parameters/ID" }],
+      "post": {
+        "description": "Promotes one pending proposal. Nothing is promoted automatically; as/status/title override the created record, force allows a stale or orphaned source and yes confirms a local-only source. The call is idempotent.",
+        "requestBody": { "$ref": "#/components/requestBodies/ProposalDecision" },
+        "responses": { "200": { "description": "Promotion receipt", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ProposalOutcome" } } } }, "400": { "$ref": "#/components/responses/Error" }, "404": { "$ref": "#/components/responses/Error" }, "409": { "$ref": "#/components/responses/Error" } }
+      }
+    },
+    "/v1/proposals/{project}/{id}/dismiss": {
+      "parameters": [{ "name": "project", "in": "path", "required": true, "schema": { "type": "string" } }, { "$ref": "#/components/parameters/ID" }],
+      "post": {
+        "description": "Dismisses one proposal. Repeating the dismissal is idempotent; dismissing a promoted proposal is 409.",
+        "requestBody": { "required": false, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ProposalDecision" } } } },
+        "responses": { "200": { "description": "Dismissal receipt", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ProposalOutcome" } } } }, "404": { "$ref": "#/components/responses/Error" }, "409": { "$ref": "#/components/responses/Error" } }
+      }
+    },
+    "/v1/catchup": {
+      "get": {
+        "description": "Recent changes since the latest handoff, an explicit since, or the default window.",
+        "parameters": [
+          { "$ref": "#/components/parameters/Project" },
+          { "$ref": "#/components/parameters/Since" },
+          { "name": "include_unreviewed", "in": "query", "schema": { "type": "boolean", "default": false } },
+          { "name": "limit", "in": "query", "schema": { "type": "integer", "minimum": 1, "maximum": 100, "default": 20 } }
+        ],
+        "responses": { "200": { "description": "Catchup report", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Catchup" } } } }, "400": { "$ref": "#/components/responses/Error" }, "404": { "$ref": "#/components/responses/Error" } }
+      }
+    },
     "/v1/settings": { "get": { "responses": { "200": { "description": "Non-secret settings only" } } }, "put": { "requestBody": { "$ref": "#/components/requestBodies/JSON" }, "responses": { "200": { "description": "Settings saved" }, "400": { "$ref": "#/components/responses/Error" }, "413": { "$ref": "#/components/responses/Error" } } } },
     "/v1/engine/update": { "post": { "description": "Checks/applies an engine update only after explicit confirmation.", "requestBody": { "$ref": "#/components/requestBodies/JSON" }, "responses": { "200": { "description": "Sanitized update result" }, "400": { "$ref": "#/components/responses/Error" }, "500": { "$ref": "#/components/responses/Error" } } } },
     "/v1/shutdown": { "post": { "responses": { "202": { "description": "Graceful shutdown requested" }, "500": { "$ref": "#/components/responses/Error" } } } }
   },
   "components": {
     "securitySchemes": { "bearerAuth": { "type": "http", "scheme": "bearer" } },
-    "parameters": { "ID": { "name": "id", "in": "path", "required": true, "schema": { "type": "string" } } },
-    "requestBodies": { "JSON": { "required": true, "content": { "application/json": { "schema": { "type": "object" } } } } },
-    "responses": { "Error": { "description": "Sanitized API error", "content": { "application/json": { "schema": { "type": "object", "required": ["error"], "properties": { "error": { "type": "object", "required": ["code", "message"], "properties": { "code": { "type": "string" }, "message": { "type": "string" } } } } } } } } }
+    "parameters": {
+      "ID": { "name": "id", "in": "path", "required": true, "schema": { "type": "string" } },
+      "Project": { "name": "project", "in": "query", "required": true, "schema": { "type": "string" } },
+      "Since": { "name": "since", "in": "query", "description": "A positive duration (24h, 7d, 2w), a date (2026-11-01) or an RFC3339 time.", "schema": { "type": "string" } },
+      "Limit": { "name": "limit", "in": "query", "schema": { "type": "integer", "minimum": 1, "maximum": 200 } },
+      "Cursor": { "name": "cursor", "in": "query", "description": "Opaque next_cursor from the previous page; bound to its query.", "schema": { "type": "string" } }
+    },
+    "requestBodies": {
+      "JSON": { "required": true, "content": { "application/json": { "schema": { "type": "object" } } } },
+      "StateWrite": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/StateWrite" } } } },
+      "ProposalDecision": { "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ProposalDecision" } } } }
+    },
+    "responses": {
+      "Error": { "description": "Sanitized API error", "content": { "application/json": { "schema": { "type": "object", "required": ["error"], "properties": { "error": { "type": "object", "required": ["code", "message"], "properties": { "code": { "type": "string" }, "message": { "type": "string" }, "current_revision": { "type": "string" } } } } } } } }
+    },
+    "schemas": {
+      "Page": {
+        "type": "object",
+        "required": ["page", "page_size", "has_more"],
+        "properties": {
+          "page": { "type": "integer" },
+          "page_size": { "type": "integer" },
+          "has_more": { "type": "boolean" },
+          "next_cursor": { "type": "string" }
+        }
+      },
+      "Provenance": {
+        "type": "object",
+        "required": ["origin", "trust", "reviewed", "quarantined", "needs_review"],
+        "properties": {
+          "origin": { "type": "string", "enum": ["human", "agent", "connector", "import"] },
+          "trust": { "type": "string", "enum": ["verified", "stated", "inferred"] },
+          "reviewed": { "type": "boolean" },
+          "quarantined": { "type": "boolean" },
+          "needs_review": { "type": "boolean" }
+        }
+      },
+      "Validity": {
+        "type": "object",
+        "properties": {
+          "valid_from": { "type": "string", "format": "date-time" },
+          "valid_to": { "type": "string", "format": "date-time" },
+          "superseded_by": { "type": "string" },
+          "supersedes": { "type": "string" },
+          "confidence": { "type": "number" },
+          "current": { "type": "boolean" }
+        }
+      },
+      "ReviewState": {
+        "type": "object",
+        "properties": {
+          "review_after": { "type": "string", "format": "date-time" },
+          "review_source": { "type": "string", "enum": ["frontmatter", "default"] },
+          "due": { "type": "boolean" }
+        }
+      },
+      "Record": {
+        "type": "object",
+        "required": ["id", "project_id", "kind", "title", "path", "validity", "provenance", "review"],
+        "properties": {
+          "id": { "type": "string" },
+          "project_id": { "type": "string" },
+          "kind": { "type": "string", "enum": ["note", "decision", "attempt", "handoff"] },
+          "title": { "type": "string" },
+          "status": { "type": "string" },
+          "path": { "type": "string" },
+          "permalink": { "type": "string" },
+          "subtype": { "type": "string" },
+          "scope": { "type": "string", "enum": ["project", "personal", "global"] },
+          "topic_key": { "type": "string" },
+          "occurrences": { "type": "integer" },
+          "created_at": { "type": "string", "format": "date-time" },
+          "updated_at": { "type": "string", "format": "date-time" },
+          "validity": { "$ref": "#/components/schemas/Validity" },
+          "provenance": { "$ref": "#/components/schemas/Provenance" },
+          "review": { "$ref": "#/components/schemas/ReviewState" }
+        }
+      },
+      "RecordLink": {
+        "type": "object",
+        "required": ["field", "ref", "state"],
+        "properties": {
+          "field": { "type": "string" },
+          "ref": { "type": "string" },
+          "text": { "type": "string" },
+          "project_id": { "type": "string" },
+          "id": { "type": "string" },
+          "state": { "type": "string", "enum": ["found", "missing", "unavailable"] },
+          "detail": { "type": "string" },
+          "target": { "$ref": "#/components/schemas/Record" }
+        }
+      },
+      "Backlink": {
+        "type": "object",
+        "required": ["field", "source"],
+        "properties": { "field": { "type": "string" }, "source": { "$ref": "#/components/schemas/Record" } }
+      },
+      "Relation": {
+        "type": "object",
+        "required": ["target", "relation", "status"],
+        "properties": {
+          "target": { "type": "string" },
+          "relation": { "type": "string" },
+          "reason": { "type": "string" },
+          "confidence": { "type": "number" },
+          "status": { "type": "string", "enum": ["pending", "accepted", "rejected"] },
+          "judged_at": { "type": "string", "format": "date-time" },
+          "verdict_by": { "type": "string", "enum": ["human", "agent"] }
+        }
+      },
+      "RecordHistory": {
+        "type": "object",
+        "required": ["records", "anchor_index", "before", "after", "total"],
+        "properties": {
+          "records": { "type": "array", "items": { "$ref": "#/components/schemas/Record" } },
+          "anchor_index": { "type": "integer" },
+          "before": { "type": "integer" },
+          "after": { "type": "integer" },
+          "total": { "type": "integer" }
+        }
+      },
+      "RecordDetail": {
+        "allOf": [
+          { "$ref": "#/components/schemas/Record" },
+          {
+            "type": "object",
+            "required": ["body", "body_truncated", "body_tokens", "max_tokens", "links", "backlinks", "relations"],
+            "properties": {
+              "body": { "type": "string" },
+              "body_truncated": { "type": "boolean" },
+              "body_tokens": { "type": "integer" },
+              "max_tokens": { "type": "integer" },
+              "links": { "type": "array", "items": { "$ref": "#/components/schemas/RecordLink" } },
+              "backlinks": { "type": "array", "items": { "$ref": "#/components/schemas/Backlink" } },
+              "relations": { "type": "array", "items": { "$ref": "#/components/schemas/Relation" } },
+              "history": { "$ref": "#/components/schemas/RecordHistory" }
+            }
+          }
+        ]
+      },
+      "RecordPage": {
+        "allOf": [
+          { "$ref": "#/components/schemas/Page" },
+          { "type": "object", "required": ["items"], "properties": { "items": { "type": "array", "items": { "$ref": "#/components/schemas/Record" } } } }
+        ]
+      },
+      "SearchExplain": {
+        "type": "object",
+        "properties": {
+          "bm25": { "type": "number" },
+          "recency": { "type": "number" },
+          "importance": { "type": "number" },
+          "pin": { "type": "number" },
+          "link": { "type": "number" }
+        }
+      },
+      "SearchHit": {
+        "type": "object",
+        "required": ["id", "project_id", "kind", "title", "preview", "score"],
+        "properties": {
+          "id": { "type": "string" },
+          "project_id": { "type": "string" },
+          "kind": { "type": "string" },
+          "title": { "type": "string" },
+          "preview": { "type": "string" },
+          "score": { "type": "number" },
+          "subtype": { "type": "string" },
+          "scope": { "type": "string" },
+          "topic_key": { "type": "string" },
+          "occurrences": { "type": "integer" },
+          "valid_from": { "type": "string", "format": "date-time" },
+          "valid_to": { "type": "string", "format": "date-time" },
+          "superseded_by": { "type": "string" },
+          "match_reasons": { "type": "array", "items": { "type": "string" } },
+          "explain": { "$ref": "#/components/schemas/SearchExplain" }
+        }
+      },
+      "SearchPage": {
+        "allOf": [
+          { "$ref": "#/components/schemas/Page" },
+          {
+            "type": "object",
+            "required": ["query", "relaxed", "hits"],
+            "properties": {
+              "query": { "type": "string" },
+              "relaxed": { "type": "boolean" },
+              "notice": { "type": "string" },
+              "hits": { "type": "array", "items": { "$ref": "#/components/schemas/SearchHit" } }
+            }
+          }
+        ]
+      },
+      "State": {
+        "type": "object",
+        "required": ["project_id", "revision"],
+        "properties": {
+          "project_id": { "type": "string" },
+          "goal": { "type": "string" },
+          "next_action": { "type": "string" },
+          "active": { "type": "array", "items": { "type": "string" } },
+          "blocked": { "type": "array", "items": { "type": "string" } },
+          "open_questions": { "type": "array", "items": { "type": "string" } },
+          "updated_at": { "type": "string", "format": "date-time" },
+          "fresh_until": { "type": "string", "format": "date-time" },
+          "revision": { "type": "string" }
+        }
+      },
+      "StateWrite": {
+        "type": "object",
+        "properties": {
+          "goal": { "type": "string" },
+          "next_action": { "type": "string" },
+          "active": { "type": "array", "items": { "type": "string" } },
+          "blocked": { "type": "array", "items": { "type": "string" } },
+          "open_questions": { "type": "array", "items": { "type": "string" } },
+          "fresh_until": { "type": "string", "description": "RFC3339 time to mark the state current until; an empty string clears it; omit to keep it." },
+          "expected_revision": { "type": "string" }
+        }
+      },
+      "Finding": {
+        "type": "object",
+        "required": ["kind", "severity", "message", "why", "next", "confirm", "fixable"],
+        "properties": {
+          "kind": { "type": "string" },
+          "severity": { "type": "string", "enum": ["error", "warn", "info"] },
+          "message": { "type": "string" },
+          "why": { "type": "string" },
+          "next": { "type": "string" },
+          "confirm": { "type": "string" },
+          "evidence": { "type": "string" },
+          "fixable": { "type": "boolean" },
+          "fix": { "type": "string" }
+        }
+      },
+      "DueReview": {
+        "type": "object",
+        "required": ["kind", "id", "title", "review_after", "overdue_seconds", "source"],
+        "properties": {
+          "kind": { "type": "string", "enum": ["note", "decision", "attempt", "handoff", "state", "proposal"] },
+          "id": { "type": "string" },
+          "title": { "type": "string" },
+          "review_after": { "type": "string", "format": "date-time" },
+          "overdue_seconds": { "type": "integer" },
+          "source": { "type": "string" }
+        }
+      },
+      "Proposal": {
+        "type": "object",
+        "required": ["id", "project_id", "kind", "title", "confidence", "status", "connection_id", "source_stale", "source_orphan", "local_only"],
+        "properties": {
+          "id": { "type": "string" },
+          "project_id": { "type": "string" },
+          "external_id": { "type": "string" },
+          "kind": { "type": "string", "enum": ["decision", "attempt", "note"] },
+          "title": { "type": "string" },
+          "rule": { "type": "string" },
+          "confidence": { "type": "number" },
+          "status": { "type": "string", "enum": ["pending", "stale", "promoted", "dismissed"] },
+          "connection_id": { "type": "string" },
+          "created_at": { "type": "string", "format": "date-time" },
+          "updated_at": { "type": "string", "format": "date-time" },
+          "source_stale": { "type": "boolean" },
+          "source_orphan": { "type": "boolean" },
+          "local_only": { "type": "boolean" },
+          "source_health": { "type": "string" }
+        }
+      },
+      "ProposalPage": {
+        "allOf": [
+          { "$ref": "#/components/schemas/Page" },
+          { "type": "object", "required": ["items", "total"], "properties": { "items": { "type": "array", "items": { "$ref": "#/components/schemas/Proposal" } }, "total": { "type": "integer" } } }
+        ]
+      },
+      "ProposalDecision": {
+        "type": "object",
+        "properties": {
+          "as": { "type": "string", "enum": ["decision", "attempt", "note"] },
+          "status": { "type": "string", "enum": ["proposed", "accepted"] },
+          "title": { "type": "string" },
+          "force": { "type": "boolean", "description": "Allow a stale or orphaned source (CLI --force)." },
+          "yes": { "type": "boolean", "description": "Confirm promotion from a local-only source (CLI --yes)." },
+          "allow_duplicate": { "type": "boolean" },
+          "allow_protected": { "type": "boolean" },
+          "dry_run": { "type": "boolean" }
+        }
+      },
+      "ProposalOutcome": {
+        "type": "object",
+        "required": ["project_id", "proposal_id", "proposal_status", "already", "dismissed", "dry_run"],
+        "properties": {
+          "project_id": { "type": "string" },
+          "proposal_id": { "type": "string" },
+          "proposal_status": { "type": "string" },
+          "record_kind": { "type": "string" },
+          "record_id": { "type": "string" },
+          "record_title": { "type": "string" },
+          "already": { "type": "boolean" },
+          "dismissed": { "type": "boolean" },
+          "dry_run": { "type": "boolean" }
+        }
+      },
+      "Review": {
+        "type": "object",
+        "required": ["project_id", "findings", "due_reviews", "proposals", "quarantined_count"],
+        "properties": {
+          "project_id": { "type": "string" },
+          "findings": { "type": "array", "items": { "$ref": "#/components/schemas/Finding" } },
+          "due_reviews": { "type": "array", "items": { "$ref": "#/components/schemas/DueReview" } },
+          "proposals": {
+            "type": "object",
+            "required": ["pending_count", "items"],
+            "properties": {
+              "pending_count": { "type": "integer" },
+              "items": { "type": "array", "items": { "$ref": "#/components/schemas/Proposal" } }
+            }
+          },
+          "quarantined_count": { "type": "integer" }
+        }
+      },
+      "JournalEntry": {
+        "type": "object",
+        "required": ["time", "event"],
+        "properties": {
+          "time": { "type": "string", "format": "date-time" },
+          "event": { "type": "string" },
+          "project": { "type": "string" },
+          "id": { "type": "string" },
+          "title": { "type": "string" },
+          "fields": { "type": "object", "additionalProperties": { "type": "string" } }
+        }
+      },
+      "Catchup": {
+        "type": "object",
+        "required": ["project", "since", "since_source", "state", "state_changed", "notes", "decisions", "attempts", "handoffs", "journal", "quarantined_count", "include_unreviewed"],
+        "properties": {
+          "project": { "type": "object", "required": ["id", "name"], "properties": { "id": { "type": "string" }, "name": { "type": "string" } } },
+          "since": { "type": "string", "format": "date-time" },
+          "since_source": { "type": "string", "enum": ["handoff", "explicit", "default"] },
+          "baseline_handoff_id": { "type": "string" },
+          "state": { "$ref": "#/components/schemas/State" },
+          "state_changed": { "type": "boolean" },
+          "notes": { "type": "array", "items": { "$ref": "#/components/schemas/Record" } },
+          "decisions": { "type": "array", "items": { "$ref": "#/components/schemas/Record" } },
+          "attempts": { "type": "array", "items": { "$ref": "#/components/schemas/Record" } },
+          "handoffs": { "type": "array", "items": { "$ref": "#/components/schemas/Record" } },
+          "journal": { "type": "array", "items": { "$ref": "#/components/schemas/JournalEntry" } },
+          "quarantined_count": { "type": "integer" },
+          "include_unreviewed": { "type": "boolean" }
+        }
+      }
+    }
   }
 }

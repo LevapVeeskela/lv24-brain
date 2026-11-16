@@ -166,9 +166,11 @@ local/git only.
   strips control characters and never copies a full raw body, but it does not
   attest to the content. Review before promoting.
 - The change is additive: `Item.State` is optional, no data schema is bumped,
-  and the frozen `contracts-v1` source/connector contract and `localapi-v1`
-  wire contract are unchanged. The local API and desktop surfaces gain no
-  proposal endpoints.
+  and the frozen `contracts-v1` source/connector contract is unchanged. The
+  `localapi-v1` wire contract gains proposal list/promote/dismiss routes, which
+  is an allowed additive change; every proposal write still requires an explicit
+  call with the CLI's `force`/`yes` confirmations, and nothing is promoted
+  automatically.
 
 ## Provenance and quarantine (0.15)
 
@@ -356,6 +358,12 @@ reverse-proxy or browser mode.
   `POST /v1/connections/{id}/credentials/{field}`. Responses never include
   secret values, and run/log output is redacted by the ingestion host and the
   handler.
+- The memory routes expose curated records, ranked search, project state, the
+  review queue, proposals and catchup. They never return raw-zone bodies:
+  search refuses `dump`/`item` kinds and proposal listings carry identity and
+  source health, not source text. Every response string passes through the
+  handler redactor. The only memory writes are the state compare-and-swap and
+  the explicit proposal promote/dismiss calls.
 - `POST /v1/engine/update` requires explicit `{"confirm":true}` and uses the
   same signed-manifest verification as `brain update`; `POST /v1/shutdown` only
   requests the graceful stop of the local agent. Settings persist non-secret UI
@@ -363,7 +371,8 @@ reverse-proxy or browser mode.
 
 The frozen [localapi-v1 contract](localapi-v1.md) records these rules, the
 sanitized error envelope and 405 `Allow` header, job/run ID semantics, the
-500-run list cap and the bounded SSE snapshot/truncation signal.
+500-run list cap, the bounded SSE snapshot/truncation signal, the memory route
+caps and the state CAS error.
 
 ## Server hardening
 

@@ -30,9 +30,13 @@ const (
 )
 
 // ProposalListItem is one pending candidate as review lists it. It carries no
-// source body: proposals stay out of context and search.
+// source body: proposals stay out of context and search. The health fields are
+// filled by ListProposals, which inspects the source for the review inbox;
+// review leaves them empty.
 type ProposalListItem struct {
 	ID           string
+	ProjectID    string
+	ExternalID   string
 	Kind         domain.ProposalKind
 	Title        string
 	Rule         string
@@ -41,6 +45,11 @@ type ProposalListItem struct {
 	ConnectionID string
 	CreatedAt    time.Time
 	UpdatedAt    time.Time
+	// Stale, Orphan, LocalOnly and HealthReason mirror proposalSourceHealth.
+	Stale        bool
+	Orphan       bool
+	LocalOnly    bool
+	HealthReason string
 }
 
 // proposalSourceHealth is the freshness verdict shared by review and
@@ -188,19 +197,26 @@ func proposalListItems(proposals []domain.Proposal, limit int) ([]ProposalListIt
 	}
 	items := make([]ProposalListItem, 0, len(proposals))
 	for _, proposal := range proposals {
-		items = append(items, ProposalListItem{
-			ID:           proposal.ID,
-			Kind:         proposal.Kind,
-			Title:        proposal.Title,
-			Rule:         proposal.Rule,
-			Confidence:   proposal.Confidence,
-			Status:       proposal.StatusOrPending(),
-			ConnectionID: proposal.ConnectionID,
-			CreatedAt:    proposal.CreatedAt,
-			UpdatedAt:    proposal.UpdatedAt,
-		})
+		items = append(items, proposalListItem(proposal))
 	}
 	return items, total
+}
+
+// proposalListItem is the listing form of one candidate.
+func proposalListItem(proposal domain.Proposal) ProposalListItem {
+	return ProposalListItem{
+		ID:           proposal.ID,
+		ProjectID:    proposal.ProjectID,
+		ExternalID:   proposal.ExternalID,
+		Kind:         proposal.Kind,
+		Title:        proposal.Title,
+		Rule:         proposal.Rule,
+		Confidence:   proposal.Confidence,
+		Status:       proposal.StatusOrPending(),
+		ConnectionID: proposal.ConnectionID,
+		CreatedAt:    proposal.CreatedAt,
+		UpdatedAt:    proposal.UpdatedAt,
+	}
 }
 
 // ProposalFindings computes proposal-stale, proposal-orphan and

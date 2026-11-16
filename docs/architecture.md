@@ -586,12 +586,15 @@ loopback `Host`; any `Origin` or `Referer` is rejected, CORS is not implemented,
 and request bodies are size-limited. The API exposes health, connection
 CRUD/test/run/credentials, run history with SSE logs, schedules, projects,
 non-secret settings, an explicitly confirmed engine update and graceful
-shutdown. Run and log identifiers are job IDs for the current process and
-persisted run IDs afterwards; job details and logs are sanitized by the
-ingestion host and the handler. The wire contract is frozen as `localapi-v1`;
-[localapi-v1.md](localapi-v1.md) defines auth/Host/Origin rules, the error
-envelope and 405 `Allow` behavior, ID and 500-run cap semantics, and SSE
-snapshot/truncation rules.
+shutdown. It also serves the desktop memory surface: curated records (list and
+detail with links/backlinks/relations/history), ranked search, project state
+with a compare-and-swap write, the read-only review report, proposal
+list/promote/dismiss and catchup. Run and log identifiers are job IDs for the
+current process and persisted run IDs afterwards; job details and logs are
+sanitized by the ingestion host and the handler. The wire contract is frozen as
+`localapi-v1`; [localapi-v1.md](localapi-v1.md) defines auth/Host/Origin rules,
+the error envelope and 405 `Allow` behavior, ID and 500-run cap semantics, SSE
+snapshot/truncation rules, memory-route pagination caps and the state CAS error.
 
 ## Connectors and secrets
 
@@ -783,7 +786,7 @@ left untouched and the command exits non-zero.
 | Multi-replica deployment unsupported | the SSE broker and login rate limiter are per-process even with durable tokens |
 | Server raw items require PostgreSQL | connector runs persist raw items, checkpoints and run records with `BRAIN_DATABASE_URL`; the in-memory development store returns `unsupported` instead of discarding output |
 | Raw-zone deletes are not inferred | sources report tombstones only; `Deletes` is false without authoritative tombstones |
-| Curation is local and rule-based | `brain digest --source` and `brain promote` run in local/git mode only, read stored items, and write machine-local git-ignored proposals; server mode, the local API and the desktop app have no proposal surface, and there is no scheduled digest or proposal merge/trash |
+| Curation is local and rule-based | `brain digest --source` and `brain promote` run in local/git mode only, read stored items, and write machine-local git-ignored proposals; server mode has no proposal surface, the local API exposes proposals read/promote/dismiss to the desktop (never automatically), and there is no scheduled digest or proposal merge/trash |
 | Raw context excerpts are local/git only | `brain context --raw` and every raw search path read `context-allow.json`; excerpts exist only in local/git mode, and server search never returns raw items to viewers or members |
 | `state.md` has no provenance | state is always trusted context; only records carry `origin/reviewed/trust`, so `brain_state_set` text is not quarantined (planned with a later state model) |
 | `record review` is local/git only | server mode has no provenance-edit route yet; quarantined server records can only be changed through the ordinary update routes |

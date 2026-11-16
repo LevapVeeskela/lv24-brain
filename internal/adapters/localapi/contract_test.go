@@ -169,6 +169,7 @@ func TestLocalAPIV1OperationsDispatch(t *testing.T) {
 func newContractFixture(t *testing.T) *testFixture {
 	t.Helper()
 	fixture := newFixture(t)
+	fixture.handler.opts.Memory = newFakeMemory()
 	if err := fixture.connections.Create(context.Background(), domain.Connection{ID: "demo-1", Provider: "demo"}); err != nil {
 		t.Fatalf("seed connection: %v", err)
 	}
@@ -200,6 +201,14 @@ func contractPath(path string) string {
 		return "/v1/runs/run-1/log"
 	case "/v1/schedules/{connectionId}":
 		return "/v1/schedules/demo-1"
+	case "/v1/records/{id}":
+		return "/v1/records/note-1"
+	case "/v1/projects/{id}/state":
+		return "/v1/projects/brain/state"
+	case "/v1/proposals/{project}/{id}/promote":
+		return "/v1/proposals/brain/proposal-gh-000000000000/promote"
+	case "/v1/proposals/{project}/{id}/dismiss":
+		return "/v1/proposals/brain/proposal-gh-000000000000/dismiss"
 	default:
 		return path
 	}
@@ -223,6 +232,8 @@ func contractBody(method, path string) string {
 		return `{"theme":"light"}`
 	case method == http.MethodPost && path == "/v1/engine/update":
 		return `{"confirm":true}`
+	case method == http.MethodPut && path == "/v1/projects/{id}/state":
+		return `{"goal":"smoke"}`
 	}
 	return ""
 }

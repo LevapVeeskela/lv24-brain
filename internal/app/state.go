@@ -50,6 +50,32 @@ func (a *App) GetState(ctx context.Context, projectID string) (domain.Project, d
 // read-modify-write runs under the store's lock, so concurrent writers do not
 // lose each other's fields.
 func (a *App) SetState(ctx context.Context, input StateInput) (domain.State, error) {
+	return a.setState(ctx, input, nil)
+}
+
+// SetStateIfRevision is SetState guarded by StateRevision: when expected is not
+// empty, the write is refused with *StateRevisionConflict unless the stored
+// state still has that revision. The comparison runs inside the store's atomic
+// state update (ports.StateUpdater), so a concurrent writer cannot slip between
+// the read and the write; a store without the updater keeps the historical
+// read-then-write behaviour, where the check is still the best available but not
+// atomic. An empty expected keeps the unconditional SetState semantics.
+func (a *App) SetStateIfRevision(ctx context.Context, input StateInput, expected string) (domain.State, error) {
+	expected = strings.TrimSpace(expected)
+	if expected == "" {
+		return a.setState(ctx, input, nil)
+	}
+	return a.setState(ctx, input, func(projectID string, current domain.State) error {
+		if revision := StateRevision(current); revision != expected {
+			return &StateRevisionConflict{ProjectID: projectID, Expected: expected, Current: revision}
+		}
+		return nil
+	})
+}
+
+// setState is the shared state write. guard, when set, runs against the stored
+// state before any field changes and may refuse the write.
+func (a *App) setState(ctx context.Context, input StateInput, guard func(projectID string, current domain.State) error) (domain.State, error) {
 	input.redact()
 	if err := a.requireStore(); err != nil {
 		return domain.State{}, err
@@ -63,6 +89,13 @@ func (a *App) SetState(ctx context.Context, input StateInput) (domain.State, err
 	}
 	var changed []string
 	apply := func(state *domain.State) error {
+		if guard != nil {
+			current := *state
+			current.ProjectID = project.ID
+			if err := guard(project.ID, current); err != nil {
+				return err
+			}
+		}
 		changed = applyStateInput(state, input, a.now())
 		state.ProjectID = project.ID
 		return state.Validate()

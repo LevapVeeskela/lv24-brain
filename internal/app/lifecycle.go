@@ -42,6 +42,46 @@ type RecordSummary struct {
 	Scope       string
 	TopicKey    string
 	Occurrences int
+	// Provenance is the authorship, review state and trust of the record.
+	Provenance domain.Provenance
+	// Permalink is the canonical path the record was written with, when any.
+	Permalink string
+	// ReviewAfter and ReviewSource hold the effective review date: the
+	// record's frontmatter date ("frontmatter") or its kind default counted
+	// from creation ("default"). Both are empty when the kind has no review
+	// window. ListRecords fills them because the window comes from config.
+	ReviewAfter  time.Time
+	ReviewSource string
+}
+
+// Provenance returns the provenance of whichever record is set.
+func (r Record) Provenance() domain.Provenance {
+	switch {
+	case r.Note != nil:
+		return r.Note.Provenance
+	case r.Decision != nil:
+		return r.Decision.Provenance
+	case r.Attempt != nil:
+		return r.Attempt.Provenance
+	case r.Handoff != nil:
+		return r.Handoff.Provenance
+	}
+	return domain.Provenance{}
+}
+
+// Permalink returns the canonical permalink of whichever record is set.
+func (r Record) Permalink() string {
+	switch {
+	case r.Note != nil:
+		return r.Note.Permalink
+	case r.Decision != nil:
+		return r.Decision.Permalink
+	case r.Attempt != nil:
+		return r.Attempt.Permalink
+	case r.Handoff != nil:
+		return r.Handoff.Permalink
+	}
+	return ""
 }
 
 // ListRecordsOptions filters ListRecords.
@@ -106,6 +146,8 @@ func (r Record) Summary() RecordSummary {
 	summary.Supersedes = valid.Supersedes
 	summary.Confidence = valid.Confidence
 	summary.Subtype, summary.Scope, summary.TopicKey, summary.Occurrences = taxonomyOf(r)
+	summary.Provenance = r.Provenance()
+	summary.Permalink = r.Permalink()
 	return summary
 }
 
@@ -223,7 +265,7 @@ func (a *App) ListRecords(ctx context.Context, opts ListRecordsOptions) ([]Recor
 	now := a.now()
 	var out []RecordSummary
 	for _, record := range records {
-		summary := record.Summary()
+		summary := a.Summarize(record)
 		if len(opts.Kinds) > 0 && !containsString(opts.Kinds, summary.Kind) {
 			continue
 		}

@@ -27,6 +27,9 @@ type errorEnvelope struct {
 type apiError struct {
 	Code    string `json:"code"`
 	Message string `json:"message"`
+	// CurrentRevision is set only by a refused state compare-and-swap; it is
+	// the revision the client must send to retry.
+	CurrentRevision string `json:"current_revision,omitempty"`
 }
 
 // NewHandler constructs a handler for an already-bound loopback listener.
@@ -124,6 +127,22 @@ func (h *Handler) route(w http.ResponseWriter, r *http.Request) {
 		h.scheduleRoute(w, r, strings.TrimPrefix(path, "/v1/schedules/"))
 	case path == "/v1/projects":
 		h.projects(w, r)
+	case strings.HasPrefix(path, "/v1/projects/"):
+		h.projectRoute(w, r, strings.TrimPrefix(path, "/v1/projects/"))
+	case path == "/v1/records":
+		h.records(w, r)
+	case strings.HasPrefix(path, "/v1/records/"):
+		h.recordRoute(w, r, strings.TrimPrefix(path, "/v1/records/"))
+	case path == "/v1/search":
+		h.search(w, r)
+	case path == "/v1/review":
+		h.review(w, r)
+	case path == "/v1/proposals":
+		h.proposals(w, r)
+	case strings.HasPrefix(path, "/v1/proposals/"):
+		h.proposalRoute(w, r, strings.TrimPrefix(path, "/v1/proposals/"))
+	case path == "/v1/catchup":
+		h.catchup(w, r)
 	case path == "/v1/settings":
 		h.settings(w, r)
 	case path == "/v1/engine/update":
@@ -824,6 +843,30 @@ func (h *Handler) writeServiceError(w http.ResponseWriter, err error) {
 	}
 }
 
+// writeMemoryError maps the memory use cases onto the envelope. It is separate
+// from writeServiceError so the older routes keep their exact status mapping;
+// the memory routes document the additional codes (409 with the current
+// revision, 400 unsupported, 500 unavailable).
+func (h *Handler) writeMemoryError(w http.ResponseWriter, err error) {
+	var revision *app.StateRevisionConflict
+	switch {
+	case errors.As(err, &revision):
+		writeErrorRevision(w, revision.Error(), revision.Current)
+	case errors.Is(err, domain.ErrValidation):
+		writeError(w, http.StatusBadRequest, "validation", "request is invalid")
+	case errors.Is(err, domain.ErrNotFound):
+		writeError(w, http.StatusNotFound, "not_found", "resource not found")
+	case errors.Is(err, domain.ErrConflict):
+		writeError(w, http.StatusConflict, "conflict", "resource is busy or conflicts with existing data")
+	case errors.Is(err, domain.ErrUnsupported):
+		writeError(w, http.StatusBadRequest, "unsupported", "the engine cannot serve this request in the current mode")
+	case errors.Is(err, app.ErrNotImplemented):
+		unavailable(w)
+	default:
+		internal(w)
+	}
+}
+
 func pathParts(rest string) ([]string, bool) {
 	if rest == "" || strings.Contains(rest, "//") {
 		return nil, false
@@ -861,6 +904,14 @@ func writeJSON(w http.ResponseWriter, status int, body any) {
 
 func writeError(w http.ResponseWriter, status int, code, message string) {
 	writeJSON(w, status, errorEnvelope{Error: apiError{Code: code, Message: message}})
+}
+
+// writeErrorRevision is the 409 envelope of a refused state CAS. The current
+// revision is additive: clients that do not know it keep branching on the code.
+func writeErrorRevision(w http.ResponseWriter, message, revision string) {
+	writeJSON(w, http.StatusConflict, errorEnvelope{Error: apiError{
+		Code: "conflict", Message: message, CurrentRevision: revision,
+	}})
 }
 
 func internal(w http.ResponseWriter) {

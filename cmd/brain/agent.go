@@ -122,6 +122,7 @@ func runAgentForeground(cfg config.BrainConfig, parentPID int, stdout, stderr io
 		Updater:     inspection.Updater,
 		Locker:      ingestion.Ingestion.Locker,
 		Version:     version.Version,
+		App:         inspection.App,
 	})
 	if err != nil {
 		return reportError(stderr, "agent", err)

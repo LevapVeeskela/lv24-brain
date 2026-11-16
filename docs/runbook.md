@@ -665,7 +665,11 @@ brain agent stop --config <data-dir>/brain.yaml
   `GET /v1/health`; connections CRUD, `POST /v1/connections/{id}/test|run`,
   `POST /v1/connections/{id}/credentials/{field}`; `GET /v1/runs`,
   `GET /v1/runs/{id}`, `GET /v1/runs/{id}/log` (SSE); schedules, projects,
-  non-secret settings; `POST /v1/engine/update` with `{"confirm":true}`;
+  non-secret settings; the desktop memory surface (`GET /v1/records`,
+  `GET /v1/records/{id}`, `GET /v1/search`, `GET /v1/review`,
+  `GET /v1/proposals`, `POST /v1/proposals/{project}/{id}/promote|dismiss`,
+  `GET /v1/catchup`, `GET|PUT /v1/projects/{id}/state` with
+  `expected_revision` CAS); `POST /v1/engine/update` with `{"confirm":true}`;
   `POST /v1/shutdown`. Consumers should not cache the token across restarts.
 - `POST /v1/engine/update` downloads, verifies and stages a signed release and
   swaps the binary; the running process keeps the old image until restart, and
