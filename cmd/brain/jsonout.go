@@ -472,6 +472,9 @@ type jsonReview struct {
 	Findings  []jsonFinding        `json:"findings"`
 	Applied   []jsonFinding        `json:"applied"`
 	Proposals []jsonReviewProposal `json:"proposals"`
+	// SnoozedProposalCount counts pending candidates hidden by an active
+	// snooze; they are excluded from Proposals and the pending count.
+	SnoozedProposalCount int `json:"snoozed_proposal_count"`
 	// Due is present only with --due; an empty list means nothing is due.
 	Due *[]jsonDueReview `json:"due,omitempty"`
 }

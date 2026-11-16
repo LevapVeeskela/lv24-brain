@@ -2,6 +2,7 @@ package ports
 
 import (
 	"context"
+	"time"
 
 	"github.com/levapveeskela/lv24-brain/internal/domain"
 )
@@ -58,6 +59,16 @@ type ProposalStore interface {
 	// is the promoted curated record id; it is ignored for every other status
 	// (a non-promoted proposal never stores one).
 	SetStatus(ctx context.Context, projectID, id string, status domain.ProposalStatus, recordID string) (domain.Proposal, error)
+}
+
+// ProposalSnoozer hides a pending or stale proposal from review until a time.
+// It is optional: a store without it keeps listing every proposal and the app
+// reports the snooze use case as unsupported.
+type ProposalSnoozer interface {
+	// SetSnooze stores until as the return instant; the zero time clears the
+	// snooze. Repeating the stored value is idempotent and writes nothing. A
+	// terminal (promoted or dismissed) proposal is a validation error.
+	SetSnooze(ctx context.Context, projectID, proposalID string, until time.Time) (domain.Proposal, error)
 }
 
 // ProposalLocker serializes the read-decide-write window of one proposal

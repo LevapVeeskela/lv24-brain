@@ -50,6 +50,11 @@ type ProposalListItem struct {
 	Orphan       bool
 	LocalOnly    bool
 	HealthReason string
+	// SnoozedUntil is the instant the candidate returns to the inbox; zero
+	// means it is not snoozed. Snoozed reports that the instant is still in
+	// the future.
+	SnoozedUntil time.Time
+	Snoozed      bool
 	// Body, BodyTruncated, BodyTokens and MaxTokens are set only when the
 	// listing asked for bodies.
 	Body          string
@@ -175,13 +180,15 @@ func connectionLocalOnly(connection domain.Connection) bool {
 	return entry.Descriptor.DefaultPublish == domain.PublishLocalOnly
 }
 
-// pendingProposalCount returns how many candidates wait for a decision.
+// pendingProposalCount returns how many candidates wait for a decision. A
+// snoozed candidate is not waiting: it returns on its own when the snooze comes
+// due.
 func (a *App) pendingProposalCount(ctx context.Context, projectID string) (int, error) {
-	proposals, err := a.listPendingProposals(ctx, projectID)
+	_, count, err := a.PendingProposals(ctx, projectID)
 	if err != nil {
 		return 0, fmt.Errorf("list proposals: %w", err)
 	}
-	return len(proposals), nil
+	return count, nil
 }
 
 // listPendingProposals returns pending and stale candidates newest first.
@@ -196,20 +203,20 @@ func (a *App) listPendingProposals(ctx context.Context, projectID string) ([]dom
 
 // proposalListItems converts proposals for review, capping the list while
 // keeping the total count.
-func proposalListItems(proposals []domain.Proposal, limit int) ([]ProposalListItem, int) {
+func proposalListItems(proposals []domain.Proposal, limit int, now time.Time) ([]ProposalListItem, int) {
 	total := len(proposals)
 	if limit > 0 && len(proposals) > limit {
 		proposals = proposals[:limit]
 	}
 	items := make([]ProposalListItem, 0, len(proposals))
 	for _, proposal := range proposals {
-		items = append(items, proposalListItem(proposal))
+		items = append(items, proposalListItem(proposal, now))
 	}
 	return items, total
 }
 
 // proposalListItem is the listing form of one candidate.
-func proposalListItem(proposal domain.Proposal) ProposalListItem {
+func proposalListItem(proposal domain.Proposal, now time.Time) ProposalListItem {
 	return ProposalListItem{
 		ID:           proposal.ID,
 		ProjectID:    proposal.ProjectID,
@@ -222,6 +229,8 @@ func proposalListItem(proposal domain.Proposal) ProposalListItem {
 		ConnectionID: proposal.ConnectionID,
 		CreatedAt:    proposal.CreatedAt,
 		UpdatedAt:    proposal.UpdatedAt,
+		SnoozedUntil: proposal.SnoozedUntil,
+		Snoozed:      proposal.IsSnoozed(now),
 	}
 }
 
@@ -252,7 +261,13 @@ func (a *App) ProposalFindings(ctx context.Context, projectID string) ([]Finding
 	}
 
 	var findings []Finding
+	now := a.now()
 	for _, proposal := range proposals {
+		if proposal.IsSnoozed(now) {
+			// A snoozed candidate is deliberately deferred; reporting it now
+			// would defeat the snooze. It returns to this scan when due.
+			continue
+		}
 		health, err := a.proposalSourceHealth(ctx, proposal)
 		if err != nil {
 			return nil, err

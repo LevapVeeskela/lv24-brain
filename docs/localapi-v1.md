@@ -94,6 +94,8 @@ rename one.
 | `GET` | `/v1/proposals/{project}/{id}` |
 | `POST` | `/v1/proposals/{project}/{id}/promote` |
 | `POST` | `/v1/proposals/{project}/{id}/dismiss` |
+| `POST` | `/v1/proposals/{project}/{id}/snooze` |
+| `DELETE` | `/v1/proposals/{project}/{id}/snooze` |
 | `GET` | `/v1/catchup` |
 | `GET` | `/v1/settings` |
 | `PUT` | `/v1/settings` |
@@ -132,18 +134,20 @@ review and the reversible record trash/restore.
 `GET /v1/records` lists records newest first. Filters: `kind` (repeated or
 comma-separated note/decision/attempt/handoff), `status`, `scope`, `subtype`,
 `topic`, `since`, `due_review`. A row carries `id`, `project_id`, `kind`,
-`title`, `status`, `path`, `permalink`, the classification, `created_at`,
-`updated_at`, `validity`, `provenance` and `review`. `path` is the logical
-data-directory path (`projects/<project>/<dir>/<id>.md`); the record id is the
-stable file stem even when the physical file also carries a date and slug.
+`title`, `status`, `path`, `permalink`, the classification, `tags` (notes only;
+omitted for every other kind), `created_at`, `updated_at`, `validity`,
+`provenance` and `review`. `path` is the logical data-directory path
+(`projects/<project>/<dir>/<id>.md`); the record id is the stable file stem even
+when the physical file also carries a date and slug.
 
 `GET /v1/records/{id}?project=&max_tokens=&history=` adds the `body` bounded by
 `max_tokens` (default 4000, 1–32000) with `body_truncated` and `body_tokens`,
 `links` (resolved `[[...]]` references), `backlinks`, typed `relations` and,
 with `history=1`, the timeline of the same kind around the record (oldest
-first, superseded records included). A relation row carries `target_kind` when
-the target is still live, so a client can deep-link it. An unknown record id
-returns `404`; an unregistered project selector returns `400`.
+first, superseded records included). The row also carries the note `tags`. A
+relation row carries `target_kind` when the target is still live, so a client
+can deep-link it. An unknown record id returns `404`; an unregistered project
+selector returns `400`.
 
 `POST /v1/records/{id}/trash?project=` and `.../restore?project=` move a record
 through the same lifecycle use case as `brain record trash` and
@@ -158,7 +162,8 @@ request is `{title?, body?, tags?, expected_updated_at?, allow_duplicate?}` and
 at least one of `title`, `body` and `tags` must be present. `body` is the note
 text, the decision context, the attempt result or the handoff summary; a
 handoff has no title, so `title` on one is `400 validation`. `tags` is a note
-field and replaces the stored list. The ID, kind, project, file path,
+field and replaces the stored list; the edited detail and every later record
+row carry the normalized list. The ID, kind, project, file path,
 `created_at`, provenance, validity, relations, review state and classification
 never change, the previous body is kept in the record's bounded history, and an
 unreviewed record stays unreviewed.
@@ -240,7 +245,7 @@ edit route is the one place that exposes `expected_updated_at`.
 
 ### Proposals and promotion
 
-`GET /v1/proposals?project=&status=&kind=&limit=&cursor=&include_body=&max_tokens=`
+`GET /v1/proposals?project=&status=&kind=&limit=&cursor=&include_body=&include_snoozed=&max_tokens=`
 lists candidates with `source_stale`, `source_orphan`, `local_only` and a
 diagnostic `source_health`. Proposal bodies stay out of the list by default.
 With `include_body=true` each item carries the redacted candidate text as
@@ -248,8 +253,26 @@ With `include_body=true` each item carries the redacted candidate text as
 600). One page shares a 16000-token body budget; an item past it is returned
 with `body_omitted: true` instead of silently shrinking the page.
 
+A candidate hidden by an active snooze is omitted from the default listing.
+Pass `include_snoozed=true`, or an explicit `status` filter, to see it; every
+row then carries `snoozed` and, when set, `snoozed_until`. The pending count of
+`GET /v1/review` excludes snoozed candidates and reports them as
+`snoozed_count` instead.
+
 `GET /v1/proposals/{project}/{id}?max_tokens=` returns one candidate with its
-bounded redacted body (1–32000, default 600).
+bounded redacted body (1–32000, default 600), `snoozed`, `snoozed_until` and
+`updated_at`.
+
+`POST /v1/proposals/{project}/{id}/snooze` hides a pending or stale candidate
+until `{until}` names: an RFC3339 time, a calendar date or a positive duration
+(`7d`). `until: null` (or `""`) clears the snooze, as does
+`DELETE /v1/proposals/{project}/{id}/snooze`. Snoozing changes no lifecycle
+status, body or source data; a repeated identical call writes nothing and is
+idempotent. `expected_updated_at` makes the write a compare-and-swap: a stale
+value returns `409` with `error.current_revision` and writes nothing. Snoozing
+a promoted or dismissed proposal, or a value that is not in the future, is
+`400 validation`. The receipt carries `project_id`, `proposal_id`, `status`,
+`snoozed`, `snoozed_until` and `updated_at`.
 
 `POST /v1/proposals/{project}/{id}/promote` and `.../dismiss` mirror
 `brain promote`: nothing is ever promoted automatically, `as`/`status`/`title`

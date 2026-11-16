@@ -140,7 +140,8 @@ with these tolerances:
 A failed check prints the baseline, current and allowed values and exits 1.
 An improvement always passes. The baseline stores a SHA-256 digest of the
 fixture files; if the digest differs, the gate still runs and prints a warning,
-so a label change cannot silently reuse an old baseline. Latency is
+so a label change cannot silently reuse an old baseline. The digest is computed
+over LF-normalized file bytes, so LF and CRLF checkouts yield the same value. Latency is
 machine-relative: regenerate the baseline after a deliberate change and treat
 small latency moves as noise.
 

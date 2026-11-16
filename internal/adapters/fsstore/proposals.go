@@ -120,6 +120,10 @@ type proposalFrontmatter struct {
 	// PromotedAt is a string so a hand-edited or legacy space-separated
 	// timestamp decodes leniently instead of hiding the whole proposal.
 	PromotedAt string `yaml:"promoted_at,omitempty"`
+	// SnoozeUntil is a string for the same lenient decoding reason.
+	SnoozeUntil string `yaml:"snooze_until,omitempty"`
+	// SnoozedUntil is the earlier spelling accepted on read only.
+	SnoozedUntil string `yaml:"snoozed_until,omitempty"`
 }
 
 type proposalSectionFrontmatter struct {
@@ -138,6 +142,7 @@ type proposalCitationFrontmatter struct {
 
 var _ ports.ProposalStore = (*Store)(nil)
 var _ ports.ProposalProblemReporter = (*Store)(nil)
+var _ ports.ProposalSnoozer = (*Store)(nil)
 
 // Put creates or refreshes one pending proposal. See ports.ProposalStore.
 func (s *Store) Put(ctx context.Context, proposal domain.Proposal) (domain.Proposal, error) {
@@ -207,6 +212,9 @@ func (s *Store) Put(ctx context.Context, proposal domain.Proposal) (domain.Propo
 			proposal.CreatedAt, proposal.UpdatedAt = proposalTimes(existing.CreatedAt, now)
 			proposal.PromotedRecordID = ""
 			proposal.PromotedAt = time.Time{}
+			// Snooze is user state, not digest content: refreshing the payload
+			// must not bring a deferred candidate back into the inbox.
+			proposal.SnoozedUntil = existing.SnoozedUntil
 			stored = proposal
 			return writeProposalFile(path, proposal)
 		case errors.Is(readErr, fs.ErrNotExist):
@@ -386,11 +394,73 @@ func (s *Store) SetStatus(ctx context.Context, projectID, id string, status doma
 			proposal.PromotedRecordID = ""
 			proposal.PromotedAt = time.Time{}
 		}
+		if status.Terminal() {
+			// A snooze is only defined for a pending or stale proposal;
+			// promotion and dismissal end it together with the inbox state.
+			proposal.SnoozedUntil = time.Time{}
+		}
 		if proposal.Status == status {
 			stored = proposal
 			return nil
 		}
 		proposal.Status = status
+		proposal.CreatedAt, proposal.UpdatedAt = proposalTimes(proposal.CreatedAt, now)
+		if err := proposal.Validate(); err != nil {
+			return err
+		}
+		stored = proposal
+		return writeProposalFile(path, proposal)
+	})
+	return stored, err
+}
+
+// SetSnooze hides a pending or stale proposal until a time; the zero value
+// clears the snooze. Repeating the stored value writes nothing, so a desktop
+// retry with the same expected revision stays idempotent. A terminal proposal
+// is a validation error: promotion and dismissal already ended its inbox life.
+func (s *Store) SetSnooze(ctx context.Context, projectID, id string, until time.Time) (domain.Proposal, error) {
+	if err := contextError(ctx); err != nil {
+		return domain.Proposal{}, err
+	}
+	if err := domain.ValidateProposalID("proposal.id", id); err != nil {
+		return domain.Proposal{}, err
+	}
+	if err := s.requireProject(projectID); err != nil {
+		return domain.Proposal{}, err
+	}
+	if err := s.ensureProposalsIgnore(); err != nil {
+		return domain.Proposal{}, err
+	}
+	path, err := s.proposalPath(projectID, id)
+	if err != nil {
+		return domain.Proposal{}, err
+	}
+	until = until.UTC()
+	if until.IsZero() {
+		until = time.Time{}
+	}
+	now := s.nowUTC()
+	var stored domain.Proposal
+	err = withFileLock(ctx, path, func() error {
+		proposal, err := readProposalFile(path)
+		if errors.Is(err, fs.ErrNotExist) {
+			return notFound("proposal", id)
+		}
+		if err != nil {
+			return err
+		}
+		if proposal.ProjectID != projectID {
+			return proposalInvalid(proposalReasonProject, nil)
+		}
+		if proposal.Status.Terminal() {
+			return domain.NewValidationError("proposal.snoozedUntil",
+				"a promoted or dismissed proposal cannot be snoozed")
+		}
+		if proposal.SnoozedUntil.Equal(until) {
+			stored = proposal
+			return nil
+		}
+		proposal.SnoozedUntil = until
 		proposal.CreatedAt, proposal.UpdatedAt = proposalTimes(proposal.CreatedAt, now)
 		if err := proposal.Validate(); err != nil {
 			return err
@@ -674,6 +744,9 @@ func encodeProposal(proposal domain.Proposal) ([]byte, error) {
 	if !proposal.PromotedAt.IsZero() {
 		front.PromotedAt = formatItemTime(proposal.PromotedAt)
 	}
+	if !proposal.SnoozedUntil.IsZero() {
+		front.SnoozeUntil = formatItemTime(proposal.SnoozedUntil)
+	}
 	for _, section := range proposal.Sections {
 		front.Sections = append(front.Sections, proposalSectionFrontmatter{
 			Heading: section.Heading,
@@ -755,6 +828,10 @@ func readProposalFile(path string) (domain.Proposal, error) {
 	case front.UpdatedAt.IsZero():
 		return domain.Proposal{}, proposalInvalid(proposalReasonMissing, nil)
 	}
+	snoozeUntil := front.SnoozeUntil
+	if snoozeUntil == "" {
+		snoozeUntil = front.SnoozedUntil
+	}
 	proposal := domain.Proposal{
 		SchemaVersion:    front.SchemaVersion,
 		ProjectID:        front.ProjectID,
@@ -772,6 +849,7 @@ func readProposalFile(path string) (domain.Proposal, error) {
 		UpdatedAt:        front.UpdatedAt.UTC(),
 		PromotedRecordID: front.PromotedRecordID,
 		PromotedAt:       parseOptionalTime(front.PromotedAt),
+		SnoozedUntil:     parseOptionalTime(snoozeUntil),
 	}
 	for _, section := range front.Sections {
 		proposal.Sections = append(proposal.Sections, domain.ProposalSection{

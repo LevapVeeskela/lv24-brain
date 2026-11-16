@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/levapveeskela/lv24-brain/internal/domain"
 	"github.com/levapveeskela/lv24-brain/internal/ports"
@@ -26,6 +27,10 @@ type ProposalQuery struct {
 	IncludeBody bool
 	// BodyTokens bounds the rendered body; <= 0 uses DefaultProposalBodyTokens.
 	BodyTokens int
+	// IncludeSnoozed keeps proposals hidden by an active snooze. By default
+	// they are omitted unless Statuses names an explicit status filter, which
+	// lists them with Snoozed set.
+	IncludeSnoozed bool
 }
 
 // DefaultProposalListLimit is the proposal window a caller gets without an
@@ -43,7 +48,10 @@ type ProposalBody struct {
 	ProjectID string
 	Title     string
 	Status    domain.ProposalStatus
-	Body      string
+	// SnoozedUntil is the stored snooze instant; zero means not snoozed.
+	SnoozedUntil time.Time
+	UpdatedAt    time.Time
+	Body         string
 	// Truncated reports that the candidate continues past the budget.
 	Truncated bool
 	// Tokens is the approximate token count of Body.
@@ -92,6 +100,18 @@ func (a *App) ListProposals(ctx context.Context, query ProposalQuery) (ProposalL
 	if err != nil {
 		return ProposalListing{}, fmt.Errorf("list proposals: %w", err)
 	}
+	now := a.now()
+	includeSnoozed := query.IncludeSnoozed || len(statuses) > 0
+	if !includeSnoozed {
+		active := make([]domain.Proposal, 0, len(stored))
+		for _, proposal := range stored {
+			if proposal.IsSnoozed(now) {
+				continue
+			}
+			active = append(active, proposal)
+		}
+		stored = active
+	}
 	listing := ProposalListing{ProjectID: project.ID, Total: len(stored)}
 	if len(stored) > limit {
 		stored = stored[:limit]
@@ -102,7 +122,7 @@ func (a *App) ListProposals(ctx context.Context, query ProposalQuery) (ProposalL
 	}
 	listing.Items = make([]ProposalListItem, 0, len(stored))
 	for _, proposal := range stored {
-		item := proposalListItem(proposal)
+		item := proposalListItem(proposal, now)
 		if query.IncludeBody {
 			body, truncated := textbudget.Truncate(ProposalText(proposal), bodyTokens)
 			item.Body, item.BodyTruncated = body, truncated
@@ -139,8 +159,8 @@ func (a *App) ProposalBody(ctx context.Context, projectID, id string, maxTokens 
 	body, truncated := textbudget.Truncate(ProposalText(proposal), maxTokens)
 	return ProposalBody{
 		Kind: proposal.Kind, ID: proposal.ID, ProjectID: project.ID, Title: proposal.Title,
-		Status: proposal.StatusOrPending(), Body: body, Truncated: truncated,
-		Tokens: textbudget.Tokens(body), MaxTokens: maxTokens,
+		Status: proposal.StatusOrPending(), SnoozedUntil: proposal.SnoozedUntil, UpdatedAt: proposal.UpdatedAt,
+		Body: body, Truncated: truncated, Tokens: textbudget.Tokens(body), MaxTokens: maxTokens,
 	}, nil
 }
 
@@ -168,21 +188,48 @@ func ProposalText(proposal domain.Proposal) string {
 }
 
 // PendingProposals lists the pending and stale candidates a review inbox shows,
-// newest first, together with the total count. The returned items carry source
-// health, so an inbox can show the promotion blockers without another call.
+// newest first, together with the total count. Candidates hidden by an active
+// snooze are excluded from both the list and the count; they return on their own
+// when the snooze comes due. The returned items carry source health, so an
+// inbox can show the promotion blockers without another call.
 func (a *App) PendingProposals(ctx context.Context, projectID string) ([]ProposalListItem, int, error) {
 	if a.deps.Proposals == nil {
 		return nil, 0, nil
 	}
-	listing, err := a.ListProposals(ctx, ProposalQuery{
-		ProjectID: projectID,
-		Statuses:  []domain.ProposalStatus{domain.ProposalPending, domain.ProposalStale},
-		Limit:     proposalReviewLimit,
-	})
+	proposals, err := a.listPendingProposals(ctx, projectID)
 	if err != nil {
 		return nil, 0, err
 	}
-	return listing.Items, listing.Total, nil
+	now := a.now()
+	active := make([]domain.Proposal, 0, len(proposals))
+	for _, proposal := range proposals {
+		if proposal.IsSnoozed(now) {
+			continue
+		}
+		active = append(active, proposal)
+	}
+	items, total := proposalListItems(active, proposalReviewLimit, now)
+	return items, total, nil
+}
+
+// SnoozedProposalCount reports how many pending or stale candidates are hidden
+// by a snooze that has not come due yet.
+func (a *App) SnoozedProposalCount(ctx context.Context, projectID string) (int, error) {
+	if a.deps.Proposals == nil {
+		return 0, nil
+	}
+	proposals, err := a.listPendingProposals(ctx, projectID)
+	if err != nil {
+		return 0, err
+	}
+	now := a.now()
+	count := 0
+	for _, proposal := range proposals {
+		if proposal.IsSnoozed(now) {
+			count++
+		}
+	}
+	return count, nil
 }
 
 // normalizeProposalStatuses validates a status filter; empty means "every

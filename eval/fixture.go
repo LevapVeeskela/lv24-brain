@@ -150,7 +150,9 @@ func LoadDir(dir string) (Corpus, error) {
 		corpus.RecordCount += len(fixture.Records)
 		_, _ = hasher.Write([]byte(filepath.Base(path)))
 		_, _ = hasher.Write([]byte{0})
-		_, _ = hasher.Write(raw)
+		// Normalize CRLF to LF so the digest is stable across checkouts with
+		// different line endings (see docs/eval.md).
+		_, _ = hasher.Write(normalizeLineEndings(raw))
 		_, _ = hasher.Write([]byte{0})
 	}
 	corpus.Digest = hex.EncodeToString(hasher.Sum(nil))
@@ -398,6 +400,12 @@ func parseOptionalTime(field, raw string) (time.Time, error) {
 		return time.Time{}, fmt.Errorf("%s %q is not RFC 3339: %w", field, raw, err)
 	}
 	return parsed, nil
+}
+
+// normalizeLineEndings strips a CR that precedes an LF so hashing and digests
+// do not depend on the checkout's line-ending convention.
+func normalizeLineEndings(raw []byte) []byte {
+	return bytes.ReplaceAll(raw, []byte("\r\n"), []byte("\n"))
 }
 
 func requireText(field, value string) error {

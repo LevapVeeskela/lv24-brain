@@ -223,3 +223,23 @@ func writeFixtureFile(t *testing.T, dir, name, content string) {
 		t.Fatalf("write %s: %v", name, err)
 	}
 }
+
+func TestLoadDirDigestNormalizesLineEndings(t *testing.T) {
+	lfDir := t.TempDir()
+	writeFixtureFile(t, lfDir, "a.yaml", validFixtureYAML)
+	lfCorpus, err := LoadDir(lfDir)
+	if err != nil {
+		t.Fatalf("LoadDir (LF): %v", err)
+	}
+
+	crlfDir := t.TempDir()
+	writeFixtureFile(t, crlfDir, "a.yaml", strings.ReplaceAll(validFixtureYAML, "\n", "\r\n"))
+	crlfCorpus, err := LoadDir(crlfDir)
+	if err != nil {
+		t.Fatalf("LoadDir (CRLF): %v", err)
+	}
+
+	if lfCorpus.Digest != crlfCorpus.Digest {
+		t.Fatalf("digests differ: LF %s, CRLF %s", lfCorpus.Digest, crlfCorpus.Digest)
+	}
+}

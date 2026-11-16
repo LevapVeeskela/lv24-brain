@@ -133,6 +133,32 @@ and `error` beyond it.
 `brain doctor` reports the same counts in its `reviews` check (`code:
 review-overdue`) and never changes a date.
 
+### Proposal snooze
+
+A pending or stale proposal can be deferred without dismissing it. The snooze
+is stored as `snooze_until` in the proposal frontmatter and never changes the
+lifecycle status or the candidate text:
+
+```bash
+brain promote <id> --snooze 7d          # also: 2026-12-01 or an RFC3339 time
+brain promote <id> --unsnooze
+```
+
+- `brain review` lists active candidates only and shows the hidden ones as a
+  separate count, for example `## Proposals (2 pending, 1 snoozed)`.
+- `brain review --json` reports `snoozed_proposal_count`; the pending list and
+  `pending_proposals` counts exclude snoozed candidates.
+- `brain review --due` and the proposal findings skip a snoozed candidate until
+  its snooze comes due; it then returns to the normal queues on its own.
+- A digest rerun that refreshes the candidate keeps the snooze, so new source
+  text does not bring a deferred proposal back into the inbox.
+- Snoozing a promoted or dismissed proposal is a validation error, and so is an
+  `until` that is not in the future. Promotion and dismissal clear the snooze
+  together with the inbox state.
+- The local API exposes the same write as
+  `POST /v1/proposals/{project}/{id}/snooze` (see
+  [localapi-v1.md](localapi-v1.md)); repeating the stored value is idempotent.
+
 ## Deterministic duplicates
 
 Two records are **exact duplicates** when their normalized text is identical:

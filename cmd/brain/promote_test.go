@@ -198,6 +198,72 @@ func TestPromoteCLIDismissDryRunAndExitCodes(t *testing.T) {
 	}
 }
 
+func TestPromoteCLISnoozeAndUnsnooze(t *testing.T) {
+	cfgPath, store := setupPromoteBrain(t, domain.PublishShared)
+	addPromoteCLIItem(t, store, promoteClosedCLIItem("issue-snoozed", "Serialize writes"))
+	if code, _, stderr := runForTest(t, "digest", "--config", cfgPath, "--source", "gh", "--write"); code != 0 {
+		t.Fatalf("digest: exit %d: %s", code, stderr)
+	}
+	proposalID := domain.ProposalID("demo", "gh", "issue-snoozed")
+	until := time.Now().UTC().Add(48 * time.Hour).Format(time.RFC3339)
+
+	code, stdout, stderr := runForTest(t, "promote", "--config", cfgPath, proposalID, "--snooze", until)
+	if code != 0 || !strings.Contains(stdout, "snoozed:") || !strings.Contains(stdout, until) {
+		t.Fatalf("snooze: exit %d stdout %q stderr %q", code, stdout, stderr)
+	}
+	stored, err := store.Get(context.Background(), "demo", proposalID)
+	if err != nil || stored.SnoozedUntil.IsZero() || stored.StatusOrPending() != domain.ProposalPending {
+		t.Fatalf("stored snooze = %+v, %v", stored, err)
+	}
+	if code, stdout, stderr := runForTest(t, "promote", "--config", cfgPath, proposalID, "--snooze", until); code != 0 ||
+		!strings.Contains(stdout, "snoozed:") {
+		t.Fatalf("idempotent snooze: exit %d stdout %q stderr %q", code, stdout, stderr)
+	}
+
+	code, stdout, stderr = runForTest(t, "review", "--config", cfgPath, "--project", "demo")
+	if code != 0 || !strings.Contains(stdout, "## Proposals (0 pending, 1 snoozed)") {
+		t.Fatalf("review with snooze: exit %d stdout %q stderr %q", code, stdout, stderr)
+	}
+	_, data := runJSONForTest(t, "review", "--json", "--config", cfgPath, "--project", "demo")
+	if data["snoozed_proposal_count"] != float64(1) {
+		t.Fatalf("review snoozed count = %#v", data["snoozed_proposal_count"])
+	}
+	if proposals, ok := data["proposals"].([]any); !ok || len(proposals) != 0 {
+		t.Fatalf("review proposals = %#v", data["proposals"])
+	}
+	_, data = runJSONForTest(t, "promote", "--json", "--config", cfgPath, proposalID, "--snooze", "7d")
+	snoozeJSON, _ := data["snoozed"].(bool)
+	if !snoozeJSON || data["snoozed_until"] == nil || data["status"] != "pending" {
+		t.Fatalf("snooze json = %#v", data)
+	}
+
+	code, stdout, stderr = runForTest(t, "promote", "--config", cfgPath, proposalID, "--unsnooze")
+	if code != 0 || !strings.Contains(stdout, "unsnoozed:") {
+		t.Fatalf("unsnooze: exit %d stdout %q stderr %q", code, stdout, stderr)
+	}
+	if stored, err := store.Get(context.Background(), "demo", proposalID); err != nil || !stored.SnoozedUntil.IsZero() {
+		t.Fatalf("snooze after unsnooze = %+v, %v", stored, err)
+	}
+
+	for _, args := range [][]string{
+		{"promote", "--config", cfgPath, proposalID, "--snooze", "7d", "--unsnooze"},
+		{"promote", "--config", cfgPath, proposalID, "--snooze", "7d", "--dismiss"},
+		{"promote", "--config", cfgPath, proposalID, "--snooze", "7d", "--dry-run"},
+		{"promote", "--config", cfgPath, proposalID, "--snooze", "later"},
+	} {
+		if code, _, _ := runForTest(t, args...); code != 2 {
+			t.Fatalf("%v exit = %d, want 2", args, code)
+		}
+	}
+
+	if code, _, stderr := runForTest(t, "promote", "--config", cfgPath, proposalID, "--dismiss"); code != 0 {
+		t.Fatalf("dismiss: exit %d: %s", code, stderr)
+	}
+	if code, _, _ := runForTest(t, "promote", "--config", cfgPath, proposalID, "--snooze", "7d"); code != 2 {
+		t.Fatalf("snooze dismissed exit = %d, want 2", code)
+	}
+}
+
 func TestPromoteCLILocalOnlyAndStale(t *testing.T) {
 	localCfg, localStore := setupPromoteBrain(t, domain.PublishLocalOnly)
 	addPromoteCLIItem(t, localStore, promoteClosedCLIItem("issue-local", "Serialize writes"))

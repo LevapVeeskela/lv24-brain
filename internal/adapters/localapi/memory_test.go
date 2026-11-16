@@ -31,6 +31,7 @@ type fakeMemory struct {
 	page             ProposalPage
 	proposal         ProposalDetailView
 	outcome          ProposalOutcome
+	snooze           ProposalSnoozeView
 	catchup          CatchupView
 	quarantine       []QuarantineItemView
 	quarantineReview QuarantineReviewView
@@ -46,6 +47,7 @@ type fakeMemory struct {
 	reviewErr     error
 	propErr       error
 	promoteErr    error
+	snoozeErr     error
 	catchupErr    error
 	quarantineErr error
 	fixErr        error
@@ -64,6 +66,7 @@ type fakeMemory struct {
 	lastProposal   ProposalQuery
 	lastProposalID ProposalDetailQuery
 	lastDecision   ProposalDecision
+	lastSnooze     ProposalSnoozeRequest
 	lastCatchup    CatchupQuery
 	lastQuarantine QuarantineQuery
 	lastReviewID   QuarantineReviewDecision
@@ -293,6 +296,23 @@ func (f *fakeMemory) Promote(_ context.Context, decision ProposalDecision) (Prop
 	f.decided[decision.ProposalID] = "promoted"
 	return ProposalOutcome{ProjectID: decision.ProjectID, ProposalID: decision.ProposalID,
 		ProposalStatus: "promoted", RecordKind: "decision", RecordID: "decision-1", RecordTitle: "Adopt"}, nil
+}
+
+func (f *fakeMemory) SnoozeProposal(_ context.Context, request ProposalSnoozeRequest) (ProposalSnoozeView, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.lastSnooze = request
+	if f.snoozeErr != nil {
+		return ProposalSnoozeView{}, f.snoozeErr
+	}
+	view := f.snooze
+	if view.ProjectID == "" {
+		view.ProjectID = request.ProjectID
+	}
+	if view.ProposalID == "" {
+		view.ProposalID = request.ProposalID
+	}
+	return view, nil
 }
 
 func (f *fakeMemory) Catchup(_ context.Context, query CatchupQuery) (CatchupView, error) {

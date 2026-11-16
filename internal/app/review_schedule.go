@@ -185,6 +185,9 @@ func (a *App) dueProposals(ctx context.Context, projectID string, now time.Time)
 	}
 	var due []DueReview
 	for _, proposal := range proposals {
+		if proposal.IsSnoozed(now) {
+			continue
+		}
 		updated := proposal.UpdatedAt
 		if updated.IsZero() {
 			updated = proposal.CreatedAt

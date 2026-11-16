@@ -49,16 +49,18 @@ type ReviewStateView struct {
 
 // RecordView is one record in a listing.
 type RecordView struct {
-	ID          string          `json:"id"`
-	ProjectID   string          `json:"project_id"`
-	Kind        string          `json:"kind"`
-	Title       string          `json:"title"`
-	Status      string          `json:"status,omitempty"`
-	Path        string          `json:"path"`
-	Permalink   string          `json:"permalink,omitempty"`
-	Subtype     string          `json:"subtype,omitempty"`
-	Scope       string          `json:"scope,omitempty"`
-	TopicKey    string          `json:"topic_key,omitempty"`
+	ID        string `json:"id"`
+	ProjectID string `json:"project_id"`
+	Kind      string `json:"kind"`
+	Title     string `json:"title"`
+	Status    string `json:"status,omitempty"`
+	Path      string `json:"path"`
+	Permalink string `json:"permalink,omitempty"`
+	Subtype   string `json:"subtype,omitempty"`
+	Scope     string `json:"scope,omitempty"`
+	TopicKey  string `json:"topic_key,omitempty"`
+	// Tags are the note tags; omitted for every other kind.
+	Tags        []string        `json:"tags,omitempty"`
 	Occurrences int             `json:"occurrences,omitempty"`
 	CreatedAt   time.Time       `json:"created_at,omitzero"`
 	UpdatedAt   time.Time       `json:"updated_at,omitzero"`
@@ -298,6 +300,10 @@ type ProposalView struct {
 	SourceOrphan bool   `json:"source_orphan"`
 	LocalOnly    bool   `json:"local_only"`
 	SourceHealth string `json:"source_health,omitempty"`
+	// SnoozedUntil is when a snoozed candidate returns to the inbox.
+	// Snoozed reports that the instant is still in the future.
+	SnoozedUntil time.Time `json:"snoozed_until,omitzero"`
+	Snoozed      bool      `json:"snoozed"`
 	// Body is the redacted candidate text, present only when the caller asked
 	// for bodies. BodyOmitted marks an item whose body did not fit the page
 	// budget; it is never silently empty.
@@ -317,20 +323,26 @@ type ProposalDetailQuery struct {
 
 // ProposalDetailView is one candidate with its bounded body.
 type ProposalDetailView struct {
-	ID            string `json:"id"`
-	ProjectID     string `json:"project_id"`
-	Kind          string `json:"kind"`
-	Title         string `json:"title"`
-	Status        string `json:"status"`
-	Body          string `json:"body"`
-	BodyTruncated bool   `json:"body_truncated"`
-	BodyTokens    int    `json:"body_tokens"`
-	MaxTokens     int    `json:"max_tokens"`
+	ID            string    `json:"id"`
+	ProjectID     string    `json:"project_id"`
+	Kind          string    `json:"kind"`
+	Title         string    `json:"title"`
+	Status        string    `json:"status"`
+	SnoozedUntil  time.Time `json:"snoozed_until,omitzero"`
+	Snoozed       bool      `json:"snoozed"`
+	UpdatedAt     time.Time `json:"updated_at,omitzero"`
+	Body          string    `json:"body"`
+	BodyTruncated bool      `json:"body_truncated"`
+	BodyTokens    int       `json:"body_tokens"`
+	MaxTokens     int       `json:"max_tokens"`
 }
 
-// ProposalSummaryView is the pending-proposal summary of a review report.
+// ProposalSummaryView is the pending-proposal summary of a review report. The
+// pending count excludes candidates hidden by an active snooze; SnoozedCount
+// reports those separately.
 type ProposalSummaryView struct {
 	PendingCount int            `json:"pending_count"`
+	SnoozedCount int            `json:"snoozed_count"`
 	Items        []ProposalView `json:"items"`
 }
 
@@ -439,6 +451,8 @@ type ProposalQuery struct {
 	Limit       int
 	IncludeBody bool
 	BodyTokens  int
+	// IncludeSnoozed keeps candidates hidden by an active snooze.
+	IncludeSnoozed bool
 }
 
 // ProposalPage is one window of proposals plus the total matching count.
@@ -476,6 +490,26 @@ type ProposalOutcome struct {
 	Already        bool   `json:"already"`
 	Dismissed      bool   `json:"dismissed"`
 	DryRun         bool   `json:"dry_run"`
+}
+
+// ProposalSnoozeRequest sets or clears the review snooze of one candidate.
+// Clear wins over Until; ExpectedUpdatedAt is zero for an unconditional write.
+type ProposalSnoozeRequest struct {
+	ProjectID         string
+	ProposalID        string
+	Until             time.Time
+	Clear             bool
+	ExpectedUpdatedAt time.Time
+}
+
+// ProposalSnoozeView is the candidate after a snooze write.
+type ProposalSnoozeView struct {
+	ProjectID    string    `json:"project_id"`
+	ProposalID   string    `json:"proposal_id"`
+	Status       string    `json:"status"`
+	Snoozed      bool      `json:"snoozed"`
+	SnoozedUntil time.Time `json:"snoozed_until,omitzero"`
+	UpdatedAt    time.Time `json:"updated_at,omitzero"`
 }
 
 // CatchupQuery selects the project and baseline of a catchup report.
@@ -533,6 +567,7 @@ type MemoryService interface {
 	ListProposals(context.Context, ProposalQuery) (ProposalPage, error)
 	ProposalDetail(context.Context, ProposalDetailQuery) (ProposalDetailView, error)
 	Promote(context.Context, ProposalDecision) (ProposalOutcome, error)
+	SnoozeProposal(context.Context, ProposalSnoozeRequest) (ProposalSnoozeView, error)
 	Catchup(context.Context, CatchupQuery) (CatchupView, error)
 	// ResolveProject maps an id, alias or path to its registered project so
 	// the handler can enforce the project allowlist on the canonical id.
@@ -834,25 +869,116 @@ func (h *Handler) editRecord(w http.ResponseWriter, r *http.Request, id string) 
 		Title: body.Title, Body: body.Body, Tags: body.Tags,
 		AllowDuplicate: body.AllowDuplicate,
 	}
-	if body.ExpectedUpdatedAt != nil {
-		raw := strings.TrimSpace(*body.ExpectedUpdatedAt)
-		if raw == "" {
-			writeError(w, http.StatusBadRequest, "validation", "expected_updated_at must be an RFC3339 timestamp or omitted")
-			return
-		}
-		expected, err := time.Parse(time.RFC3339Nano, raw)
-		if err != nil {
-			writeError(w, http.StatusBadRequest, "validation", "expected_updated_at must be an RFC3339 timestamp or omitted")
-			return
-		}
-		request.ExpectedUpdatedAt = expected.UTC()
+	expected, ok := h.expectedUpdatedAt(w, body.ExpectedUpdatedAt)
+	if !ok {
+		return
 	}
+	request.ExpectedUpdatedAt = expected
 	detail, err := h.opts.Memory.EditRecord(r.Context(), request)
 	if err != nil {
 		h.writeMemoryError(w, err)
 		return
 	}
 	writeSafeJSON(w, http.StatusOK, detail, h.redact)
+}
+
+// snoozeProposal sets or clears one candidate's review snooze. POST carries
+// {until, expected_updated_at?}; DELETE, {until:null} or {until:""} clears it.
+// The route is idempotent: repeating the stored value writes nothing.
+func (h *Handler) snoozeProposal(w http.ResponseWriter, r *http.Request, projectID, proposalID string) {
+	if !method(w, r, http.MethodPost, http.MethodDelete) {
+		return
+	}
+	if h.opts.Memory == nil {
+		unavailable(w)
+		return
+	}
+	projectID, ok := h.resolveProjectID(w, r, projectID)
+	if !ok {
+		return
+	}
+	request := ProposalSnoozeRequest{
+		ProjectID: projectID, ProposalID: proposalID,
+		Clear: r.Method == http.MethodDelete,
+	}
+	if !request.Clear {
+		if r.ContentLength == 0 {
+			writeError(w, http.StatusBadRequest, "validation",
+				"until is required; pass an RFC3339 time, a date, a duration or null to clear the snooze")
+			return
+		}
+		var body struct {
+			Until             json.RawMessage `json:"until"`
+			ExpectedUpdatedAt *string         `json:"expected_updated_at"`
+		}
+		if !h.decode(w, r, &body) {
+			return
+		}
+		until, clear, ok := parseSnoozeUntil(w, body.Until, h.opts.Now())
+		if !ok {
+			return
+		}
+		expected, ok := h.expectedUpdatedAt(w, body.ExpectedUpdatedAt)
+		if !ok {
+			return
+		}
+		request.Until, request.Clear, request.ExpectedUpdatedAt = until, clear, expected
+	}
+	view, err := h.opts.Memory.SnoozeProposal(r.Context(), request)
+	if err != nil {
+		h.writeMemoryError(w, err)
+		return
+	}
+	writeSafeJSON(w, http.StatusOK, view, h.redact)
+}
+
+// parseSnoozeUntil decodes the until field of a snooze request. It reports the
+// parsed instant, whether the request clears the snooze, and whether the field
+// was acceptable.
+func parseSnoozeUntil(w http.ResponseWriter, raw json.RawMessage, now time.Time) (time.Time, bool, bool) {
+	const message = "until must be an RFC3339 time, a date, a positive duration (7d) or null to clear the snooze"
+	trimmed := strings.TrimSpace(string(raw))
+	if trimmed == "" {
+		writeError(w, http.StatusBadRequest, "validation", message)
+		return time.Time{}, false, false
+	}
+	if trimmed == "null" {
+		return time.Time{}, true, true
+	}
+	var text string
+	if err := json.Unmarshal(raw, &text); err != nil {
+		writeError(w, http.StatusBadRequest, "validation", message)
+		return time.Time{}, false, false
+	}
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return time.Time{}, true, true
+	}
+	until, err := domain.ParseSnoozeUntil(text, now)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "validation", message)
+		return time.Time{}, false, false
+	}
+	return until, false, true
+}
+
+// expectedUpdatedAt parses the optional compare-and-swap revision shared by the
+// record edit and proposal snooze routes.
+func (h *Handler) expectedUpdatedAt(w http.ResponseWriter, raw *string) (time.Time, bool) {
+	if raw == nil {
+		return time.Time{}, true
+	}
+	value := strings.TrimSpace(*raw)
+	if value == "" {
+		writeError(w, http.StatusBadRequest, "validation", "expected_updated_at must be an RFC3339 timestamp or omitted")
+		return time.Time{}, false
+	}
+	expected, err := time.Parse(time.RFC3339Nano, value)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "validation", "expected_updated_at must be an RFC3339 timestamp or omitted")
+		return time.Time{}, false
+	}
+	return expected.UTC(), true
 }
 
 func (h *Handler) search(w http.ResponseWriter, r *http.Request) {
@@ -1135,18 +1261,28 @@ func (h *Handler) proposals(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	includeSnoozed, ok := h.queryFlag(w, r, "include_snoozed")
+	if !ok {
+		return
+	}
 	maxTokens, ok := h.queryBoundedInt(w, r, "max_tokens", proposalBodyDefaultTokens, 1, proposalBodyMaxTokens)
 	if !ok {
 		return
 	}
-	offset, filter, ok := h.pageCursor(w, r, "proposals", proposalsWindow, project, strings.Join(statuses, ","), kind, strconv.FormatBool(includeBody), strconv.Itoa(maxTokens))
+	// include_snoozed joins the cursor fingerprint only when set, so cursors
+	// issued before the field existed keep working for the default listing.
+	cursorFilter := []string{project, strings.Join(statuses, ","), kind, strconv.FormatBool(includeBody), strconv.Itoa(maxTokens)}
+	if includeSnoozed {
+		cursorFilter = append(cursorFilter, "include_snoozed=1")
+	}
+	offset, filter, ok := h.pageCursor(w, r, "proposals", proposalsWindow, cursorFilter...)
 	if !ok {
 		return
 	}
 	page, err := h.opts.Memory.ListProposals(r.Context(), ProposalQuery{
 		ProjectID: project, Statuses: statuses, Kind: kind,
 		Limit:       scanLimit(offset, limit, proposalsWindow),
-		IncludeBody: includeBody, BodyTokens: maxTokens,
+		IncludeBody: includeBody, BodyTokens: maxTokens, IncludeSnoozed: includeSnoozed,
 	})
 	if err != nil {
 		h.writeMemoryError(w, err)
@@ -1190,8 +1326,12 @@ func (h *Handler) proposalRoute(w http.ResponseWriter, r *http.Request, rest str
 		return
 	}
 	action := parts[2]
-	if action != "promote" && action != "dismiss" {
+	if action != "promote" && action != "dismiss" && action != "snooze" {
 		writeError(w, http.StatusNotFound, "not_found", "endpoint not found")
+		return
+	}
+	if action == "snooze" {
+		h.snoozeProposal(w, r, projectID, proposalID)
 		return
 	}
 	if !method(w, r, http.MethodPost) {

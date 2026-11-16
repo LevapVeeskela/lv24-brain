@@ -397,6 +397,85 @@ func TestProposalProblemsReportsMalformedFiles(t *testing.T) {
 	}
 }
 
+func TestProposalSnoozeRoundTripIdempotencyAndTerminal(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+	project := seedProject(t, store)
+	proposal := testProposal(project.ID)
+	if _, err := store.Put(ctx, proposal); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	until := testClock.Add(48 * time.Hour)
+
+	snoozed, err := store.SetSnooze(ctx, project.ID, proposal.ID, until)
+	if err != nil {
+		t.Fatalf("SetSnooze: %v", err)
+	}
+	if !snoozed.SnoozedUntil.Equal(until) {
+		t.Fatalf("snoozed until = %v, want %v", snoozed.SnoozedUntil, until)
+	}
+	path := filepath.Join(store.Root(), "proposals", project.ID, proposal.ID+".md")
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read proposal: %v", err)
+	}
+	var front proposalFrontmatter
+	if _, err := markdown.Parse(raw, &front); err != nil {
+		t.Fatalf("parse proposal: %v", err)
+	}
+	if front.SnoozeUntil == "" {
+		t.Fatal("snooze_until is missing from the proposal frontmatter")
+	}
+
+	repeat, err := store.SetSnooze(ctx, project.ID, proposal.ID, until)
+	if err != nil {
+		t.Fatalf("repeat SetSnooze: %v", err)
+	}
+	if !repeat.UpdatedAt.Equal(snoozed.UpdatedAt) {
+		t.Fatalf("idempotent snooze rewrote updated_at: %v -> %v", snoozed.UpdatedAt, repeat.UpdatedAt)
+	}
+	got, err := store.Get(ctx, project.ID, proposal.ID)
+	if err != nil || !got.SnoozedUntil.Equal(until) {
+		t.Fatalf("Get after snooze = %+v, %v", got, err)
+	}
+
+	// A digest refresh (Put with changed content) keeps the user's snooze.
+	refreshed := got
+	refreshed.Title = "Adopt a retry budget everywhere"
+	refreshed.PayloadHash = refreshed.ComputePayloadHash()
+	if refreshed, err = store.Put(ctx, refreshed); err != nil {
+		t.Fatalf("Put refresh: %v", err)
+	}
+	if !refreshed.SnoozedUntil.Equal(until) {
+		t.Fatalf("refresh cleared snooze: %+v", refreshed)
+	}
+
+	cleared, err := store.SetSnooze(ctx, project.ID, proposal.ID, time.Time{})
+	if err != nil {
+		t.Fatalf("clear snooze: %v", err)
+	}
+	if !cleared.SnoozedUntil.IsZero() {
+		t.Fatalf("cleared snooze = %v", cleared.SnoozedUntil)
+	}
+	if again, err := store.SetSnooze(ctx, project.ID, proposal.ID, time.Time{}); err != nil || !again.UpdatedAt.Equal(cleared.UpdatedAt) {
+		t.Fatalf("repeated clear = %+v, %v", again, err)
+	}
+
+	if _, err := store.SetSnooze(ctx, project.ID, proposal.ID, until); err != nil {
+		t.Fatalf("snooze before promotion: %v", err)
+	}
+	promoted, err := store.SetStatus(ctx, project.ID, proposal.ID, domain.ProposalPromoted, "decision-2026-11-09-retry-budget")
+	if err != nil {
+		t.Fatalf("SetStatus promoted: %v", err)
+	}
+	if !promoted.SnoozedUntil.IsZero() {
+		t.Fatalf("promotion kept a snooze: %+v", promoted)
+	}
+	if _, err := store.SetSnooze(ctx, project.ID, proposal.ID, until); !errors.Is(err, domain.ErrValidation) {
+		t.Fatalf("snooze promoted = %v, want validation", err)
+	}
+}
+
 func TestProposalStoreErrors(t *testing.T) {
 	store := newTestStore(t)
 	ctx := context.Background()

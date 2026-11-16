@@ -179,6 +179,10 @@ type Proposal struct {
 	PromotedRecordID string `json:"promotedRecordId,omitempty"`
 	// PromotedAt is when promotion succeeded.
 	PromotedAt time.Time `json:"promotedAt,omitzero"`
+	// SnoozedUntil hides a pending or stale proposal from the review queue
+	// until that instant. The zero value means not snoozed. Snoozing never
+	// changes the lifecycle status and is excluded from PayloadHash.
+	SnoozedUntil time.Time `json:"snoozedUntil,omitzero"`
 }
 
 // ProposalID returns the deterministic ID for one source item. The hash covers
@@ -236,6 +240,12 @@ func (p Proposal) StatusOrPending() ProposalStatus {
 
 // IsTerminal reports whether the stored status is promoted or dismissed.
 func (p Proposal) IsTerminal() bool { return p.Status.Terminal() }
+
+// IsSnoozed reports whether the proposal is hidden until a later instant.
+// A snooze that has come due no longer hides the proposal.
+func (p Proposal) IsSnoozed(now time.Time) bool {
+	return !p.SnoozedUntil.IsZero() && p.SnoozedUntil.After(now)
+}
 
 // Validate checks identity, bounds and payload hash consistency. SchemaVersion
 // 0 and Status "" are accepted for values that have not been stored yet; the
@@ -328,6 +338,9 @@ func (p Proposal) Validate() error {
 	}
 	if !p.PromotedAt.IsZero() && p.StatusOrPending() != ProposalPromoted {
 		return NewValidationError("proposal.promotedAt", "is only valid for a promoted proposal")
+	}
+	if !p.SnoozedUntil.IsZero() && p.StatusOrPending().Terminal() {
+		return NewValidationError("proposal.snoozedUntil", "is only valid for a pending or stale proposal")
 	}
 	if p.StatusOrPending() == ProposalPromoted && p.PromotedRecordID == "" {
 		return NewValidationError("proposal.promotedRecordId", "is required for a promoted proposal")

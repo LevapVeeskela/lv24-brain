@@ -1447,11 +1447,12 @@ func runReview(args []string, stdout, stderr io.Writer) int {
 			items = []string{}
 		}
 		payload := jsonReview{
-			Summary:   result.Summary,
-			Items:     items,
-			Findings:  toJSONFindings(findings),
-			Applied:   toJSONFindings(applied),
-			Proposals: toJSONReviewProposals(result.Proposals),
+			Summary:              result.Summary,
+			Items:                items,
+			Findings:             toJSONFindings(findings),
+			Applied:              toJSONFindings(applied),
+			Proposals:            toJSONReviewProposals(result.Proposals),
+			SnoozedProposalCount: result.SnoozedProposalCount,
 		}
 		if *due {
 			list := toJSONDueReviews(dueReviews)

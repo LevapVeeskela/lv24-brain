@@ -221,6 +221,8 @@ func contractPath(path string) string {
 		return "/v1/proposals/brain/proposal-gh-000000000000/promote"
 	case "/v1/proposals/{project}/{id}/dismiss":
 		return "/v1/proposals/brain/proposal-gh-000000000000/dismiss"
+	case "/v1/proposals/{project}/{id}/snooze":
+		return "/v1/proposals/brain/proposal-gh-000000000000/snooze"
 	default:
 		return path
 	}
@@ -252,6 +254,8 @@ func contractBody(method, path string) string {
 		return `{}`
 	case method == http.MethodPost && path == "/v1/quarantine/{id}/review":
 		return `{}`
+	case method == http.MethodPost && path == "/v1/proposals/{project}/{id}/snooze":
+		return `{"until":"2026-12-01"}`
 	}
 	return ""
 }

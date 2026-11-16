@@ -162,7 +162,7 @@
     },
     "/v1/proposals": {
       "get": {
-        "description": "Candidate records with source health. Bodies stay out unless include_body=true; the page shares a body budget and items past it are marked body_omitted.",
+        "description": "Candidate records with source health. Bodies stay out unless include_body=true; the page shares a body budget and items past it are marked body_omitted. Candidates hidden by an active snooze are omitted unless a status filter is given or include_snoozed=true.",
         "parameters": [
           { "$ref": "#/components/parameters/Project" },
           { "name": "status", "in": "query", "description": "Repeated or comma-separated: pending, stale, promoted, dismissed.", "schema": { "type": "array", "items": { "type": "string" } }, "style": "form", "explode": true },
@@ -170,6 +170,7 @@
           { "$ref": "#/components/parameters/Limit" },
           { "$ref": "#/components/parameters/Cursor" },
           { "name": "include_body", "in": "query", "description": "Render each candidate's redacted text under max_tokens.", "schema": { "type": "boolean", "default": false } },
+          { "name": "include_snoozed", "in": "query", "description": "Keep candidates hidden by a snooze that has not come due.", "schema": { "type": "boolean", "default": false } },
           { "name": "max_tokens", "in": "query", "schema": { "type": "integer", "minimum": 1, "maximum": 2000, "default": 600 } }
         ],
         "responses": { "200": { "description": "One page of proposals", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ProposalPage" } } } }, "400": { "$ref": "#/components/responses/Error" }, "404": { "$ref": "#/components/responses/Error" } }
@@ -197,6 +198,18 @@
         "description": "Dismisses one proposal. Repeating the dismissal is idempotent; dismissing a promoted proposal is 409.",
         "requestBody": { "required": false, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ProposalDecision" } } } },
         "responses": { "200": { "description": "Dismissal receipt", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ProposalOutcome" } } } }, "404": { "$ref": "#/components/responses/Error" }, "409": { "$ref": "#/components/responses/Error" } }
+      }
+    },
+    "/v1/proposals/{project}/{id}/snooze": {
+      "parameters": [{ "name": "project", "in": "path", "required": true, "schema": { "type": "string" } }, { "$ref": "#/components/parameters/ID" }],
+      "post": {
+        "description": "Hides a pending or stale candidate from the review queue until a time. until accepts an RFC3339 time, a calendar date, a positive duration (7d) or null to clear; repeating the stored value writes nothing. expected_updated_at makes the write a compare-and-swap and a stale value returns 409 with error.current_revision. Snoozing a promoted or dismissed proposal is 400 validation.",
+        "requestBody": { "$ref": "#/components/requestBodies/ProposalSnooze" },
+        "responses": { "200": { "description": "The candidate after the snooze write", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ProposalSnoozeReceipt" } } } }, "400": { "$ref": "#/components/responses/Error" }, "404": { "$ref": "#/components/responses/Error" }, "409": { "$ref": "#/components/responses/Error" }, "413": { "$ref": "#/components/responses/Error" }, "415": { "$ref": "#/components/responses/Error" } }
+      },
+      "delete": {
+        "description": "Clears the snooze of one candidate. The call is idempotent: clearing a candidate that is not snoozed succeeds unchanged.",
+        "responses": { "200": { "description": "The candidate after clearing its snooze", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ProposalSnoozeReceipt" } } } }, "400": { "$ref": "#/components/responses/Error" }, "404": { "$ref": "#/components/responses/Error" }, "409": { "$ref": "#/components/responses/Error" } }
       }
     },
     "/v1/catchup": {
@@ -230,6 +243,7 @@
       "JSON": { "required": true, "content": { "application/json": { "schema": { "type": "object" } } } },
       "StateWrite": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/StateWrite" } } } },
       "ProposalDecision": { "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ProposalDecision" } } } },
+      "ProposalSnooze": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ProposalSnoozeRequest" } } } },
       "ReviewFix": { "required": false, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ReviewFixRequest" } } } }
     },
     "responses": {
@@ -308,6 +322,7 @@
           "scope": { "type": "string", "enum": ["project", "personal", "global"] },
           "topic_key": { "type": "string" },
           "occurrences": { "type": "integer" },
+          "tags": { "type": "array", "items": { "type": "string" }, "description": "Note tags; omitted for every other kind." },
           "created_at": { "type": "string", "format": "date-time" },
           "updated_at": { "type": "string", "format": "date-time" },
           "validity": { "$ref": "#/components/schemas/Validity" },
@@ -505,6 +520,8 @@
           "source_orphan": { "type": "boolean" },
           "local_only": { "type": "boolean" },
           "source_health": { "type": "string" },
+          "snoozed_until": { "type": "string", "format": "date-time", "description": "When a snoozed candidate returns to the inbox." },
+          "snoozed": { "type": "boolean", "description": "The candidate is hidden until snoozed_until." },
           "body": { "type": "string", "description": "Redacted candidate text; present only with include_body=true." },
           "body_truncated": { "type": "boolean" },
           "body_tokens": { "type": "integer" },
@@ -521,10 +538,33 @@
           "kind": { "type": "string", "enum": ["decision", "attempt", "note"] },
           "title": { "type": "string" },
           "status": { "type": "string" },
+          "snoozed_until": { "type": "string", "format": "date-time" },
+          "snoozed": { "type": "boolean" },
+          "updated_at": { "type": "string", "format": "date-time", "description": "Revision for the snooze compare-and-swap." },
           "body": { "type": "string" },
           "body_truncated": { "type": "boolean" },
           "body_tokens": { "type": "integer" },
           "max_tokens": { "type": "integer" }
+        }
+      },
+      "ProposalSnoozeRequest": {
+        "type": "object",
+        "required": ["until"],
+        "properties": {
+          "until": { "type": "string", "nullable": true, "description": "RFC3339 time, calendar date, positive duration (7d) or null to clear." },
+          "expected_updated_at": { "type": "string", "format": "date-time", "description": "The updated_at the client read; a stale value is 409 with error.current_revision." }
+        }
+      },
+      "ProposalSnoozeReceipt": {
+        "type": "object",
+        "required": ["project_id", "proposal_id", "status", "snoozed"],
+        "properties": {
+          "project_id": { "type": "string" },
+          "proposal_id": { "type": "string" },
+          "status": { "type": "string" },
+          "snoozed": { "type": "boolean" },
+          "snoozed_until": { "type": "string", "format": "date-time" },
+          "updated_at": { "type": "string", "format": "date-time" }
         }
       },
       "ProposalPage": {
@@ -572,9 +612,10 @@
           "due_reviews": { "type": "array", "items": { "$ref": "#/components/schemas/DueReview" } },
           "proposals": {
             "type": "object",
-            "required": ["pending_count", "items"],
+            "required": ["pending_count", "snoozed_count", "items"],
             "properties": {
-              "pending_count": { "type": "integer" },
+              "pending_count": { "type": "integer", "description": "Pending candidates only; an active snooze is excluded." },
+              "snoozed_count": { "type": "integer", "description": "Pending or stale candidates hidden by a snooze that has not come due." },
               "items": { "type": "array", "items": { "$ref": "#/components/schemas/Proposal" } }
             }
           },

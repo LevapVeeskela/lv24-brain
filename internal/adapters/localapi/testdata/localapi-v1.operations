@@ -1,4 +1,5 @@
 DELETE /v1/connections/{id}
+DELETE /v1/proposals/{project}/{id}/snooze
 GET /v1/catchup
 GET /v1/connections
 GET /v1/connections/{id}
@@ -26,6 +27,7 @@ POST /v1/connections/{id}/test
 POST /v1/engine/update
 POST /v1/proposals/{project}/{id}/dismiss
 POST /v1/proposals/{project}/{id}/promote
+POST /v1/proposals/{project}/{id}/snooze
 POST /v1/quarantine/{id}/review
 POST /v1/records/{id}/restore
 POST /v1/records/{id}/trash

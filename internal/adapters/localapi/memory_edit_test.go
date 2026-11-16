@@ -23,7 +23,7 @@ func decodeEditEnvelope(t *testing.T, w *httptest.ResponseRecorder) map[string]a
 func TestEditRecordHandlerValidatesRequestAndReturnsDetail(t *testing.T) {
 	fixture, memory := newMemoryFixture(t)
 	memory.edit = RecordDetailView{
-		RecordView: RecordView{ID: "note-1", ProjectID: "brain", Kind: "note", Title: "edited"},
+		RecordView: RecordView{ID: "note-1", ProjectID: "brain", Kind: "note", Title: "edited", Tags: []string{"one", "two"}},
 		Body:       "new body for " + testToken,
 		BodyTokens: 5, MaxTokens: 4000,
 	}
@@ -35,6 +35,9 @@ func TestEditRecordHandlerValidatesRequestAndReturnsDetail(t *testing.T) {
 	}
 	if strings.Contains(w.Body.String(), testToken) {
 		t.Fatalf("edit response leaked the token: %s", w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), `"tags":["one","two"]`) {
+		t.Fatalf("edit response does not carry tags: %s", w.Body.String())
 	}
 	field := memory.lastEdit
 	if field.Title == nil || *field.Title != "edited" || field.Body == nil || *field.Body != "new body" ||

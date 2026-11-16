@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"time"
 
 	"github.com/levapveeskela/lv24-brain/internal/app"
 	"github.com/levapveeskela/lv24-brain/internal/bootstrap"
@@ -59,6 +60,8 @@ func runPromote(args []string, stdout, stderr io.Writer) int {
 	allowProtected := fs.Bool("allow-protected", false, "write even though limits.protected_projects or limits.protected_globs protect the project")
 	allowDuplicate := fs.Bool("allow-duplicate", false, "promote even though an existing record holds the same normalized text")
 	dryRun := fs.Bool("dry-run", false, "show what would happen without writing")
+	snooze := fs.String("snooze", "", "hide the proposal until a time: 7d, 2026-12-01 or an RFC3339 time")
+	unsnooze := fs.Bool("unsnooze", false, "show a snoozed proposal again now")
 	asJSON := fs.Bool("json", false, "print JSON")
 	cfgPath := configFlag(fs)
 	positional, err := parseInterspersed(fs, args)
@@ -88,6 +91,15 @@ func runPromote(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "brain promote: --dismiss cannot be combined with --as, --status or --title")
 		return 2
 	}
+	snoozing := *snooze != "" || *unsnooze
+	if *snooze != "" && *unsnooze {
+		fmt.Fprintln(stderr, "brain promote: --snooze and --unsnooze cannot be combined")
+		return 2
+	}
+	if snoozing && (*dismiss || strings.TrimSpace(*as) != "" || strings.TrimSpace(*status) != "" || strings.TrimSpace(*title) != "" || *dryRun) {
+		fmt.Fprintln(stderr, "brain promote: --snooze/--unsnooze cannot be combined with --dismiss, --as, --status, --title or --dry-run")
+		return 2
+	}
 	cfg, err := loadRequiredConfig(*cfgPath)
 	if err != nil {
 		return reportError(stderr, "promote", err)
@@ -101,6 +113,31 @@ func runPromote(args []string, stdout, stderr io.Writer) int {
 		return reportError(stderr, "promote", err)
 	}
 	defer func() { _ = runtime.Close() }()
+
+	if snoozing {
+		var until time.Time
+		if *snooze != "" {
+			parsed, err := domain.ParseSnoozeUntil(*snooze, time.Now())
+			if err != nil {
+				fmt.Fprintf(stderr, "brain promote: %v\n", err)
+				return 2
+			}
+			until = parsed
+		}
+		result, err := runtime.App.SnoozeProposal(context.Background(), app.SnoozeOptions{
+			ProposalID: proposalID,
+			ProjectID:  strings.TrimSpace(*project),
+			Until:      until,
+		})
+		if err != nil {
+			return promoteError(stderr, err)
+		}
+		if *asJSON {
+			return writeJSONReport(stdout, stderr, "promote", toJSONSnooze(result))
+		}
+		printSnoozeResult(stdout, result)
+		return 0
+	}
 
 	result, err := runtime.App.Promote(context.Background(), app.PromoteOptions{
 		ProposalID:     proposalID,
@@ -116,17 +153,52 @@ func runPromote(args []string, stdout, stderr io.Writer) int {
 		DryRun:         *dryRun,
 	})
 	if err != nil {
-		if errors.Is(err, domain.ErrValidation) {
-			fmt.Fprintf(stderr, "brain promote: %v\n", err)
-			return 2
-		}
-		return reportError(stderr, "promote", err)
+		return promoteError(stderr, err)
 	}
 	if *asJSON {
 		return writeJSONReport(stdout, stderr, "promote", toJSONPromote(result))
 	}
 	printPromoteResult(stdout, result)
 	return 0
+}
+
+// jsonSnooze is `brain promote --snooze/--unsnooze --json`.
+type jsonSnooze struct {
+	ProposalID   string  `json:"proposal_id"`
+	Status       string  `json:"status"`
+	Snoozed      bool    `json:"snoozed"`
+	SnoozedUntil *string `json:"snoozed_until"`
+	UpdatedAt    *string `json:"updated_at"`
+}
+
+func toJSONSnooze(result app.SnoozeResult) jsonSnooze {
+	return jsonSnooze{
+		ProposalID:   result.Proposal.ID,
+		Status:       string(result.Proposal.StatusOrPending()),
+		Snoozed:      result.Snoozed,
+		SnoozedUntil: jsonTime(result.Proposal.SnoozedUntil),
+		UpdatedAt:    jsonTime(result.Proposal.UpdatedAt),
+	}
+}
+
+func printSnoozeResult(w io.Writer, result app.SnoozeResult) {
+	if result.Proposal.SnoozedUntil.IsZero() {
+		fmt.Fprintf(w, "unsnoozed: %s\n", result.Proposal.ID)
+		return
+	}
+	fmt.Fprintf(w, "snoozed: %s until %s\n", result.Proposal.ID,
+		result.Proposal.SnoozedUntil.UTC().Format(time.RFC3339))
+}
+
+// promoteError maps a use-case error to the documented promote exit code: a
+// validation error is a bad flag or value (2), everything else a state failure
+// (1).
+func promoteError(stderr io.Writer, err error) int {
+	if errors.Is(err, domain.ErrValidation) {
+		fmt.Fprintf(stderr, "brain promote: %v\n", err)
+		return 2
+	}
+	return reportError(stderr, "promote", err)
 }
 
 func printPromoteResult(w io.Writer, result app.PromoteResult) {

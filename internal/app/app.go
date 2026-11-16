@@ -378,6 +378,10 @@ type ReviewResult struct {
 	// PendingProposalCount is the total number of pending proposals, even
 	// when Proposals is capped.
 	PendingProposalCount int
+	// SnoozedProposalCount is the number of pending or stale candidates hidden
+	// by a snooze that has not come due. They are excluded from Proposals and
+	// PendingProposalCount.
+	SnoozedProposalCount int
 }
 
 // SyncOptions controls a sync run.

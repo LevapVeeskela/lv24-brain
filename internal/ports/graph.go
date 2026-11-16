@@ -77,6 +77,20 @@ const (
 	MaxGraphPRSymbols = 500
 	// MaxGraphPRFiles bounds the changed files one PR impact answer reports.
 	MaxGraphPRFiles = 200
+
+	// DefaultGraphCycles is the number of import cycles one answer lists.
+	DefaultGraphCycles = 10
+	// MaxGraphCycles bounds the import cycles one answer lists.
+	MaxGraphCycles = 50
+	// DefaultGraphCycleMembers is the member list length of one cycle.
+	DefaultGraphCycleMembers = 20
+	// MaxGraphCycleMembers bounds the member list of one cycle.
+	MaxGraphCycleMembers = 50
+	// DefaultGraphDiffSamples is the number of added and removed keys one
+	// graph diff answer lists per category.
+	DefaultGraphDiffSamples = 20
+	// MaxGraphDiffSamples bounds the samples of one graph diff answer.
+	MaxGraphDiffSamples = 100
 )
 
 // Risk tiers of a PR impact answer, from least to most likely to break a
@@ -326,6 +340,14 @@ type GraphAnalytics interface {
 	// PRImpact maps the files and symbols changed between two git refs to
 	// their reverse blast radius, a risk tier and the test files involved.
 	PRImpact(ctx context.Context, project, base, head string) (PRImpactView, error)
+	// Cycles lists strongly connected components over import edges: a Go
+	// package, TypeScript module or Python module cycle. Components below two
+	// members and self-imports are not cycles.
+	Cycles(ctx context.Context, project string, opts CycleQuery) (CyclesView, error)
+	// Diff compares this index with another index of the same engine and
+	// reports file, symbol and dependency-edge deltas. Both sides are read
+	// only; no index is rewritten.
+	Diff(ctx context.Context, project string, opts GraphDiffQuery) (GraphDiffView, error)
 	// GraphStats reports counts that need the whole graph: communities,
 	// orphan definitions and the language mix.
 	GraphStats(ctx context.Context, project string) (GraphStatsView, error)
@@ -372,9 +394,13 @@ type GraphCommunity struct {
 type CommunityView struct {
 	Communities []GraphCommunity `json:"communities"`
 	// Total is the number of detected communities, not the number returned.
-	Total     int      `json:"total"`
-	Truncated bool     `json:"truncated,omitempty"`
-	Notes     []string `json:"notes,omitempty"`
+	Total     int  `json:"total"`
+	Truncated bool `json:"truncated,omitempty"`
+	// Cached is true when the partition was served from an in-process cache
+	// instead of being computed for this call. The native engine stores its
+	// partition and leaves it false.
+	Cached bool     `json:"cached,omitempty"`
+	Notes  []string `json:"notes,omitempty"`
 }
 
 // GraphGodNode is one ranked definition. Degree counts distinct neighbours
@@ -398,9 +424,12 @@ type GraphGodNode struct {
 type GodNodesView struct {
 	Nodes []GraphGodNode `json:"nodes"`
 	// Total is the number of definitions the ranking considered.
-	Total     int      `json:"total"`
-	Truncated bool     `json:"truncated,omitempty"`
-	Notes     []string `json:"notes,omitempty"`
+	Total     int  `json:"total"`
+	Truncated bool `json:"truncated,omitempty"`
+	// Cached is true when the community column came from an in-process
+	// partition cache instead of a computation of this call.
+	Cached bool     `json:"cached,omitempty"`
+	Notes  []string `json:"notes,omitempty"`
 }
 
 // GraphPathStep is one node of a path. Edge, Line, Confidence and Reverse
@@ -480,5 +509,99 @@ type GraphStatsView struct {
 	Orphans     int            `json:"orphans"`
 	Languages   map[string]int `json:"languages,omitempty"`
 	NodesByKind map[string]int `json:"nodes_by_kind,omitempty"`
-	Notes       []string       `json:"notes,omitempty"`
+	// Cached is true when the community count came from an in-process
+	// partition cache instead of a computation of this call.
+	Cached bool     `json:"cached,omitempty"`
+	Notes  []string `json:"notes,omitempty"`
+}
+
+// CycleQuery selects how much of the import-cycle report one call returns.
+type CycleQuery struct {
+	// Limit bounds the listed cycles; zero selects DefaultGraphCycles and an
+	// engine clamps above MaxGraphCycles.
+	Limit int `json:"limit,omitempty"`
+	// MemberLimit bounds the member list of one cycle; zero selects
+	// DefaultGraphCycleMembers and an engine clamps above MaxGraphCycleMembers.
+	MemberLimit int `json:"member_limit,omitempty"`
+}
+
+// GraphCycle is one strongly connected component of the import graph: a Go
+// package, TypeScript module or Python module import cycle. Members are
+// ordered by file and line.
+type GraphCycle struct {
+	// Size is the member count, including members a listing clipped.
+	Size             int           `json:"size"`
+	Members          []GraphSymbol `json:"members,omitempty"`
+	MembersTruncated bool          `json:"members_truncated,omitempty"`
+}
+
+// CyclesView is the import-cycle report. Total is the number of components
+// found, not the number returned; a cut sets Truncated and adds a note.
+type CyclesView struct {
+	Cycles []GraphCycle `json:"cycles"`
+	// Total is the number of import cycles detected.
+	Total int `json:"total"`
+	// Nodes is the number of distinct nodes that belong to a cycle.
+	Nodes int `json:"nodes"`
+	// SelfLoops is the number of import edges from a node to itself; a
+	// self-import is not a cycle between modules and is reported separately.
+	SelfLoops int      `json:"self_loops,omitempty"`
+	Truncated bool     `json:"truncated,omitempty"`
+	Notes     []string `json:"notes,omitempty"`
+}
+
+// GraphDiffQuery selects the index a diff compares against. The base index is
+// another index of the same engine, normally the index of a second checkout or
+// worktree of the same repository at the base commit.
+type GraphDiffQuery struct {
+	// BaseProject labels the base side in the answer.
+	BaseProject string `json:"base_project,omitempty"`
+	// BaseIndexPath is the base index file. It is opened read-only and is
+	// never written.
+	BaseIndexPath string `json:"base_index_path"`
+	// Limit bounds the added and removed samples per category; zero selects
+	// DefaultGraphDiffSamples and an engine clamps above MaxGraphDiffSamples.
+	Limit int `json:"limit,omitempty"`
+}
+
+// GraphDiffCount is the number of added and removed keys of one category.
+type GraphDiffCount struct {
+	Added   int `json:"added"`
+	Removed int `json:"removed"`
+}
+
+// GraphDiffEdge is one dependency edge of a diff sample. The edge is keyed by
+// source, target and kind, so repeated call sites of one pair are one edge.
+type GraphDiffEdge struct {
+	From string `json:"from"`
+	To   string `json:"to"`
+	Kind string `json:"kind"`
+}
+
+// GraphDiffView is the difference between two indexes of one engine. Samples
+// are ordered by key and capped; counts are always the true totals of the set
+// difference, so a clipped sample never understates the delta.
+type GraphDiffView struct {
+	BaseProject string         `json:"base_project"`
+	HeadProject string         `json:"head_project"`
+	BaseIndex   string         `json:"base_index"`
+	HeadIndex   string         `json:"head_index"`
+	BaseCommit  string         `json:"base_commit,omitempty"`
+	HeadCommit  string         `json:"head_commit,omitempty"`
+	Files       GraphDiffCount `json:"files"`
+	Symbols     GraphDiffCount `json:"symbols"`
+	Edges       GraphDiffCount `json:"edges"`
+	// Communities compares stored community signatures. An engine that
+	// computes the partition in memory reports zero and says so in Notes.
+	Communities        GraphDiffCount  `json:"communities"`
+	AddedFiles         []string        `json:"added_files,omitempty"`
+	RemovedFiles       []string        `json:"removed_files,omitempty"`
+	AddedSymbols       []GraphSymbol   `json:"added_symbols,omitempty"`
+	RemovedSymbols     []GraphSymbol   `json:"removed_symbols,omitempty"`
+	AddedEdges         []GraphDiffEdge `json:"added_edges,omitempty"`
+	RemovedEdges       []GraphDiffEdge `json:"removed_edges,omitempty"`
+	AddedCommunities   []string        `json:"added_communities,omitempty"`
+	RemovedCommunities []string        `json:"removed_communities,omitempty"`
+	Truncated          bool            `json:"truncated,omitempty"`
+	Notes              []string        `json:"notes,omitempty"`
 }

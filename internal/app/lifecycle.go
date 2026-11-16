@@ -44,6 +44,8 @@ type RecordSummary struct {
 	Occurrences int
 	// Provenance is the authorship, review state and trust of the record.
 	Provenance domain.Provenance
+	// Tags are the note tags. They are empty for every other kind.
+	Tags []string
 	// Permalink is the canonical path the record was written with, when any.
 	Permalink string
 	// ReviewAfter and ReviewSource hold the effective review date: the
@@ -149,6 +151,9 @@ func (r Record) Summary() RecordSummary {
 	summary.Subtype, summary.Scope, summary.TopicKey, summary.Occurrences = taxonomyOf(r)
 	summary.Provenance = r.Provenance()
 	summary.Permalink = r.Permalink()
+	if r.Note != nil {
+		summary.Tags = append([]string(nil), r.Note.Tags...)
+	}
 	return summary
 }
 

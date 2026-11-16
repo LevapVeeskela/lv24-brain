@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/levapveeskela/lv24-brain/internal/domain"
 )
 
 // Review reports state age, open questions, decision evidence and recent
@@ -36,7 +38,7 @@ func (a *App) Review(ctx context.Context, opts ReviewOptions) (ReviewResult, err
 	}
 
 	items := make([]string, 0, 16)
-	proposals, pendingProposals, err := a.reviewProposals(ctx, project.ID)
+	proposals, pendingProposals, snoozedProposals, err := a.reviewProposals(ctx, project.ID)
 	if err != nil {
 		return ReviewResult{}, err
 	}
@@ -132,7 +134,7 @@ func (a *App) Review(ctx context.Context, opts ReviewOptions) (ReviewResult, err
 	}
 
 	if a.deps.Proposals != nil {
-		writeReviewProposals(&out, proposals, pendingProposals)
+		writeReviewProposals(&out, proposals, pendingProposals, snoozedProposals)
 	}
 
 	return ReviewResult{
@@ -140,27 +142,46 @@ func (a *App) Review(ctx context.Context, opts ReviewOptions) (ReviewResult, err
 		Items:                items,
 		Proposals:            proposals,
 		PendingProposalCount: pendingProposals,
+		SnoozedProposalCount: snoozedProposals,
 	}, nil
 }
 
 // reviewProposals lists pending candidates for the review report. It is only
 // called by Review: context and other callers never pay these store reads.
-func (a *App) reviewProposals(ctx context.Context, projectID string) ([]ProposalListItem, int, error) {
+// Candidates hidden by an active snooze are reported separately and stay out of
+// the pending list and count.
+func (a *App) reviewProposals(ctx context.Context, projectID string) ([]ProposalListItem, int, int, error) {
 	if a.deps.Proposals == nil {
-		return nil, 0, nil
+		return nil, 0, 0, nil
 	}
 	proposals, err := a.listPendingProposals(ctx, projectID)
 	if err != nil {
-		return nil, 0, fmt.Errorf("list proposals: %w", err)
+		return nil, 0, 0, fmt.Errorf("list proposals: %w", err)
 	}
-	items, total := proposalListItems(proposals, proposalReviewLimit)
-	return items, total, nil
+	now := a.now()
+	active := make([]domain.Proposal, 0, len(proposals))
+	snoozed := 0
+	for _, proposal := range proposals {
+		if proposal.IsSnoozed(now) {
+			snoozed++
+			continue
+		}
+		active = append(active, proposal)
+	}
+	items, total := proposalListItems(active, proposalReviewLimit, now)
+	return items, total, snoozed, nil
 }
 
 // writeReviewProposals renders the pending candidates before findings. Only
-// identity and confidence are shown; proposal bodies stay out of review.
-func writeReviewProposals(out *strings.Builder, proposals []ProposalListItem, total int) {
-	fmt.Fprintf(out, "\n## Proposals (%d pending)\n", total)
+// identity and confidence are shown; proposal bodies stay out of review. The
+// snoozed count is shown separately so deferred candidates stay visible without
+// counting as work waiting for a decision.
+func writeReviewProposals(out *strings.Builder, proposals []ProposalListItem, total, snoozed int) {
+	if snoozed > 0 {
+		fmt.Fprintf(out, "\n## Proposals (%d pending, %d snoozed)\n", total, snoozed)
+	} else {
+		fmt.Fprintf(out, "\n## Proposals (%d pending)\n", total)
+	}
 	if len(proposals) == 0 {
 		out.WriteString("- none\n")
 		return

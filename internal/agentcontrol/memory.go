@@ -35,9 +35,11 @@ type MemoryApp interface {
 	FixFindings(context.Context, string, []app.FindingKind) (app.FixResult, error)
 	DueReviews(context.Context, string) ([]app.DueReview, error)
 	PendingProposals(context.Context, string) ([]app.ProposalListItem, int, error)
+	SnoozedProposalCount(context.Context, string) (int, error)
 	ListProposals(context.Context, app.ProposalQuery) (app.ProposalListing, error)
 	ProposalBody(context.Context, string, string, int) (app.ProposalBody, error)
 	Promote(context.Context, app.PromoteOptions) (app.PromoteResult, error)
+	SnoozeProposal(context.Context, app.SnoozeOptions) (app.SnoozeResult, error)
 	Catchup(context.Context, app.CatchupOptions) (app.CatchupResult, error)
 	ResolveSelector(context.Context, string) (app.Resolved, error)
 	ListProjects(context.Context) ([]domain.Project, error)
@@ -411,6 +413,7 @@ func (s *memoryService) Review(ctx context.Context, query localapi.ReviewQuery) 
 		view.Findings = append(view.Findings, one.Findings...)
 		view.DueReviews = append(view.DueReviews, one.DueReviews...)
 		view.Proposals.PendingCount += one.Proposals.PendingCount
+		view.Proposals.SnoozedCount += one.Proposals.SnoozedCount
 		view.Proposals.Items = append(view.Proposals.Items, one.Proposals.Items...)
 		view.QuarantinedCount += one.QuarantinedCount
 	}
@@ -449,6 +452,10 @@ func (s *memoryService) reviewOne(ctx context.Context, projectID string) (locala
 	if err != nil {
 		return localapi.ReviewView{}, err
 	}
+	snoozedCount, err := s.app.SnoozedProposalCount(ctx, projectID)
+	if err != nil {
+		return localapi.ReviewView{}, err
+	}
 	quarantined, err := s.app.QuarantinedCount(ctx, projectID)
 	if err != nil {
 		return localapi.ReviewView{}, err
@@ -480,7 +487,7 @@ func (s *memoryService) reviewOne(ctx context.Context, projectID string) (locala
 			Source: review.Source,
 		})
 	}
-	view.Proposals = localapi.ProposalSummaryView{PendingCount: pendingCount, Items: proposalViews(pending)}
+	view.Proposals = localapi.ProposalSummaryView{PendingCount: pendingCount, SnoozedCount: snoozedCount, Items: proposalViews(pending)}
 	return view, nil
 }
 
@@ -566,6 +573,7 @@ func (s *memoryService) ListProposals(ctx context.Context, query localapi.Propos
 		ProjectID: query.ProjectID, Statuses: proposalStatuses(query.Statuses),
 		Kind: domain.ProposalKind(strings.TrimSpace(query.Kind)), Limit: query.Limit,
 		IncludeBody: query.IncludeBody, BodyTokens: query.BodyTokens,
+		IncludeSnoozed: query.IncludeSnoozed,
 	})
 	if err != nil {
 		return localapi.ProposalPage{}, err
@@ -597,7 +605,30 @@ func (s *memoryService) ProposalDetail(ctx context.Context, query localapi.Propo
 	return localapi.ProposalDetailView{
 		ID: body.ID, ProjectID: body.ProjectID, Kind: string(body.Kind),
 		Title: body.Title, Status: string(body.Status),
-		Body: body.Body, BodyTruncated: body.Truncated, BodyTokens: body.Tokens, MaxTokens: body.MaxTokens,
+		SnoozedUntil: body.SnoozedUntil, Snoozed: !body.SnoozedUntil.IsZero() && body.SnoozedUntil.After(s.now()),
+		UpdatedAt: body.UpdatedAt,
+		Body:      body.Body, BodyTruncated: body.Truncated, BodyTokens: body.Tokens, MaxTokens: body.MaxTokens,
+	}, nil
+}
+
+// SnoozeProposal sets or clears the review snooze of one candidate and returns
+// the receipt the desktop shows.
+func (s *memoryService) SnoozeProposal(ctx context.Context, request localapi.ProposalSnoozeRequest) (localapi.ProposalSnoozeView, error) {
+	until := request.Until
+	if request.Clear {
+		until = time.Time{}
+	}
+	result, err := s.app.SnoozeProposal(ctx, app.SnoozeOptions{
+		ProjectID: request.ProjectID, ProposalID: request.ProposalID,
+		Until: until, ExpectedUpdatedAt: request.ExpectedUpdatedAt,
+	})
+	if err != nil {
+		return localapi.ProposalSnoozeView{}, err
+	}
+	return localapi.ProposalSnoozeView{
+		ProjectID: result.Proposal.ProjectID, ProposalID: result.Proposal.ID,
+		Status: string(result.Proposal.StatusOrPending()), Snoozed: result.Snoozed,
+		SnoozedUntil: result.Proposal.SnoozedUntil, UpdatedAt: result.Proposal.UpdatedAt,
 	}, nil
 }
 
@@ -811,6 +842,7 @@ func recordView(record app.RecordSummary, now time.Time) localapi.RecordView {
 		Status: record.Status, Path: app.RecordPath(record.ProjectID, record.Kind, record.ID),
 		Permalink: record.Permalink, Subtype: record.Subtype, Scope: record.Scope,
 		TopicKey: record.TopicKey, Occurrences: record.Occurrences,
+		Tags:      append([]string(nil), record.Tags...),
 		CreatedAt: record.CreatedAt, UpdatedAt: record.UpdatedAt,
 		Validity: localapi.ValidityView{
 			ValidFrom: record.ValidFrom, ValidTo: record.ValidTo,
@@ -849,7 +881,8 @@ func proposalViews(items []app.ProposalListItem) []localapi.ProposalView {
 			ConnectionID: item.ConnectionID, CreatedAt: item.CreatedAt, UpdatedAt: item.UpdatedAt,
 			SourceStale: item.Stale, SourceOrphan: item.Orphan, LocalOnly: item.LocalOnly,
 			SourceHealth: item.HealthReason,
-			Body:         item.Body, BodyTruncated: item.BodyTruncated,
+			SnoozedUntil: item.SnoozedUntil, Snoozed: item.Snoozed,
+			Body: item.Body, BodyTruncated: item.BodyTruncated,
 			BodyTokens: item.BodyTokens, MaxTokens: item.MaxTokens,
 		})
 	}
