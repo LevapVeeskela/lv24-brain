@@ -54,6 +54,7 @@ func (a *App) Doctor(ctx context.Context, opts DoctorOptions) (DoctorReport, err
 	checks = append(checks, a.doctorGit(ctx))
 	checks = append(checks, a.doctorMergeDrivers(ctx, opts.Fix))
 	checks = append(checks, a.doctorRawZone(ctx)...)
+	checks = append(checks, a.doctorLegacyDumpZones(ctx))
 	checks = append(checks, a.doctorPrompts(ctx))
 	checks = append(checks, a.doctorRetiredPaths(ctx))
 	checks = append(checks, a.doctorPendingConflicts(ctx))
@@ -738,6 +739,69 @@ func rawZonePath(path string) (string, string, bool) {
 		return "", "", false
 	}
 	return parts[0], parts[1], true
+}
+
+// legacyDumpRoots are the pre-raw-zone connector dump directories. They are
+// external, often personal data; git must keep them local-only. Each pattern
+// is anchored in .gitignore so connectors/github and connectors/gitlab stay
+// shared only when their connection explicitly publishes them.
+var legacyDumpRoots = []string{"mail", "github", "gitlab", "merges"}
+
+// doctorLegacyDumpZones reports tracked files under the legacy dump roots and
+// the removed connection directory connectors/gitlab. They predate the
+// publish policy, which governs connectors/<id> only, so a data repository
+// upgraded from an older engine can still publish mail and raw dumps. It
+// reports only: files and git history are never changed here.
+func (a *App) doctorLegacyDumpZones(ctx context.Context) DoctorCheck {
+	if a.cfg.Mode != config.ModeGit || a.deps.Sync == nil {
+		return DoctorCheck{Name: "pii-zone", Status: doctorOK, Message: "not used in this mode"}
+	}
+	lister, ok := a.deps.Sync.(ports.GitPathLister)
+	if !ok {
+		return DoctorCheck{Name: "pii-zone", Status: doctorOK, Message: "not checked for this sync provider"}
+	}
+	counts := map[string]int{}
+	for _, root := range legacyDumpRoots {
+		paths, err := lister.TrackedPaths(ctx, root)
+		if err != nil {
+			return DoctorCheck{Name: "pii-zone", Status: doctorWarn, Message: "cannot list tracked " + root + " files: " + err.Error()}
+		}
+		if len(paths) > 0 {
+			counts[root] = len(paths)
+		}
+	}
+	// connectors/gitlab was a legacy dump, not a live connection. A live
+	// connection with that id keeps its explicit publish policy and is handled
+	// by doctorRawZone instead.
+	if a.deps.Connections != nil {
+		if _, err := a.deps.Connections.Get(ctx, "gitlab"); errors.Is(err, domain.ErrNotFound) {
+			paths, listErr := lister.TrackedPaths(ctx, "connectors/gitlab")
+			if listErr != nil {
+				return DoctorCheck{Name: "pii-zone", Status: doctorWarn, Message: "cannot list tracked connectors/gitlab files: " + listErr.Error()}
+			}
+			if len(paths) > 0 {
+				counts["connectors/gitlab"] = len(paths)
+			}
+		} else if err != nil {
+			return DoctorCheck{Name: "pii-zone", Status: doctorWarn, Message: "cannot read connection gitlab: " + err.Error()}
+		}
+	}
+	if len(counts) == 0 {
+		return DoctorCheck{Name: "pii-zone", Status: doctorOK, Message: "no legacy PII or raw dump zones are tracked by git"}
+	}
+	parts := make([]string, 0, len(counts))
+	for _, root := range append(append([]string{}, legacyDumpRoots...), "connectors/gitlab") {
+		if count := counts[root]; count > 0 {
+			parts = append(parts, fmt.Sprintf("%s (%d files)", root, count))
+		}
+	}
+	return DoctorCheck{
+		Name:   "pii-zone",
+		Status: doctorWarn,
+		Code:   "tracked-pii-zone",
+		Message: fmt.Sprintf("legacy PII or raw dump zones are tracked by git (%s): untrack them with git rm --cached -r -- mail github gitlab merges connectors/gitlab; the files stay on disk and git history is not rewritten",
+			strings.Join(parts, ", ")),
+	}
 }
 
 // doctorPendingConflicts counts the conflict artifacts the merge drivers and

@@ -116,7 +116,16 @@ matching `.gitignore` into the data directory.
   connection (untrack with `git rm --cached -r`), `raw-zone-policy` for a tracked
   zone with no explicit policy (choose with `brain connection publish <id>
   shared|local-only`). Untracking never erases prior git history, and mail
-  defaults to `local-only`. Server mode runs the same
+  defaults to `local-only`.
+- Legacy dump roots predate the publish policy: `mail/`, root `github/` and
+  `gitlab/`, `merges/`, and the orphan `connectors/gitlab/`. Since 0.22 they are
+  local-only and anchored in `.gitignore`; `brain doctor` reports any tracked
+  file there as `pii-zone` with code `tracked-pii-zone` and the exact
+  `git rm --cached` command. The untrack commit keeps the files on the machine
+  that has them and keeps every blob in git history. If a clean machine loses a
+  worktree copy while pulling that commit, restore it from history, for example
+  `git checkout <commit>^ -- mail/gmail/2026-11-05.md`. No history is rewritten.
+  Server mode runs the same
   native item-level path through `POST /v1/connectors/run` (admin only): with
   PostgreSQL it persists raw items, checkpoints and the run record (schema 10);
   the in-memory development store has no raw zone and rejects connector runs

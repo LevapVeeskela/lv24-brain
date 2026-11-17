@@ -1,6 +1,6 @@
 # Release 0.21.0 — consolidation, review routes, multi-machine hardening
 
-Status: release candidate on `main`; tag `v0.21.0`.
+Status: released; tag `v0.21.0`.
 
 0.21 turns duplicate reports into a reviewed job, closes the local review loop
 for records and state, and hardens the shared git brain for multiple machines

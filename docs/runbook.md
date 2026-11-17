@@ -401,6 +401,28 @@ What `brain sync` does, in order:
 Exit codes: **0** success, **1** runtime error, **2** usage error, **3** sync
 conflict with unmerged paths. `--status` never changes anything.
 
+### Automatic sync
+
+On this Windows machine the "Company Brain Update" task runs every 30 minutes:
+it applies a signed engine update and then runs `brain sync --push`, so a clean
+tree is a cheap no-op and an interrupted rebase is recovered before the pull.
+The nightly "Company Brain Graph Refresh" task still runs graphs, connectors,
+`brain sync --push` and `brain agents sync`. Both tasks call the scripts in
+`lv24-brain/scripts/`; the retired `.brain` wrapper folder is no longer used.
+On macOS the daily LaunchAgent remains the scheduled sync; run `brain sync
+--push` manually between runs or add your own timer.
+
+### Legacy PII dump zones
+
+`mail/`, root `github/` and `gitlab/`, `merges/` and orphan
+`connectors/gitlab/` predate the connection publish policy. They are local-only
+and anchored in `.gitignore`. `brain doctor` reports a tracked file there as
+`pii-zone` / `tracked-pii-zone` with the untrack command; it never deletes or
+rewrites anything. The files stay on disk and every blob stays in git history,
+so a worktree copy removed by a pull can be restored with
+`git checkout <commit>^ -- <path>`. Use `brain connection publish <id>
+shared|local-only` for the current raw zone under `connectors/<id>`.
+
 ### Conflicts and merge drivers
 
 `brain sync --status` lists conflicting paths as `conflict: <path>` lines.
@@ -736,7 +758,9 @@ Codex yourself (the owner approves hooks; brain does not). Brain never edits
 `~/.codex/config.toml`. `--check --hooks` reports what would change and exits 1.
 
 Scheduled refresh: on Windows the nightly "Company Brain Graph Refresh" task
-runs graphs, connectors, `brain sync --push` and `brain agents sync`. On macOS
+runs `scripts/brain-graphs.bat` (graphs, connectors, `brain sync --push` and
+`brain agents sync`), and the 30-minute "Company Brain Update" task runs
+`scripts/brain-update.bat` (signed update, then `brain sync --push`). On macOS
 the LaunchAgent `by.lv24.brain-daily` (`~/Library/LaunchAgents/`, script
 `~/.local/bin/brain-daily.sh`, log `~/Library/Logs/lv24-brain-daily.log`) runs
 `brain sync --push` and `brain agents sync` daily at 09:30 or on wake after a

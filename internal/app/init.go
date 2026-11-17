@@ -18,6 +18,10 @@ const gitignoreContent = `# LV24 Brain local data exclusions
 secrets/
 index/
 backups/
+/mail/
+/github/
+/gitlab/
+/merges/
 connectors/.locks/
 proposals/
 agent/

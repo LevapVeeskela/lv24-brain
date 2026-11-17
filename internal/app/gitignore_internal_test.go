@@ -20,7 +20,7 @@ func TestEnsureIgnorePatternsAddsLockAndTempLines(t *testing.T) {
 		t.Fatalf("read .gitignore: %v", err)
 	}
 	content := string(raw)
-	for _, want := range []string{"custom/", ".tmp-*", "*.lock", "**/.lock"} {
+	for _, want := range []string{"custom/", ".tmp-*", "*.lock", "**/.lock", "/mail/", "/github/", "/gitlab/", "/merges/"} {
 		if !hasIgnoreLine(content, want) {
 			t.Fatalf(".gitignore is missing %q:\n%s", want, content)
 		}
