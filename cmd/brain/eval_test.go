@@ -109,7 +109,7 @@ func TestEvalBaselineRegressionExitsOne(t *testing.T) {
 func TestEvalImprovedBaselinePasses(t *testing.T) {
 	dir := writeEvalFixture(t, "alpha widget")
 	baseline := filepath.Join(t.TempDir(), "baseline.json")
-	raw := `{"version":1,"task_count":1,"metrics":{"recall_at_5":0,"precision_at_5":0,"mrr":0,"superseded_leak_rate":0,"tokens_per_answer":20,"p50_latency_ms":0,"p95_latency_ms":0}}`
+	raw := `{"version":1,"task_count":1,"metrics":{"recall_at_5":0,"precision_at_5":0,"mrr":0,"superseded_leak_rate":0,"tokens_per_answer":20,"p50_latency_ms":10000,"p95_latency_ms":10000}}`
 	if err := os.WriteFile(baseline, []byte(raw), 0o644); err != nil {
 		t.Fatal(err)
 	}
