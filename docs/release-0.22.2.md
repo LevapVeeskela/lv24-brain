@@ -1,4 +1,4 @@
-﻿# Release 0.22.2 вЂ” Postgres migration and provenance fix
+# Release 0.22.2 вЂ” Postgres migration and provenance fix
 
 Status: released; tag `v0.22.2`.
 
