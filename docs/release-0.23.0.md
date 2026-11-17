@@ -1,8 +1,8 @@
-# Release 0.23.0 — desktop git sync, machine provenance, onboarding
+# Release 0.23.0 вЂ” desktop git sync, machine provenance, onboarding
 
-Status: release candidate on `main`; tag `v0.23.0`.
+Status: released; tag `v0.23.0`.
 
-0.23 closes the “three machines can write but the desktop cannot see sync”
+0.23 closes the вЂњthree machines can write but the desktop cannot see syncвЂќ
 gap and makes a new machine a one-command setup.
 
 ## Desktop git sync
@@ -50,3 +50,4 @@ are gone.
 - Data schema unchanged; no migration.
 - Server-canonical mode is still deferred until a second human writer or
   same-field real-time writes require it.
+
