@@ -222,15 +222,15 @@ type SearchResult struct {
 // StateView is a project's curated state with its CAS revision and
 // provenance.
 type StateView struct {
-	ProjectID     string    `json:"project_id"`
-	Goal          string    `json:"goal,omitempty"`
-	NextAction    string    `json:"next_action,omitempty"`
-	Active        []string  `json:"active,omitempty"`
-	Blocked       []string  `json:"blocked,omitempty"`
-	OpenQuestions []string  `json:"open_questions,omitempty"`
-	UpdatedAt     time.Time `json:"updated_at,omitzero"`
-	FreshUntil    time.Time `json:"fresh_until,omitzero"`
-	Revision      string    `json:"revision"`
+	ProjectID     string         `json:"project_id"`
+	Goal          string         `json:"goal,omitempty"`
+	NextAction    string         `json:"next_action,omitempty"`
+	Active        []string       `json:"active,omitempty"`
+	Blocked       []string       `json:"blocked,omitempty"`
+	OpenQuestions []string       `json:"open_questions,omitempty"`
+	UpdatedAt     time.Time      `json:"updated_at,omitzero"`
+	FreshUntil    time.Time      `json:"fresh_until,omitzero"`
+	Revision      string         `json:"revision"`
 	Provenance    ProvenanceView `json:"provenance"`
 }
 
@@ -891,8 +891,8 @@ func (h *Handler) recordLifecycle(w http.ResponseWriter, r *http.Request, id str
 // be true when present; an omitted body means reviewed=true, so a plain
 // `POST` reviews the record like `brain record review <id>`.
 type recordReviewRequest struct {
-	Reviewed          *bool  `json:"reviewed"`
-	Trust             string `json:"trust"`
+	Reviewed          *bool   `json:"reviewed"`
+	Trust             string  `json:"trust"`
 	ExpectedUpdatedAt *string `json:"expected_updated_at"`
 }
 

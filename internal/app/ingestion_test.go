@@ -22,7 +22,7 @@ func TestIngestPolicyRedactsPIITruncatesAndNormalizesTimes(t *testing.T) {
 	item := domain.Item{
 		Ref: domain.ItemRef{ExternalID: "m-1"}, Kind: domain.ItemMessage,
 		Title: "From alice@example.com", Body: "token=" + ingestToken + " alice@example.com " + strings.Repeat("x", domain.MaxItemBodyBytes),
-		URL:    "https://example.test/?access_token=" + ingestToken, Author: "alice@example.com",
+		URL: "https://example.test/?access_token=" + ingestToken, Author: "alice@example.com",
 		UpdatedAt: ingestionTestTime,
 	}
 	got, report, err := policy.normalizeItem(item, ingestionTestTime)
