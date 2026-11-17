@@ -10,7 +10,7 @@ import (
 	"github.com/levapveeskela/lv24-brain/internal/ports"
 )
 
-const decisionColumns = `id, project_id, title, status, decision_context, alternatives, consequences, evidence, permalink, revision, created_at, updated_at, created_by`
+const decisionColumns = `id, project_id, title, status, decision_context, alternatives, consequences, evidence, permalink, origin, reviewed, trust, revision, created_at, updated_at, created_by`
 
 // DecisionRecord is a decision plus its current server revision.
 type DecisionRecord struct {
