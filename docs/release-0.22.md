@@ -1,6 +1,6 @@
 # Release 0.22.0 — PII untrack, legacy profile removal, auto-sync
 
-Status: release candidate on `main`; tag `v0.22.0`.
+Status: released; tag `v0.22.0`.
 
 0.22 closes the legacy publishing gap and removes the last deprecated MCP
 vocabulary. The data schema stays `schema_version: 1`; there is no data
