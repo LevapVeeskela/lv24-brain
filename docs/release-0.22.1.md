@@ -1,6 +1,6 @@
 # Release 0.22.1 — `sync --watch` and the three-machine proof
 
-Status: release candidate on `main`; tag `v0.22.1`.
+Status: released; tag `v0.22.1`.
 
 0.22.1 adds the loop that lets every machine publish without waiting for a
 manual `brain sync`, and a test that proves the intended topology: three clones,
