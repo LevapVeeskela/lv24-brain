@@ -7,10 +7,10 @@ and **`2025-06-18`** (handshake). This page is the contract for hosts, for
 `skills` and for anyone pinning our tool definitions.
 
 The default profile is `lv24`: **17 tools** plus the read-only `memory://`
-resources and the `code://` symbol resource. Migration profiles (`lv24-legacy`,
-`engram`), the code-graph vocabularies (`codegraph`, `graphify`) and the
-resources are described in §10–§14. Stdout carries protocol messages only;
-diagnostics go to stderr.
+resources and the `code://` symbol resource. Migration profiles (`engram`), the
+code-graph vocabularies (`codegraph`, `graphify`) and the resources are
+described in §10–§14. Stdout carries protocol messages only; diagnostics go to
+stderr.
 
 ## 1. Revisions
 
@@ -448,7 +448,6 @@ or version is a startup error with exit code 2, never a silent downgrade.
 
 ```sh
 brain mcp --profile=lv24                     # default: 17 native tools
-brain mcp --profile=lv24-legacy              # bridge: the 17 plus the seven 0.16 names
 brain mcp --profile=engram [--strict]        # 27 engram names + brain_capabilities
 brain mcp --profile=codegraph                # 8 codegraph names mapped to brain_code
 brain mcp --profile=graphify                 # 10 graphify names mapped to brain_code/brain_graph
@@ -457,7 +456,6 @@ brain mcp --profile=graphify                 # 10 graphify names mapped to brain
 | Profile | Listed names | Read | Append | Destructive | Aliases | Grades |
 |---|---:|---:|---:|---:|---|---|
 | `lv24` (default) | 17 | 9 | 5 | 3 | – | – |
-| `lv24-legacy` (deprecated bridge) | 24 | 13 | 5 | 6 | 7 | A 6, B 1 |
 | `engram` | 28 | 12 | 7 | 9 | 27 | A 3, B 15, C 7, D 2 |
 | `codegraph` | 9 | 9 | 0 | 0 | 8 | B 5, C 3 |
 | `graphify` | 11 | 11 | 0 | 0 | 10 | B 2, C 5, D 3 |
@@ -488,21 +486,22 @@ A successful alias call carries the per-call envelope:
 ```json
 "_meta":{"lv24.brain/compat":{
   "legacy":"mem_save","grade":"B","target":"brain_note",
-  "ignored_fields":["session_id","org"],
-  "deprecated":true
+  "ignored_fields":["session_id","org"]
 }}
 ```
 
-`degraded:true`, `note` and `deprecated` appear only where they apply. Dropped
-fields are never silently ignored.
+`degraded:true` and `note` appear only where they apply. Dropped fields are
+never silently ignored.
 
-## 11. `lv24-legacy` and the 24-name bridge
+## 11. Removed: the `lv24-legacy` bridge
 
-The bridge exists for clients written against 0.16 and is removed in 0.19. It
-lists the 17 native names plus the seven retired ones; each retired name calls
-the native action with no semantic loss.
+The 0.16 compatibility profile was removed in 0.22.0. `--profile=lv24-legacy`
+now fails at startup with exit code 2 and lists the supported profiles; there
+is no silent fallback. Use the native `lv24` profile, or `engram` for an engram
+client. A retired name called on `lv24` returns `NOT_FOUND` with the replacement
+in `try_instead`.
 
-| 0.16 name | 0.17 call | Translation | Grade |
+| 0.16 name | Replacement | Translation | Grade |
 |---|---|---|---|
 | `brain_state_get` | `brain_state(action=get)` | – | A |
 | `brain_state_set` | `brain_state(action=set)` | `next`→`next` | A |
@@ -512,17 +511,9 @@ the native action with no semantic loss.
 | `brain_review_record` | `brain_judge(action=review)` | `all=true`→`ids:["*"]` | A |
 | `brain_decision_status` | `brain_judge(action=accept\|reject\|supersede)` | `superseded_by`→`to`; `status=proposed` is refused | B |
 
-The exact 24-name list, in `tools/list` order, is: the 17 native names
-(`brain_open`, `brain_context`, `brain_search`, `brain_record`, `brain_note`,
-`brain_decision`, `brain_attempt`, `brain_handoff`, `brain_state`,
-`brain_catchup`, `brain_review`, `brain_judge`, `brain_projects`,
-`brain_prompt`, `brain_code`, `brain_graph`, `brain_capabilities`) followed by
-`brain_state_get`, `brain_state_set`, `brain_journal`, `brain_records`,
-`brain_relations`, `brain_review_record`, `brain_decision_status`.
-
-`status=proposed` is the one value the 0.17 lifecycle cannot express: the bridge
-refuses it with `UNSUPPORTED` and points at `brain_decision`, because a
-proposed decision is recorded by appending a new one.
+A client that still sends `brain_decision(status=proposed)` must record a new
+decision with `brain_decision`; the lifecycle never moves a decision back to
+proposed.
 
 ## 12. `engram` profile (27 aliases + introspection)
 
@@ -672,7 +663,7 @@ brain mcp --list-tools --json --read-only              # the 10 tools a read-onl
 The JSON document keeps the 0.16 keys (`server`, `protocol_versions`, `policy`,
 `tools`, `omitted_tools`) and adds:
 
-- `profile`: `{name, version, strict, native, deprecated?}`.
+- `profile`: `{name, version, strict, native}`.
 - `tools[*].policy`: `read`, `append` or `destructive`; `brain_code` is an
   idempotent non-destructive write, classified as `append` for the closed
   vocabulary while `x-lv24-read-actions`/`x-lv24-write-actions` carry the exact
@@ -716,18 +707,17 @@ Two argument changes are refused rather than silently ignored:
 - `brain_records` and the other retired names are no longer valid tool names in
   `lv24`.
 
-A host that has not been updated in the same release can keep the old names
-without touching the data:
+A host that has not been updated in the same release can use the migration
+profiles without touching the data:
 
 ```sh
-brain mcp --profile=lv24-legacy                 # 24 names, all callable
 brain mcp --profile=engram                      # a client written against engram
 brain import --from engram --dry-run            # preview an engram migration
 ```
 
-`lv24-legacy` is a bridge: it is `deprecated:true` in `_meta`, documented as the
-last release at 0.18, and removed in 0.19. The `engram` profile stays served for
-two minor releases after 0.17.
+The `lv24-legacy` profile was removed in 0.22.0; `--profile=lv24-legacy` is now
+a startup error. The `engram` profile stays served for two minor releases after
+0.17.
 
 ## 17. Not implemented, and why
 

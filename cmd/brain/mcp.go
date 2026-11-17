@@ -33,7 +33,7 @@ func runMCP(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	cfgPath := configFlag(fs)
 	listTools := fs.Bool("list-tools", false, "print the tool catalogue (name, title, annotations, schemas, limits) and exit without serving")
 	asJSON := fs.Bool("json", false, "with --list-tools, print the catalogue as JSON")
-	profileName := fs.String("profile", mcpserver.ProfileLV24, "tool profile to serve: lv24 (default), lv24-legacy, engram, codegraph or graphify")
+	profileName := fs.String("profile", mcpserver.ProfileLV24, "tool profile to serve: lv24 (default), engram, codegraph or graphify")
 	profileVersion := fs.String("profile-version", "", "profile revision to pin (this build serves 1.0; pass 1 to pin the major)")
 	strict := fs.Bool("strict", false, "with a migration profile, refuse every approximate alias and every dropped legacy argument; no effect on lv24")
 	readOnly := fs.Bool("read-only", false, "expose read tools only: write tools are omitted and a call to one is refused with UNSUPPORTED")

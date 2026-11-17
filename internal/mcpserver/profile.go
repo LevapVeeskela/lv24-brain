@@ -24,13 +24,6 @@ func (s *Server) buildTools() {
 		s.nativeByName[t.Name] = t
 	}
 	switch s.profile.Name {
-	case ProfileLV24Legacy:
-		tools := make([]tool, 0, len(s.nativeTools)+len(legacyAliasSpecs()))
-		tools = append(tools, s.nativeTools...)
-		for _, spec := range legacyAliasSpecs() {
-			tools = append(tools, s.aliasTool(spec))
-		}
-		s.allTools = tools
 	case ProfileEngram:
 		s.allTools = s.aliasProfileTools(engramAliasSpecs())
 	case ProfileCodegraph:
@@ -105,7 +98,7 @@ func (s *Server) aliasTool(spec aliasSpec) tool {
 		OutputSchema: out,
 		ReadActions:  spec.ReadActions,
 		Legacy:       true,
-		Deprecated:   s.profile.Deprecated,
+		Deprecated:   spec.Deprecated,
 		Target:       spec.Target,
 		Action:       spec.Action,
 		Grade:        spec.Grade,
@@ -193,7 +186,7 @@ func (s *Server) runAlias(ctx context.Context, spec aliasSpec, raw json.RawMessa
 	if spec.augment != nil {
 		out = spec.augment(out)
 	}
-	out.Meta = compatMeta(spec, s.profile, ignored)
+	out.Meta = compatMeta(spec, ignored)
 	return out, nil
 }
 
@@ -210,14 +203,11 @@ func (s *Server) runNative(ctx context.Context, name string, args nativeArgs) (t
 
 // compatMeta builds _meta["lv24.brain/compat"]. A grade-C call always says
 // degraded and names its gap; dropped legacy arguments are always echoed.
-func compatMeta(spec aliasSpec, profile Profile, ignored []string) map[string]any {
+func compatMeta(spec aliasSpec, ignored []string) map[string]any {
 	compat := map[string]any{
 		"legacy": spec.Legacy,
 		"grade":  spec.Grade,
 		"target": spec.Target,
-	}
-	if profile.Name == ProfileLV24Legacy {
-		compat["deprecated"] = true
 	}
 	if spec.Grade == GradeApproximate {
 		compat["degraded"] = true
@@ -488,271 +478,6 @@ func judgmentPair(id string) (string, string, bool) {
 		return "", "", false
 	}
 	return strings.TrimSpace(id[:index]), strings.TrimSpace(id[index+2:]), true
-}
-
-// ---------------------------------------------------------------------------
-// Legacy 0.16 bridge (7 names)
-
-func legacyAliasSpecs() []aliasSpec {
-	project := func() map[string]any {
-		return map[string]any{"project": stringProp("Project id, alias or checkout path. Omit to use the project of the working directory.")}
-	}
-	return []aliasSpec{
-		{
-			AliasSpec: AliasSpec{Legacy: "brain_state_get", Target: "brain_state", Action: "get", Grade: GradeExact,
-				Note: profileLegacyReason},
-			Title:       "Read project state (0.16)",
-			Description: "0.16 name: calls brain_state(action=get). Kept so a client written against 0.16 keeps working.",
-			Kind:        "read",
-			InputSchema: legacySchema(nil, project()),
-			translate: func(a aliasArgs) (nativeArgs, error) {
-				native := newNativeArgs()
-				native.set("action", "get")
-				setProjectFromAlias(native, a)
-				return native, nil
-			},
-		},
-		{
-			AliasSpec: AliasSpec{Legacy: "brain_state_set", Target: "brain_state", Action: "set", Grade: GradeExact,
-				Note: profileLegacyReason},
-			Title:       "Update project state (0.16)",
-			Description: "0.16 name: calls brain_state(action=set). Only the given fields change.",
-			Kind:        "destructive",
-			InputSchema: legacySchema(nil, map[string]any{
-				"project":         project()["project"],
-				"goal":            stringProp("Project goal."),
-				"next":            stringProp("The next action."),
-				"active":          stringArrayProp("Active work items (replaces the list)."),
-				"blocked":         stringArrayProp("Blockers (replaces the list)."),
-				"open_questions":  stringArrayProp("Open questions (replaces the list)."),
-				"fresh_for_hours": intProp("Mark the state current for this many hours; 0 keeps the stored value.", 0),
-			}),
-			translate: func(a aliasArgs) (nativeArgs, error) {
-				native := newNativeArgs()
-				native.set("action", "set")
-				setProjectFromAlias(native, a)
-				if value, ok, err := a.text("goal"); err != nil {
-					return nil, err
-				} else if ok {
-					native.set("goal", value)
-				}
-				if value, ok, err := a.text("next"); err != nil {
-					return nil, err
-				} else if ok {
-					native.set("next", value)
-				}
-				for _, key := range []string{"active", "blocked", "open_questions"} {
-					if values, ok, err := a.list(key); err != nil {
-						return nil, err
-					} else if ok {
-						native.set(key, values)
-					}
-				}
-				if hours, ok, err := a.integer("fresh_for_hours"); err != nil {
-					return nil, err
-				} else if ok {
-					native.set("fresh_for_hours", hours)
-				}
-				return native, nil
-			},
-		},
-		{
-			AliasSpec: AliasSpec{Legacy: "brain_journal", Target: "brain_catchup", Action: "journal", Grade: GradeExact,
-				Note: profileLegacyReason},
-			Title:       "Read the activity journal (0.16)",
-			Description: "0.16 name: calls brain_catchup(mode=journal); limit and cursor map one to one.",
-			Kind:        "read",
-			InputSchema: legacySchema(nil, map[string]any{
-				"project": project()["project"],
-				"limit":   intProp("Page size; 0 selects the default of 20.", 0),
-				"cursor":  cursorProp(),
-			}),
-			translate: func(a aliasArgs) (nativeArgs, error) {
-				native := newNativeArgs()
-				native.set("mode", "journal")
-				setProjectFromAlias(native, a)
-				if limit, ok, err := a.integer("limit"); err != nil {
-					return nil, err
-				} else if ok {
-					native.set("limit", limit)
-				}
-				if cursor, ok, err := a.text("cursor"); err != nil {
-					return nil, err
-				} else if ok {
-					native.set("cursor", cursor)
-				}
-				return native, nil
-			},
-		},
-		{
-			AliasSpec: AliasSpec{Legacy: "brain_records", Target: "brain_record", Action: "list", Grade: GradeExact,
-				Note: profileLegacyReason},
-			Title:       "List records (0.16)",
-			Description: "0.16 name: calls brain_record(action=list). Filters and output are unchanged.",
-			Kind:        "read",
-			InputSchema: legacySchema(nil, map[string]any{
-				"project":    project()["project"],
-				"kinds":      stringArrayProp("Keep only these kinds: note, decision, attempt, handoff."),
-				"since_days": intProp("Keep records created or updated in the last N days; 0 keeps all.", 0),
-				"status":     enumProp("Keep decisions with this status.", decisionStatuses),
-				"limit":      intProp("Page size; 0 selects the default of 50.", 0),
-				"cursor":     cursorProp(),
-			}),
-			translate: func(a aliasArgs) (nativeArgs, error) {
-				native := newNativeArgs()
-				native.set("action", "list")
-				setProjectFromAlias(native, a)
-				if kinds, ok, err := a.list("kinds"); err != nil {
-					return nil, err
-				} else if ok {
-					native.set("kinds", kinds)
-				}
-				if days, ok, err := a.integer("since_days"); err != nil {
-					return nil, err
-				} else if ok {
-					native.set("since_days", days)
-				}
-				if status, ok, err := a.text("status"); err != nil {
-					return nil, err
-				} else if ok {
-					native.set("status", status)
-				}
-				if limit, ok, err := a.integer("limit"); err != nil {
-					return nil, err
-				} else if ok {
-					native.set("limit", limit)
-				}
-				if cursor, ok, err := a.text("cursor"); err != nil {
-					return nil, err
-				} else if ok {
-					native.set("cursor", cursor)
-				}
-				return native, nil
-			},
-		},
-		{
-			AliasSpec: AliasSpec{Legacy: "brain_relations", Target: "brain_record", Action: "relations", Grade: GradeExact,
-				Note: profileLegacyReason},
-			Title:       "List relations (0.16)",
-			Description: "0.16 name: calls brain_record(action=relations); the filters map one to one.",
-			Kind:        "read",
-			InputSchema: legacySchema(nil, map[string]any{
-				"project":  project()["project"],
-				"id":       stringProp("List the relations the record with this id carries."),
-				"target":   stringProp("List the relations that point at this record."),
-				"status":   enumProp("Keep one status: pending, accepted, rejected.", domain.RelationStatusNames()),
-				"relation": enumProp("Keep one relation verb.", relationVerbNames()),
-				"limit":    intProp("Page size; 0 selects the default of 50.", 0),
-				"cursor":   cursorProp(),
-			}),
-			translate: func(a aliasArgs) (nativeArgs, error) {
-				native := newNativeArgs()
-				native.set("action", "relations")
-				setProjectFromAlias(native, a)
-				for _, key := range []string{"id", "target", "status", "relation"} {
-					if value, ok, err := a.text(key); err != nil {
-						return nil, err
-					} else if ok {
-						native.set(key, value)
-					}
-				}
-				if limit, ok, err := a.integer("limit"); err != nil {
-					return nil, err
-				} else if ok {
-					native.set("limit", limit)
-				}
-				if cursor, ok, err := a.text("cursor"); err != nil {
-					return nil, err
-				} else if ok {
-					native.set("cursor", cursor)
-				}
-				return native, nil
-			},
-		},
-		{
-			AliasSpec: AliasSpec{Legacy: "brain_review_record", Target: "brain_judge", Action: "review", Grade: GradeExact,
-				Note: profileLegacyReason},
-			Title:       "Review records (0.16)",
-			Description: "0.16 name: calls brain_judge(action=review); all=true becomes ids:[\"*\"].",
-			Kind:        "destructive",
-			InputSchema: legacySchema(nil, map[string]any{
-				"project": project()["project"],
-				"id":      stringProp("Record id to review. Omit with all=true."),
-				"all":     boolProp("Review every unreviewed record of the project."),
-				"trust":   enumProp("Optional trust level of the reviewed records.", trustLevels),
-			}),
-			translate: func(a aliasArgs) (nativeArgs, error) {
-				native := newNativeArgs()
-				native.set("action", "review")
-				setProjectFromAlias(native, a)
-				if id, ok, err := a.text("id"); err != nil {
-					return nil, err
-				} else if ok {
-					native.set("id", id)
-				}
-				if all, ok, err := a.boolean("all"); err != nil {
-					return nil, err
-				} else if ok && all {
-					native.set("ids", []string{"*"})
-				}
-				if trust, ok, err := a.text("trust"); err != nil {
-					return nil, err
-				} else if ok {
-					native.set("trust", trust)
-				}
-				return native, nil
-			},
-		},
-		{
-			AliasSpec: AliasSpec{Legacy: "brain_decision_status", Target: "brain_judge", Action: "accept|reject|supersede", Grade: GradeEnvelope,
-				Note: "status=proposed is refused: the 0.17 lifecycle only accepts, rejects or supersedes; record a new decision instead."},
-			Title:       "Change decision status (0.16)",
-			Description: "0.16 name: status accepted/rejected map to brain_judge(action=accept|reject); superseded_by maps to supersede.",
-			Kind:        "destructive",
-			InputSchema: legacySchema(nil, map[string]any{
-				"project":       project()["project"],
-				"id":            stringProp("Decision id."),
-				"status":        enumProp("New status.", decisionStatuses),
-				"superseded_by": stringProp("Id of the live decision that replaces this one."),
-			}),
-			translate: func(a aliasArgs) (nativeArgs, error) {
-				id, err := requireAliasText(a, "id")
-				if err != nil {
-					return nil, err
-				}
-				supersededBy, _, err := a.text("superseded_by")
-				if err != nil {
-					return nil, err
-				}
-				status, _, err := a.text("status")
-				if err != nil {
-					return nil, err
-				}
-				native := newNativeArgs()
-				native.set("id", id)
-				setProjectFromAlias(native, a)
-				switch {
-				case strings.TrimSpace(supersededBy) != "":
-					native.set("action", "supersede")
-					native.set("to", supersededBy)
-				case strings.EqualFold(status, "accepted"):
-					native.set("action", "accept")
-				case strings.EqualFold(status, "rejected"):
-					native.set("action", "reject")
-				case strings.EqualFold(status, "superseded"):
-					return nil, refusalInvalidWith("status=superseded needs superseded_by",
-						"brain_judge(action=supersede) with to=<new decision id>")
-				case strings.EqualFold(status, "proposed"):
-					return nil, refusalUnsupported(
-						"a decision cannot be moved back to proposed in 0.17",
-						"record a new decision with brain_decision; the old one stays superseded")
-				default:
-					return nil, refusalInvalidf("unknown status %q (proposed, accepted, rejected, superseded)", status)
-				}
-				return native, nil
-			},
-		},
-	}
 }
 
 func setProjectFromAlias(native nativeArgs, a aliasArgs) {
@@ -2516,12 +2241,10 @@ func statsLegacyFields(out toolResult) toolResult {
 }
 
 // Aliases returns the public alias table of a profile. The native profile has
-// no A-D aliases; the four migration vocabularies publish their mapping.
+// no A-D aliases; the three migration vocabularies publish their mapping.
 func Aliases(profile Profile) []AliasSpec {
 	var specs []aliasSpec
 	switch profile.Name {
-	case ProfileLV24Legacy:
-		specs = legacyAliasSpecs()
 	case ProfileEngram:
 		specs = engramAliasSpecs()
 	case ProfileCodegraph:
@@ -2533,12 +2256,7 @@ func Aliases(profile Profile) []AliasSpec {
 	}
 	aliases := make([]AliasSpec, 0, len(specs))
 	for _, spec := range specs {
-		alias := spec.AliasSpec
-		if profile.Name == ProfileLV24Legacy {
-			alias.Deprecated = true
-			alias.Reason = profileLegacyReason
-		}
-		aliases = append(aliases, alias)
+		aliases = append(aliases, spec.AliasSpec)
 	}
 	return aliases
 }

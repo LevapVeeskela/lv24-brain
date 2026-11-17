@@ -32,10 +32,6 @@ func profileToolNames(t *testing.T, server *Server) []string {
 }
 
 func TestProfilesExposeTheExactVocabulary(t *testing.T) {
-	legacy := []string{
-		"brain_state_get", "brain_state_set", "brain_journal", "brain_records",
-		"brain_relations", "brain_review_record", "brain_decision_status",
-	}
 	engram := []string{
 		"mem_save", "mem_search", "mem_search_prompts", "mem_context", "mem_get_observation",
 		"mem_timeline", "mem_update", "mem_delete", "mem_save_prompt", "mem_pin", "mem_unpin",
@@ -59,7 +55,6 @@ func TestProfilesExposeTheExactVocabulary(t *testing.T) {
 		want    []string
 	}{
 		{ProfileLV24, nativeToolNames},
-		{ProfileLV24Legacy, append(append([]string{}, nativeToolNames...), legacy...)},
 		{ProfileEngram, engram},
 		{ProfileCodegraph, codegraph},
 		{ProfileGraphify, graphify},
@@ -102,7 +97,7 @@ func TestMigrationProfilesNeverListNativeNames(t *testing.T) {
 }
 
 func TestResolveProfileFailsClosed(t *testing.T) {
-	for _, name := range []string{"engram,admin", "bogus", "lv25"} {
+	for _, name := range []string{"engram,admin", "bogus", "lv25", "lv24-legacy"} {
 		if _, err := ResolveProfile(name, "", false); err == nil || !strings.Contains(err.Error(), "unknown profile") {
 			t.Fatalf("%q: err = %v", name, err)
 		}
@@ -117,10 +112,6 @@ func TestResolveProfileFailsClosed(t *testing.T) {
 		if err != nil || profile.Name != ProfileEngram || profile.Version != ProfileVersion || !profile.Strict || profile.Native {
 			t.Fatalf("version %q: profile = %+v, err = %v", version, profile, err)
 		}
-	}
-	bridge, err := ResolveProfile(ProfileLV24Legacy, "", false)
-	if err != nil || !bridge.Deprecated || bridge.Native {
-		t.Fatalf("bridge profile = %+v, err = %v", bridge, err)
 	}
 	native, err := ResolveProfile("", "", false)
 	if err != nil || native.Name != ProfileLV24 || !native.Native {
@@ -202,44 +193,6 @@ func TestStrictRefusesEveryApproximateAndUnsupportedAlias(t *testing.T) {
 	if !strings.Contains(mergeResult["try_instead"].(string), "--map-project") {
 		t.Fatalf("mem_merge_projects remediation = %v", mergeResult["try_instead"])
 	}
-}
-
-func TestLegacyBridgeCallsTheNativeAction(t *testing.T) {
-	cases := []struct {
-		legacy toolCase
-		native toolCase
-	}{
-		{toolCase{"brain_state_get", `{"project":"alpha"}`}, toolCase{"brain_state", `{"action":"get","project":"alpha"}`}},
-		{toolCase{"brain_state_set", `{"goal":"new goal"}`}, toolCase{"brain_state", `{"action":"set","goal":"new goal"}`}},
-		{toolCase{"brain_journal", `{"limit":1}`}, toolCase{"brain_catchup", `{"mode":"journal","limit":1}`}},
-		{toolCase{"brain_records", `{}`}, toolCase{"brain_record", `{"action":"list"}`}},
-		{toolCase{"brain_relations", `{}`}, toolCase{"brain_record", `{"action":"relations"}`}},
-		{toolCase{"brain_review_record", `{"all":true}`}, toolCase{"brain_judge", `{"action":"review","ids":["*"]}`}},
-		{toolCase{"brain_decision_status", `{"id":"decision-alpha-1","status":"accepted"}`}, toolCase{"brain_judge", `{"action":"accept","id":"decision-alpha-1"}`}},
-	}
-	for _, test := range cases {
-		bridge := newProfileServer(t, newSurfaceFake(), ProfileLV24Legacy, false, Policy{})
-		legacyResult := profileCall(t, bridge, test.legacy.name, test.legacy.args)
-		if legacyResult["isError"] != false {
-			t.Fatalf("%s failed: %v", test.legacy.name, legacyResult)
-		}
-		nativeResult := profileCall(t, newProfileServer(t, newSurfaceFake(), ProfileLV24, false, Policy{}), test.native.name, test.native.args)
-		if nativeResult["isError"] != false {
-			t.Fatalf("%s failed: %v", test.native.name, nativeResult)
-		}
-		if !reflect.DeepEqual(legacyResult["structuredContent"], nativeResult["structuredContent"]) {
-			t.Fatalf("%s = %v, want %v", test.legacy.name, legacyResult["structuredContent"], nativeResult["structuredContent"])
-		}
-		compat, ok := legacyResult["_meta"].(map[string]any)["lv24.brain/compat"].(map[string]any)
-		if !ok || compat["legacy"] != test.legacy.name || compat["deprecated"] != true {
-			t.Fatalf("%s compat = %v", test.legacy.name, legacyResult["_meta"])
-		}
-	}
-}
-
-type toolCase struct {
-	name string
-	args string
 }
 
 func TestEngramAliasesTranslateArguments(t *testing.T) {
@@ -458,7 +411,6 @@ func TestCapabilitiesReflectTheActiveProfile(t *testing.T) {
 		wantGaps int
 	}{
 		{ProfileLV24, 17, 0, 0, 4},
-		{ProfileLV24Legacy, 24, 7, 0, 4},
 		{ProfileEngram, 28, 27, 0, 10},
 		{ProfileCodegraph, 9, 8, 0, 3},
 		{ProfileGraphify, 11, 10, 0, 8},
@@ -479,7 +431,7 @@ func TestCapabilitiesReflectTheActiveProfile(t *testing.T) {
 			t.Fatalf("%s code_graph = %v, want %v", test.profile, payload.Features["code_graph"], wantCodeGraph)
 		}
 		var wantKnowledge any = "partial"
-		if test.profile != ProfileLV24 && test.profile != ProfileLV24Legacy && test.profile != ProfileGraphify {
+		if test.profile != ProfileLV24 && test.profile != ProfileGraphify {
 			wantKnowledge = false
 		}
 		if payload.Features["knowledge_graph"] != wantKnowledge {

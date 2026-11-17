@@ -18,9 +18,6 @@ import (
 const (
 	// ProfileLV24 is the native 17-tool profile and the default.
 	ProfileLV24 = "lv24"
-	// ProfileLV24Legacy is the 24-name bridge for clients written against
-	// 0.16: the 17 native names plus the seven retired ones.
-	ProfileLV24Legacy = "lv24-legacy"
 	// ProfileEngram is the 27-name engram-compatible vocabulary.
 	ProfileEngram = "engram"
 	// ProfileCodegraph is the 8-name codegraph vocabulary, mapped to
@@ -39,20 +36,17 @@ const (
 // approximates and says so; D cannot be served at all. GradeStub marks a
 // placeholder tool; this release serves no code-graph stub.
 const (
-	GradeExact          = "A"
-	GradeEnvelope       = "B"
-	GradeApproximate    = "C"
-	GradeUnsupported    = "D"
-	GradeStub           = "stub"
-	profileDeprecation  = "lv24-legacy is a bridge for 0.16 clients and is removed in 0.19"
-	profileLegacyReason = "the 0.16 name was retired in 0.17; this profile keeps it callable"
+	GradeExact       = "A"
+	GradeEnvelope    = "B"
+	GradeApproximate = "C"
+	GradeUnsupported = "D"
+	GradeStub        = "stub"
 )
 
 // SupportedProfiles is the closed profile vocabulary of this build, in the
 // order --list-tools and error messages report it.
 var SupportedProfiles = []string{
 	ProfileLV24,
-	ProfileLV24Legacy,
 	ProfileEngram,
 	ProfileCodegraph,
 	ProfileGraphify,
@@ -65,8 +59,6 @@ type Profile struct {
 	Strict  bool   `json:"strict"`
 	// Native reports whether the profile is the native vocabulary.
 	Native bool `json:"native"`
-	// Deprecated marks a bridge profile that a later release removes.
-	Deprecated bool `json:"deprecated,omitempty"`
 }
 
 // DefaultProfile returns the native profile.
@@ -91,11 +83,10 @@ func ResolveProfile(name, version string, strict bool) (Profile, error) {
 		return Profile{}, fmt.Errorf("unsupported profile version %q (this build serves: %s; pass 1 to pin the major)", version, ProfileVersion)
 	}
 	return Profile{
-		Name:       name,
-		Version:    ProfileVersion,
-		Strict:     strict,
-		Native:     name == ProfileLV24,
-		Deprecated: name == ProfileLV24Legacy,
+		Name:    name,
+		Version: ProfileVersion,
+		Strict:  strict,
+		Native:  name == ProfileLV24,
 	}, nil
 }
 
@@ -439,15 +430,13 @@ func (s *Server) featureFlags() map[string]any {
 		"prompts":         false,
 	}
 	switch s.profile.Name {
-	case ProfileLV24Legacy:
-		features["deprecated"] = profileDeprecation
 	case ProfileEngram:
 		features["pinning"] = "approximate"
 		features["sessions"] = "synthetic"
 		features["consolidation"] = "approximate"
 	}
 	switch s.profile.Name {
-	case ProfileLV24, ProfileLV24Legacy, ProfileCodegraph:
+	case ProfileLV24, ProfileCodegraph:
 		features["code_graph"] = true
 		features["code_graph_analytics"] = true
 	case ProfileGraphify:
