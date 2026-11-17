@@ -1,31 +1,70 @@
-# Release 0.21.0 — proposal-only consolidation
+# Release 0.21.0 — consolidation, review routes, multi-machine hardening
 
-Status: unreleased; not tagged. Engine work: the `brain consolidate` job and the
-`brain_judge(action=consolidate)` MCP action.
+Status: release candidate on `main`; tag `v0.21.0`.
 
-0.21 turns the duplicate report into a reviewed job. `brain consolidate` plans
-deterministic ops (merge an exact duplicate cluster, archive a superseded record
-with no live links) and writes nothing; `--apply` executes only the reviewed ops
-and records a manifest that `--rollback` restores. Nothing is deleted: a merge
-trashes the duplicate, an archive trashes the superseded record, and the trash
-keeps the file.
+0.21 turns duplicate reports into a reviewed job, closes the local review loop
+for records and state, and hardens the shared git brain for multiple machines
+and parallel agent sessions.
 
-## Consolidation
+## Consolidation (proposal-only)
 
-- `brain consolidate [--plan|--apply] [--op <id>]... [--max N] [--archive-after D]
-  [--scan] [--rollback <manifest>] [--json]`.
+- `brain consolidate [--plan|--apply] [--op <id>]... [--max N]
+  [--archive-after D] [--scan] [--rollback <manifest>] [--json]`.
 - `brain_judge(action=consolidate)` with `phase=plan|apply`, `ids` and
   `fingerprint`; `mem_consolidate` maps to it.
-- Ops: `merge-<survivor>` (exact clusters, and near clusters at similarity
-  `>= 0.98` of the same kind and project) and `archive-<id>` (superseded for
-  more than `--archive-after` days, default 30, with no live links). Near
-  clusters below the threshold are report-only.
-- Apply re-derives the plan, refuses an unknown op id and a stale fingerprint,
-  and writes `backups/consolidate-<ts>/manifest.json`; `--rollback` restores it.
-- Docs: [review.md](review.md#consolidation),
-  [mcp.md](mcp.md#63-brain_judgeactionconsolidate).
+- Ops: exact-cluster merges, near clusters at similarity `>= 0.98` of the same
+  kind/project, and archive of superseded records older than N days with no
+  live links. Below-threshold near clusters stay report-only.
+- Apply re-derives the plan, refuses unknown/stale ops, is serialized, and
+  revalidates archive ops at apply time. Nothing is deleted: merges and
+  archives move files to trash; a manifest under `backups/consolidate-<ts>/`
+  supports reverse rollback.
+
+## Review routes
+
+- Local API `POST /v1/records/{id}/review` and
+  `POST /v1/projects/{id}/state/review`: provenance-only (`reviewed`, `trust`),
+  optional `expected_updated_at` / `expected_revision` CAS, idempotent,
+  allowlist-aware. Record list/detail and state JSON expose
+  `origin/reviewed/trust`.
+- Desktop 1.5.0 surfaces those fields and adds review actions for quarantined
+  records and state; the quarantine page reuses the record adapter.
+
+## Multi-machine and parallel-write hardening
+
+- `brain sync` recovers an interrupted rebase/autostash before the conflict
+  check, instead of exiting 3 with a detached HEAD.
+- Sync preflight self-heals `.gitattributes` (`* text=auto eol=lf`, binary
+  rules, driver routes) and re-registers missing merge drivers with the current
+  executable; a nested data directory is rejected.
+- Driver-generated `state-conflicts/`, `registry-conflicts/` and
+  `merge-conflicts/` are committed in the same sync and surfaced by
+  `sync --status --json`; `review`/`doctor` report them.
+- Shared raw-zone items use the deterministic `lv24-items` merge driver:
+  host `observed_at` is stripped and both sides are kept under content-hash
+  paths. Checkpoints remain local-only.
+- Registry paths are unioned across machines; `repo_url` recognizes the same
+  repository at a new checkout, and `discover` adopts the path instead of
+  registering a duplicate project. Optional `machine_id` is recorded for
+  provenance.
+- Consolidation apply is serialized and archive ops revalidated; topic upsert
+  requires a real per-topic lock; LvEF import is staged, serialized and
+  manifested; raw publish prep holds the sync lock.
+
+## Migration notes
+
+- Data schema stays `schema_version: 1`; all changes are additive.
+- Run `brain doctor --fix` once per clone to register drivers/attributes, or
+  simply run `brain sync` (preflight self-heals).
+- Existing raw-zone items are normalized by the `lv24-items` driver on the
+  first shared merge; checkpoints stay untracked.
+- Desktop 1.5.0 pins engine 0.21.0; Postgres schema remains 10.
 
 ## Known gaps
 
-- The job plans and applies; it does not run on a schedule.
-- `--max` and the MCP op cap are fixed at 50 per run.
+- Consolidation is manual; no schedule.
+- 50-op cap per apply run.
+- No cross-host runtime lock: two machines coordinate through git only.
+- PII cleanup (tracked legacy mail/dumps) and server-canonical migration are
+  later work.
+- `lv24-legacy` remains deprecated.
