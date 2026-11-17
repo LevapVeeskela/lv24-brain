@@ -219,7 +219,8 @@ type SearchResult struct {
 	Notice  string
 }
 
-// StateView is a project's curated state with its CAS revision.
+// StateView is a project's curated state with its CAS revision and
+// provenance.
 type StateView struct {
 	ProjectID     string    `json:"project_id"`
 	Goal          string    `json:"goal,omitempty"`
@@ -230,6 +231,7 @@ type StateView struct {
 	UpdatedAt     time.Time `json:"updated_at,omitzero"`
 	FreshUntil    time.Time `json:"fresh_until,omitzero"`
 	Revision      string    `json:"revision"`
+	Provenance    ProvenanceView `json:"provenance"`
 }
 
 // StateWrite changes selected state fields; nil keeps the stored value and an
@@ -443,6 +445,32 @@ type QuarantineReviewView struct {
 	Provenance ProvenanceView `json:"provenance"`
 }
 
+// RecordReviewRequest reviews one record's provenance through
+// POST /v1/records/{id}/review. The id is unambiguous inside the project, so
+// no kind is sent. Reviewed must be true: a review clears a quarantine and
+// never re-arms one. Trust optionally replaces the stored trust; an empty
+// value keeps it. ExpectedUpdatedAt is zero for a last-write-wins review.
+type RecordReviewRequest struct {
+	ProjectID string
+	ID        string
+	Reviewed  bool
+	Trust     string
+	// ExpectedUpdatedAt is the updated_at the client read; zero omits the
+	// compare-and-swap.
+	ExpectedUpdatedAt time.Time
+}
+
+// StateReviewRequest reviews one project state's provenance through
+// POST /v1/projects/{id}/state/review. Reviewed must be true; Trust
+// optionally replaces the stored trust; ExpectedRevision is the CAS revision
+// the client read (empty keeps last-write-wins).
+type StateReviewRequest struct {
+	ProjectID        string
+	Reviewed         bool
+	Trust            string
+	ExpectedRevision string
+}
+
 // ProposalQuery narrows a proposal listing.
 type ProposalQuery struct {
 	ProjectID   string
@@ -560,10 +588,19 @@ type MemoryService interface {
 	Search(context.Context, SearchQuery) (SearchResult, error)
 	State(context.Context, string) (StateView, error)
 	SetState(context.Context, string, StateWrite) (StateView, error)
+	// ReviewState reviews one project state's provenance: it clears the
+	// state quarantine and optionally replaces its trust. ExpectedRevision
+	// makes the write a compare-and-swap; a stale value returns
+	// *app.StateRevisionConflict and writes nothing.
+	ReviewState(context.Context, StateReviewRequest) (StateView, error)
 	Review(context.Context, ReviewQuery) (ReviewView, error)
 	ReviewFix(context.Context, ReviewFixRequest) (ReviewFixView, error)
 	ListQuarantined(context.Context, QuarantineQuery) ([]QuarantineItemView, error)
 	ReviewQuarantine(context.Context, QuarantineReviewDecision) (QuarantineReviewView, error)
+	// ReviewRecord reviews one record's provenance through the same use case
+	// as the quarantine review, addressed by record id alone. It returns the
+	// record summary after the write.
+	ReviewRecord(context.Context, RecordReviewRequest) (RecordView, error)
 	ListProposals(context.Context, ProposalQuery) (ProposalPage, error)
 	ProposalDetail(context.Context, ProposalDetailQuery) (ProposalDetailView, error)
 	Promote(context.Context, ProposalDecision) (ProposalOutcome, error)
@@ -641,6 +678,23 @@ func (h *Handler) requiredProjectQuery(w http.ResponseWriter, r *http.Request) (
 		return "", false
 	}
 	return h.resolveProjectID(w, r, selector)
+}
+
+// optionalProject resolves the optional project selector of a single-record
+// write. An explicit selector is resolved and allowlist-checked like everywhere
+// else; omitting it binds to the one project a single-entry allowlist serves,
+// and an empty or multi-project scope requires the explicit project because a
+// bare record id is only unambiguous inside one project.
+func (h *Handler) optionalProject(w http.ResponseWriter, r *http.Request) (string, bool) {
+	if selector := queryText(r, "project"); selector != "" {
+		return h.resolveProjectID(w, r, selector)
+	}
+	if len(h.opts.ProjectAllowlist) == 1 {
+		return h.opts.ProjectAllowlist[0], true
+	}
+	writeError(w, http.StatusBadRequest, "validation",
+		"project is required: pass the project explicitly because this API does not serve exactly one project")
+	return "", false
 }
 
 // projectScope resolves the project selector of a collection route and enforces
@@ -761,6 +815,11 @@ func (h *Handler) recordRoute(w http.ResponseWriter, r *http.Request, rest strin
 				return
 			}
 			h.recordLifecycle(w, r, parts[0], true)
+		case "review":
+			if !method(w, r, http.MethodPost) {
+				return
+			}
+			h.reviewRecord(w, r, parts[0])
 		default:
 			writeError(w, http.StatusNotFound, "not_found", "endpoint not found")
 		}
@@ -821,6 +880,57 @@ func (h *Handler) recordLifecycle(w http.ResponseWriter, r *http.Request, id str
 	} else {
 		view, err = h.opts.Memory.TrashRecord(r.Context(), project, id)
 	}
+	if err != nil {
+		h.writeMemoryError(w, err)
+		return
+	}
+	writeSafeJSON(w, http.StatusOK, view, h.redact)
+}
+
+// recordReviewRequest is the POST /v1/records/{id}/review body. Reviewed must
+// be true when present; an omitted body means reviewed=true, so a plain
+// `POST` reviews the record like `brain record review <id>`.
+type recordReviewRequest struct {
+	Reviewed          *bool  `json:"reviewed"`
+	Trust             string `json:"trust"`
+	ExpectedUpdatedAt *string `json:"expected_updated_at"`
+}
+
+// reviewRecord is POST /v1/records/{id}/review: a provenance-only write that
+// marks one record reviewed and optionally replaces its trust, through the
+// same use case as the quarantine review and `brain record review`. The id is
+// unambiguous inside the project, so no kind is sent, and project is optional
+// when the API's allowlist pins exactly one project. expected_updated_at makes
+// the write a compare-and-swap: a stale value returns 409 with
+// error.current_revision and writes nothing. The response is the record
+// summary after the review, so a client can show the cleared quarantine
+// without a second read.
+func (h *Handler) reviewRecord(w http.ResponseWriter, r *http.Request, id string) {
+	if h.opts.Memory == nil {
+		unavailable(w)
+		return
+	}
+	project, ok := h.optionalProject(w, r)
+	if !ok {
+		return
+	}
+	var body recordReviewRequest
+	if r.ContentLength != 0 && !h.decode(w, r, &body) {
+		return
+	}
+	if body.Reviewed != nil && !*body.Reviewed {
+		writeError(w, http.StatusBadRequest, "validation",
+			"reviewed must be true: a review clears a quarantine and never re-arms one")
+		return
+	}
+	expected, ok := h.expectedUpdatedAt(w, body.ExpectedUpdatedAt)
+	if !ok {
+		return
+	}
+	view, err := h.opts.Memory.ReviewRecord(r.Context(), RecordReviewRequest{
+		ProjectID: project, ID: id, Reviewed: true,
+		Trust: body.Trust, ExpectedUpdatedAt: expected,
+	})
 	if err != nil {
 		h.writeMemoryError(w, err)
 		return
@@ -1036,7 +1146,19 @@ func (h *Handler) search(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) projectRoute(w http.ResponseWriter, r *http.Request, rest string) {
 	parts, ok := pathParts(rest)
-	if !ok || len(parts) != 2 || parts[1] != "state" {
+	if !ok || len(parts) < 2 || parts[1] != "state" {
+		writeError(w, http.StatusNotFound, "not_found", "endpoint not found")
+		return
+	}
+	if len(parts) == 3 {
+		if parts[2] != "review" {
+			writeError(w, http.StatusNotFound, "not_found", "endpoint not found")
+			return
+		}
+		h.reviewState(w, r, parts[0])
+		return
+	}
+	if len(parts) != 2 {
 		writeError(w, http.StatusNotFound, "not_found", "endpoint not found")
 		return
 	}
@@ -1048,6 +1170,54 @@ func (h *Handler) projectRoute(w http.ResponseWriter, r *http.Request, rest stri
 	default:
 		method(w, r, http.MethodGet, http.MethodPut)
 	}
+}
+
+// stateReviewRequest is the POST /v1/projects/{id}/state/review body.
+// Reviewed must be true when present; an omitted body reviews the state like
+// `brain state review`.
+type stateReviewRequest struct {
+	Reviewed         *bool  `json:"reviewed"`
+	Trust            string `json:"trust"`
+	ExpectedRevision string `json:"expected_revision"`
+}
+
+// reviewState is POST /v1/projects/{id}/state/review: a provenance-only write
+// that marks the project state reviewed and optionally replaces its trust,
+// through the same use case as `brain state review`. expected_revision makes
+// the write a compare-and-swap inside the store's atomic state update: a stale
+// value returns 409 with error.current_revision and writes nothing. A review
+// never moves the revision, so a repeated call with the same expected_revision
+// stays a no-op. The response is the state with its revision.
+func (h *Handler) reviewState(w http.ResponseWriter, r *http.Request, projectID string) {
+	if !method(w, r, http.MethodPost) {
+		return
+	}
+	if h.opts.Memory == nil {
+		unavailable(w)
+		return
+	}
+	projectID, ok := h.resolveProjectID(w, r, projectID)
+	if !ok {
+		return
+	}
+	var body stateReviewRequest
+	if r.ContentLength != 0 && !h.decode(w, r, &body) {
+		return
+	}
+	if body.Reviewed != nil && !*body.Reviewed {
+		writeError(w, http.StatusBadRequest, "validation",
+			"reviewed must be true: a review clears a quarantine and never re-arms one")
+		return
+	}
+	view, err := h.opts.Memory.ReviewState(r.Context(), StateReviewRequest{
+		ProjectID: projectID, Reviewed: true,
+		Trust: body.Trust, ExpectedRevision: body.ExpectedRevision,
+	})
+	if err != nil {
+		h.writeMemoryError(w, err)
+		return
+	}
+	writeSafeJSON(w, http.StatusOK, view, h.redact)
 }
 
 func (h *Handler) getState(w http.ResponseWriter, r *http.Request, projectID string) {

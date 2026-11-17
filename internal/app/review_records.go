@@ -38,6 +38,62 @@ type ReviewRecordResult struct {
 	Reviewed  []RecordSummary
 }
 
+// ReviewRecordInput reviews one record's provenance: it clears the record's
+// quarantine and optionally replaces its trust. The id is unambiguous inside
+// the project, so no kind is needed. ExpectedUpdatedAt is zero for a
+// last-write-wins review; a non-zero value makes the review a compare-and-swap
+// against the stored updated_at and a stale value is refused with a
+// domain.RevisionConflictError before anything is written.
+type ReviewRecordInput struct {
+	ProjectID string
+	ID        string
+	Trust     domain.Trust
+	// ExpectedUpdatedAt is the updated_at the client read.
+	ExpectedUpdatedAt time.Time
+}
+
+// ReviewRecord marks exactly one record reviewed and optionally sets its trust.
+// Like ReviewRecords it is a provenance-only write: the body, ID, kind,
+// classification and review date are untouched, the journal records the
+// review, and an already reviewed record that keeps its trust is an idempotent
+// no-op. The response is the record summary after the write.
+func (a *App) ReviewRecord(ctx context.Context, opts ReviewRecordInput) (RecordSummary, error) {
+	if err := a.requireStore(); err != nil {
+		return RecordSummary{}, err
+	}
+	id := strings.TrimSpace(opts.ID)
+	if id == "" {
+		return RecordSummary{}, domain.NewValidationError("id", "is required")
+	}
+	if opts.Trust != "" && !opts.Trust.Valid() {
+		return RecordSummary{}, domain.NewValidationError("trust",
+			fmt.Sprintf("unknown trust %q (verified, stated, inferred)", opts.Trust))
+	}
+	record, err := a.GetRecord(ctx, opts.ProjectID, id)
+	if err != nil {
+		return RecordSummary{}, err
+	}
+	summary := record.Summary()
+	if !opts.ExpectedUpdatedAt.IsZero() && !summary.UpdatedAt.Equal(opts.ExpectedUpdatedAt) {
+		return RecordSummary{}, domain.NewRevisionConflictError(summary.Kind, summary.ID, summary.UpdatedAt)
+	}
+	result, err := a.ReviewRecords(ctx, ReviewRecordOptions{
+		ProjectID: summary.ProjectID, ID: summary.ID, Trust: opts.Trust,
+	})
+	if err != nil {
+		return RecordSummary{}, err
+	}
+	if len(result.Reviewed) != 1 {
+		return RecordSummary{}, fmt.Errorf("app: review of %s %s touched %d records, want 1",
+			summary.Kind, summary.ID, len(result.Reviewed))
+	}
+	reviewed, err := a.GetRecord(ctx, summary.ProjectID, summary.ID)
+	if err != nil {
+		return RecordSummary{}, err
+	}
+	return reviewed.Summary(), nil
+}
+
 // ReviewRecords marks one record (or every unreviewed record) reviewed and
 // optionally sets its trust. It is idempotent: reviewing an already reviewed
 // record without changing its trust writes nothing.

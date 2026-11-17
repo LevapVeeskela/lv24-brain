@@ -80,11 +80,13 @@ rename one.
 | `GET` | `/v1/projects` |
 | `GET` | `/v1/projects/{id}/state` |
 | `PUT` | `/v1/projects/{id}/state` |
+| `POST` | `/v1/projects/{id}/state/review` |
 | `GET` | `/v1/records` |
 | `GET` | `/v1/records/{id}` |
 | `PATCH` | `/v1/records/{id}` |
 | `POST` | `/v1/records/{id}/trash` |
 | `POST` | `/v1/records/{id}/restore` |
+| `POST` | `/v1/records/{id}/review` |
 | `GET` | `/v1/search` |
 | `GET` | `/v1/review` |
 | `POST` | `/v1/review/fix` |
@@ -176,6 +178,22 @@ that another live record of the same project and kind already holds; without it
 an exact duplicate is `409` with code `duplicate`. The response is the edited
 record with its body, links, relations and validity.
 
+`POST /v1/records/{id}/review?project=` marks one record reviewed and
+optionally replaces its `trust` (`verified`, `stated`, `inferred`) through the
+same provenance-only use case as `brain record review <id>` and the quarantine
+review: the body, ID, kind, classification and review date are untouched, the
+write is journalled, and an unknown origin stays quarantined. The request is
+`{reviewed?, trust?, expected_updated_at?}`; an omitted body reviews the
+record, and `reviewed` must be `true` when present because a review clears a
+quarantine and never re-arms one. The record id is unambiguous inside its
+project, so no kind is sent; `project` may be omitted when the API's allowlist
+pins exactly one project, and is `400 validation` otherwise. The response is
+the record summary after the review (`provenance.reviewed`, `provenance.trust`
+and `provenance.quarantined`). The route is idempotent: reviewing an already
+reviewed record that keeps its trust writes nothing. `expected_updated_at`
+makes the write a compare-and-swap: a stale value returns `409` with
+`error.current_revision` and writes nothing.
+
 Edit refusals keep their typed envelopes: `400 validation` (empty patch, bad
 timestamp, handoff title, empty decision/attempt title), `403 forbidden` (protected
 project or glob), `404 not_found`, `409 conflict` (stale revision) or
@@ -204,6 +222,20 @@ time, `""` to clear it, or omitted to keep it. When `expected_revision` is set,
 the write is a compare-and-swap: it runs inside the store's atomic state update
 and a mismatch returns `409` with `error.current_revision` and writes nothing.
 Omitting `expected_revision` keeps the CLI's last-write-wins behaviour.
+
+The state row of `GET` and `PUT` carries `provenance` (`origin`, `trust`,
+`reviewed`, `quarantined`, `needs_review`) like a record row.
+
+`POST /v1/projects/{id}/state/review` marks the project state reviewed and
+optionally replaces its `trust`, through the same provenance-only use case as
+`brain state review`. The request is
+`{reviewed?, trust?, expected_revision?}`; an omitted body reviews the state,
+and `reviewed` must be `true` when present. `expected_revision` makes the write
+a compare-and-swap inside the store's atomic state update: a stale value
+returns `409` with `error.current_revision` and writes nothing. A review
+changes provenance only, so the revision does not move and a repeated call
+with the same `expected_revision` is an idempotent no-op. The response is the
+state with its `revision` and `provenance`.
 
 ### Review
 
@@ -382,6 +414,15 @@ The desktop repository is not changed by the engine. Its pinned contract copy is
 refreshed from this file as described below; the desktop release that consumes
 these additive fields must regenerate its types and keep refusing a contract
 major it does not know.
+
+## Desktop 0.21 gap closure
+
+The 0.21 desktop gaps are served additively in this engine build: the record
+review route (`POST /v1/records/{id}/review`), the state review route
+(`POST /v1/projects/{id}/state/review`) and the state `provenance` block. Both
+review writes are provenance-only, journalled and compare-and-swap capable;
+record detail and list rows already carried `provenance` with `origin`,
+`trust` and `reviewed`.
 
 ## Compatibility rule
 

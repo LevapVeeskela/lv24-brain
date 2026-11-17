@@ -77,9 +77,11 @@ confirm a curation change, the server answers with `resultType:
 "input_required"` and an elicitation request; the client retries the same call
 with a new JSON-RPC id, the `inputResponses`, and the echoed `requestState`.
 
-Two actions ask for confirmation: `brain_judge(action=judge)`, because the
-verdict replaces any existing relation between the pair, and
-`brain_judge(action=supersede)`, because it changes which decision is current:
+Three actions ask for confirmation: `brain_judge(action=judge)`, because the
+verdict replaces any existing relation between the pair;
+`brain_judge(action=supersede)`, because it changes which decision is current;
+and `brain_judge(action=consolidate, phase=apply)`, because it writes merges and
+archives (a plan never asks and never writes):
 
 ```json
 {"jsonrpc":"2.0","id":7,"method":"tools/call","params":{
@@ -147,7 +149,6 @@ CLI `try_instead`, never a silent no-op. The gaps are:
 | `brain_search` | `include_prompts=true` | `brain_prompt(action=search)` |
 | `brain_prompt` | `discard` | edit `projects/<id>/prompts/<date>.md` by hand |
 | `brain_projects` | `merge` | `brain project set <id> --alias <old-id>` or `brain import --map-project` |
-| `brain_judge` | `consolidate` | `brain record supersede <old-id> --by <new-id>` |
 
 A graph engine that serves symbol navigation but not analytics refuses the
 analytics actions of `brain_graph` at call time; both shipped engines serve
@@ -178,7 +179,7 @@ its `readOnlyHint` is false while `x-lv24-read-actions` names the reads.
 | `brain_state` | destructive | `get` (default), `set` | read or replace project state (`expected_revision`) |
 | `brain_catchup` | read | `changes` (default), `journal`, `timeline` | what changed, the journal, one record in context |
 | `brain_review` | read | `findings` (default), `due`, `doctor` | stale knowledge, the review queue, engine checks |
-| `brain_judge` | destructive | `judge` (default), `list`, `judge_many`, `compare`, `review`, `accept`, `reject`, `supersede`, `pin`, `unpin`, `consolidate` | change the status of existing knowledge |
+| `brain_judge` | destructive | `judge` (default), `list`, `judge_many`, `compare`, `review`, `accept`, `reject`, `supersede`, `pin`, `unpin`, `consolidate` | change the status of existing knowledge; `consolidate` plans or applies the proposal-only dedup job (§6.3) |
 | `brain_projects` | read | `list` (default), `current`, `register`, `merge` | project registry; `current` reports the resolution source |
 | `brain_prompt` | destructive | `save`, `search`, `discard` | opt-in local-only prompt zone |
 | `brain_code` | mixed | `status` (default), `search`, `node`, `explore`, `impact`, `index`, `sync` | query or index one checkout's code graph |
@@ -278,6 +279,38 @@ Typed refusals, never empty answers:
 | base index of another engine or schema | `UNSUPPORTED` | index the base checkout with the same engine and rebuild it |
 | an argument above its cap | `INVALID_ARGUMENTS` | lower it to the documented maximum |
 
+
+### 6.3 `brain_judge(action=consolidate)`
+
+The dedup job is proposal-only. `phase=plan` (the default) computes deterministic
+ops and writes nothing; `phase=apply` executes only the named `ids` and requires
+the plan `fingerprint`, so a stale plan is refused with `CONFLICT` instead of
+being replayed.
+
+| Field | Meaning |
+|---|---|
+| `phase` | `plan` (default, read-only) or `apply` |
+| `ids` | op ids to apply; required with `phase=apply`, at most 50 |
+| `fingerprint` | the plan fingerprint from `phase=plan`; required with `phase=apply` |
+
+Ops are deterministic: `merge-<survivor>` merges an exact duplicate cluster (or a
+near cluster at similarity `>= 0.98` of the same kind and project), and
+`archive-<id>` trashes one superseded record older than the archive age that no
+live record links to. Near clusters below the threshold are reported in
+`plan.near` and never merged. Every op carries `risk` and `reversible` (the merge
+manifest, or `brain record restore <id>` for an archive). An apply writes a
+manifest under `backups/consolidate-<ts>/manifest.json` that
+`brain consolidate --rollback <manifest>` restores; nothing is ever deleted. The
+CLI adds `--max`, `--archive-after`, `--scan` and `--op` (§`review.md`).
+
+Typed refusals:
+
+| Condition | Code | `try_instead` |
+|---|---|---|
+| `phase=apply` without `fingerprint` or `ids` | `INVALID_ARGUMENTS` | run `phase=plan`, then apply the reviewed op ids with the fingerprint |
+| unknown `phase` | `INVALID_ARGUMENTS` | `plan` or `apply` |
+| plan fingerprint mismatch | `CONFLICT` | re-run `phase=plan` and apply the fresh ops |
+| more than 50 op ids | `INVALID_ARGUMENTS` | apply in batches |
 
 ## 7. Pagination
 
@@ -524,9 +557,12 @@ Translation rules that matter to a client:
 - `mem_timeline` returns previews (at most 160 characters) and caps
   `before`/`after` at 5 per side. `mem_update` never edits in place: it appends
   a new body under `topic_key` and leaves the old body under History.
-- `mem_pin`, `mem_unpin` and `mem_consolidate` are graded C/B but the engine
-  refuses pinning and consolidation in 0.17; the refusal names the CLI path.
-  No fake `pinned` frontmatter or tombstone is written.
+- `mem_pin` and `mem_unpin` are graded C: the native
+  `brain_judge(action=pin|unpin)` sets or clears the `pinned` flag, but the
+  engram ranking boost is not reproduced. No fake frontmatter is written.
+- `mem_consolidate` is graded B and plans by default. `phase=apply` needs the op
+  `ids` and the plan `fingerprint`; an apply writes merges and archives, all
+  reversible through `brain consolidate --rollback <manifest>` (§6.3).
 - `mem_session_start` and `mem_session_end` are synthetic: they return a
   `<project>/<date>` handle and write nothing unless a non-empty summary is
   forwarded to `brain_handoff`.
@@ -700,9 +736,9 @@ two minor releases after 0.17.
   GitHub/GitLab pull requests. The native `brain_graph(action=pr_impact)`
   answers the same underlying question for two local git refs and never writes
   to the checkout.
-- **Consolidation and prompt discard** are refused with guidance (`pin`/`unpin`
-  are served by `brain_judge`).
-  (§5); the underlying app methods land later.
+- **Prompt discard** is refused with guidance. Consolidation is served by
+  `brain_judge(action=consolidate)` in proposal-only form (§6.3), and
+  `pin`/`unpin` by `brain_judge(action=pin|unpin)` (§12).
 - **In-place record edit, MCP delete and hard delete** stay CLI-only. The
   Markdown truth is append-only: evolution is `brain_note(topic_key=…)`,
   lifecycle is `brain_judge`, and removal is `brain record trash` (reversible).

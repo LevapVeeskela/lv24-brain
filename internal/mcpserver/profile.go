@@ -1012,10 +1012,10 @@ func engramAliasSpecs() []aliasSpec {
 		{
 			AliasSpec: AliasSpec{
 				Legacy: "mem_pin", Target: "brain_judge", Grade: GradeApproximate,
-				Note: "pinning needs additive frontmatter and a ranking weight; the native call refuses it in 0.17",
+				Note: "the native pin sets the pinned flag but does not add a ranking weight",
 			},
 			Title:       "Pin an observation",
-			Description: "Pin a record. Pinning is not exposed in 0.17: the native call refuses with the CLI path.",
+			Description: "Pin a record. brain_judge(action=pin) sets the flag; the engram ranking boost is not reproduced.",
 			Kind:        "destructive",
 			InputSchema: engramSchema([]string{"id"}, map[string]any{"id": stringProp("Record id.")}),
 			translate: func(a aliasArgs) (nativeArgs, error) {
@@ -1033,10 +1033,10 @@ func engramAliasSpecs() []aliasSpec {
 		{
 			AliasSpec: AliasSpec{
 				Legacy: "mem_unpin", Target: "brain_judge", Grade: GradeApproximate,
-				Note: "pinning needs additive frontmatter and a ranking weight; the native call refuses it in 0.17",
+				Note: "the native pin sets the pinned flag but does not add a ranking weight",
 			},
 			Title:       "Unpin an observation",
-			Description: "Unpin a record. Pinning is not exposed in 0.17: the native call refuses with the CLI path.",
+			Description: "Unpin a record. brain_judge(action=unpin) clears the flag; the engram ranking boost is not reproduced.",
 			Kind:        "destructive",
 			InputSchema: engramSchema([]string{"id"}, map[string]any{"id": stringProp("Record id.")}),
 			translate: func(a aliasArgs) (nativeArgs, error) {
@@ -1255,19 +1255,19 @@ func engramAliasSpecs() []aliasSpec {
 		{
 			AliasSpec: AliasSpec{
 				Legacy: "mem_consolidate", Target: "brain_judge", Grade: GradeEnvelope,
-				Unsupported: []string{"confirm", "fingerprint", "phase", "strategy"},
-				Note:        "two-phase consolidation is refused by the engine in 0.17; sources stay intact",
+				Unsupported: []string{"confirm", "strategy"},
+				Note:        "plans by default (phase=plan, read-only); apply needs the op ids and the plan fingerprint",
 			},
 			Title:       "Consolidate observations",
-			Description: "Consolidation is not exposed in 0.17: the native call refuses and points at the CLI supersede path.",
+			Description: "Consolidation plans exact-duplicate merges, archives of superseded records and near-cluster reports; apply runs only the reviewed ops and every op is reversible.",
 			Kind:        "destructive",
 			InputSchema: engramSchema(nil, map[string]any{
-				"ids":         stringArrayProp("Source record ids."),
+				"ids":         stringArrayProp("Source record ids (plan); op ids to apply (phase=apply)."),
 				"memory_ids":  stringArrayProp("Alias of ids."),
 				"phase":       enumProp("plan or apply.", []string{"plan", "apply"}),
-				"confirm":     boolProp("Dropped: consolidation is refused."),
-				"fingerprint": stringProp("Dropped: consolidation is refused."),
-				"strategy":    stringProp("Dropped: consolidation is refused."),
+				"confirm":     boolProp("Dropped: the native apply is explicit (phase=apply with ids)."),
+				"fingerprint": stringProp("Required with phase=apply: the plan fingerprint from phase=plan."),
+				"strategy":    stringProp("Dropped: the engine uses deterministic detectors only."),
 			}),
 			translate: func(a aliasArgs) (nativeArgs, error) {
 				native := newNativeArgs()
@@ -2577,8 +2577,8 @@ func engramGaps() []CapabilityGap {
 		}
 	}
 	gaps = append(gaps, CapabilityGap{
-		Tool: "mem_consolidate", Grade: GradeEnvelope, Reason: "two-phase consolidation is refused by the engine in 0.17",
-		Remediation: "brain record supersede <old-id> --by <new-id>",
+		Tool: "mem_consolidate", Grade: GradeEnvelope, Reason: "apply needs the plan fingerprint and the op ids; plan is the default",
+		Remediation: "brain_judge action=consolidate phase=plan",
 	})
 	return gaps
 }

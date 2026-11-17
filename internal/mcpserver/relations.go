@@ -121,7 +121,9 @@ func (s *Server) judgeTool() tool {
 		Annotations: mutatingAnnotations("Judge or reclassify existing knowledge"),
 		Description: "Change the status of existing knowledge. action=judge (default) records a verdict on the pair (from,to) and is the only way a pending relation becomes accepted or rejected; " +
 			"action=list reads the relation rows; action=judge_many records up to 32 verdicts; action=compare records one verdict from two records; " +
-			"action=review clears quarantine; action=accept, reject and supersede change a decision's lifecycle. No record body is edited; the target record is never deleted.",
+			"action=review clears quarantine; action=accept, reject and supersede change a decision's lifecycle; " +
+			"action=consolidate plans (phase=plan, read-only) or applies (phase=apply) the dedup job: merge exact duplicate clusters, archive superseded records with no live links, report near clusters. " +
+			"Plan never writes; apply trashes duplicates and superseded records (never deletes) and every op names its rollback.",
 		InputSchema: objectSchema(nil, map[string]any{
 			"action":            enumProp("judge (default), list, judge_many, compare, review, accept, reject, supersede, pin, unpin, consolidate.", []string{"judge", "list", "judge_many", "compare", "review", "accept", "reject", "supersede", "pin", "unpin", "consolidate"}),
 			"from":              stringProp("Record id that carries the relation (judge, compare), or the old decision (supersede)."),
@@ -130,10 +132,10 @@ func (s *Server) judgeTool() tool {
 			"reason":            stringProp("Why the pair is related, conflicting or unrelated. Required by judge, compare and judge_many."),
 			"confidence":        numberProp("Optional judge confidence between 0 and 1."),
 			"id":                stringProp("Record or decision id (review, accept, reject, supersede)."),
-			"ids":               stringArrayProp("Record ids to review; [\"*\"] reviews every unreviewed record."),
+			"ids":               stringArrayProp("Record ids to review; [\"*\"] reviews every unreviewed record. With action=consolidate phase=apply, the op ids to apply."),
 			"judgments":         arrayProp("Verdicts for action=judge_many, at most 32.", objectProp("One verdict: from, to, verdict, reason, confidence.")),
-			"phase":             stringProp("Not available: consolidation is refused in 0.17."),
-			"fingerprint":       stringProp("Not available: consolidation is refused in 0.17."),
+			"phase":             enumProp("With action=consolidate: plan (default, read-only) or apply.", []string{"plan", "apply"}),
+			"fingerprint":       stringProp("With action=consolidate phase=apply: the plan fingerprint from phase=plan; a stale fingerprint is refused and the fresh plan is returned."),
 			"trust":             enumProp("Optional trust level of reviewed records; omit to keep the stored one.", trustLevels),
 			"expected_revision": stringProp("Not available: relation verdicts and decision lifecycle are not revision-checked in 0.17."),
 			"target":            stringProp("With action=list, list the relations that point at this record."),
@@ -178,8 +180,10 @@ func (s *Server) judge(ctx context.Context, raw json.RawMessage) (toolResult, er
 			"read the current record with brain_record(action=get) and retry the judgment")
 	}
 	if strings.TrimSpace(args.Phase) != "" || strings.TrimSpace(args.Fingerprint) != "" {
-		return toolResult{}, refusalInvalidWith("phase and fingerprint only apply to consolidation, which is not available",
-			"brain record supersede <old-id> --by <new-id>")
+		if action != "consolidate" {
+			return toolResult{}, refusalInvalidWith("phase and fingerprint only apply to action=consolidate",
+				"brain_judge action=consolidate phase=plan")
+		}
 	}
 	if strings.TrimSpace(args.Trust) != "" && action != "review" {
 		return toolResult{}, refusalInvalid("trust only applies to action=review")
@@ -214,7 +218,7 @@ func (s *Server) judge(ctx context.Context, raw json.RawMessage) (toolResult, er
 		}
 		return s.applyDecisionStatus(ctx, decisionStatusArgs{ID: args.ID, SupersededBy: args.To, Project: args.Project})
 	case "consolidate":
-		return toolResult{}, refusedGap("brain_judge", action)
+		return s.judgeConsolidate(ctx, args)
 	case "pin", "unpin":
 		return s.applyPin(ctx, args, action == "pin")
 	default:
@@ -446,6 +450,8 @@ func confirmJudgeAction(args json.RawMessage) *confirmation {
 			return nil
 		}
 		return &confirmation{Message: fmt.Sprintf("Mark decision %s as superseded by %s? The old decision stays in the record but is no longer current.", probe.ID, probe.To)}
+	case "consolidate":
+		return confirmConsolidate(argsOrDefault(args))
 	}
 	return nil
 }

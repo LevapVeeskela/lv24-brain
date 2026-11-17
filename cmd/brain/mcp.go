@@ -904,6 +904,70 @@ func (b mcpBackend) JudgeRelation(ctx context.Context, in mcpserver.JudgeInput) 
 	return mcpserver.JudgedRelation{Relation: toMCPRelation(result.Relation), Changed: result.Changed}, nil
 }
 
+// Consolidate implements mcpserver.ConsolidateBackend.
+func (b mcpBackend) Consolidate(ctx context.Context, in mcpserver.ConsolidateInput) (mcpserver.ConsolidateResult, error) {
+	plan, applied, err := b.app.Consolidate(ctx, app.ConsolidateOptions{
+		ProjectID: in.ProjectID, Phase: in.Phase, Ops: in.IDs,
+		Fingerprint: in.Fingerprint,
+	})
+	if err != nil {
+		return mcpserver.ConsolidateResult{}, err
+	}
+	out := mcpserver.ConsolidateResult{Phase: in.Phase, Plan: toMCPConsolidatePlan(plan)}
+	if applied != nil {
+		out.Phase = "apply"
+		out.Applied = &mcpserver.ConsolidateApply{
+			Manifest: applied.Manifest,
+			Merged:   make([]mcpserver.ConsolidateMerged, 0, len(applied.Merged)),
+			Archived: make([]mcpserver.ConsolidateArchived, 0, len(applied.Archived)),
+			Skipped:  make([]mcpserver.ConsolidateApplySkip, 0, len(applied.Skipped)),
+		}
+		for _, merged := range applied.Merged {
+			out.Applied.Merged = append(out.Applied.Merged, mcpserver.ConsolidateMerged{
+				Op: merged.Op, Survivor: merged.Survivor, Manifest: merged.Manifest,
+			})
+		}
+		for _, archived := range applied.Archived {
+			out.Applied.Archived = append(out.Applied.Archived, mcpserver.ConsolidateArchived{
+				Op: archived.Op, Kind: archived.Kind, ID: archived.ID,
+			})
+		}
+		for _, skip := range applied.Skipped {
+			out.Applied.Skipped = append(out.Applied.Skipped, mcpserver.ConsolidateApplySkip{Op: skip.Op, Reason: skip.Reason})
+		}
+	}
+	return out, nil
+}
+
+// toMCPConsolidatePlan projects a consolidation plan for the MCP tool.
+func toMCPConsolidatePlan(plan app.ConsolidatePlan) mcpserver.ConsolidatePlan {
+	out := mcpserver.ConsolidatePlan{
+		Projects: plan.Projects, Fingerprint: plan.Fingerprint, Truncated: plan.Truncated,
+		Ops: make([]mcpserver.ConsolidateOp, 0, len(plan.Ops)),
+	}
+	for _, op := range plan.Ops {
+		out.Ops = append(out.Ops, mcpserver.ConsolidateOp{
+			ID: op.ID, Kind: op.Kind, ProjectID: op.ProjectID, RecordKind: op.RecordKind,
+			IDs: nonNilStrings(op.IDs), Reason: op.Reason, Fingerprint: op.Fingerprint,
+			Risk: op.Risk, Reversible: op.Reversible,
+		})
+	}
+	if len(plan.Near) > 0 {
+		out.Near = make([]mcpserver.ConsolidateCluster, 0, len(plan.Near))
+		for _, cluster := range plan.Near {
+			members := make([]mcpserver.ConsolidateClusterMem, 0, len(cluster.Members))
+			for _, member := range cluster.Members {
+				members = append(members, mcpserver.ConsolidateClusterMem{ID: member.ID, Title: member.Title})
+			}
+			out.Near = append(out.Near, mcpserver.ConsolidateCluster{
+				ProjectID: cluster.ProjectID, Kind: cluster.Kind, Reason: cluster.Reason,
+				Similarity: cluster.Similarity, Members: members,
+			})
+		}
+	}
+	return out
+}
+
 // toMCPRelation projects one relation view for the MCP tools.
 func toMCPRelation(view app.RelationView) mcpserver.RelationRow {
 	row := mcpserver.RelationRow{

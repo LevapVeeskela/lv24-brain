@@ -25,11 +25,13 @@ POST /v1/connections/{id}/credentials/{field}
 POST /v1/connections/{id}/run
 POST /v1/connections/{id}/test
 POST /v1/engine/update
+POST /v1/projects/{id}/state/review
 POST /v1/proposals/{project}/{id}/dismiss
 POST /v1/proposals/{project}/{id}/promote
 POST /v1/proposals/{project}/{id}/snooze
 POST /v1/quarantine/{id}/review
 POST /v1/records/{id}/restore
+POST /v1/records/{id}/review
 POST /v1/records/{id}/trash
 POST /v1/review/fix
 POST /v1/runs/{id}/cancel

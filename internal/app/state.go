@@ -180,11 +180,18 @@ func applyStateInput(state *domain.State, input StateInput, now time.Time) []str
 type ReviewStateOptions struct {
 	ProjectID string
 	Trust     domain.Trust
+	// ExpectedRevision is the state revision the client read. When it is not
+	// empty the review is a compare-and-swap: a stale value is refused with
+	// *StateRevisionConflict inside the store's atomic state update and
+	// nothing is written. An empty value keeps the unconditional behaviour.
+	ExpectedRevision string
 }
 
 // ReviewState marks the project state reviewed and optionally sets its trust.
 // It is idempotent: a state that is already reviewed (and already carries the
-// requested trust) is left untouched.
+// requested trust) is left untouched. The review changes provenance only, so
+// the state's revision does not move and a repeated call with the same
+// expected_revision still passes the compare-and-swap.
 func (a *App) ReviewState(ctx context.Context, opts ReviewStateOptions) (domain.State, bool, error) {
 	if err := a.requireStore(); err != nil {
 		return domain.State{}, false, err
@@ -194,6 +201,7 @@ func (a *App) ReviewState(ctx context.Context, opts ReviewStateOptions) (domain.
 		return domain.State{}, false, domain.NewValidationError("trust",
 			fmt.Sprintf("unknown trust %q (verified, stated, inferred)", trust))
 	}
+	expected := strings.TrimSpace(opts.ExpectedRevision)
 	project, err := a.ensureProject(ctx, opts.ProjectID, false)
 	if err != nil {
 		return domain.State{}, false, err
@@ -208,6 +216,11 @@ func (a *App) ReviewState(ctx context.Context, opts ReviewStateOptions) (domain.
 	updated, err := a.writeState(ctx, project.ID, func(state *domain.State) error {
 		if state.ProjectID == "" {
 			state.ProjectID = project.ID
+		}
+		if expected != "" {
+			if revision := StateRevision(*state); revision != expected {
+				return &StateRevisionConflict{ProjectID: project.ID, Expected: expected, Current: revision}
+			}
 		}
 		current := state.Provenance
 		if alreadyReviewedState(current, trust) {

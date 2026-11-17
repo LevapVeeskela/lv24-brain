@@ -240,6 +240,40 @@ command in this flow deletes, trashes or rewrites a record.
 names each project with clusters. Duplicates are a curation task, not damage, so
 the check warns and never fails.
 
+## Consolidation
+
+`brain consolidate` turns the duplicate report into a reviewed, reversible job.
+The default phase is a plan: it computes deterministic ops and writes nothing.
+
+```bash
+brain consolidate                          # plan the selected project
+brain consolidate --scan                   # plan every registered project
+brain consolidate --json                   # ops, near clusters and the plan fingerprint
+brain consolidate --apply --op <id>        # apply only the reviewed ops
+brain consolidate --apply --fingerprint <plan fingerprint>
+brain consolidate --rollback <manifest>    # undo an apply
+```
+
+| Op | Proposed when | Risk | Undo |
+|---|---|---|---|
+| `merge-<survivor>` | an exact duplicate cluster, or a near cluster at similarity `>= 0.98` of the same kind and project | low / medium | roll back the printed merge manifest |
+| `archive-<id>` | a superseded record older than `--archive-after` days (default 30) that no live record links to | medium | `brain record restore <id>` |
+
+Near clusters below the threshold stay report-only in `plan.near`; the job never
+merges them. `--max` caps the plan (default 50; `truncated` reports the cut) and
+`--op` selects the ops to apply (repeatable or comma-separated).
+
+An apply re-derives the plan from the records instead of replaying a stored op
+list, so an op that is no longer current is `not in the current plan`, and a
+stale `--fingerprint` is refused. The run records
+`backups/consolidate-<ts>/manifest.json`, and `--rollback` restores every merge
+and archive it lists. Nothing is deleted: a merge trashes the duplicate and an
+archive trashes the superseded record, and the trash keeps the file.
+
+The MCP surface is `brain_judge(action=consolidate)` with `phase=plan|apply`,
+`ids` and `fingerprint`; see
+[mcp.md](mcp.md#63-brain_judgeactionconsolidate).
+
 ## Related
 
 - Write-time caps and protected paths: [limits.md](limits.md)

@@ -26,9 +26,11 @@ type MemoryApp interface {
 	QuarantinedCount(context.Context, string) (int, error)
 	ListQuarantined(context.Context, string, int) ([]app.QuarantinedRecord, error)
 	ReviewRecords(context.Context, app.ReviewRecordOptions) (app.ReviewRecordResult, error)
+	ReviewRecord(context.Context, app.ReviewRecordInput) (app.RecordSummary, error)
 	SearchWithReport(context.Context, app.SearchOptions) (app.SearchReport, error)
 	GetState(context.Context, string) (domain.Project, domain.State, error)
 	SetStateIfRevision(context.Context, app.StateInput, string) (domain.State, error)
+	ReviewState(context.Context, app.ReviewStateOptions) (domain.State, bool, error)
 	Findings(context.Context, string) ([]app.Finding, error)
 	ProposalFindings(context.Context, string) ([]app.Finding, error)
 	PlanFixFindings(context.Context, string, []app.FindingKind) (app.FixPlan, error)
@@ -740,6 +742,38 @@ func (s *memoryService) ReviewQuarantine(ctx context.Context, decision localapi.
 	}, nil
 }
 
+// ReviewState reviews one project state's provenance and returns the state
+// with its revision. The write is provenance-only, so the revision does not
+// move and a repeated call is an idempotent no-op.
+func (s *memoryService) ReviewState(ctx context.Context, request localapi.StateReviewRequest) (localapi.StateView, error) {
+	state, _, err := s.app.ReviewState(ctx, app.ReviewStateOptions{
+		ProjectID:        request.ProjectID,
+		Trust:            domain.Trust(strings.TrimSpace(request.Trust)),
+		ExpectedRevision: request.ExpectedRevision,
+	})
+	if err != nil {
+		return localapi.StateView{}, err
+	}
+	return stateView(state), nil
+}
+
+// ReviewRecord reviews one record by id alone and returns the record summary
+// after the write. Trust is validated by the use case; an unknown id is
+// domain.ErrNotFound and a stale expected_updated_at is a
+// domain.RevisionConflictError, which the handler maps to 409.
+func (s *memoryService) ReviewRecord(ctx context.Context, request localapi.RecordReviewRequest) (localapi.RecordView, error) {
+	summary, err := s.app.ReviewRecord(ctx, app.ReviewRecordInput{
+		ProjectID:         request.ProjectID,
+		ID:                request.ID,
+		Trust:             domain.Trust(strings.TrimSpace(request.Trust)),
+		ExpectedUpdatedAt: request.ExpectedUpdatedAt,
+	})
+	if err != nil {
+		return localapi.RecordView{}, err
+	}
+	return recordView(summary, s.now().UTC()), nil
+}
+
 // ResolveProject maps a project id, alias or path to its registered project,
 // using the same rules as every CLI command.
 func (s *memoryService) ResolveProject(ctx context.Context, selector string) (localapi.Project, error) {
@@ -831,7 +865,8 @@ func stateView(state domain.State) localapi.StateView {
 		ProjectID: state.ProjectID, Goal: state.Goal, NextAction: state.NextAction,
 		Active: state.Active, Blocked: state.Blocked, OpenQuestions: state.OpenQuestions,
 		UpdatedAt: state.UpdatedAt, FreshUntil: state.FreshUntil,
-		Revision: app.StateRevision(state),
+		Revision:   app.StateRevision(state),
+		Provenance: provenanceView(state.Provenance),
 	}
 }
 

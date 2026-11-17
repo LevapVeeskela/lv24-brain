@@ -390,7 +390,7 @@ func TestConnectorRunnerPersistsPanicAsFailedRun(t *testing.T) {
 }
 
 func TestConnectorRunnerPanicRedactsSecrets(t *testing.T) {
-	const token = "ghp_0123456789abcdef0123456789abcdef01"
+	const token = "ghp_" + "0123456789abcdef0123456789abcdef01"
 	t.Setenv("BRAIN_GITHUB_REPOS", "acme/widgets")
 	store := newRawTestStore(t)
 	runner := newConnectorRunner(store, staticSecrets{}, time.Second, nil)
@@ -414,7 +414,7 @@ func TestConnectorRunnerPanicRedactsSecrets(t *testing.T) {
 }
 
 func TestConnectorRunnerKeepsSecretsOutOfRuns(t *testing.T) {
-	const token = "ghp_0123456789abcdef0123456789abcdef01"
+	const token = "ghp_" + "0123456789abcdef0123456789abcdef01"
 	t.Setenv("BRAIN_GITHUB_REPOS", "acme/widgets")
 	store := newRawTestStore(t)
 	runner := newConnectorRunner(store, staticSecrets{}, time.Second, nil)

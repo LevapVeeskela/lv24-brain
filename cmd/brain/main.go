@@ -131,6 +131,8 @@ func runCommand(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return runReview(rest, stdout, stderr)
 	case "duplicates":
 		return runDuplicates(rest, stdout, stderr)
+	case "consolidate":
+		return runConsolidate(rest, stdout, stderr)
 	case "promote":
 		return runPromote(rest, stdout, stderr)
 	case "sync":
@@ -245,6 +247,7 @@ Commands:
   status     Show the configured instance
   review     Build a review report; --fix applies the safe fixes
   duplicates List exact and near-duplicate records (--scan every project)
+  consolidate Proposal-only dedup job: merge exact duplicates, archive superseded (--plan|--apply, --rollback)
   promote    Promote or dismiss a proposal candidate
   sync       Pull, commit, and push brain data (exit 3 on conflict)
   index      Rebuild or refresh the local search index

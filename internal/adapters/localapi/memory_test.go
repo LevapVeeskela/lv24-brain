@@ -55,6 +55,9 @@ type fakeMemory struct {
 	restoreErr    error
 	editErr       error
 	resolveErr    error
+	// recordReviewErr and stateReviewErr are returned by the review routes.
+	recordReviewErr error
+	stateReviewErr  error
 	// conflict, when set, is returned by SetState even for a fresh revision.
 	conflict *app.StateRevisionConflict
 
@@ -74,6 +77,9 @@ type fakeMemory struct {
 	lastTrashed    string
 	lastRestored   string
 	lastEdit       RecordEditRequest
+	// lastRecordReview and lastStateReview record the review-route requests.
+	lastRecordReview RecordReviewRequest
+	lastStateReview  StateReviewRequest
 
 	decided map[string]string
 }
@@ -209,6 +215,35 @@ func (f *fakeMemory) ReviewQuarantine(_ context.Context, decision QuarantineRevi
 		return QuarantineReviewView{}, f.quarantineErr
 	}
 	return f.quarantineReview, nil
+}
+
+func (f *fakeMemory) ReviewRecord(_ context.Context, request RecordReviewRequest) (RecordView, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.lastRecordReview = request
+	if f.recordReviewErr != nil {
+		return RecordView{}, f.recordReviewErr
+	}
+	view := f.record
+	if view.ID == "" {
+		view = recordRow(request.ID, "note", time.Date(2026, 11, 15, 10, 0, 0, 0, time.UTC))
+		view.ProjectID = request.ProjectID
+	}
+	return view, nil
+}
+
+func (f *fakeMemory) ReviewState(_ context.Context, request StateReviewRequest) (StateView, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.lastStateReview = request
+	if f.stateReviewErr != nil {
+		return StateView{}, f.stateReviewErr
+	}
+	if f.state.ProjectID == "" {
+		f.state.ProjectID = request.ProjectID
+	}
+	f.state.Revision = "rev-2"
+	return f.state, nil
 }
 
 func (f *fakeMemory) ProposalDetail(_ context.Context, query ProposalDetailQuery) (ProposalDetailView, error) {
@@ -355,6 +390,8 @@ func TestMemoryRoutesAuthHostAndOrigin(t *testing.T) {
 		{http.MethodGet, "/v1/search?project=brain&q=x"},
 		{http.MethodGet, "/v1/projects/brain/state"},
 		{http.MethodPut, "/v1/projects/brain/state"},
+		{http.MethodPost, "/v1/projects/brain/state/review"},
+		{http.MethodPost, "/v1/records/note-1/review?project=brain"},
 		{http.MethodGet, "/v1/review?project=brain"},
 		{http.MethodGet, "/v1/proposals?project=brain"},
 		{http.MethodPost, "/v1/proposals/brain/proposal-gh-000000000000/promote"},

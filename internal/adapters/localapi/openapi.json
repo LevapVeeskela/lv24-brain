@@ -31,6 +31,14 @@
       "get": { "description": "Reads a project's state and its CAS revision.", "responses": { "200": { "description": "Project state with revision", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/State" } } } }, "400": { "$ref": "#/components/responses/Error" }, "404": { "$ref": "#/components/responses/Error" } } },
       "put": { "description": "Changes the given state fields. expected_revision was returned by a previous read; a mismatch is 409 with the current revision in error.current_revision and writes nothing. Omit expected_revision for an unconditional write.", "requestBody": { "$ref": "#/components/requestBodies/StateWrite" }, "responses": { "200": { "description": "State after the write", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/State" } } } }, "400": { "$ref": "#/components/responses/Error" }, "404": { "$ref": "#/components/responses/Error" }, "409": { "$ref": "#/components/responses/Error" }, "413": { "$ref": "#/components/responses/Error" }, "415": { "$ref": "#/components/responses/Error" } } }
     },
+    "/v1/projects/{id}/state/review": {
+      "parameters": [{ "$ref": "#/components/parameters/ID" }],
+      "post": {
+        "description": "Marks the project state reviewed and optionally replaces its trust, like brain state review. Provenance-only: the state revision does not move, so a repeated call with the same expected_revision is an idempotent no-op. expected_revision makes the write a compare-and-swap inside the store's atomic state update; a stale value returns 409 with error.current_revision and writes nothing. reviewed must be true when present.",
+        "requestBody": { "required": false, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/StateReviewRequest" } } } },
+        "responses": { "200": { "description": "The state with its revision after review", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/State" } } } }, "400": { "$ref": "#/components/responses/Error" }, "404": { "$ref": "#/components/responses/Error" }, "409": { "$ref": "#/components/responses/Error" } }
+      }
+    },
     "/v1/records": {
       "get": {
         "description": "Newest-first curated records, paginated. project is optional: omit it or pass all_projects=true to read every project the API serves. due_review keeps records whose review date has passed.",
@@ -106,6 +114,15 @@
         "description": "Restores one trashed record. An id that is not in the project trash is 404.",
         "parameters": [{ "$ref": "#/components/parameters/Project" }],
         "responses": { "200": { "description": "The restored record", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Record" } } } }, "400": { "$ref": "#/components/responses/Error" }, "404": { "$ref": "#/components/responses/Error" } }
+      }
+    },
+    "/v1/records/{id}/review": {
+      "parameters": [{ "$ref": "#/components/parameters/ID" }],
+      "post": {
+        "description": "Marks one record reviewed and optionally replaces its trust, like brain record review. Provenance-only: body, ID, kind, classification and review date are untouched and the write is journalled. The record id is unambiguous inside its project; project is optional when the API serves exactly one project. expected_updated_at makes the write a compare-and-swap; a stale value returns 409 with error.current_revision and writes nothing. reviewed must be true when present.",
+        "parameters": [{ "$ref": "#/components/parameters/ProjectOptional" }],
+        "requestBody": { "required": false, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/RecordReviewRequest" } } } },
+        "responses": { "200": { "description": "The record summary after review, with its cleared quarantine", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Record" } } } }, "400": { "$ref": "#/components/responses/Error" }, "404": { "$ref": "#/components/responses/Error" }, "409": { "$ref": "#/components/responses/Error" } }
       }
     },
     "/v1/search": {
@@ -447,7 +464,7 @@
       },
       "State": {
         "type": "object",
-        "required": ["project_id", "revision"],
+        "required": ["project_id", "revision", "provenance"],
         "properties": {
           "project_id": { "type": "string" },
           "goal": { "type": "string" },
@@ -457,7 +474,24 @@
           "open_questions": { "type": "array", "items": { "type": "string" } },
           "updated_at": { "type": "string", "format": "date-time" },
           "fresh_until": { "type": "string", "format": "date-time" },
-          "revision": { "type": "string" }
+          "revision": { "type": "string" },
+          "provenance": { "$ref": "#/components/schemas/Provenance" }
+        }
+      },
+      "RecordReviewRequest": {
+        "type": "object",
+        "properties": {
+          "reviewed": { "type": "boolean", "default": true, "description": "Must be true when present: a review clears a quarantine and never re-arms one." },
+          "trust": { "type": "string", "enum": ["verified", "stated", "inferred"], "description": "Optional replacement trust; omit to keep the stored one." },
+          "expected_updated_at": { "type": "string", "format": "date-time", "description": "The updated_at the client read; omit for a last-write-wins review." }
+        }
+      },
+      "StateReviewRequest": {
+        "type": "object",
+        "properties": {
+          "reviewed": { "type": "boolean", "default": true, "description": "Must be true when present: a review clears a quarantine and never re-arms one." },
+          "trust": { "type": "string", "enum": ["verified", "stated", "inferred"], "description": "Optional replacement trust; omit to keep the stored one." },
+          "expected_revision": { "type": "string", "description": "The state revision the client read; omit for a last-write-wins review." }
         }
       },
       "StateWrite": {
