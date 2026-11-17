@@ -1,6 +1,6 @@
-# Release 0.22.2 — Postgres migration and provenance fix
+﻿# Release 0.22.2 вЂ” Postgres migration and provenance fix
 
-Status: release candidate on `main`; tag `v0.22.2`.
+Status: released; tag `v0.22.2`.
 
 0.22.2 fixes two server-mode defects that the Postgres integration job caught
 after 0.22.1.
@@ -23,8 +23,8 @@ number of destinations, got 13 and 16`. The column list now includes
 ## Verification
 
 - `go test -count=1 -p 1 ./internal/adapters/postgres ./internal/adapters/serverstore ./internal/server`
-  against PostgreSQL 16 — green.
-- `go vet` and the full unit suite — green.
+  against PostgreSQL 16 вЂ” green.
+- `go vet` and the full unit suite вЂ” green.
 - No data-schema change and no migration history rewrite; the checksum of
   migration 0010 changes with the BOM, so an existing server that applied the
   BOM version must be recreated or have its migration checksum refreshed
