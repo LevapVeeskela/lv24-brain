@@ -83,6 +83,7 @@ var completionTable = []completionCmd{
 			valueFlag("repo"), valueFlag("branch"), boolFlag("clear-paths"), boolFlag("clear-aliases"),
 			valueFlag("path"), valueFlag("add-path"), valueFlag("alias"), boolFlag("json"), valueFlag("config")),
 		cmdLeaf("members", choiceFlag("role", "viewer", "member", "maintainer"), boolFlag("json"), valueFlag("config")),
+		cmdLeaf("adopt", boolFlag("apply"), boolFlag("json"), valueFlag("config")),
 	),
 	cmdLeaf("bootstrap", valueFlag("project"), valueFlag("budget"), boolFlag("include-unreviewed"),
 		valueFlag("as-of"), boolFlag("include-superseded"), boolFlag("all-time"), boolFlag("json"), valueFlag("config")),

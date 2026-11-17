@@ -13,14 +13,15 @@ import (
 
 // onboardReport is the stable machine-readable shape of `brain onboard`.
 type onboardReport struct {
-	Engine      string          `json:"engine"`
-	Mode        string          `json:"mode"`
-	DataDir     string          `json:"data_dir"`
-	Config      string          `json:"config"`
-	Checks      []string        `json:"checks"`
-	Warnings    []string        `json:"warnings"`
-	Sync        *app.SyncResult `json:"sync,omitempty"`
-	NextActions []string        `json:"next_actions"`
+	Engine      string           `json:"engine"`
+	Mode        string           `json:"mode"`
+	DataDir     string           `json:"data_dir"`
+	Config      string           `json:"config"`
+	Checks      []string         `json:"checks"`
+	Warnings    []string         `json:"warnings"`
+	Provenance  *app.AdoptReport `json:"provenance,omitempty"`
+	Sync        *app.SyncResult  `json:"sync,omitempty"`
+	NextActions []string         `json:"next_actions"`
 }
 
 // runOnboard is the one-command setup check for a new machine. It registers
@@ -70,6 +71,15 @@ func runOnboard(args []string, stdout, stderr io.Writer) int {
 	}
 
 	code := 0
+	adopt, adoptErr := useCase.App.AdoptLocalPaths(ctx, true)
+	if adoptErr != nil {
+		report.Warnings = append(report.Warnings, "provenance: "+adoptErr.Error())
+	} else {
+		report.Provenance = &adopt
+		report.Checks = append(report.Checks, fmt.Sprintf(
+			"ok: provenance (%d paths stamped for %s, %d already owned, %d not on this machine)",
+			adopt.Stamped, adopt.Machine, adopt.Owned, adopt.Missing))
+	}
 	if cfg.Mode == config.ModeGit {
 		result, syncErr := useCase.App.Sync(ctx, app.SyncOptions{StatusOnly: true})
 		report.Sync = &result

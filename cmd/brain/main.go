@@ -696,6 +696,8 @@ func runProject(args []string, stdout, stderr io.Writer) int {
 		return runProjectSet(args[1:], stdout, stderr)
 	case "members":
 		return runProjectMembers(args[1:], stdout, stderr)
+	case "adopt":
+		return runProjectAdopt(args[1:], stdout, stderr)
 	default:
 		fmt.Fprintf(stderr, "brain project: unknown subcommand %q\n\n", args[0])
 		printProjectUsage(stderr)
@@ -766,6 +768,47 @@ func runProjectShow(args []string, stdout, stderr io.Writer) int {
 	}
 	if err := printProject(stdout, project, *asJSON); err != nil {
 		return reportError(stderr, "project show", err)
+	}
+	return 0
+}
+
+func runProjectAdopt(args []string, stdout, stderr io.Writer) int {
+	fs := newFlagSet("project adopt", stderr)
+	apply := fs.Bool("apply", false, "write the stamped owners (default: dry run)")
+	asJSON := fs.Bool("json", false, "print JSON")
+	cfgPath := configFlag(fs)
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	if fs.NArg() > 0 {
+		fmt.Fprintf(stderr, "brain project adopt: unexpected arguments: %s\n", strings.Join(fs.Args(), " "))
+		return 2
+	}
+	useCase, closeRuntime, err := projectRuntime(*cfgPath)
+	if err != nil {
+		return reportError(stderr, "project adopt", err)
+	}
+	defer closeRuntime()
+	report, err := useCase.AdoptLocalPaths(context.Background(), *apply)
+	if err != nil {
+		return reportError(stderr, "project adopt", err)
+	}
+	if *asJSON {
+		return writeJSONReport(stdout, stderr, "project adopt", report)
+	}
+	fmt.Fprintf(stdout, "machine: %s\n", report.Machine)
+	for _, project := range report.Projects {
+		for _, path := range project.Paths {
+			if path.State != "stamped" {
+				continue
+			}
+			fmt.Fprintf(stdout, "stamp: %s %s -> %s\n", project.ProjectID, path.Path, path.Machine)
+		}
+	}
+	fmt.Fprintf(stdout, "provenance: %d stamped, %d already owned, %d not on this machine\n",
+		report.Stamped, report.Owned, report.Missing)
+	if !report.Applied && report.Stamped > 0 {
+		fmt.Fprintln(stdout, "dry run: pass --apply to record these owners in registry.json")
 	}
 	return 0
 }
@@ -979,6 +1022,7 @@ func printProjectUsage(w io.Writer) {
                     [--clear-paths] [--clear-aliases] [--json]
   brain project add <id> ...   (synonym of set)
   brain project members <id> [add <login> --role viewer|member|maintainer | remove <login> | restrict | open]
+  brain project adopt [--apply] [--json]
 
 Repeat --path and --alias to replace the stored lists; --add-path appends to the
 stored paths (one checkout per machine, e.g. Windows and macOS). --clear-paths and

@@ -373,6 +373,19 @@ command plus the service-manager hint for macOS, Linux or Windows. It never
 installs a service or rewrites records. Use `--json` for a machine-readable
 report; unresolved conflicts return exit 3.
 
+It also stamps path provenance: every registered checkout that exists on this
+machine and has no recorded owner becomes owned by this machine
+(`path_provenance` in `registry.json`). Run the same onboarding on every
+machine once so the desktop Projects page can name the machine behind each
+path. An owner recorded by another machine is never overwritten, so a shared
+`C:\0projects\...` path keeps the first machine that registered it. To inspect
+or re-apply the mapping without the other onboarding checks:
+
+```sh
+brain project adopt            # dry run: what would be stamped
+brain project adopt --apply    # record the owners
+```
+
 ## 2. Git-mode sync routine
 
 The data repository is private and holds the shared brain. The sync commands
