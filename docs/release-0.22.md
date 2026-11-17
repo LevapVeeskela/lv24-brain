@@ -69,8 +69,9 @@ desktop git-sync page is not part of 0.22.
   git history; restore individual files with `git checkout <commit>^ -- <path>`
   before relying on them. Connector runs regenerate GitHub/GitLab dumps; IMAP
   mail is re-fetched from the server.
-- Desktop 1.5.0 stays the current desktop release; its bundled engine 0.21.0
-  keeps the deprecated profile but is otherwise compatible with 0.22 data.
+- Desktop 1.5.1 bundles engine 0.22.0 and adds one-shot recovery from the
+  WebView2 `missing Origin header` IPC startup race; the error banner offers an
+  explicit Reload action for a persistent failure.
 
 ## Known gaps
 
