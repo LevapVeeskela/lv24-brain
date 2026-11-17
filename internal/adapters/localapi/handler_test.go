@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -244,6 +245,24 @@ type fakeProjects struct{ items []Project }
 
 func (f fakeProjects) ListProjects(context.Context) ([]Project, error) { return f.items, nil }
 
+type fakeSync struct {
+	status  SyncView
+	result  SyncView
+	err     error
+	pushed  bool
+	statusC int
+}
+
+func (f *fakeSync) Status(context.Context) (SyncView, error) {
+	f.statusC++
+	return f.status, nil
+}
+
+func (f *fakeSync) Sync(_ context.Context, push bool) (SyncView, error) {
+	f.pushed = push
+	return f.result, f.err
+}
+
 type fakeSettings struct{ values map[string]string }
 
 func (f *fakeSettings) GetSettings(context.Context) (map[string]string, error) { return f.values, nil }
@@ -269,6 +288,7 @@ type testFixture struct {
 	schedules   *fakeSchedules
 	settings    *fakeSettings
 	updater     *fakeUpdater
+	sync        *fakeSync
 	shutdown    chan struct{}
 }
 
@@ -307,10 +327,10 @@ func (w *synchronizedWriter) String() string {
 
 func newFixture(t *testing.T) *testFixture {
 	t.Helper()
-	f := &testFixture{connections: newFakeConnections(), credentials: &fakeCredentials{}, jobs: &fakeJobs{}, cancels: &fakeCancels{statuses: map[string]string{"run-1": "queued"}}, runs: &fakeRuns{log: newFakeRunLog()}, schedules: &fakeSchedules{}, settings: &fakeSettings{values: map[string]string{"theme": "dark", "api_token": "should-not-escape"}}, updater: &fakeUpdater{}, shutdown: make(chan struct{})}
+	f := &testFixture{connections: newFakeConnections(), credentials: &fakeCredentials{}, jobs: &fakeJobs{}, cancels: &fakeCancels{statuses: map[string]string{"run-1": "queued"}}, runs: &fakeRuns{log: newFakeRunLog()}, schedules: &fakeSchedules{}, settings: &fakeSettings{values: map[string]string{"theme": "dark", "api_token": "should-not-escape"}}, updater: &fakeUpdater{}, sync: &fakeSync{status: SyncView{Provider: "git", Branch: "main", Conflicts: []string{}, ConflictRecords: []string{}}, result: SyncView{Provider: "git", Branch: "main", Conflicts: []string{}, ConflictRecords: []string{}}}, shutdown: make(chan struct{})}
 	f.schedules.connections = f.connections
 	var err error
-	f.handler, err = NewHandler(Options{Token: TokenFunc(func() string { return testToken }), Port: testPort, Version: "test", PID: 99, StartedAt: time.Now().Add(-time.Minute), Now: time.Now, MaxBody: 256, Heartbeat: 10 * time.Millisecond, Connections: f.connections, Sources: fakeRegistry{}, Credentials: f.credentials, Jobs: f.jobs, Cancels: f.cancels, Runs: f.runs, Schedules: f.schedules, Projects: fakeProjects{items: []Project{{ID: "brain", Name: "Brain"}}}, Settings: f.settings, Updater: f.updater, Shutdown: ShutdownFunc(func(context.Context) error { close(f.shutdown); return nil })})
+	f.handler, err = NewHandler(Options{Token: TokenFunc(func() string { return testToken }), Port: testPort, Version: "test", PID: 99, StartedAt: time.Now().Add(-time.Minute), Now: time.Now, MaxBody: 256, Heartbeat: 10 * time.Millisecond, Connections: f.connections, Sources: fakeRegistry{}, Credentials: f.credentials, Jobs: f.jobs, Cancels: f.cancels, Runs: f.runs, Schedules: f.schedules, Projects: fakeProjects{items: []Project{{ID: "brain", Name: "Brain"}}}, Settings: f.settings, Sync: f.sync, Updater: f.updater, Shutdown: ShutdownFunc(func(context.Context) error { close(f.shutdown); return nil })})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -539,6 +559,52 @@ func TestRunsSSEHeartbeatCancellationAndRedaction(t *testing.T) {
 	case <-f.runs.log.closed:
 	default:
 		t.Fatal("log producer was not closed")
+	}
+}
+
+func TestSyncStatusAndAction(t *testing.T) {
+	f := newFixture(t)
+	f.sync.status = SyncView{Provider: "git", Branch: "main", Ahead: 2, Dirty: true, Conflicts: []string{}, ConflictRecords: []string{}}
+	w := request(f, http.MethodGet, "/v1/sync", "", nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d: %s", w.Code, w.Body.String())
+	}
+	var view SyncView
+	if err := json.Unmarshal(w.Body.Bytes(), &view); err != nil {
+		t.Fatal(err)
+	}
+	if view.Provider != "git" || view.Branch != "main" || view.Ahead != 2 || !view.Dirty {
+		t.Fatalf("status view = %+v", view)
+	}
+
+	w = request(f, http.MethodPost, "/v1/sync", `{"push":true}`, nil)
+	if w.Code != http.StatusOK || !f.sync.pushed {
+		t.Fatalf("sync = %d pushed=%t: %s", w.Code, f.sync.pushed, w.Body.String())
+	}
+
+	f.sync.err = fmt.Errorf("sync: %w: unresolved conflicts in state.md", domain.ErrConflict)
+	w = request(f, http.MethodPost, "/v1/sync", `{"push":true}`, nil)
+	if w.Code != http.StatusConflict {
+		t.Fatalf("conflict = %d: %s", w.Code, w.Body.String())
+	}
+	var envelope struct {
+		Error struct {
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &envelope); err != nil {
+		t.Fatal(err)
+	}
+	if envelope.Error.Code != "sync_conflict" {
+		t.Fatalf("conflict code = %q", envelope.Error.Code)
+	}
+}
+
+func TestSyncRouteUnavailableWithoutProvider(t *testing.T) {
+	f := newFixture(t)
+	f.handler.opts.Sync = nil
+	if w := request(f, http.MethodGet, "/v1/sync", "", nil); w.Code != http.StatusInternalServerError {
+		t.Fatalf("unavailable = %d: %s", w.Code, w.Body.String())
 	}
 }
 

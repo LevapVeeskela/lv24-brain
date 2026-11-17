@@ -1,77 +1,618 @@
 {
   "openapi": "3.0.3",
-  "info": { "title": "LV24 Brain Local Control API", "version": "1.0.0", "description": "Frozen localapi-v1 contract. Every error uses the sanitized {error:{code,message}} envelope; a method mismatch returns 405 with an Allow header. See docs/localapi-v1.md." },
+  "info": {
+    "title": "LV24 Brain Local Control API",
+    "version": "1.0.0",
+    "description": "Frozen localapi-v1 contract. Every error uses the sanitized {error:{code,message}} envelope; a method mismatch returns 405 with an Allow header. See docs/localapi-v1.md."
+  },
   "x-contract": "localapi-v1",
-  "servers": [{ "url": "http://127.0.0.1:{port}", "variables": { "port": { "default": "49152" } } }],
-  "security": [{ "bearerAuth": [] }],
+  "servers": [
+    {
+      "url": "http://127.0.0.1:{port}",
+      "variables": {
+        "port": {
+          "default": "49152"
+        }
+      }
+    }
+  ],
+  "security": [
+    {
+      "bearerAuth": []
+    }
+  ],
   "paths": {
-    "/v1/health": { "get": { "responses": { "200": { "description": "Agent health (bearer token required)" }, "401": { "$ref": "#/components/responses/Error" }, "403": { "$ref": "#/components/responses/Error" } } } },
+    "/v1/health": {
+      "get": {
+        "responses": {
+          "200": {
+            "description": "Agent health (bearer token required)"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
     "/v1/connections": {
-      "get": { "responses": { "200": { "description": "Connection catalogue" }, "401": { "$ref": "#/components/responses/Error" } } },
-      "post": { "requestBody": { "$ref": "#/components/requestBodies/JSON" }, "responses": { "201": { "description": "Created connection" }, "400": { "$ref": "#/components/responses/Error" }, "409": { "$ref": "#/components/responses/Error" }, "413": { "$ref": "#/components/responses/Error" }, "415": { "$ref": "#/components/responses/Error" } } }
+      "get": {
+        "responses": {
+          "200": {
+            "description": "Connection catalogue"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      },
+      "post": {
+        "requestBody": {
+          "$ref": "#/components/requestBodies/JSON"
+        },
+        "responses": {
+          "201": {
+            "description": "Created connection"
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error"
+          },
+          "413": {
+            "$ref": "#/components/responses/Error"
+          },
+          "415": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
     },
     "/v1/connections/{id}": {
-      "parameters": [{ "$ref": "#/components/parameters/ID" }],
-      "get": { "responses": { "200": { "description": "Connection without secret values" }, "404": { "$ref": "#/components/responses/Error" } } },
-      "patch": { "requestBody": { "$ref": "#/components/requestBodies/JSON" }, "responses": { "200": { "description": "Updated connection" }, "400": { "$ref": "#/components/responses/Error" }, "409": { "$ref": "#/components/responses/Error" } } },
-      "delete": { "description": "Removes the connection configuration; items, checkpoints and credentials are retained (as with `brain connection remove`).", "responses": { "204": { "description": "Removed connection configuration" }, "404": { "$ref": "#/components/responses/Error" }, "409": { "$ref": "#/components/responses/Error" } } }
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/ID"
+        }
+      ],
+      "get": {
+        "responses": {
+          "200": {
+            "description": "Connection without secret values"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      },
+      "patch": {
+        "requestBody": {
+          "$ref": "#/components/requestBodies/JSON"
+        },
+        "responses": {
+          "200": {
+            "description": "Updated connection"
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      },
+      "delete": {
+        "description": "Removes the connection configuration; items, checkpoints and credentials are retained (as with `brain connection remove`).",
+        "responses": {
+          "204": {
+            "description": "Removed connection configuration"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
     },
-    "/v1/connections/{id}/credentials/{field}": { "parameters": [{ "$ref": "#/components/parameters/ID" }, { "name": "field", "in": "path", "required": true, "schema": { "type": "string" } }], "post": { "description": "Writes a secret through the credential store; the value is never returned.", "requestBody": { "$ref": "#/components/requestBodies/JSON" }, "responses": { "204": { "description": "Credential stored" }, "400": { "$ref": "#/components/responses/Error" }, "404": { "$ref": "#/components/responses/Error" } } } },
-    "/v1/connections/{id}/test": { "parameters": [{ "$ref": "#/components/parameters/ID" }], "post": { "responses": { "200": { "description": "Source check passed" }, "404": { "$ref": "#/components/responses/Error" }, "500": { "$ref": "#/components/responses/Error" } } } },
-    "/v1/connections/{id}/run": { "parameters": [{ "$ref": "#/components/parameters/ID" }], "post": { "requestBody": { "required": false, "content": { "application/json": { "schema": { "type": "object" } } } }, "responses": { "202": { "description": "Run queued" }, "400": { "$ref": "#/components/responses/Error" }, "404": { "$ref": "#/components/responses/Error" }, "409": { "$ref": "#/components/responses/Error" } } } },
-    "/v1/runs": { "get": { "description": "Recent run summaries without error text. Items carry connectionId plus the snake_case connection_id and project_ids of the connection when it is known; actor is omitted because run records do not persist a trigger.", "parameters": [{ "name": "limit", "in": "query", "schema": { "type": "integer", "minimum": 1, "maximum": 500 } }], "responses": { "200": { "description": "Recent run summaries without error text", "content": { "application/json": { "schema": { "type": "array", "items": { "$ref": "#/components/schemas/Run" } } } } } } } },
-    "/v1/runs/{id}": { "parameters": [{ "$ref": "#/components/parameters/ID" }], "get": { "responses": { "200": { "description": "Run summary", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Run" } } } }, "404": { "$ref": "#/components/responses/Error" } } } },
-    "/v1/runs/{id}/cancel": { "parameters": [{ "$ref": "#/components/parameters/ID" }], "post": { "description": "Requests cancellation of a queued or running job. A 202 means the request was accepted, not that the job has already stopped.", "responses": { "202": { "description": "Cancellation accepted" }, "404": { "$ref": "#/components/responses/Error" }, "409": { "$ref": "#/components/responses/Error" } } } },
-    "/v1/runs/{id}/log": { "parameters": [{ "$ref": "#/components/parameters/ID" }], "get": { "responses": { "200": { "description": "Redacted Server-Sent Events log stream", "content": { "text/event-stream": { "schema": { "type": "string" } } } }, "404": { "$ref": "#/components/responses/Error" } } } },
-    "/v1/schedules": { "get": { "responses": { "200": { "description": "Persisted schedules" } } } },
-    "/v1/schedules/{connectionId}": { "parameters": [{ "name": "connectionId", "in": "path", "required": true, "schema": { "type": "string" } }], "put": { "requestBody": { "$ref": "#/components/requestBodies/JSON" }, "responses": { "200": { "description": "Schedule saved" }, "400": { "$ref": "#/components/responses/Error" }, "404": { "$ref": "#/components/responses/Error" } } } },
-    "/v1/projects": { "get": { "responses": { "200": { "description": "Registered project IDs and names" } } } },
+    "/v1/connections/{id}/credentials/{field}": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/ID"
+        },
+        {
+          "name": "field",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "post": {
+        "description": "Writes a secret through the credential store; the value is never returned.",
+        "requestBody": {
+          "$ref": "#/components/requestBodies/JSON"
+        },
+        "responses": {
+          "204": {
+            "description": "Credential stored"
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/v1/connections/{id}/test": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/ID"
+        }
+      ],
+      "post": {
+        "responses": {
+          "200": {
+            "description": "Source check passed"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "500": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/v1/connections/{id}/run": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/ID"
+        }
+      ],
+      "post": {
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "description": "Run queued"
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/v1/runs": {
+      "get": {
+        "description": "Recent run summaries without error text. Items carry connectionId plus the snake_case connection_id and project_ids of the connection when it is known; actor is omitted because run records do not persist a trigger.",
+        "parameters": [
+          {
+            "name": "limit",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 500
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Recent run summaries without error text",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/Run"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/runs/{id}": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/ID"
+        }
+      ],
+      "get": {
+        "responses": {
+          "200": {
+            "description": "Run summary",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Run"
+                }
+              }
+            }
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/v1/runs/{id}/cancel": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/ID"
+        }
+      ],
+      "post": {
+        "description": "Requests cancellation of a queued or running job. A 202 means the request was accepted, not that the job has already stopped.",
+        "responses": {
+          "202": {
+            "description": "Cancellation accepted"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/v1/runs/{id}/log": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/ID"
+        }
+      ],
+      "get": {
+        "responses": {
+          "200": {
+            "description": "Redacted Server-Sent Events log stream",
+            "content": {
+              "text/event-stream": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/v1/schedules": {
+      "get": {
+        "responses": {
+          "200": {
+            "description": "Persisted schedules"
+          }
+        }
+      }
+    },
+    "/v1/schedules/{connectionId}": {
+      "parameters": [
+        {
+          "name": "connectionId",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "put": {
+        "requestBody": {
+          "$ref": "#/components/requestBodies/JSON"
+        },
+        "responses": {
+          "200": {
+            "description": "Schedule saved"
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/v1/projects": {
+      "get": {
+        "responses": {
+          "200": {
+            "description": "Registered project IDs, names, checkout paths and path provenance",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/Project"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/projects/{id}/state": {
-      "parameters": [{ "$ref": "#/components/parameters/ID" }],
-      "get": { "description": "Reads a project's state and its CAS revision.", "responses": { "200": { "description": "Project state with revision", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/State" } } } }, "400": { "$ref": "#/components/responses/Error" }, "404": { "$ref": "#/components/responses/Error" } } },
-      "put": { "description": "Changes the given state fields. expected_revision was returned by a previous read; a mismatch is 409 with the current revision in error.current_revision and writes nothing. Omit expected_revision for an unconditional write.", "requestBody": { "$ref": "#/components/requestBodies/StateWrite" }, "responses": { "200": { "description": "State after the write", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/State" } } } }, "400": { "$ref": "#/components/responses/Error" }, "404": { "$ref": "#/components/responses/Error" }, "409": { "$ref": "#/components/responses/Error" }, "413": { "$ref": "#/components/responses/Error" }, "415": { "$ref": "#/components/responses/Error" } } }
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/ID"
+        }
+      ],
+      "get": {
+        "description": "Reads a project's state and its CAS revision.",
+        "responses": {
+          "200": {
+            "description": "Project state with revision",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/State"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      },
+      "put": {
+        "description": "Changes the given state fields. expected_revision was returned by a previous read; a mismatch is 409 with the current revision in error.current_revision and writes nothing. Omit expected_revision for an unconditional write.",
+        "requestBody": {
+          "$ref": "#/components/requestBodies/StateWrite"
+        },
+        "responses": {
+          "200": {
+            "description": "State after the write",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/State"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error"
+          },
+          "413": {
+            "$ref": "#/components/responses/Error"
+          },
+          "415": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
     },
     "/v1/projects/{id}/state/review": {
-      "parameters": [{ "$ref": "#/components/parameters/ID" }],
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/ID"
+        }
+      ],
       "post": {
         "description": "Marks the project state reviewed and optionally replaces its trust, like brain state review. Provenance-only: the state revision does not move, so a repeated call with the same expected_revision is an idempotent no-op. expected_revision makes the write a compare-and-swap inside the store's atomic state update; a stale value returns 409 with error.current_revision and writes nothing. reviewed must be true when present.",
-        "requestBody": { "required": false, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/StateReviewRequest" } } } },
-        "responses": { "200": { "description": "The state with its revision after review", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/State" } } } }, "400": { "$ref": "#/components/responses/Error" }, "404": { "$ref": "#/components/responses/Error" }, "409": { "$ref": "#/components/responses/Error" } }
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/StateReviewRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The state with its revision after review",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/State"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
       }
     },
     "/v1/records": {
       "get": {
         "description": "Newest-first curated records, paginated. project is optional: omit it or pass all_projects=true to read every project the API serves. due_review keeps records whose review date has passed.",
         "parameters": [
-          { "$ref": "#/components/parameters/ProjectOptional" },
-          { "$ref": "#/components/parameters/AllProjects" },
-          { "name": "kind", "in": "query", "description": "Repeated or comma-separated: note, decision, attempt, handoff.", "schema": { "type": "array", "items": { "type": "string" } }, "style": "form", "explode": true },
-          { "name": "status", "in": "query", "description": "Decision status (proposed, accepted, rejected, superseded).", "schema": { "type": "string" } },
-          { "name": "scope", "in": "query", "schema": { "type": "string", "enum": ["project", "personal", "global"] } },
-          { "name": "subtype", "in": "query", "schema": { "type": "string" } },
-          { "name": "topic", "in": "query", "schema": { "type": "string" } },
-          { "$ref": "#/components/parameters/Since" },
-          { "$ref": "#/components/parameters/Limit" },
-          { "$ref": "#/components/parameters/Cursor" },
-          { "name": "due_review", "in": "query", "schema": { "type": "boolean", "default": false } }
+          {
+            "$ref": "#/components/parameters/ProjectOptional"
+          },
+          {
+            "$ref": "#/components/parameters/AllProjects"
+          },
+          {
+            "name": "kind",
+            "in": "query",
+            "description": "Repeated or comma-separated: note, decision, attempt, handoff.",
+            "schema": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "style": "form",
+            "explode": true
+          },
+          {
+            "name": "status",
+            "in": "query",
+            "description": "Decision status (proposed, accepted, rejected, superseded).",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "scope",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "project",
+                "personal",
+                "global"
+              ]
+            }
+          },
+          {
+            "name": "subtype",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "topic",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "$ref": "#/components/parameters/Since"
+          },
+          {
+            "$ref": "#/components/parameters/Limit"
+          },
+          {
+            "$ref": "#/components/parameters/Cursor"
+          },
+          {
+            "name": "due_review",
+            "in": "query",
+            "schema": {
+              "type": "boolean",
+              "default": false
+            }
+          }
         ],
-        "responses": { "200": { "description": "One page of records", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/RecordPage" } } } }, "400": { "$ref": "#/components/responses/Error" }, "404": { "$ref": "#/components/responses/Error" } }
+        "responses": {
+          "200": {
+            "description": "One page of records",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RecordPage"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
       }
     },
     "/v1/records/{id}": {
-      "parameters": [{ "$ref": "#/components/parameters/ID" }],
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/ID"
+        }
+      ],
       "get": {
         "description": "One record with its body, links, backlinks, relations, validity and provenance. max_tokens bounds the body; history adds the timeline of the same kind around the record. Relation rows carry target_kind when the target is live.",
         "parameters": [
-          { "$ref": "#/components/parameters/Project" },
-          { "name": "max_tokens", "in": "query", "schema": { "type": "integer", "minimum": 1, "maximum": 32000, "default": 4000 } },
-          { "name": "history", "in": "query", "schema": { "type": "boolean", "default": false } }
+          {
+            "$ref": "#/components/parameters/Project"
+          },
+          {
+            "name": "max_tokens",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 32000,
+              "default": 4000
+            }
+          },
+          {
+            "name": "history",
+            "in": "query",
+            "schema": {
+              "type": "boolean",
+              "default": false
+            }
+          }
         ],
-        "responses": { "200": { "description": "Record detail", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/RecordDetail" } } } }, "400": { "$ref": "#/components/responses/Error" }, "404": { "$ref": "#/components/responses/Error" } }
+        "responses": {
+          "200": {
+            "description": "Record detail",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RecordDetail"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
       },
       "patch": {
         "description": "Edits the text of one record in place: title and body (plus tags on a note), never its ID, kind, project, provenance, validity, relations or review state. Body is the note text, the decision context, the attempt result or the handoff summary; a handoff has no title. The stored body is kept in bounded history. expected_updated_at makes the edit a compare-and-swap; a stale value returns 409 with error.current_revision and writes nothing. allow_duplicate accepts text another live record of the same kind already has. An unreviewed record stays unreviewed.",
-        "parameters": [{ "$ref": "#/components/parameters/Project" }],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/Project"
+          }
+        ],
         "requestBody": {
           "required": true,
           "content": {
@@ -80,673 +621,2637 @@
                 "type": "object",
                 "additionalProperties": false,
                 "properties": {
-                  "title": { "type": "string", "maxLength": 200 },
-                  "body": { "type": "string", "maxLength": 1048576 },
-                  "tags": { "type": "array", "maxItems": 256, "items": { "type": "string" } },
-                  "expected_updated_at": { "type": "string", "format": "date-time" },
-                  "allow_duplicate": { "type": "boolean", "default": false }
+                  "title": {
+                    "type": "string",
+                    "maxLength": 200
+                  },
+                  "body": {
+                    "type": "string",
+                    "maxLength": 1048576
+                  },
+                  "tags": {
+                    "type": "array",
+                    "maxItems": 256,
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "expected_updated_at": {
+                    "type": "string",
+                    "format": "date-time"
+                  },
+                  "allow_duplicate": {
+                    "type": "boolean",
+                    "default": false
+                  }
                 }
               }
             }
           }
         },
         "responses": {
-          "200": { "description": "The edited record with its body", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/RecordDetail" } } } },
-          "400": { "$ref": "#/components/responses/Error" },
-          "403": { "$ref": "#/components/responses/Error" },
-          "404": { "$ref": "#/components/responses/Error" },
-          "409": { "$ref": "#/components/responses/Error" },
-          "413": { "$ref": "#/components/responses/Error" }
+          "200": {
+            "description": "The edited record with its body",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RecordDetail"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error"
+          },
+          "413": {
+            "$ref": "#/components/responses/Error"
+          }
         }
       }
     },
     "/v1/records/{id}/trash": {
-      "parameters": [{ "$ref": "#/components/parameters/ID" }],
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/ID"
+        }
+      ],
       "post": {
         "description": "Moves one record to its project trash through the same use case as brain record trash. The move is reversible and never deletes a file; an unknown record is 404 and a hand-written note without an id marker is 400 validation.",
-        "parameters": [{ "$ref": "#/components/parameters/Project" }],
-        "responses": { "200": { "description": "The trashed record", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Record" } } } }, "400": { "$ref": "#/components/responses/Error" }, "404": { "$ref": "#/components/responses/Error" } }
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/Project"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The trashed record",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Record"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
       }
     },
     "/v1/records/{id}/restore": {
-      "parameters": [{ "$ref": "#/components/parameters/ID" }],
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/ID"
+        }
+      ],
       "post": {
         "description": "Restores one trashed record. An id that is not in the project trash is 404.",
-        "parameters": [{ "$ref": "#/components/parameters/Project" }],
-        "responses": { "200": { "description": "The restored record", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Record" } } } }, "400": { "$ref": "#/components/responses/Error" }, "404": { "$ref": "#/components/responses/Error" } }
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/Project"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The restored record",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Record"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
       }
     },
     "/v1/records/{id}/review": {
-      "parameters": [{ "$ref": "#/components/parameters/ID" }],
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/ID"
+        }
+      ],
       "post": {
         "description": "Marks one record reviewed and optionally replaces its trust, like brain record review. Provenance-only: body, ID, kind, classification and review date are untouched and the write is journalled. The record id is unambiguous inside its project; project is optional when the API serves exactly one project. expected_updated_at makes the write a compare-and-swap; a stale value returns 409 with error.current_revision and writes nothing. reviewed must be true when present.",
-        "parameters": [{ "$ref": "#/components/parameters/ProjectOptional" }],
-        "requestBody": { "required": false, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/RecordReviewRequest" } } } },
-        "responses": { "200": { "description": "The record summary after review, with its cleared quarantine", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Record" } } } }, "400": { "$ref": "#/components/responses/Error" }, "404": { "$ref": "#/components/responses/Error" }, "409": { "$ref": "#/components/responses/Error" } }
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/ProjectOptional"
+          }
+        ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RecordReviewRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The record summary after review, with its cleared quarantine",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Record"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
       }
     },
     "/v1/search": {
       "get": {
         "description": "Ranked search over curated records only. Raw-zone kinds are never returned and kind=dump/item is refused.",
         "parameters": [
-          { "name": "q", "in": "query", "required": true, "schema": { "type": "string" } },
-          { "$ref": "#/components/parameters/ProjectOptional" },
-          { "$ref": "#/components/parameters/AllProjects" },
-          { "name": "kind", "in": "query", "description": "Repeated or comma-separated: note, decision, attempt, handoff, state.", "schema": { "type": "array", "items": { "type": "string" } }, "style": "form", "explode": true },
-          { "name": "limit", "in": "query", "schema": { "type": "integer", "minimum": 1, "maximum": 100, "default": 20 } },
-          { "$ref": "#/components/parameters/Cursor" },
-          { "name": "mode", "in": "query", "schema": { "type": "string", "enum": ["all", "any"] } },
-          { "name": "min_score", "in": "query", "schema": { "type": "number", "minimum": 0, "maximum": 1 } },
-          { "name": "explain", "in": "query", "schema": { "type": "boolean", "default": false } }
+          {
+            "name": "q",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "$ref": "#/components/parameters/ProjectOptional"
+          },
+          {
+            "$ref": "#/components/parameters/AllProjects"
+          },
+          {
+            "name": "kind",
+            "in": "query",
+            "description": "Repeated or comma-separated: note, decision, attempt, handoff, state.",
+            "schema": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "style": "form",
+            "explode": true
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100,
+              "default": 20
+            }
+          },
+          {
+            "$ref": "#/components/parameters/Cursor"
+          },
+          {
+            "name": "mode",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "all",
+                "any"
+              ]
+            }
+          },
+          {
+            "name": "min_score",
+            "in": "query",
+            "schema": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            }
+          },
+          {
+            "name": "explain",
+            "in": "query",
+            "schema": {
+              "type": "boolean",
+              "default": false
+            }
+          }
         ],
-        "responses": { "200": { "description": "One page of ranked hits", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/SearchPage" } } } }, "400": { "$ref": "#/components/responses/Error" }, "404": { "$ref": "#/components/responses/Error" } }
+        "responses": {
+          "200": {
+            "description": "One page of ranked hits",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SearchPage"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
       }
     },
     "/v1/review": {
       "get": {
         "description": "Read-only review report: findings with severity/why/next/confirm, due reviews, pending proposals and the quarantined count. project is optional; an all-projects report sets project_id to * and names each item's project_id.",
-        "parameters": [{ "$ref": "#/components/parameters/ProjectOptional" }, { "$ref": "#/components/parameters/AllProjects" }],
-        "responses": { "200": { "description": "Review report", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Review" } } } }, "400": { "$ref": "#/components/responses/Error" }, "404": { "$ref": "#/components/responses/Error" } }
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/ProjectOptional"
+          },
+          {
+            "$ref": "#/components/parameters/AllProjects"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Review report",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Review"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
       }
     },
     "/v1/review/fix": {
       "post": {
         "description": "Applies the same safe fixes as brain review --fix: adopts the next action of a later handoff and removes open questions a later record answers. The default is a dry run; writing needs apply=true, and dry_run=true with apply is refused. Semantic fixes are never performed.",
-        "parameters": [{ "$ref": "#/components/parameters/Project" }],
-        "requestBody": { "$ref": "#/components/requestBodies/ReviewFix" },
-        "responses": { "200": { "description": "Planned or applied safe fixes", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ReviewFixResult" } } } }, "400": { "$ref": "#/components/responses/Error" }, "404": { "$ref": "#/components/responses/Error" }, "413": { "$ref": "#/components/responses/Error" }, "415": { "$ref": "#/components/responses/Error" } }
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/Project"
+          }
+        ],
+        "requestBody": {
+          "$ref": "#/components/requestBodies/ReviewFix"
+        },
+        "responses": {
+          "200": {
+            "description": "Planned or applied safe fixes",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReviewFixResult"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "413": {
+            "$ref": "#/components/responses/Error"
+          },
+          "415": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
       }
     },
     "/v1/quarantine": {
       "get": {
         "description": "The quarantine inbox: unreviewed external writes and unknown origins, newest first, without bodies. Age is whole seconds since creation.",
         "parameters": [
-          { "$ref": "#/components/parameters/Project" },
-          { "$ref": "#/components/parameters/Limit" },
-          { "$ref": "#/components/parameters/Cursor" }
+          {
+            "$ref": "#/components/parameters/Project"
+          },
+          {
+            "$ref": "#/components/parameters/Limit"
+          },
+          {
+            "$ref": "#/components/parameters/Cursor"
+          }
         ],
-        "responses": { "200": { "description": "One page of quarantined records", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/QuarantinePage" } } } }, "400": { "$ref": "#/components/responses/Error" }, "404": { "$ref": "#/components/responses/Error" } }
+        "responses": {
+          "200": {
+            "description": "One page of quarantined records",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/QuarantinePage"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
       }
     },
     "/v1/quarantine/{id}/review": {
-      "parameters": [{ "$ref": "#/components/parameters/ID" }],
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/ID"
+        }
+      ],
       "post": {
         "description": "Marks one quarantined record reviewed, optionally replacing its trust, like brain record review. A record with an unknown origin stays quarantined because review cannot repair a malformed origin. Records have no revision, so review is idempotent and has no compare-and-swap.",
-        "parameters": [{ "$ref": "#/components/parameters/Project" }],
-        "requestBody": { "required": false, "content": { "application/json": { "schema": { "type": "object", "properties": { "trust": { "type": "string", "enum": ["verified", "stated", "inferred"] } } } } } },
-        "responses": { "200": { "description": "The record after review", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/QuarantineReview" } } } }, "400": { "$ref": "#/components/responses/Error" }, "404": { "$ref": "#/components/responses/Error" } }
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/Project"
+          }
+        ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "trust": {
+                    "type": "string",
+                    "enum": [
+                      "verified",
+                      "stated",
+                      "inferred"
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The record after review",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/QuarantineReview"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
       }
     },
     "/v1/proposals": {
       "get": {
         "description": "Candidate records with source health. Bodies stay out unless include_body=true; the page shares a body budget and items past it are marked body_omitted. Candidates hidden by an active snooze are omitted unless a status filter is given or include_snoozed=true.",
         "parameters": [
-          { "$ref": "#/components/parameters/Project" },
-          { "name": "status", "in": "query", "description": "Repeated or comma-separated: pending, stale, promoted, dismissed.", "schema": { "type": "array", "items": { "type": "string" } }, "style": "form", "explode": true },
-          { "name": "kind", "in": "query", "schema": { "type": "string", "enum": ["decision", "attempt", "note"] } },
-          { "$ref": "#/components/parameters/Limit" },
-          { "$ref": "#/components/parameters/Cursor" },
-          { "name": "include_body", "in": "query", "description": "Render each candidate's redacted text under max_tokens.", "schema": { "type": "boolean", "default": false } },
-          { "name": "include_snoozed", "in": "query", "description": "Keep candidates hidden by a snooze that has not come due.", "schema": { "type": "boolean", "default": false } },
-          { "name": "max_tokens", "in": "query", "schema": { "type": "integer", "minimum": 1, "maximum": 2000, "default": 600 } }
+          {
+            "$ref": "#/components/parameters/Project"
+          },
+          {
+            "name": "status",
+            "in": "query",
+            "description": "Repeated or comma-separated: pending, stale, promoted, dismissed.",
+            "schema": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "style": "form",
+            "explode": true
+          },
+          {
+            "name": "kind",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "decision",
+                "attempt",
+                "note"
+              ]
+            }
+          },
+          {
+            "$ref": "#/components/parameters/Limit"
+          },
+          {
+            "$ref": "#/components/parameters/Cursor"
+          },
+          {
+            "name": "include_body",
+            "in": "query",
+            "description": "Render each candidate's redacted text under max_tokens.",
+            "schema": {
+              "type": "boolean",
+              "default": false
+            }
+          },
+          {
+            "name": "include_snoozed",
+            "in": "query",
+            "description": "Keep candidates hidden by a snooze that has not come due.",
+            "schema": {
+              "type": "boolean",
+              "default": false
+            }
+          },
+          {
+            "name": "max_tokens",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 2000,
+              "default": 600
+            }
+          }
         ],
-        "responses": { "200": { "description": "One page of proposals", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ProposalPage" } } } }, "400": { "$ref": "#/components/responses/Error" }, "404": { "$ref": "#/components/responses/Error" } }
+        "responses": {
+          "200": {
+            "description": "One page of proposals",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProposalPage"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
       }
     },
     "/v1/proposals/{project}/{id}": {
-      "parameters": [{ "name": "project", "in": "path", "required": true, "schema": { "type": "string" } }, { "$ref": "#/components/parameters/ID" }],
+      "parameters": [
+        {
+          "name": "project",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "$ref": "#/components/parameters/ID"
+        }
+      ],
       "get": {
         "description": "One candidate with its bounded redacted body; the preview a promotion would create.",
-        "parameters": [{ "name": "max_tokens", "in": "query", "schema": { "type": "integer", "minimum": 1, "maximum": 32000, "default": 600 } }],
-        "responses": { "200": { "description": "Proposal detail", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ProposalDetail" } } } }, "400": { "$ref": "#/components/responses/Error" }, "404": { "$ref": "#/components/responses/Error" } }
+        "parameters": [
+          {
+            "name": "max_tokens",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 32000,
+              "default": 600
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Proposal detail",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProposalDetail"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
       }
     },
     "/v1/proposals/{project}/{id}/promote": {
-      "parameters": [{ "name": "project", "in": "path", "required": true, "schema": { "type": "string" } }, { "$ref": "#/components/parameters/ID" }],
+      "parameters": [
+        {
+          "name": "project",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "$ref": "#/components/parameters/ID"
+        }
+      ],
       "post": {
         "description": "Promotes one pending proposal. Nothing is promoted automatically; as/status/title override the created record, force allows a stale or orphaned source and yes confirms a local-only source. The call is idempotent.",
-        "requestBody": { "$ref": "#/components/requestBodies/ProposalDecision" },
-        "responses": { "200": { "description": "Promotion receipt", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ProposalOutcome" } } } }, "400": { "$ref": "#/components/responses/Error" }, "404": { "$ref": "#/components/responses/Error" }, "409": { "$ref": "#/components/responses/Error" } }
+        "requestBody": {
+          "$ref": "#/components/requestBodies/ProposalDecision"
+        },
+        "responses": {
+          "200": {
+            "description": "Promotion receipt",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProposalOutcome"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
       }
     },
     "/v1/proposals/{project}/{id}/dismiss": {
-      "parameters": [{ "name": "project", "in": "path", "required": true, "schema": { "type": "string" } }, { "$ref": "#/components/parameters/ID" }],
+      "parameters": [
+        {
+          "name": "project",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "$ref": "#/components/parameters/ID"
+        }
+      ],
       "post": {
         "description": "Dismisses one proposal. Repeating the dismissal is idempotent; dismissing a promoted proposal is 409.",
-        "requestBody": { "required": false, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ProposalDecision" } } } },
-        "responses": { "200": { "description": "Dismissal receipt", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ProposalOutcome" } } } }, "404": { "$ref": "#/components/responses/Error" }, "409": { "$ref": "#/components/responses/Error" } }
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ProposalDecision"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Dismissal receipt",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProposalOutcome"
+                }
+              }
+            }
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
       }
     },
     "/v1/proposals/{project}/{id}/snooze": {
-      "parameters": [{ "name": "project", "in": "path", "required": true, "schema": { "type": "string" } }, { "$ref": "#/components/parameters/ID" }],
+      "parameters": [
+        {
+          "name": "project",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "$ref": "#/components/parameters/ID"
+        }
+      ],
       "post": {
         "description": "Hides a pending or stale candidate from the review queue until a time. until accepts an RFC3339 time, a calendar date, a positive duration (7d) or null to clear; repeating the stored value writes nothing. expected_updated_at makes the write a compare-and-swap and a stale value returns 409 with error.current_revision. Snoozing a promoted or dismissed proposal is 400 validation.",
-        "requestBody": { "$ref": "#/components/requestBodies/ProposalSnooze" },
-        "responses": { "200": { "description": "The candidate after the snooze write", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ProposalSnoozeReceipt" } } } }, "400": { "$ref": "#/components/responses/Error" }, "404": { "$ref": "#/components/responses/Error" }, "409": { "$ref": "#/components/responses/Error" }, "413": { "$ref": "#/components/responses/Error" }, "415": { "$ref": "#/components/responses/Error" } }
+        "requestBody": {
+          "$ref": "#/components/requestBodies/ProposalSnooze"
+        },
+        "responses": {
+          "200": {
+            "description": "The candidate after the snooze write",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProposalSnoozeReceipt"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error"
+          },
+          "413": {
+            "$ref": "#/components/responses/Error"
+          },
+          "415": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
       },
       "delete": {
         "description": "Clears the snooze of one candidate. The call is idempotent: clearing a candidate that is not snoozed succeeds unchanged.",
-        "responses": { "200": { "description": "The candidate after clearing its snooze", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ProposalSnoozeReceipt" } } } }, "400": { "$ref": "#/components/responses/Error" }, "404": { "$ref": "#/components/responses/Error" }, "409": { "$ref": "#/components/responses/Error" } }
+        "responses": {
+          "200": {
+            "description": "The candidate after clearing its snooze",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProposalSnoozeReceipt"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
       }
     },
     "/v1/catchup": {
       "get": {
         "description": "Recent changes since the latest handoff, an explicit since, or the default window.",
         "parameters": [
-          { "$ref": "#/components/parameters/Project" },
-          { "$ref": "#/components/parameters/Since" },
-          { "name": "include_unreviewed", "in": "query", "schema": { "type": "boolean", "default": false } },
-          { "name": "limit", "in": "query", "schema": { "type": "integer", "minimum": 1, "maximum": 100, "default": 20 } }
+          {
+            "$ref": "#/components/parameters/Project"
+          },
+          {
+            "$ref": "#/components/parameters/Since"
+          },
+          {
+            "name": "include_unreviewed",
+            "in": "query",
+            "schema": {
+              "type": "boolean",
+              "default": false
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100,
+              "default": 20
+            }
+          }
         ],
-        "responses": { "200": { "description": "Catchup report", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Catchup" } } } }, "400": { "$ref": "#/components/responses/Error" }, "404": { "$ref": "#/components/responses/Error" } }
+        "responses": {
+          "200": {
+            "description": "Catchup report",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Catchup"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
       }
     },
-    "/v1/settings": { "get": { "responses": { "200": { "description": "Non-secret settings only" } } }, "put": { "requestBody": { "$ref": "#/components/requestBodies/JSON" }, "responses": { "200": { "description": "Settings saved" }, "400": { "$ref": "#/components/responses/Error" }, "413": { "$ref": "#/components/responses/Error" } } } },
-    "/v1/engine/update": { "post": { "description": "Checks/applies an engine update only after explicit confirmation.", "requestBody": { "$ref": "#/components/requestBodies/JSON" }, "responses": { "200": { "description": "Sanitized update result" }, "400": { "$ref": "#/components/responses/Error" }, "500": { "$ref": "#/components/responses/Error" } } } },
-    "/v1/shutdown": { "post": { "responses": { "202": { "description": "Graceful shutdown requested" }, "500": { "$ref": "#/components/responses/Error" } } } }
+    "/v1/settings": {
+      "get": {
+        "responses": {
+          "200": {
+            "description": "Non-secret settings only"
+          }
+        }
+      },
+      "put": {
+        "requestBody": {
+          "$ref": "#/components/requestBodies/JSON"
+        },
+        "responses": {
+          "200": {
+            "description": "Settings saved"
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "413": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/v1/engine/update": {
+      "post": {
+        "description": "Checks/applies an engine update only after explicit confirmation.",
+        "requestBody": {
+          "$ref": "#/components/requestBodies/JSON"
+        },
+        "responses": {
+          "200": {
+            "description": "Sanitized update result"
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "500": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/v1/shutdown": {
+      "post": {
+        "responses": {
+          "202": {
+            "description": "Graceful shutdown requested"
+          },
+          "500": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/v1/sync": {
+      "get": {
+        "description": "Reads the git sync state of the agent's data repository, including divergence, dirty files and conflict records.",
+        "responses": {
+          "200": {
+            "description": "Current git sync state",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SyncView"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "500": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      },
+      "post": {
+        "description": "Commits local changes, pulls with rebase and optionally pushes. A content conflict returns 409 sync_conflict and changes nothing else; refresh GET /v1/sync for the conflict paths.",
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SyncRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Sync completed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SyncView"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error"
+          },
+          "500": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    }
   },
   "components": {
-    "securitySchemes": { "bearerAuth": { "type": "http", "scheme": "bearer" } },
+    "securitySchemes": {
+      "bearerAuth": {
+        "type": "http",
+        "scheme": "bearer"
+      }
+    },
     "parameters": {
-      "ID": { "name": "id", "in": "path", "required": true, "schema": { "type": "string" } },
-      "Project": { "name": "project", "in": "query", "required": true, "schema": { "type": "string" } },
-      "ProjectOptional": { "name": "project", "in": "query", "description": "A registered project id, alias or path. Omit it (or pass all_projects=true) to read every project this API serves; a non-empty allowlist requires an explicit project unless it holds exactly one.", "schema": { "type": "string" } },
-      "AllProjects": { "name": "all_projects", "in": "query", "description": "Reads every project the API's allowlist serves. Mutually exclusive with project and refused when the allowlist names several projects.", "schema": { "type": "boolean", "default": false } },
-      "Since": { "name": "since", "in": "query", "description": "A positive duration (24h, 7d, 2w), a date (2026-11-01) or an RFC3339 time.", "schema": { "type": "string" } },
-      "Limit": { "name": "limit", "in": "query", "schema": { "type": "integer", "minimum": 1, "maximum": 200 } },
-      "Cursor": { "name": "cursor", "in": "query", "description": "Opaque next_cursor from the previous page; bound to its query.", "schema": { "type": "string" } }
+      "ID": {
+        "name": "id",
+        "in": "path",
+        "required": true,
+        "schema": {
+          "type": "string"
+        }
+      },
+      "Project": {
+        "name": "project",
+        "in": "query",
+        "required": true,
+        "schema": {
+          "type": "string"
+        }
+      },
+      "ProjectOptional": {
+        "name": "project",
+        "in": "query",
+        "description": "A registered project id, alias or path. Omit it (or pass all_projects=true) to read every project this API serves; a non-empty allowlist requires an explicit project unless it holds exactly one.",
+        "schema": {
+          "type": "string"
+        }
+      },
+      "AllProjects": {
+        "name": "all_projects",
+        "in": "query",
+        "description": "Reads every project the API's allowlist serves. Mutually exclusive with project and refused when the allowlist names several projects.",
+        "schema": {
+          "type": "boolean",
+          "default": false
+        }
+      },
+      "Since": {
+        "name": "since",
+        "in": "query",
+        "description": "A positive duration (24h, 7d, 2w), a date (2026-11-01) or an RFC3339 time.",
+        "schema": {
+          "type": "string"
+        }
+      },
+      "Limit": {
+        "name": "limit",
+        "in": "query",
+        "schema": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 200
+        }
+      },
+      "Cursor": {
+        "name": "cursor",
+        "in": "query",
+        "description": "Opaque next_cursor from the previous page; bound to its query.",
+        "schema": {
+          "type": "string"
+        }
+      }
     },
     "requestBodies": {
-      "JSON": { "required": true, "content": { "application/json": { "schema": { "type": "object" } } } },
-      "StateWrite": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/StateWrite" } } } },
-      "ProposalDecision": { "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ProposalDecision" } } } },
-      "ProposalSnooze": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ProposalSnoozeRequest" } } } },
-      "ReviewFix": { "required": false, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ReviewFixRequest" } } } }
+      "JSON": {
+        "required": true,
+        "content": {
+          "application/json": {
+            "schema": {
+              "type": "object"
+            }
+          }
+        }
+      },
+      "StateWrite": {
+        "required": true,
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/StateWrite"
+            }
+          }
+        }
+      },
+      "ProposalDecision": {
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ProposalDecision"
+            }
+          }
+        }
+      },
+      "ProposalSnooze": {
+        "required": true,
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ProposalSnoozeRequest"
+            }
+          }
+        }
+      },
+      "ReviewFix": {
+        "required": false,
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ReviewFixRequest"
+            }
+          }
+        }
+      }
     },
     "responses": {
-      "Error": { "description": "Sanitized API error", "content": { "application/json": { "schema": { "type": "object", "required": ["error"], "properties": { "error": { "type": "object", "required": ["code", "message"], "properties": { "code": { "type": "string" }, "message": { "type": "string" }, "current_revision": { "type": "string" } } } } } } } }
+      "Error": {
+        "description": "Sanitized API error",
+        "content": {
+          "application/json": {
+            "schema": {
+              "type": "object",
+              "required": [
+                "error"
+              ],
+              "properties": {
+                "error": {
+                  "type": "object",
+                  "required": [
+                    "code",
+                    "message"
+                  ],
+                  "properties": {
+                    "code": {
+                      "type": "string"
+                    },
+                    "message": {
+                      "type": "string"
+                    },
+                    "current_revision": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
     },
     "schemas": {
       "Run": {
         "type": "object",
-        "required": ["id", "source", "status", "startedAt"],
+        "required": [
+          "id",
+          "source",
+          "status",
+          "startedAt"
+        ],
         "properties": {
-          "id": { "type": "string" },
-          "source": { "type": "string" },
-          "connectionId": { "type": "string", "description": "Frozen camelCase connection id." },
-          "connection_id": { "type": "string", "description": "The same id under the memory-route naming." },
-          "project_ids": { "type": "array", "items": { "type": "string" }, "description": "Projects of the connection record, when it is known." },
-          "actor": { "type": "string", "description": "Reserved and omitted: run records do not persist who triggered a run." },
-          "status": { "type": "string", "enum": ["running", "success", "partial", "failed"] },
-          "startedAt": { "type": "string", "format": "date-time" },
-          "finishedAt": { "type": "string", "format": "date-time" },
-          "counts": { "type": "object", "additionalProperties": { "type": "integer" } },
-          "stats": { "type": "object" }
+          "id": {
+            "type": "string"
+          },
+          "source": {
+            "type": "string"
+          },
+          "connectionId": {
+            "type": "string",
+            "description": "Frozen camelCase connection id."
+          },
+          "connection_id": {
+            "type": "string",
+            "description": "The same id under the memory-route naming."
+          },
+          "project_ids": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Projects of the connection record, when it is known."
+          },
+          "actor": {
+            "type": "string",
+            "description": "Reserved and omitted: run records do not persist who triggered a run."
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "running",
+              "success",
+              "partial",
+              "failed"
+            ]
+          },
+          "startedAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "finishedAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "counts": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "integer"
+            }
+          },
+          "stats": {
+            "type": "object"
+          }
         }
       },
       "Page": {
         "type": "object",
-        "required": ["page", "page_size", "has_more"],
+        "required": [
+          "page",
+          "page_size",
+          "has_more"
+        ],
         "properties": {
-          "page": { "type": "integer" },
-          "page_size": { "type": "integer" },
-          "has_more": { "type": "boolean" },
-          "next_cursor": { "type": "string" }
+          "page": {
+            "type": "integer"
+          },
+          "page_size": {
+            "type": "integer"
+          },
+          "has_more": {
+            "type": "boolean"
+          },
+          "next_cursor": {
+            "type": "string"
+          }
         }
       },
       "Provenance": {
         "type": "object",
-        "required": ["origin", "trust", "reviewed", "quarantined", "needs_review"],
+        "required": [
+          "origin",
+          "trust",
+          "reviewed",
+          "quarantined",
+          "needs_review"
+        ],
         "properties": {
-          "origin": { "type": "string", "enum": ["human", "agent", "connector", "import"] },
-          "trust": { "type": "string", "enum": ["verified", "stated", "inferred"] },
-          "reviewed": { "type": "boolean" },
-          "quarantined": { "type": "boolean" },
-          "needs_review": { "type": "boolean" }
+          "origin": {
+            "type": "string",
+            "enum": [
+              "human",
+              "agent",
+              "connector",
+              "import"
+            ]
+          },
+          "trust": {
+            "type": "string",
+            "enum": [
+              "verified",
+              "stated",
+              "inferred"
+            ]
+          },
+          "reviewed": {
+            "type": "boolean"
+          },
+          "quarantined": {
+            "type": "boolean"
+          },
+          "needs_review": {
+            "type": "boolean"
+          }
         }
       },
       "Validity": {
         "type": "object",
         "properties": {
-          "valid_from": { "type": "string", "format": "date-time" },
-          "valid_to": { "type": "string", "format": "date-time" },
-          "superseded_by": { "type": "string" },
-          "supersedes": { "type": "string" },
-          "confidence": { "type": "number" },
-          "current": { "type": "boolean" }
+          "valid_from": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "valid_to": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "superseded_by": {
+            "type": "string"
+          },
+          "supersedes": {
+            "type": "string"
+          },
+          "confidence": {
+            "type": "number"
+          },
+          "current": {
+            "type": "boolean"
+          }
         }
       },
       "ReviewState": {
         "type": "object",
         "properties": {
-          "review_after": { "type": "string", "format": "date-time" },
-          "review_source": { "type": "string", "enum": ["frontmatter", "default"] },
-          "due": { "type": "boolean" }
+          "review_after": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "review_source": {
+            "type": "string",
+            "enum": [
+              "frontmatter",
+              "default"
+            ]
+          },
+          "due": {
+            "type": "boolean"
+          }
         }
       },
       "Record": {
         "type": "object",
-        "required": ["id", "project_id", "kind", "title", "path", "validity", "provenance", "review"],
+        "required": [
+          "id",
+          "project_id",
+          "kind",
+          "title",
+          "path",
+          "validity",
+          "provenance",
+          "review"
+        ],
         "properties": {
-          "id": { "type": "string" },
-          "project_id": { "type": "string" },
-          "kind": { "type": "string", "enum": ["note", "decision", "attempt", "handoff"] },
-          "title": { "type": "string" },
-          "status": { "type": "string" },
-          "path": { "type": "string" },
-          "permalink": { "type": "string" },
-          "subtype": { "type": "string" },
-          "scope": { "type": "string", "enum": ["project", "personal", "global"] },
-          "topic_key": { "type": "string" },
-          "occurrences": { "type": "integer" },
-          "tags": { "type": "array", "items": { "type": "string" }, "description": "Note tags; omitted for every other kind." },
-          "created_at": { "type": "string", "format": "date-time" },
-          "updated_at": { "type": "string", "format": "date-time" },
-          "validity": { "$ref": "#/components/schemas/Validity" },
-          "provenance": { "$ref": "#/components/schemas/Provenance" },
-          "review": { "$ref": "#/components/schemas/ReviewState" }
+          "id": {
+            "type": "string"
+          },
+          "project_id": {
+            "type": "string"
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "note",
+              "decision",
+              "attempt",
+              "handoff"
+            ]
+          },
+          "title": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          },
+          "path": {
+            "type": "string"
+          },
+          "permalink": {
+            "type": "string"
+          },
+          "subtype": {
+            "type": "string"
+          },
+          "scope": {
+            "type": "string",
+            "enum": [
+              "project",
+              "personal",
+              "global"
+            ]
+          },
+          "topic_key": {
+            "type": "string"
+          },
+          "occurrences": {
+            "type": "integer"
+          },
+          "tags": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Note tags; omitted for every other kind."
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "validity": {
+            "$ref": "#/components/schemas/Validity"
+          },
+          "provenance": {
+            "$ref": "#/components/schemas/Provenance"
+          },
+          "review": {
+            "$ref": "#/components/schemas/ReviewState"
+          }
         }
       },
       "RecordLink": {
         "type": "object",
-        "required": ["field", "ref", "state"],
+        "required": [
+          "field",
+          "ref",
+          "state"
+        ],
         "properties": {
-          "field": { "type": "string" },
-          "ref": { "type": "string" },
-          "text": { "type": "string" },
-          "project_id": { "type": "string" },
-          "id": { "type": "string" },
-          "state": { "type": "string", "enum": ["found", "missing", "unavailable"] },
-          "detail": { "type": "string" },
-          "target": { "$ref": "#/components/schemas/Record" }
+          "field": {
+            "type": "string"
+          },
+          "ref": {
+            "type": "string"
+          },
+          "text": {
+            "type": "string"
+          },
+          "project_id": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "state": {
+            "type": "string",
+            "enum": [
+              "found",
+              "missing",
+              "unavailable"
+            ]
+          },
+          "detail": {
+            "type": "string"
+          },
+          "target": {
+            "$ref": "#/components/schemas/Record"
+          }
         }
       },
       "Backlink": {
         "type": "object",
-        "required": ["field", "source"],
-        "properties": { "field": { "type": "string" }, "source": { "$ref": "#/components/schemas/Record" } }
+        "required": [
+          "field",
+          "source"
+        ],
+        "properties": {
+          "field": {
+            "type": "string"
+          },
+          "source": {
+            "$ref": "#/components/schemas/Record"
+          }
+        }
       },
       "Relation": {
         "type": "object",
-        "required": ["target", "relation", "status"],
+        "required": [
+          "target",
+          "relation",
+          "status"
+        ],
         "properties": {
-          "target": { "type": "string" },
-          "target_kind": { "type": "string", "enum": ["note", "decision", "attempt", "handoff"] },
-          "relation": { "type": "string" },
-          "reason": { "type": "string" },
-          "confidence": { "type": "number" },
-          "status": { "type": "string", "enum": ["pending", "accepted", "rejected"] },
-          "judged_at": { "type": "string", "format": "date-time" },
-          "verdict_by": { "type": "string", "enum": ["human", "agent"] }
+          "target": {
+            "type": "string"
+          },
+          "target_kind": {
+            "type": "string",
+            "enum": [
+              "note",
+              "decision",
+              "attempt",
+              "handoff"
+            ]
+          },
+          "relation": {
+            "type": "string"
+          },
+          "reason": {
+            "type": "string"
+          },
+          "confidence": {
+            "type": "number"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "pending",
+              "accepted",
+              "rejected"
+            ]
+          },
+          "judged_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "verdict_by": {
+            "type": "string",
+            "enum": [
+              "human",
+              "agent"
+            ]
+          }
         }
       },
       "RecordHistory": {
         "type": "object",
-        "required": ["records", "anchor_index", "before", "after", "total"],
+        "required": [
+          "records",
+          "anchor_index",
+          "before",
+          "after",
+          "total"
+        ],
         "properties": {
-          "records": { "type": "array", "items": { "$ref": "#/components/schemas/Record" } },
-          "anchor_index": { "type": "integer" },
-          "before": { "type": "integer" },
-          "after": { "type": "integer" },
-          "total": { "type": "integer" }
+          "records": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Record"
+            }
+          },
+          "anchor_index": {
+            "type": "integer"
+          },
+          "before": {
+            "type": "integer"
+          },
+          "after": {
+            "type": "integer"
+          },
+          "total": {
+            "type": "integer"
+          }
         }
       },
       "RecordDetail": {
         "allOf": [
-          { "$ref": "#/components/schemas/Record" },
+          {
+            "$ref": "#/components/schemas/Record"
+          },
           {
             "type": "object",
-            "required": ["body", "body_truncated", "body_tokens", "max_tokens", "links", "backlinks", "relations"],
+            "required": [
+              "body",
+              "body_truncated",
+              "body_tokens",
+              "max_tokens",
+              "links",
+              "backlinks",
+              "relations"
+            ],
             "properties": {
-              "body": { "type": "string" },
-              "body_truncated": { "type": "boolean" },
-              "body_tokens": { "type": "integer" },
-              "max_tokens": { "type": "integer" },
-              "links": { "type": "array", "items": { "$ref": "#/components/schemas/RecordLink" } },
-              "backlinks": { "type": "array", "items": { "$ref": "#/components/schemas/Backlink" } },
-              "relations": { "type": "array", "items": { "$ref": "#/components/schemas/Relation" } },
-              "history": { "$ref": "#/components/schemas/RecordHistory" }
+              "body": {
+                "type": "string"
+              },
+              "body_truncated": {
+                "type": "boolean"
+              },
+              "body_tokens": {
+                "type": "integer"
+              },
+              "max_tokens": {
+                "type": "integer"
+              },
+              "links": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/RecordLink"
+                }
+              },
+              "backlinks": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/Backlink"
+                }
+              },
+              "relations": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/Relation"
+                }
+              },
+              "history": {
+                "$ref": "#/components/schemas/RecordHistory"
+              }
             }
           }
         ]
       },
       "RecordPage": {
         "allOf": [
-          { "$ref": "#/components/schemas/Page" },
-          { "type": "object", "required": ["items"], "properties": { "items": { "type": "array", "items": { "$ref": "#/components/schemas/Record" } } } }
+          {
+            "$ref": "#/components/schemas/Page"
+          },
+          {
+            "type": "object",
+            "required": [
+              "items"
+            ],
+            "properties": {
+              "items": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/Record"
+                }
+              }
+            }
+          }
         ]
       },
       "SearchExplain": {
         "type": "object",
         "properties": {
-          "bm25": { "type": "number" },
-          "recency": { "type": "number" },
-          "importance": { "type": "number" },
-          "pin": { "type": "number" },
-          "link": { "type": "number" }
+          "bm25": {
+            "type": "number"
+          },
+          "recency": {
+            "type": "number"
+          },
+          "importance": {
+            "type": "number"
+          },
+          "pin": {
+            "type": "number"
+          },
+          "link": {
+            "type": "number"
+          }
         }
       },
       "SearchHit": {
         "type": "object",
-        "required": ["id", "project_id", "kind", "title", "preview", "score"],
+        "required": [
+          "id",
+          "project_id",
+          "kind",
+          "title",
+          "preview",
+          "score"
+        ],
         "properties": {
-          "id": { "type": "string" },
-          "project_id": { "type": "string" },
-          "kind": { "type": "string" },
-          "title": { "type": "string" },
-          "preview": { "type": "string" },
-          "score": { "type": "number" },
-          "subtype": { "type": "string" },
-          "scope": { "type": "string" },
-          "topic_key": { "type": "string" },
-          "occurrences": { "type": "integer" },
-          "valid_from": { "type": "string", "format": "date-time" },
-          "valid_to": { "type": "string", "format": "date-time" },
-          "superseded_by": { "type": "string" },
-          "match_reasons": { "type": "array", "items": { "type": "string" } },
-          "explain": { "$ref": "#/components/schemas/SearchExplain" }
+          "id": {
+            "type": "string"
+          },
+          "project_id": {
+            "type": "string"
+          },
+          "kind": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          },
+          "preview": {
+            "type": "string"
+          },
+          "score": {
+            "type": "number"
+          },
+          "subtype": {
+            "type": "string"
+          },
+          "scope": {
+            "type": "string"
+          },
+          "topic_key": {
+            "type": "string"
+          },
+          "occurrences": {
+            "type": "integer"
+          },
+          "valid_from": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "valid_to": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "superseded_by": {
+            "type": "string"
+          },
+          "match_reasons": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "explain": {
+            "$ref": "#/components/schemas/SearchExplain"
+          }
         }
       },
       "SearchPage": {
         "allOf": [
-          { "$ref": "#/components/schemas/Page" },
+          {
+            "$ref": "#/components/schemas/Page"
+          },
           {
             "type": "object",
-            "required": ["query", "relaxed", "hits"],
+            "required": [
+              "query",
+              "relaxed",
+              "hits"
+            ],
             "properties": {
-              "query": { "type": "string" },
-              "relaxed": { "type": "boolean" },
-              "notice": { "type": "string" },
-              "hits": { "type": "array", "items": { "$ref": "#/components/schemas/SearchHit" } }
+              "query": {
+                "type": "string"
+              },
+              "relaxed": {
+                "type": "boolean"
+              },
+              "notice": {
+                "type": "string"
+              },
+              "hits": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/SearchHit"
+                }
+              }
             }
           }
         ]
       },
       "State": {
         "type": "object",
-        "required": ["project_id", "revision", "provenance"],
+        "required": [
+          "project_id",
+          "revision",
+          "provenance"
+        ],
         "properties": {
-          "project_id": { "type": "string" },
-          "goal": { "type": "string" },
-          "next_action": { "type": "string" },
-          "active": { "type": "array", "items": { "type": "string" } },
-          "blocked": { "type": "array", "items": { "type": "string" } },
-          "open_questions": { "type": "array", "items": { "type": "string" } },
-          "updated_at": { "type": "string", "format": "date-time" },
-          "fresh_until": { "type": "string", "format": "date-time" },
-          "revision": { "type": "string" },
-          "provenance": { "$ref": "#/components/schemas/Provenance" }
+          "project_id": {
+            "type": "string"
+          },
+          "goal": {
+            "type": "string"
+          },
+          "next_action": {
+            "type": "string"
+          },
+          "active": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "blocked": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "open_questions": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "fresh_until": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "revision": {
+            "type": "string"
+          },
+          "provenance": {
+            "$ref": "#/components/schemas/Provenance"
+          }
         }
       },
       "RecordReviewRequest": {
         "type": "object",
         "properties": {
-          "reviewed": { "type": "boolean", "default": true, "description": "Must be true when present: a review clears a quarantine and never re-arms one." },
-          "trust": { "type": "string", "enum": ["verified", "stated", "inferred"], "description": "Optional replacement trust; omit to keep the stored one." },
-          "expected_updated_at": { "type": "string", "format": "date-time", "description": "The updated_at the client read; omit for a last-write-wins review." }
+          "reviewed": {
+            "type": "boolean",
+            "default": true,
+            "description": "Must be true when present: a review clears a quarantine and never re-arms one."
+          },
+          "trust": {
+            "type": "string",
+            "enum": [
+              "verified",
+              "stated",
+              "inferred"
+            ],
+            "description": "Optional replacement trust; omit to keep the stored one."
+          },
+          "expected_updated_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "The updated_at the client read; omit for a last-write-wins review."
+          }
         }
       },
       "StateReviewRequest": {
         "type": "object",
         "properties": {
-          "reviewed": { "type": "boolean", "default": true, "description": "Must be true when present: a review clears a quarantine and never re-arms one." },
-          "trust": { "type": "string", "enum": ["verified", "stated", "inferred"], "description": "Optional replacement trust; omit to keep the stored one." },
-          "expected_revision": { "type": "string", "description": "The state revision the client read; omit for a last-write-wins review." }
+          "reviewed": {
+            "type": "boolean",
+            "default": true,
+            "description": "Must be true when present: a review clears a quarantine and never re-arms one."
+          },
+          "trust": {
+            "type": "string",
+            "enum": [
+              "verified",
+              "stated",
+              "inferred"
+            ],
+            "description": "Optional replacement trust; omit to keep the stored one."
+          },
+          "expected_revision": {
+            "type": "string",
+            "description": "The state revision the client read; omit for a last-write-wins review."
+          }
         }
       },
       "StateWrite": {
         "type": "object",
         "properties": {
-          "goal": { "type": "string" },
-          "next_action": { "type": "string" },
-          "active": { "type": "array", "items": { "type": "string" } },
-          "blocked": { "type": "array", "items": { "type": "string" } },
-          "open_questions": { "type": "array", "items": { "type": "string" } },
-          "fresh_until": { "type": "string", "description": "RFC3339 time to mark the state current until; an empty string clears it; omit to keep it." },
-          "expected_revision": { "type": "string" }
+          "goal": {
+            "type": "string"
+          },
+          "next_action": {
+            "type": "string"
+          },
+          "active": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "blocked": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "open_questions": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "fresh_until": {
+            "type": "string",
+            "description": "RFC3339 time to mark the state current until; an empty string clears it; omit to keep it."
+          },
+          "expected_revision": {
+            "type": "string"
+          }
         }
       },
       "Finding": {
         "type": "object",
-        "required": ["kind", "severity", "message", "why", "next", "confirm", "fixable"],
+        "required": [
+          "kind",
+          "severity",
+          "message",
+          "why",
+          "next",
+          "confirm",
+          "fixable"
+        ],
         "properties": {
-          "project_id": { "type": "string", "description": "Set in an all-projects review." },
-          "kind": { "type": "string" },
-          "severity": { "type": "string", "enum": ["error", "warn", "info"] },
-          "message": { "type": "string" },
-          "why": { "type": "string" },
-          "next": { "type": "string" },
-          "confirm": { "type": "string" },
-          "evidence": { "type": "string" },
-          "fixable": { "type": "boolean" },
-          "fix": { "type": "string" }
+          "project_id": {
+            "type": "string",
+            "description": "Set in an all-projects review."
+          },
+          "kind": {
+            "type": "string"
+          },
+          "severity": {
+            "type": "string",
+            "enum": [
+              "error",
+              "warn",
+              "info"
+            ]
+          },
+          "message": {
+            "type": "string"
+          },
+          "why": {
+            "type": "string"
+          },
+          "next": {
+            "type": "string"
+          },
+          "confirm": {
+            "type": "string"
+          },
+          "evidence": {
+            "type": "string"
+          },
+          "fixable": {
+            "type": "boolean"
+          },
+          "fix": {
+            "type": "string"
+          }
         }
       },
       "DueReview": {
         "type": "object",
-        "required": ["kind", "id", "title", "review_after", "overdue_seconds", "source"],
+        "required": [
+          "kind",
+          "id",
+          "title",
+          "review_after",
+          "overdue_seconds",
+          "source"
+        ],
         "properties": {
-          "project_id": { "type": "string", "description": "Set in an all-projects review." },
-          "kind": { "type": "string", "enum": ["note", "decision", "attempt", "handoff", "state", "proposal"] },
-          "id": { "type": "string" },
-          "title": { "type": "string" },
-          "review_after": { "type": "string", "format": "date-time" },
-          "overdue_seconds": { "type": "integer" },
-          "source": { "type": "string" }
+          "project_id": {
+            "type": "string",
+            "description": "Set in an all-projects review."
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "note",
+              "decision",
+              "attempt",
+              "handoff",
+              "state",
+              "proposal"
+            ]
+          },
+          "id": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          },
+          "review_after": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "overdue_seconds": {
+            "type": "integer"
+          },
+          "source": {
+            "type": "string"
+          }
         }
       },
       "Proposal": {
         "type": "object",
-        "required": ["id", "project_id", "kind", "title", "confidence", "status", "connection_id", "source_stale", "source_orphan", "local_only"],
+        "required": [
+          "id",
+          "project_id",
+          "kind",
+          "title",
+          "confidence",
+          "status",
+          "connection_id",
+          "source_stale",
+          "source_orphan",
+          "local_only"
+        ],
         "properties": {
-          "id": { "type": "string" },
-          "project_id": { "type": "string" },
-          "external_id": { "type": "string" },
-          "kind": { "type": "string", "enum": ["decision", "attempt", "note"] },
-          "title": { "type": "string" },
-          "rule": { "type": "string" },
-          "confidence": { "type": "number" },
-          "status": { "type": "string", "enum": ["pending", "stale", "promoted", "dismissed"] },
-          "connection_id": { "type": "string" },
-          "created_at": { "type": "string", "format": "date-time" },
-          "updated_at": { "type": "string", "format": "date-time" },
-          "source_stale": { "type": "boolean" },
-          "source_orphan": { "type": "boolean" },
-          "local_only": { "type": "boolean" },
-          "source_health": { "type": "string" },
-          "snoozed_until": { "type": "string", "format": "date-time", "description": "When a snoozed candidate returns to the inbox." },
-          "snoozed": { "type": "boolean", "description": "The candidate is hidden until snoozed_until." },
-          "body": { "type": "string", "description": "Redacted candidate text; present only with include_body=true." },
-          "body_truncated": { "type": "boolean" },
-          "body_tokens": { "type": "integer" },
-          "max_tokens": { "type": "integer" },
-          "body_omitted": { "type": "boolean", "description": "The item's body did not fit the page budget." }
+          "id": {
+            "type": "string"
+          },
+          "project_id": {
+            "type": "string"
+          },
+          "external_id": {
+            "type": "string"
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "decision",
+              "attempt",
+              "note"
+            ]
+          },
+          "title": {
+            "type": "string"
+          },
+          "rule": {
+            "type": "string"
+          },
+          "confidence": {
+            "type": "number"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "pending",
+              "stale",
+              "promoted",
+              "dismissed"
+            ]
+          },
+          "connection_id": {
+            "type": "string"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "source_stale": {
+            "type": "boolean"
+          },
+          "source_orphan": {
+            "type": "boolean"
+          },
+          "local_only": {
+            "type": "boolean"
+          },
+          "source_health": {
+            "type": "string"
+          },
+          "snoozed_until": {
+            "type": "string",
+            "format": "date-time",
+            "description": "When a snoozed candidate returns to the inbox."
+          },
+          "snoozed": {
+            "type": "boolean",
+            "description": "The candidate is hidden until snoozed_until."
+          },
+          "body": {
+            "type": "string",
+            "description": "Redacted candidate text; present only with include_body=true."
+          },
+          "body_truncated": {
+            "type": "boolean"
+          },
+          "body_tokens": {
+            "type": "integer"
+          },
+          "max_tokens": {
+            "type": "integer"
+          },
+          "body_omitted": {
+            "type": "boolean",
+            "description": "The item's body did not fit the page budget."
+          }
         }
       },
       "ProposalDetail": {
         "type": "object",
-        "required": ["id", "project_id", "kind", "title", "status", "body", "body_truncated", "body_tokens", "max_tokens"],
+        "required": [
+          "id",
+          "project_id",
+          "kind",
+          "title",
+          "status",
+          "body",
+          "body_truncated",
+          "body_tokens",
+          "max_tokens"
+        ],
         "properties": {
-          "id": { "type": "string" },
-          "project_id": { "type": "string" },
-          "kind": { "type": "string", "enum": ["decision", "attempt", "note"] },
-          "title": { "type": "string" },
-          "status": { "type": "string" },
-          "snoozed_until": { "type": "string", "format": "date-time" },
-          "snoozed": { "type": "boolean" },
-          "updated_at": { "type": "string", "format": "date-time", "description": "Revision for the snooze compare-and-swap." },
-          "body": { "type": "string" },
-          "body_truncated": { "type": "boolean" },
-          "body_tokens": { "type": "integer" },
-          "max_tokens": { "type": "integer" }
+          "id": {
+            "type": "string"
+          },
+          "project_id": {
+            "type": "string"
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "decision",
+              "attempt",
+              "note"
+            ]
+          },
+          "title": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          },
+          "snoozed_until": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "snoozed": {
+            "type": "boolean"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Revision for the snooze compare-and-swap."
+          },
+          "body": {
+            "type": "string"
+          },
+          "body_truncated": {
+            "type": "boolean"
+          },
+          "body_tokens": {
+            "type": "integer"
+          },
+          "max_tokens": {
+            "type": "integer"
+          }
         }
       },
       "ProposalSnoozeRequest": {
         "type": "object",
-        "required": ["until"],
+        "required": [
+          "until"
+        ],
         "properties": {
-          "until": { "type": "string", "nullable": true, "description": "RFC3339 time, calendar date, positive duration (7d) or null to clear." },
-          "expected_updated_at": { "type": "string", "format": "date-time", "description": "The updated_at the client read; a stale value is 409 with error.current_revision." }
+          "until": {
+            "type": "string",
+            "nullable": true,
+            "description": "RFC3339 time, calendar date, positive duration (7d) or null to clear."
+          },
+          "expected_updated_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "The updated_at the client read; a stale value is 409 with error.current_revision."
+          }
         }
       },
       "ProposalSnoozeReceipt": {
         "type": "object",
-        "required": ["project_id", "proposal_id", "status", "snoozed"],
+        "required": [
+          "project_id",
+          "proposal_id",
+          "status",
+          "snoozed"
+        ],
         "properties": {
-          "project_id": { "type": "string" },
-          "proposal_id": { "type": "string" },
-          "status": { "type": "string" },
-          "snoozed": { "type": "boolean" },
-          "snoozed_until": { "type": "string", "format": "date-time" },
-          "updated_at": { "type": "string", "format": "date-time" }
+          "project_id": {
+            "type": "string"
+          },
+          "proposal_id": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          },
+          "snoozed": {
+            "type": "boolean"
+          },
+          "snoozed_until": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
+          }
         }
       },
       "ProposalPage": {
         "allOf": [
-          { "$ref": "#/components/schemas/Page" },
-          { "type": "object", "required": ["items", "total"], "properties": { "items": { "type": "array", "items": { "$ref": "#/components/schemas/Proposal" } }, "total": { "type": "integer" } } }
+          {
+            "$ref": "#/components/schemas/Page"
+          },
+          {
+            "type": "object",
+            "required": [
+              "items",
+              "total"
+            ],
+            "properties": {
+              "items": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/Proposal"
+                }
+              },
+              "total": {
+                "type": "integer"
+              }
+            }
+          }
         ]
       },
       "ProposalDecision": {
         "type": "object",
         "properties": {
-          "as": { "type": "string", "enum": ["decision", "attempt", "note"] },
-          "status": { "type": "string", "enum": ["proposed", "accepted"] },
-          "title": { "type": "string" },
-          "force": { "type": "boolean", "description": "Allow a stale or orphaned source (CLI --force)." },
-          "yes": { "type": "boolean", "description": "Confirm promotion from a local-only source (CLI --yes)." },
-          "allow_duplicate": { "type": "boolean" },
-          "allow_protected": { "type": "boolean" },
-          "dry_run": { "type": "boolean" }
+          "as": {
+            "type": "string",
+            "enum": [
+              "decision",
+              "attempt",
+              "note"
+            ]
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "proposed",
+              "accepted"
+            ]
+          },
+          "title": {
+            "type": "string"
+          },
+          "force": {
+            "type": "boolean",
+            "description": "Allow a stale or orphaned source (CLI --force)."
+          },
+          "yes": {
+            "type": "boolean",
+            "description": "Confirm promotion from a local-only source (CLI --yes)."
+          },
+          "allow_duplicate": {
+            "type": "boolean"
+          },
+          "allow_protected": {
+            "type": "boolean"
+          },
+          "dry_run": {
+            "type": "boolean"
+          }
         }
       },
       "ProposalOutcome": {
         "type": "object",
-        "required": ["project_id", "proposal_id", "proposal_status", "already", "dismissed", "dry_run"],
+        "required": [
+          "project_id",
+          "proposal_id",
+          "proposal_status",
+          "already",
+          "dismissed",
+          "dry_run"
+        ],
         "properties": {
-          "project_id": { "type": "string" },
-          "proposal_id": { "type": "string" },
-          "proposal_status": { "type": "string" },
-          "record_kind": { "type": "string" },
-          "record_id": { "type": "string" },
-          "record_title": { "type": "string" },
-          "already": { "type": "boolean" },
-          "dismissed": { "type": "boolean" },
-          "dry_run": { "type": "boolean" }
+          "project_id": {
+            "type": "string"
+          },
+          "proposal_id": {
+            "type": "string"
+          },
+          "proposal_status": {
+            "type": "string"
+          },
+          "record_kind": {
+            "type": "string"
+          },
+          "record_id": {
+            "type": "string"
+          },
+          "record_title": {
+            "type": "string"
+          },
+          "already": {
+            "type": "boolean"
+          },
+          "dismissed": {
+            "type": "boolean"
+          },
+          "dry_run": {
+            "type": "boolean"
+          }
         }
       },
       "Review": {
         "type": "object",
-        "required": ["project_id", "findings", "due_reviews", "proposals", "quarantined_count"],
+        "required": [
+          "project_id",
+          "findings",
+          "due_reviews",
+          "proposals",
+          "quarantined_count"
+        ],
         "properties": {
-          "project_id": { "type": "string", "description": "* in an all-projects review." },
-          "project_ids": { "type": "array", "items": { "type": "string" }, "description": "The scope of an all-projects review." },
-          "all_projects": { "type": "boolean" },
-          "findings": { "type": "array", "items": { "$ref": "#/components/schemas/Finding" } },
-          "due_reviews": { "type": "array", "items": { "$ref": "#/components/schemas/DueReview" } },
-          "proposals": {
-            "type": "object",
-            "required": ["pending_count", "snoozed_count", "items"],
-            "properties": {
-              "pending_count": { "type": "integer", "description": "Pending candidates only; an active snooze is excluded." },
-              "snoozed_count": { "type": "integer", "description": "Pending or stale candidates hidden by a snooze that has not come due." },
-              "items": { "type": "array", "items": { "$ref": "#/components/schemas/Proposal" } }
+          "project_id": {
+            "type": "string",
+            "description": "* in an all-projects review."
+          },
+          "project_ids": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The scope of an all-projects review."
+          },
+          "all_projects": {
+            "type": "boolean"
+          },
+          "findings": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Finding"
             }
           },
-          "quarantined_count": { "type": "integer" },
-          "findings_truncated": { "type": "boolean", "description": "The all-projects aggregate hit its findings cap." },
-          "due_reviews_truncated": { "type": "boolean" },
-          "proposals_truncated": { "type": "boolean" }
+          "due_reviews": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/DueReview"
+            }
+          },
+          "proposals": {
+            "type": "object",
+            "required": [
+              "pending_count",
+              "snoozed_count",
+              "items"
+            ],
+            "properties": {
+              "pending_count": {
+                "type": "integer",
+                "description": "Pending candidates only; an active snooze is excluded."
+              },
+              "snoozed_count": {
+                "type": "integer",
+                "description": "Pending or stale candidates hidden by a snooze that has not come due."
+              },
+              "items": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/Proposal"
+                }
+              }
+            }
+          },
+          "quarantined_count": {
+            "type": "integer"
+          },
+          "findings_truncated": {
+            "type": "boolean",
+            "description": "The all-projects aggregate hit its findings cap."
+          },
+          "due_reviews_truncated": {
+            "type": "boolean"
+          },
+          "proposals_truncated": {
+            "type": "boolean"
+          }
         }
       },
       "ReviewFixRequest": {
         "type": "object",
         "properties": {
-          "dry_run": { "type": "boolean", "default": true, "description": "Preview only. Combining dry_run=true with apply=true is refused." },
-          "apply": { "type": "boolean", "default": false, "description": "Explicit confirmation to write the safe fixes." },
-          "kinds": { "type": "array", "items": { "type": "string" }, "maxItems": 32, "description": "Optional finding kinds to fix; empty fixes every fixable kind." }
+          "dry_run": {
+            "type": "boolean",
+            "default": true,
+            "description": "Preview only. Combining dry_run=true with apply=true is refused."
+          },
+          "apply": {
+            "type": "boolean",
+            "default": false,
+            "description": "Explicit confirmation to write the safe fixes."
+          },
+          "kinds": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 32,
+            "description": "Optional finding kinds to fix; empty fixes every fixable kind."
+          }
         }
       },
       "ReviewFixChange": {
         "type": "object",
-        "required": ["kind", "action", "field", "value"],
+        "required": [
+          "kind",
+          "action",
+          "field",
+          "value"
+        ],
         "properties": {
-          "kind": { "type": "string" },
-          "action": { "type": "string", "enum": ["set_next_action", "drop_question"] },
-          "field": { "type": "string", "enum": ["next_action", "open_questions"] },
-          "value": { "type": "string" },
-          "evidence": { "type": "string" }
+          "kind": {
+            "type": "string"
+          },
+          "action": {
+            "type": "string",
+            "enum": [
+              "set_next_action",
+              "drop_question"
+            ]
+          },
+          "field": {
+            "type": "string",
+            "enum": [
+              "next_action",
+              "open_questions"
+            ]
+          },
+          "value": {
+            "type": "string"
+          },
+          "evidence": {
+            "type": "string"
+          }
         }
       },
       "ReviewFixResult": {
         "type": "object",
-        "required": ["project_id", "dry_run", "findings", "changes", "state"],
+        "required": [
+          "project_id",
+          "dry_run",
+          "findings",
+          "changes",
+          "state"
+        ],
         "properties": {
-          "project_id": { "type": "string" },
-          "dry_run": { "type": "boolean" },
-          "findings": { "type": "array", "items": { "$ref": "#/components/schemas/Finding" } },
-          "changes": { "type": "array", "items": { "$ref": "#/components/schemas/ReviewFixChange" } },
-          "state": { "$ref": "#/components/schemas/State" }
+          "project_id": {
+            "type": "string"
+          },
+          "dry_run": {
+            "type": "boolean"
+          },
+          "findings": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Finding"
+            }
+          },
+          "changes": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ReviewFixChange"
+            }
+          },
+          "state": {
+            "$ref": "#/components/schemas/State"
+          }
         }
       },
       "QuarantineItem": {
         "type": "object",
-        "required": ["id", "kind", "project_id", "title", "reason", "age_seconds"],
+        "required": [
+          "id",
+          "kind",
+          "project_id",
+          "title",
+          "reason",
+          "age_seconds"
+        ],
         "properties": {
-          "id": { "type": "string" },
-          "kind": { "type": "string", "enum": ["note", "decision", "attempt", "handoff"] },
-          "project_id": { "type": "string" },
-          "title": { "type": "string" },
-          "reason": { "type": "string", "enum": ["unreviewed", "unknown_origin"] },
-          "origin": { "type": "string" },
-          "trust": { "type": "string" },
-          "created_at": { "type": "string", "format": "date-time" },
-          "age_seconds": { "type": "integer" }
+          "id": {
+            "type": "string"
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "note",
+              "decision",
+              "attempt",
+              "handoff"
+            ]
+          },
+          "project_id": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          },
+          "reason": {
+            "type": "string",
+            "enum": [
+              "unreviewed",
+              "unknown_origin"
+            ]
+          },
+          "origin": {
+            "type": "string"
+          },
+          "trust": {
+            "type": "string"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "age_seconds": {
+            "type": "integer"
+          }
         }
       },
       "QuarantinePage": {
         "allOf": [
-          { "$ref": "#/components/schemas/Page" },
-          { "type": "object", "required": ["items"], "properties": { "items": { "type": "array", "items": { "$ref": "#/components/schemas/QuarantineItem" } } } }
+          {
+            "$ref": "#/components/schemas/Page"
+          },
+          {
+            "type": "object",
+            "required": [
+              "items"
+            ],
+            "properties": {
+              "items": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/QuarantineItem"
+                }
+              }
+            }
+          }
         ]
       },
       "QuarantineReview": {
         "type": "object",
-        "required": ["record", "provenance"],
+        "required": [
+          "record",
+          "provenance"
+        ],
         "properties": {
-          "record": { "$ref": "#/components/schemas/Record" },
-          "provenance": { "$ref": "#/components/schemas/Provenance" }
+          "record": {
+            "$ref": "#/components/schemas/Record"
+          },
+          "provenance": {
+            "$ref": "#/components/schemas/Provenance"
+          }
         }
       },
       "JournalEntry": {
         "type": "object",
-        "required": ["time", "event"],
+        "required": [
+          "time",
+          "event"
+        ],
         "properties": {
-          "time": { "type": "string", "format": "date-time" },
-          "event": { "type": "string" },
-          "project": { "type": "string" },
-          "id": { "type": "string" },
-          "title": { "type": "string" },
-          "fields": { "type": "object", "additionalProperties": { "type": "string" } }
+          "time": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "event": {
+            "type": "string"
+          },
+          "project": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          },
+          "fields": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            }
+          }
         }
       },
       "Catchup": {
         "type": "object",
-        "required": ["project", "since", "since_source", "state", "state_changed", "notes", "decisions", "attempts", "handoffs", "journal", "quarantined_count", "include_unreviewed"],
+        "required": [
+          "project",
+          "since",
+          "since_source",
+          "state",
+          "state_changed",
+          "notes",
+          "decisions",
+          "attempts",
+          "handoffs",
+          "journal",
+          "quarantined_count",
+          "include_unreviewed"
+        ],
         "properties": {
-          "project": { "type": "object", "required": ["id", "name"], "properties": { "id": { "type": "string" }, "name": { "type": "string" } } },
-          "since": { "type": "string", "format": "date-time" },
-          "since_source": { "type": "string", "enum": ["handoff", "explicit", "default"] },
-          "baseline_handoff_id": { "type": "string" },
-          "state": { "$ref": "#/components/schemas/State" },
-          "state_changed": { "type": "boolean" },
-          "notes": { "type": "array", "items": { "$ref": "#/components/schemas/Record" } },
-          "decisions": { "type": "array", "items": { "$ref": "#/components/schemas/Record" } },
-          "attempts": { "type": "array", "items": { "$ref": "#/components/schemas/Record" } },
-          "handoffs": { "type": "array", "items": { "$ref": "#/components/schemas/Record" } },
-          "journal": { "type": "array", "items": { "$ref": "#/components/schemas/JournalEntry" } },
-          "quarantined_count": { "type": "integer" },
-          "include_unreviewed": { "type": "boolean" }
+          "project": {
+            "type": "object",
+            "required": [
+              "id",
+              "name"
+            ],
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "name": {
+                "type": "string"
+              }
+            }
+          },
+          "since": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "since_source": {
+            "type": "string",
+            "enum": [
+              "handoff",
+              "explicit",
+              "default"
+            ]
+          },
+          "baseline_handoff_id": {
+            "type": "string"
+          },
+          "state": {
+            "$ref": "#/components/schemas/State"
+          },
+          "state_changed": {
+            "type": "boolean"
+          },
+          "notes": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Record"
+            }
+          },
+          "decisions": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Record"
+            }
+          },
+          "attempts": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Record"
+            }
+          },
+          "handoffs": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Record"
+            }
+          },
+          "journal": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/JournalEntry"
+            }
+          },
+          "quarantined_count": {
+            "type": "integer"
+          },
+          "include_unreviewed": {
+            "type": "boolean"
+          }
+        }
+      },
+      "SyncRevision": {
+        "type": "object",
+        "required": [
+          "kind",
+          "value",
+          "at"
+        ],
+        "properties": {
+          "kind": {
+            "type": "string"
+          },
+          "value": {
+            "type": "string"
+          },
+          "at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "SyncView": {
+        "type": "object",
+        "required": [
+          "ahead",
+          "behind",
+          "changed",
+          "dirty",
+          "unmerged",
+          "conflicts",
+          "conflict_records",
+          "recovered",
+          "reindexed"
+        ],
+        "properties": {
+          "provider": {
+            "type": "string"
+          },
+          "branch": {
+            "type": "string"
+          },
+          "ahead": {
+            "type": "integer"
+          },
+          "behind": {
+            "type": "integer"
+          },
+          "changed": {
+            "type": "integer"
+          },
+          "dirty": {
+            "type": "boolean"
+          },
+          "unmerged": {
+            "type": "boolean"
+          },
+          "conflicts": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "conflict_records": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "recovered": {
+            "type": "boolean"
+          },
+          "reindexed": {
+            "type": "boolean"
+          },
+          "last_synced_revision": {
+            "$ref": "#/components/schemas/SyncRevision"
+          }
+        }
+      },
+      "SyncRequest": {
+        "type": "object",
+        "properties": {
+          "push": {
+            "type": "boolean",
+            "default": false
+          }
+        }
+      },
+      "Project": {
+        "type": "object",
+        "required": [
+          "id",
+          "name"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "paths": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "path_provenance": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            }
+          }
         }
       }
     }

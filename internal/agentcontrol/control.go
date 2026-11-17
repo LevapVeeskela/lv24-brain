@@ -30,6 +30,11 @@ type Projects interface {
 	ListProjects(context.Context) ([]domain.Project, error)
 }
 
+// SyncApp is the git sync use case used by the control API.
+type SyncApp interface {
+	Sync(context.Context, app.SyncOptions) (app.SyncResult, error)
+}
+
 // Updater is the verified engine updater with the running build identity.
 type Updater interface {
 	ports.Updater
@@ -55,6 +60,8 @@ type Options struct {
 	// without it keeps serving the connection routes and reports the memory
 	// routes as unavailable.
 	App MemoryApp
+	// Sync is the optional git sync use case exposed to the desktop.
+	Sync SyncApp
 	// ProjectAllowlist bounds the memory routes to these resolved project
 	// ids. Empty serves every registered project.
 	ProjectAllowlist []string
@@ -120,6 +127,10 @@ func (c *Control) Start(ctx context.Context, runtime daemon.Runtime) (int, error
 	if c.opts.App != nil {
 		memory = newMemoryService(c.opts.App, c.opts.Now)
 	}
+	var syncService localapi.SyncService
+	if c.opts.Sync != nil {
+		syncService = newSyncService(c.opts.Sync)
+	}
 	server, err := localapi.NewServer(localapi.Options{
 		Token:     localapi.TokenFunc(func() string { return runtime.Token }),
 		Port:      0,
@@ -130,6 +141,7 @@ func (c *Control) Start(ctx context.Context, runtime daemon.Runtime) (int, error
 		Heartbeat: 15 * time.Second,
 		Status:    "running",
 		Memory:    memory,
+		Sync:      syncService,
 		// The local API's memory routes honour the same project scope as
 		// `brain mcp`.
 		ProjectAllowlist: c.opts.ProjectAllowlist,
@@ -562,7 +574,18 @@ func (p projectLister) ListProjects(ctx context.Context) ([]localapi.Project, er
 	}
 	out := make([]localapi.Project, 0, len(projects))
 	for _, project := range projects {
-		out = append(out, localapi.Project{ID: project.ID, Name: project.Name})
+		paths := append([]string{}, project.Paths...)
+		var provenance map[string]string
+		if len(project.PathProvenance) > 0 {
+			provenance = make(map[string]string, len(project.PathProvenance))
+			for path, machine := range project.PathProvenance {
+				provenance[path] = machine
+			}
+		}
+		out = append(out, localapi.Project{
+			ID: project.ID, Name: project.Name,
+			Paths: paths, PathProvenance: provenance,
+		})
 	}
 	return out, nil
 }

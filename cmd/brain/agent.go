@@ -137,6 +137,7 @@ func runAgentForeground(cfg config.BrainConfig, parentPID int, projectsFlag stri
 		Locker:           ingestion.Ingestion.Locker,
 		Version:          version.Version,
 		App:              inspection.App,
+		Sync:             inspection.App,
 		ProjectAllowlist: allowlist,
 	})
 	if err != nil {

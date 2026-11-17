@@ -73,6 +73,7 @@ func (c completionCmd) withPos(index int, label string, values ...string) comple
 var completionTable = []completionCmd{
 	cmdLeaf("init", choiceFlag("mode", "local", "git", "server"), valueFlag("data-dir"), valueFlag("server-url"), valueFlag("config")),
 	cmdLeaf("doctor", boolFlag("json"), boolFlag("fix"), valueFlag("config")),
+	cmdLeaf("onboard", boolFlag("json"), valueFlag("config")),
 	cmdLeaf("open", valueFlag("project"), valueFlag("budget"), boolFlag("brief"), boolFlag("include-unreviewed"),
 		valueFlag("as-of"), boolFlag("include-superseded"), boolFlag("all-time"), boolFlag("json"), valueFlag("config")),
 	cmdGroup("project",

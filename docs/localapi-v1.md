@@ -99,10 +99,25 @@ rename one.
 | `POST` | `/v1/proposals/{project}/{id}/snooze` |
 | `DELETE` | `/v1/proposals/{project}/{id}/snooze` |
 | `GET` | `/v1/catchup` |
+| `GET` | `/v1/sync` |
+| `POST` | `/v1/sync` |
 | `GET` | `/v1/settings` |
 | `PUT` | `/v1/settings` |
 | `POST` | `/v1/engine/update` |
 | `POST` | `/v1/shutdown` |
+
+## Git sync (desktop 0.23)
+
+`GET /v1/sync` reports the data repository state without changing it:
+`provider`, `branch`, `ahead`, `behind`, `changed`, `dirty`, `unmerged`,
+`conflicts`, `conflict_records`, `recovered`, `reindexed` and
+`last_synced_revision`. It is the same shape as `brain sync --status --json`.
+
+`POST /v1/sync` with `{"push":false|true}` runs the same use case as
+`brain sync` (commit, rebase, optional push). A clean sync returns `200` with
+the new status. Unmerged paths return `409 sync_conflict`; refresh the GET route
+to read them. The route is unavailable in local mode without a sync provider
+and returns the sanitized error envelope.
 
 ## Memory routes (desktop 1.2)
 
@@ -210,6 +225,13 @@ returns the search-v2 shape: `query`, `relaxed`, an optional `notice`, `hits`
 (`id`, `kind`, `title`, `preview`, `score`, `match_reasons`, optional
 `explain`, validity) and the page fields. `mode` is `all` or `any`; `min_score`
 is between 0 and 1; `explain` adds the weighted signal contributions.
+
+### Projects and provenance
+
+`GET /v1/projects` returns `id`, `name`, optional `paths` and the optional
+`path_provenance` map (`path -> machine id`). The desktop uses it to show which
+machine registered each checkout path; a registry written by an older engine
+omits both fields.
 
 ### State and CAS
 

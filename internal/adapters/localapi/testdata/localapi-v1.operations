@@ -18,6 +18,7 @@ GET /v1/runs/{id}/log
 GET /v1/schedules
 GET /v1/search
 GET /v1/settings
+GET /v1/sync
 PATCH /v1/connections/{id}
 PATCH /v1/records/{id}
 POST /v1/connections
@@ -36,6 +37,7 @@ POST /v1/records/{id}/trash
 POST /v1/review/fix
 POST /v1/runs/{id}/cancel
 POST /v1/shutdown
+POST /v1/sync
 PUT /v1/projects/{id}/state
 PUT /v1/schedules/{connectionId}
 PUT /v1/settings

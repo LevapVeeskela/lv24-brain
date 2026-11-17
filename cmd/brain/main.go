@@ -109,6 +109,8 @@ func runCommand(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return runInit(rest, stdout, stderr)
 	case "doctor":
 		return runDoctor(rest, stdout, stderr)
+	case "onboard":
+		return runOnboard(rest, stdout, stderr)
 	case "open":
 		return runOpen(rest, stdout, stderr)
 	case "project":
@@ -245,6 +247,7 @@ Commands:
   attempt    Append an attempt record
   handoff    Append a session handoff
   status     Show the configured instance
+  onboard    Check a new machine: drivers, PII, git sync and next commands
   review     Build a review report; --fix applies the safe fixes
   duplicates List exact and near-duplicate records (--scan every project)
   consolidate Proposal-only dedup job: merge exact duplicates, archive superseded (--plan|--apply, --rollback)

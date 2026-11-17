@@ -149,6 +149,8 @@ func (h *Handler) route(w http.ResponseWriter, r *http.Request) {
 		h.proposalRoute(w, r, strings.TrimPrefix(path, "/v1/proposals/"))
 	case path == "/v1/catchup":
 		h.catchup(w, r)
+	case path == "/v1/sync":
+		h.sync(w, r)
 	case path == "/v1/settings":
 		h.settings(w, r)
 	case path == "/v1/engine/update":

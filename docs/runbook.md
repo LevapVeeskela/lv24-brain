@@ -357,6 +357,22 @@ brain eval --fixtures eval/fixtures --write-baseline eval/baseline.json
 3. `brain handoff "<summary>" --next "<next action>"` at the end.
 4. In git mode, run `brain sync --push` after the handoff (see section 2).
 
+## 1a. Onboard a new machine
+
+One command prepares a checkout and prints the next step for its platform:
+
+```sh
+brain update --yes
+brain onboard --config ~/brain-data/brain.yaml
+```
+
+`brain onboard` runs the safe doctor repairs (merge drivers and managed
+`.gitattributes`/`.gitignore` lines), checks schema, PII/raw-zone status and git
+divergence, and prints the exact `brain sync --watch --push --interval=5m`
+command plus the service-manager hint for macOS, Linux or Windows. It never
+installs a service or rewrites records. Use `--json` for a machine-readable
+report; unresolved conflicts return exit 3.
+
 ## 2. Git-mode sync routine
 
 The data repository is private and holds the shared brain. The sync commands

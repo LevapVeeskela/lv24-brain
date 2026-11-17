@@ -123,8 +123,10 @@ type ScheduleStore interface {
 }
 
 type Project struct {
-	ID   string `json:"id"`
-	Name string `json:"name"`
+	ID             string            `json:"id"`
+	Name           string            `json:"name"`
+	Paths          []string          `json:"paths,omitempty"`
+	PathProvenance map[string]string `json:"path_provenance,omitempty"`
 }
 
 // ProjectLister exposes registered project names/ids only.
@@ -185,6 +187,9 @@ type Options struct {
 	// keeps serving the connection routes and reports memory routes as
 	// unavailable.
 	Memory MemoryService
+	// Sync exposes the git status and one sync action. It is optional: local
+	// mode without a sync provider reports the route as unavailable.
+	Sync SyncService
 	// ProjectAllowlist limits every memory route to these resolved project
 	// ids. Empty serves every registered project. A non-empty list refuses an
 	// all-projects read unless it holds exactly one project: spanning several
