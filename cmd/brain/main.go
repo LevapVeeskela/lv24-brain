@@ -1583,6 +1583,8 @@ func runSync(args []string, stdout, stderr io.Writer) int {
 	push := fs.Bool("push", false, "push after committing")
 	asJSON := fs.Bool("json", false, "print JSON")
 	autostash := fs.Bool("autostash", true, "stash and restore uncommitted changes around the pull (--autostash=false disables)")
+	watch := fs.Bool("watch", false, "run forever, syncing every --interval (for a service manager or terminal)")
+	interval := fs.Duration("interval", 5*time.Minute, "with --watch, delay between runs (minimum 30s)")
 	cfgPath := configFlag(fs)
 	if err := fs.Parse(args); err != nil {
 		return 2
@@ -1591,7 +1593,50 @@ func runSync(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "brain sync: unexpected arguments: %s\n", strings.Join(fs.Args(), " "))
 		return 2
 	}
-	cfg, err := loadRequiredConfig(*cfgPath)
+	if *watch {
+		switch {
+		case *statusOnly:
+			fmt.Fprintln(stderr, "brain sync: --watch cannot be combined with --status")
+			return 2
+		case *asJSON:
+			fmt.Fprintln(stderr, "brain sync: --watch does not support --json; log lines are the stream")
+			return 2
+		case *interval < 30*time.Second:
+			fmt.Fprintln(stderr, "brain sync: --interval must be at least 30s")
+			return 2
+		}
+		fmt.Fprintf(stderr, "brain sync --watch: every %s\n", interval.String())
+		return syncWatch(*interval, stderr, func() int {
+			return syncOnce(*cfgPath, statusOnly, push, asJSON, autostash, stdout, stderr)
+		})
+	}
+	return syncOnce(*cfgPath, statusOnly, push, asJSON, autostash, stdout, stderr)
+}
+
+// syncWatch runs one sync immediately and then on every tick until SIGINT or
+// SIGTERM. A conflict or a transient failure is logged and retried on the next
+// tick: the data repository remains the source of truth, and the service must
+// not exit merely because a human has not resolved a conflict yet.
+func syncWatch(interval time.Duration, stderr io.Writer, run func() int) int {
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		if code := run(); code != 0 {
+			fmt.Fprintf(stderr, "brain sync --watch: run exited %d; retrying in %s\n", code, interval)
+		}
+		select {
+		case <-ctx.Done():
+			return 0
+		case <-ticker.C:
+		}
+	}
+}
+
+// syncOnce is one sync invocation shared by the normal CLI and --watch.
+func syncOnce(cfgPath string, statusOnly, push, asJSON, autostash *bool, stdout, stderr io.Writer) int {
+	cfg, err := loadRequiredConfig(cfgPath)
 	if err != nil {
 		return reportError(stderr, "sync", err)
 	}

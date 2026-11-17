@@ -115,7 +115,7 @@ var completionTable = []completionCmd{
 		choiceFlag("status", "proposed", "accepted"), valueFlag("title"), boolFlag("dismiss"), boolFlag("force"),
 		boolFlag("yes"), boolFlag("dry-run"), boolFlag("allow-protected"), boolFlag("allow-duplicate"),
 		valueFlag("snooze"), boolFlag("unsnooze"), boolFlag("json"), valueFlag("config")),
-	cmdLeaf("sync", boolFlag("status"), boolFlag("push"), boolFlag("json"), boolFlag("autostash"), valueFlag("config")),
+	cmdLeaf("sync", boolFlag("status"), boolFlag("push"), boolFlag("json"), boolFlag("autostash"), boolFlag("watch"), valueFlag("interval"), valueFlag("config")),
 	cmdLeaf("index", boolFlag("rebuild"), valueFlag("config")),
 	cmdLeaf("search", valueFlag("project"), valueFlag("limit"), choiceFlag("kind", "note", "decision", "attempt", "handoff", "dump", "item"),
 		boolFlag("dumps"), valueFlag("since"), valueFlag("as-of"), boolFlag("include-superseded"), boolFlag("all-time"),

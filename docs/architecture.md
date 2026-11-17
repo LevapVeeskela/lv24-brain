@@ -186,7 +186,7 @@ brain catchup    what changed since the latest handoff (--include-unreviewed add
 brain record     list|show records (--as-of, --include-superseded/--all-time, show --history); status any record; supersede any record; review provenance; trash|restore|trash-list (local/git)
 brain session    start|end handlers for agent session hooks
 brain state      get|set the project state
-brain sync       commit, rebase, optional push, or --status (local/git only)
+brain sync       commit, rebase, optional push, --status, or --watch (local/git only)
 brain index      refresh the local FTS5 index, or --rebuild it (local/git only)
 brain search     query the local FTS5 index (local/git), or GET /v1/search (server); --dumps adds connector dumps, --kind filters, --as-of/--include-superseded select validity
 brain journal    show journal/<user>.jsonl activity, newest first (local/git)
@@ -275,7 +275,9 @@ serialized with staged planning/manifesting to avoid interleaved partial runs.
   run, so two syncs in one checkout cannot interleave. It commits non-ignored
   changes, fetches, stashes a tree dirtied by a concurrent writer, rebases,
   restores the stash, and pushes only with `--push`. `--autostash=false`
-  disables the stash step.
+  disables the stash step. `--watch` repeats the same run every `--interval`
+  until SIGINT/SIGTERM; a conflict or transient failure is logged and retried
+  on the next tick.
 - A rejected push is retried up to 3 attempts with backoff; every retry fetches
   and rebases first. It never force-pushes.
 - A conflict aborts the rebase, restores the autostash, prints the unmerged

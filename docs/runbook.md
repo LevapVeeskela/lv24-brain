@@ -409,8 +409,44 @@ tree is a cheap no-op and an interrupted rebase is recovered before the pull.
 The nightly "Company Brain Graph Refresh" task still runs graphs, connectors,
 `brain sync --push` and `brain agents sync`. Both tasks call the scripts in
 `lv24-brain/scripts/`; the retired `.brain` wrapper folder is no longer used.
-On macOS the daily LaunchAgent remains the scheduled sync; run `brain sync
---push` manually between runs or add your own timer.
+
+On macOS and Linux, run the same loop under a service manager:
+
+```sh
+brain sync --watch --push --interval=5m --config ~/brain-data/brain.yaml
+```
+
+`--watch` runs once immediately, then on every interval; SIGINT/SIGTERM stops
+it. A conflict or transient failure is logged and retried on the next tick, so
+the other machines keep publishing. A macOS LaunchAgent or a systemd user timer
+can run this command; the daily LaunchAgent remains a fallback.
+
+### Three machines writing at once
+
+The data model is built for independent concurrent writers: records are
+create-only ULID files, notes union by entry, state merges field by field,
+registry paths/aliases union, and shared raw items keep both sides. Run this
+on every machine before the first three-machine day:
+
+```sh
+brain update --yes
+brain doctor --fix
+git -C ~/brain-data config --show-origin --get-regexp 'merge\.'
+brain sync --status --json
+```
+
+Two rules make the guarantees explicit:
+
+- different records, notes, state fields, project paths and aliases merge
+  without a manual conflict; a same-field state edit or an alias claimed by two
+  machines is kept deterministically and reported as a conflict artifact for
+  review;
+- `brain sync --watch` or the scheduled task must run on every machine. One
+  machine that never syncs cannot see or merge the others' writes.
+
+A clean three-machine test (`TestThreeMachinesWriteConcurrently`) runs three
+clones with two concurrent sessions each, then verifies every note, all state
+fields and the registry entry survive the merge.
 
 ### Legacy PII dump zones
 

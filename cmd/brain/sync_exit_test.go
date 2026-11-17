@@ -67,6 +67,23 @@ func useSync(t *testing.T, syncProvider ports.SyncProvider) {
 	t.Cleanup(func() { buildRuntime = previous })
 }
 
+func TestSyncWatchRejectsIncompatibleFlags(t *testing.T) {
+	cases := []struct {
+		args []string
+		want string
+	}{
+		{[]string{"sync", "--watch", "--status"}, "--watch cannot be combined"},
+		{[]string{"sync", "--watch", "--json"}, "--watch does not support --json"},
+		{[]string{"sync", "--watch", "--interval=1s"}, "--interval must be at least 30s"},
+	}
+	for _, test := range cases {
+		code, _, stderr := runForTest(t, test.args...)
+		if code != 2 || !strings.Contains(stderr, test.want) {
+			t.Fatalf("%v = %d, %q; want 2 and %q", test.args, code, stderr, test.want)
+		}
+	}
+}
+
 func TestSyncConflictExitCodeIsThree(t *testing.T) {
 	useSync(t, &cliSync{
 		status:  ports.SyncStatus{Provider: "git", Branch: "main"},

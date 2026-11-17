@@ -30,8 +30,19 @@ type rawZoneMachines struct {
 
 func newRawZoneMachines(t *testing.T) *rawZoneMachines {
 	t.Helper()
+	return newRawZoneMachinesN(t, 2)
+}
+
+// newRawZoneMachinesN creates one bare remote and n independent clones, each
+// initialized as a brain data directory. Existing tests use two; the
+// three-machine concurrency test uses three.
+func newRawZoneMachinesN(t *testing.T, count int) *rawZoneMachines {
+	t.Helper()
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git is not installed")
+	}
+	if count < 2 {
+		t.Fatalf("newRawZoneMachinesN: count = %d, want at least 2", count)
 	}
 	root := t.TempDir()
 	machines := &rawZoneMachines{t: t, remote: filepath.Join(root, "remote.git")}
@@ -48,10 +59,13 @@ func newRawZoneMachines(t *testing.T) *rawZoneMachines {
 	machines.git(first, "commit", "-q", "-m", "seed")
 	machines.git(first, "remote", "add", "origin", machines.remote)
 	machines.git(first, "push", "-q", "origin", "main")
+	machines.dirs = []string{first}
 
-	second := filepath.Join(root, "machine-b")
-	machines.git(root, "clone", "-q", machines.remote, second)
-	machines.dirs = []string{first, second}
+	for i := 1; i < count; i++ {
+		dir := filepath.Join(root, fmt.Sprintf("machine-%d", i))
+		machines.git(root, "clone", "-q", machines.remote, dir)
+		machines.dirs = append(machines.dirs, dir)
+	}
 	return machines
 }
 
