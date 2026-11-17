@@ -34,19 +34,25 @@ type Options struct {
 	// Path is the repository-relative path git passed as %P. It is recorded in
 	// conflict files and used to place them next to the merged file.
 	Path string
+	// OutputDir is the base directory for files a driver writes next to the
+	// merged file. Git runs drivers from the work tree root, so the CLI leaves
+	// it empty; tests point it at a temporary directory.
+	OutputDir string
 	// Now stamps conflict file names. Zero uses time.Now.
 	Now time.Time
 }
 
 // Conflict describes one field both sides changed differently. The merged file
-// keeps Ours; the record carries all three values so nothing is lost.
+// keeps Ours; the record carries all three values so nothing is lost. Machine
+// names the host that recorded the conflict when the driver could read one.
 type Conflict struct {
-	Kind   string
-	Field  string
-	Base   string
-	Ours   string
-	Theirs string
-	Path   string
+	Kind    string
+	Field   string
+	Base    string
+	Ours    string
+	Theirs  string
+	Path    string
+	Machine string
 }
 
 // Result is the output of one driver run.
@@ -158,8 +164,10 @@ func MergeNotes(base, ours, theirs []byte, opts Options) (Result, error) {
 
 // MergeRegistry merges registry.json as a keyed union of projects. Both sides'
 // records are kept; the record with the later updated_at wins on a field that
-// both changed, and unknown keys from the losing record are preserved. An
-// alias claimed by two projects is kept on the later record and reported.
+// both changed, and unknown keys from the losing record are preserved. Paths
+// and aliases are unions across machines, each path keeping the machine id
+// that registered it. An alias or path claimed by two projects stays on one
+// record and is reported so nothing is lost silently.
 func MergeRegistry(base, ours, theirs []byte, opts Options) (Result, error) {
 	if err := checkInputs(base, ours, theirs); err != nil {
 		return Result{}, err
@@ -182,7 +190,7 @@ func MergeRegistry(base, ours, theirs []byte, opts Options) (Result, error) {
 	}
 
 	merged, conflicts := mergeRegistryProjects(baseDoc, oursDoc, theirsDoc, opts)
-	resolveAliasConflicts(merged, oursDoc, theirsDoc, opts, &conflicts)
+	resolveClaimConflicts(merged, opts, &conflicts)
 
 	raw, err := renderRegistry(oursDoc, theirsDoc, merged)
 	if err != nil {
@@ -261,6 +269,9 @@ func WriteConflict(dir string, conflict Conflict, now time.Time) (string, error)
 	fmt.Fprintf(&out, "# Merge conflict: %s %s\n\n", conflict.Kind, conflict.Field)
 	if conflict.Path != "" {
 		fmt.Fprintf(&out, "- path: %s\n", conflict.Path)
+	}
+	if machine := strings.TrimSpace(conflict.Machine); machine != "" {
+		fmt.Fprintf(&out, "- machine: %s\n", machine)
 	}
 	fmt.Fprintf(&out, "- field: %s\n", conflict.Field)
 	fmt.Fprintf(&out, "- recorded_at: %s\n", now.UTC().Format(time.RFC3339))

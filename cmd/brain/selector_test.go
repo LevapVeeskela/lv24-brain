@@ -1,11 +1,14 @@
 package main
 
 import (
+	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/levapveeskela/lv24-brain/internal/domain"
 )
 
 // TestAgentWorkflowFromRepositoryDirectory covers how agents call the engine
@@ -130,8 +133,23 @@ func TestProjectSetAddPathKeepsExistingPaths(t *testing.T) {
 		t.Fatalf("add-path: %s", stderr)
 	}
 	code, stdout, _ := runForTest(t, "project", "show", "p", "--json", "--config", cfgPath)
-	if code != 0 || !strings.Contains(stdout, "elsewhere-on-another-machine") || strings.Count(stdout, "elsewhere-on-another-machine") != 1 {
-		t.Fatalf("paths after add-path = %s", stdout)
+	if code != 0 {
+		t.Fatalf("show: %d %s", code, stdout)
+	}
+	// The path must stay listed exactly once. pathProvenance repeats it as a
+	// map key, so the list is parsed instead of counting raw substrings.
+	var shown domain.Project
+	if err := json.Unmarshal([]byte(stdout), &shown); err != nil {
+		t.Fatalf("project show json: %v (%s)", err, stdout)
+	}
+	occurrences := 0
+	for _, path := range shown.Paths {
+		if strings.Contains(path, "elsewhere-on-another-machine") {
+			occurrences++
+		}
+	}
+	if occurrences != 1 {
+		t.Fatalf("paths after add-path = %+v, want the path exactly once", shown.Paths)
 	}
 	// Opening by id uses the path that exists on this machine, not the
 	// first one listed.

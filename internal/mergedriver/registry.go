@@ -18,11 +18,13 @@ type registryDocument struct {
 }
 
 type registryProject struct {
-	raw       map[string]json.RawMessage
-	id        string
-	name      string
-	aliases   []string
-	updatedAt time.Time
+	raw            map[string]json.RawMessage
+	id             string
+	name           string
+	aliases        []string
+	paths          []string
+	pathProvenance map[string]string
+	updatedAt      time.Time
 }
 
 func parseRegistry(data []byte) (registryDocument, error) {
@@ -77,6 +79,16 @@ func decodeRegistryProject(raw map[string]json.RawMessage) (registryProject, err
 	if value, ok := raw["aliases"]; ok {
 		if err := json.Unmarshal(value, &project.aliases); err != nil {
 			return registryProject{}, fmt.Errorf("project %q aliases: %w", project.id, err)
+		}
+	}
+	if value, ok := raw["paths"]; ok {
+		if err := json.Unmarshal(value, &project.paths); err != nil {
+			return registryProject{}, fmt.Errorf("project %q paths: %w", project.id, err)
+		}
+	}
+	if value, ok := raw["path_provenance"]; ok {
+		if err := json.Unmarshal(value, &project.pathProvenance); err != nil {
+			return registryProject{}, fmt.Errorf("project %q path_provenance: %w", project.id, err)
 		}
 	}
 	if value, ok := raw["updated_at"]; ok {
@@ -176,13 +188,18 @@ func pickRegistryWinner(base registryProject, inBase bool, ours, theirs registry
 
 // mergeRegistryRecord keeps the winner's values and preserves keys the loser
 // has but the winner lacks, so a field added on one machine is never dropped.
+// Checkout paths are a union exactly like aliases: a path one machine added
+// while the other edited the same record survives the merge, together with
+// the provenance of the machine that registered it.
 func mergeRegistryRecord(winner, loser registryProject) registryProject {
 	record := registryProject{
-		raw:       make(map[string]json.RawMessage, len(winner.raw)+len(loser.raw)),
-		id:        winner.id,
-		name:      winner.name,
-		aliases:   unionAliases(winner.aliases, loser.aliases),
-		updatedAt: winner.updatedAt,
+		raw:            make(map[string]json.RawMessage, len(winner.raw)+len(loser.raw)),
+		id:             winner.id,
+		name:           winner.name,
+		aliases:        unionStrings(winner.aliases, loser.aliases, false),
+		paths:          unionStrings(winner.paths, loser.paths, true),
+		pathProvenance: unionPathProvenance(winner.pathProvenance, loser.pathProvenance, winner.paths, loser.paths),
+		updatedAt:      winner.updatedAt,
 	}
 	for key, value := range winner.raw {
 		record.raw[key] = value
@@ -197,33 +214,95 @@ func mergeRegistryRecord(winner, loser registryProject) registryProject {
 			record.raw["aliases"] = raw
 		}
 	}
+	if len(record.paths) > 0 {
+		if raw, err := json.Marshal(record.paths); err == nil {
+			record.raw["paths"] = raw
+		}
+	}
+	if len(record.pathProvenance) > 0 {
+		if raw, err := json.Marshal(record.pathProvenance); err == nil {
+			record.raw["path_provenance"] = raw
+		}
+	} else {
+		delete(record.raw, "path_provenance")
+	}
 	return record
 }
 
-func unionAliases(left, right []string) []string {
+// unionStrings merges two claim lists without duplicates. Keys are
+// case-folded and slash-normalized so the same path or alias written twice
+// (by two machines, or in a different spelling) stays one entry.
+func unionStrings(left, right []string, paths bool) []string {
 	result := make([]string, 0, len(left)+len(right))
 	seen := make(map[string]struct{}, len(left)+len(right))
-	for _, aliases := range [][]string{left, right} {
-		for _, alias := range aliases {
-			alias = strings.TrimSpace(alias)
-			if alias == "" {
+	for _, values := range [][]string{left, right} {
+		for _, value := range values {
+			value = strings.TrimSpace(value)
+			if value == "" {
 				continue
 			}
-			key := strings.ToLower(alias)
+			key := claimKey(value, paths)
 			if _, ok := seen[key]; ok {
 				continue
 			}
 			seen[key] = struct{}{}
-			result = append(result, alias)
+			result = append(result, value)
 		}
 	}
 	return result
 }
 
-// resolveAliasConflicts keeps an alias on one project only. The later
-// updated_at wins; a tie keeps the alias on ours. Every reassignment is
-// reported so the owner can decide which project the alias belongs to.
-func resolveAliasConflicts(merged map[string]registryProject, ours, theirs registryDocument, opts Options, conflicts *[]Conflict) {
+// unionPathProvenance merges the per-path machine records of both sides and
+// drops entries whose path no longer exists in the unioned path list.
+func unionPathProvenance(left, right map[string]string, leftPaths, rightPaths []string) map[string]string {
+	if len(left) == 0 && len(right) == 0 {
+		return nil
+	}
+	valid := make(map[string]struct{})
+	for _, path := range unionStrings(leftPaths, rightPaths, true) {
+		valid[claimKey(path, true)] = struct{}{}
+	}
+	out := make(map[string]string, len(left)+len(right))
+	claimed := make(map[string]struct{}, len(left)+len(right))
+	for _, provenance := range []map[string]string{left, right} {
+		for path, owner := range provenance {
+			path = strings.TrimSpace(path)
+			owner = strings.TrimSpace(owner)
+			key := claimKey(path, true)
+			if path == "" || owner == "" {
+				continue
+			}
+			if _, ok := valid[key]; !ok {
+				continue
+			}
+			if _, ok := claimed[key]; ok {
+				continue
+			}
+			claimed[key] = struct{}{}
+			out[path] = owner
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+// claimKey is the comparison key of an alias (folded) or a path (folded and
+// slash-normalized, trailing slash removed).
+func claimKey(value string, path bool) string {
+	value = strings.TrimSpace(value)
+	if path {
+		value = strings.TrimSuffix(strings.ReplaceAll(value, `\`, "/"), "/")
+	}
+	return strings.ToLower(value)
+}
+
+// resolveClaimConflicts keeps each alias and each checkout path on one project
+// only. The later updated_at wins; a tie keeps the claim on the smaller id.
+// Every reassignment is reported so the owner can decide which project the
+// alias or path belongs to; nothing is dropped silently.
+func resolveClaimConflicts(merged map[string]registryProject, opts Options, conflicts *[]Conflict) {
 	ids := make([]string, 0, len(merged))
 	for id := range merged {
 		ids = append(ids, id)
@@ -235,31 +314,71 @@ func resolveAliasConflicts(merged map[string]registryProject, ours, theirs regis
 		}
 		return left.id < right.id
 	})
-	owner := map[string]string{}
-	for _, id := range ids {
-		project := merged[id]
-		keep := make([]string, 0, len(project.aliases))
-		for _, alias := range project.aliases {
-			key := strings.ToLower(strings.TrimSpace(alias))
-			if first, taken := owner[key]; taken {
-				*conflicts = append(*conflicts, Conflict{
-					Kind:   "registry",
-					Field:  "alias-" + key,
-					Ours:   first,
-					Theirs: id,
-					Path:   opts.Path,
-				})
-				continue
+
+	claims := []struct {
+		kind    string
+		isPath  bool
+		extract func(registryProject) []string
+		write   func(*registryProject, []string)
+	}{
+		{
+			kind:    "alias",
+			extract: func(project registryProject) []string { return project.aliases },
+			write: func(project *registryProject, values []string) {
+				project.aliases = values
+				if raw, err := json.Marshal(values); err == nil {
+					project.raw["aliases"] = raw
+				}
+			},
+		},
+		{
+			kind:    "path",
+			isPath:  true,
+			extract: func(project registryProject) []string { return project.paths },
+			write: func(project *registryProject, values []string) {
+				project.paths = values
+				if raw, err := json.Marshal(values); err == nil {
+					project.raw["paths"] = raw
+				}
+				project.pathProvenance = unionPathProvenance(project.pathProvenance, nil, values, values)
+				if len(project.pathProvenance) > 0 {
+					if raw, err := json.Marshal(project.pathProvenance); err == nil {
+						project.raw["path_provenance"] = raw
+					}
+				} else {
+					delete(project.raw, "path_provenance")
+				}
+			},
+		},
+	}
+	for _, claim := range claims {
+		owner := map[string]string{}
+		for _, id := range ids {
+			project := merged[id]
+			values := claim.extract(project)
+			keep := make([]string, 0, len(values))
+			for _, value := range values {
+				key := claimKey(value, claim.isPath)
+				if key == "" {
+					continue
+				}
+				if first, taken := owner[key]; taken {
+					*conflicts = append(*conflicts, Conflict{
+						Kind:   "registry",
+						Field:  claim.kind + "-" + key,
+						Ours:   first,
+						Theirs: id,
+						Path:   opts.Path,
+					})
+					continue
+				}
+				owner[key] = id
+				keep = append(keep, value)
 			}
-			owner[key] = id
-			keep = append(keep, alias)
-		}
-		if len(keep) != len(project.aliases) {
-			project.aliases = keep
-			if raw, err := json.Marshal(keep); err == nil {
-				project.raw["aliases"] = raw
+			if len(keep) != len(values) {
+				claim.write(&project, keep)
+				merged[id] = project
 			}
-			merged[id] = project
 		}
 	}
 }

@@ -191,3 +191,145 @@ func TestDiscoverRegistersOnlyNewRepositories(t *testing.T) {
 		t.Fatalf("second apply changed registry: %d projects, want 3", n)
 	}
 }
+
+// A second checkout of a registered repository is adopted into the existing
+// project by its normalized origin URL, even when the folder name and the
+// stored URL spelling differ.
+func TestDiscoverAdoptsCheckoutByRepoURL(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git is not installed")
+	}
+	base := t.TempDir()
+	root := filepath.Join(base, "workspace")
+	dataDir := filepath.Join(base, "brain")
+	cfgPath := filepath.Join(dataDir, "brain.yaml")
+	if code, _, stderr := runForTest(t, "init", "--mode", "local", "--data-dir", dataDir); code != 0 {
+		t.Fatalf("init: %s", stderr)
+	}
+
+	// The registered checkout lives outside the scanned workspace.
+	original := filepath.Join(base, "original")
+	discoverGitInit(t, original)
+	if code, _, stderr := runForTest(t, "project", "set", "alpha",
+		"--repo", "https://example.test/x.git",
+		"--path", original, "--config", cfgPath); code != 0 {
+		t.Fatalf("project set: %s", stderr)
+	}
+
+	// Same remote, different folder name and different URL spelling.
+	clone := filepath.Join(root, "checkout-two")
+	discoverGitInit(t, clone)
+	discoverGitRun(t, clone, "remote", "add", "origin", "https://u:tok@example.test/x.git")
+
+	var stdout, stderr bytes.Buffer
+	if code := runDiscover([]string{"--root", root, "--config", cfgPath}, &stdout, &stderr); code != 0 {
+		t.Fatalf("dry run exit %d: %s", code, stderr.String())
+	}
+	wantDry := strings.Join([]string{
+		"adopt alpha " + clone,
+		"dry run: 0 new project(s), 1 adoption(s); rerun with --apply to register",
+		"",
+	}, "\n")
+	if stdout.String() != wantDry {
+		t.Fatalf("dry run stdout = %q, want %q", stdout.String(), wantDry)
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	if code := runDiscover([]string{"--root", root, "--apply", "--config", cfgPath}, &stdout, &stderr); code != 0 {
+		t.Fatalf("apply exit %d: %s", code, stderr.String())
+	}
+	if want := "adopted alpha " + clone + "\n"; stdout.String() != want {
+		t.Fatalf("apply stdout = %q, want %q", stdout.String(), want)
+	}
+
+	code, shown, stderrText := runForTest(t, "project", "show", "alpha", "--json", "--config", cfgPath)
+	if code != 0 {
+		t.Fatalf("project show: %s", stderrText)
+	}
+	var alpha domain.Project
+	if err := json.Unmarshal([]byte(shown), &alpha); err != nil {
+		t.Fatalf("project show json: %v", err)
+	}
+	if len(alpha.Paths) != 2 || alpha.Paths[0] != original || alpha.Paths[1] != clone {
+		t.Fatalf("alpha paths = %+v, want [%s %s]", alpha.Paths, original, clone)
+	}
+	if owner := alpha.PathProvenance[clone]; owner == "" {
+		t.Fatalf("adopted path has no machine provenance: %+v", alpha.PathProvenance)
+	}
+	if code, list, stderrText := runForTest(t, "project", "list", "--json", "--config", cfgPath); code != 0 {
+		t.Fatalf("project list: %s", stderrText)
+	} else {
+		var projects []domain.Project
+		if err := json.Unmarshal([]byte(list), &projects); err != nil {
+			t.Fatalf("project list json: %v", err)
+		}
+		if len(projects) != 1 {
+			t.Fatalf("adoption created a second project: %d projects", len(projects))
+		}
+	}
+}
+
+// One repository registered under two project ids is reported, never adopted
+// into either: only the owner can merge the split ids.
+func TestDiscoverReportsRepositoryClaimedTwice(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git is not installed")
+	}
+	base := t.TempDir()
+	root := filepath.Join(base, "workspace")
+	dataDir := filepath.Join(base, "brain")
+	cfgPath := filepath.Join(dataDir, "brain.yaml")
+	if code, _, stderr := runForTest(t, "init", "--mode", "local", "--data-dir", dataDir); code != 0 {
+		t.Fatalf("init: %s", stderr)
+	}
+	// The lv24-ytk variants: one repository, two ids, different URL spellings.
+	if code, _, stderr := runForTest(t, "project", "set", "alpha",
+		"--repo", "https://example.test/ytk.git",
+		"--path", filepath.Join(base, "one"), "--config", cfgPath); code != 0 {
+		t.Fatalf("project set alpha: %s", stderr)
+	}
+	if code, _, stderr := runForTest(t, "project", "set", "lv24-ytk-verify-typecheck",
+		"--repo", "git@example.test:ytk",
+		"--path", filepath.Join(base, "two"), "--config", cfgPath); code != 0 {
+		t.Fatalf("project set verify: %s", stderr)
+	}
+
+	clash := filepath.Join(root, "ytk-clone")
+	discoverGitInit(t, clash)
+	discoverGitRun(t, clash, "remote", "add", "origin", "https://example.test/ytk.git")
+
+	var stdout, stderr bytes.Buffer
+	if code := runDiscover([]string{"--root", root, "--config", cfgPath}, &stdout, &stderr); code != 0 {
+		t.Fatalf("dry run exit %d: %s", code, stderr.String())
+	}
+	wantDry := strings.Join([]string{
+		"repo-conflict ytk-clone " + clash + " (repository claimed by alpha, lv24-ytk-verify-typecheck)",
+		"dry run: 0 new project(s); rerun with --apply to register",
+		"",
+	}, "\n")
+	if stdout.String() != wantDry {
+		t.Fatalf("dry run stdout = %q, want %q", stdout.String(), wantDry)
+	}
+
+	// Apply registers nothing and adopts nothing.
+	stdout.Reset()
+	stderr.Reset()
+	if code := runDiscover([]string{"--root", root, "--apply", "--config", cfgPath}, &stdout, &stderr); code != 0 {
+		t.Fatalf("apply exit %d: %s", code, stderr.String())
+	}
+	if strings.Contains(stdout.String(), "registered") || strings.Contains(stdout.String(), "adopted") {
+		t.Fatalf("apply changed the registry: %q", stdout.String())
+	}
+	if code, list, stderrText := runForTest(t, "project", "list", "--json", "--config", cfgPath); code != 0 {
+		t.Fatalf("project list: %s", stderrText)
+	} else {
+		var projects []domain.Project
+		if err := json.Unmarshal([]byte(list), &projects); err != nil {
+			t.Fatalf("project list json: %v", err)
+		}
+		if len(projects) != 2 {
+			t.Fatalf("registry has %d projects, want the original 2", len(projects))
+		}
+	}
+}

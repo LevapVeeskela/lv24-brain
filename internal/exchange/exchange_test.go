@@ -531,3 +531,76 @@ func TestStreaming1kRecords(t *testing.T) {
 		t.Fatalf("imported notes=%d", len(notes))
 	}
 }
+
+func TestImportRerunIsIdempotentAndManifested(t *testing.T) {
+	ctx := context.Background()
+	srcDir := filepath.Join(t.TempDir(), "src")
+	src := newTestStore(t, srcDir)
+	seedProject(t, ctx, src, "p1")
+	if _, err := src.AppendNote(ctx, domain.Note{ID: "note-a", ProjectID: "p1", Body: "body", CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC()}); err != nil {
+		t.Fatal(err)
+	}
+	exportDir := filepath.Join(t.TempDir(), "export")
+	if _, err := Export(ctx, src, ExportOptions{Out: exportDir}); err != nil {
+		t.Fatal(err)
+	}
+	dstDir := filepath.Join(t.TempDir(), "dst")
+	dst := newTestStore(t, dstDir)
+	if _, err := Import(ctx, dst, ImportOptions{From: exportDir, CreateProjects: true}); err != nil {
+		t.Fatal(err)
+	}
+	r2, err := Import(ctx, dst, ImportOptions{From: exportDir, CreateProjects: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r2.Created != 0 || r2.Unchanged != 1 || r2.Conflicts != 0 {
+		t.Fatalf("rerun report=%+v", r2)
+	}
+	if _, err := os.Stat(filepath.Join(dstDir, "backups")); err != nil {
+		t.Fatalf("import manifest dir missing: %v", err)
+	}
+}
+
+func TestConcurrentImportAndWrite(t *testing.T) {
+	ctx := context.Background()
+	srcDir := filepath.Join(t.TempDir(), "src")
+	src := newTestStore(t, srcDir)
+	seedProject(t, ctx, src, "p1")
+	for i := 0; i < 20; i++ {
+		if _, err := src.AppendNote(ctx, domain.Note{ID: fmt.Sprintf("note-%d", i), ProjectID: "p1", Body: fmt.Sprintf("body %d", i), CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC()}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	exportDir := filepath.Join(t.TempDir(), "export")
+	if _, err := Export(ctx, src, ExportOptions{Out: exportDir}); err != nil {
+		t.Fatal(err)
+	}
+	dstDir := filepath.Join(t.TempDir(), "dst")
+	dst := newTestStore(t, dstDir)
+	errCh := make(chan error, 2)
+	go func() {
+		_, err := Import(ctx, dst, ImportOptions{From: exportDir, CreateProjects: true})
+		errCh <- err
+	}()
+	go func() {
+		time.Sleep(10 * time.Millisecond)
+		seedProject(t, ctx, dst, "p2")
+		for i := 0; i < 5; i++ {
+			if _, err := dst.AppendNote(ctx, domain.Note{ProjectID: "p2", Body: fmt.Sprintf("live %d", i), CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC()}); err != nil {
+				errCh <- err
+				return
+			}
+		}
+		errCh <- nil
+	}()
+	for i := 0; i < 2; i++ {
+		if err := <-errCh; err != nil {
+			t.Fatal(err)
+		}
+	}
+	notesP1, _ := dst.ListNotes(ctx, "p1")
+	notesP2, _ := dst.ListNotes(ctx, "p2")
+	if len(notesP1) != 20 || len(notesP2) != 5 {
+		t.Fatalf("notes p1=%d p2=%d", len(notesP1), len(notesP2))
+	}
+}

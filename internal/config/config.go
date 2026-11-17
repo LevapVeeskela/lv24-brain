@@ -62,6 +62,11 @@ type BrainConfig struct {
 	// no defaults: selection redirects to ReplacedBy and registration is
 	// refused, but nothing on disk is touched.
 	RetiredPaths []RetiredPath `yaml:"retired_paths,omitempty"`
+	// MachineID is an optional stable name for this machine. It is recorded
+	// as the provenance of registry paths and conflict files, so a shared
+	// registry says which machine registered what. Omitted and empty values
+	// fall back to the OS host name; nothing requires it.
+	MachineID string `yaml:"machine_id,omitempty"`
 }
 
 // Default write-time limits. They are generous enough that a normal note,
@@ -412,6 +417,20 @@ type RetiredPath struct {
 // to the workspace configuration, not to the public engine.
 func (c BrainConfig) EffectiveRetiredPaths() []RetiredPath {
 	return c.RetiredPaths
+}
+
+// EffectiveMachineID returns the configured machine id, falling back to the OS
+// host name when brain.yaml does not set one. The value is provenance only:
+// an empty string means "unknown" and callers must treat it as optional.
+func (c BrainConfig) EffectiveMachineID() string {
+	if id := strings.TrimSpace(c.MachineID); id != "" {
+		return id
+	}
+	host, err := os.Hostname()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(host)
 }
 
 // Default returns a local-mode configuration for a new brain.

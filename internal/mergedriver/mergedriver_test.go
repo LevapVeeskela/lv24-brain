@@ -278,6 +278,145 @@ func TestMergeRegistryAliasConflictKeepsOneOwner(t *testing.T) {
 	}
 }
 
+// registryProjectWithPaths builds a project record carrying checkout paths and
+// the machine id that registered each of them.
+func registryProjectWithPaths(id string, paths []string, provenance map[string]string, updated time.Time) map[string]any {
+	project := registryProject(id, id, nil, updated)
+	project["paths"] = paths
+	if len(provenance) > 0 {
+		project["path_provenance"] = provenance
+	}
+	return project
+}
+
+func TestMergeRegistryUnionsPathsWithProvenance(t *testing.T) {
+	at := time.Date(2026, 11, 15, 9, 0, 0, 0, time.UTC)
+	// Two machines each add a checkout to the same project while the other
+	// side touches the record: neither path may be dropped, and each path
+	// keeps the machine id that registered it.
+	base := registryDoc(t,
+		registryProjectWithPaths("alpha", []string{"/a"}, map[string]string{"/a": "m1"}, at))
+	ours := registryDoc(t,
+		registryProjectWithPaths("alpha", []string{"/a", "/b"}, map[string]string{"/a": "m1", "/b": "m1"}, at.Add(time.Hour)))
+	theirs := registryDoc(t,
+		registryProjectWithPaths("alpha", []string{"/a", "/c"}, map[string]string{"/a": "m1", "/c": "m2"}, at.Add(2*time.Hour)))
+
+	result, err := mergedriver.MergeRegistry(base, ours, theirs, mergedriver.Options{Path: "registry.json"})
+	if err != nil {
+		t.Fatalf("MergeRegistry: %v", err)
+	}
+	if len(result.Conflicts) != 0 {
+		t.Fatalf("conflicts = %+v, want none for a union of paths", result.Conflicts)
+	}
+	var decoded struct {
+		Projects []struct {
+			ID             string            `json:"id"`
+			Paths          []string          `json:"paths"`
+			PathProvenance map[string]string `json:"path_provenance"`
+		} `json:"projects"`
+	}
+	if err := json.Unmarshal(result.Merged, &decoded); err != nil {
+		t.Fatalf("merged registry is not JSON: %v\n%s", err, result.Merged)
+	}
+	if len(decoded.Projects) != 1 {
+		t.Fatalf("projects = %d, want 1", len(decoded.Projects))
+	}
+	alpha := decoded.Projects[0]
+	got := map[string]bool{}
+	for _, path := range alpha.Paths {
+		got[path] = true
+	}
+	for _, want := range []string{"/a", "/b", "/c"} {
+		if !got[want] {
+			t.Fatalf("paths %v missing %q (union lost a machine's checkout)", alpha.Paths, want)
+		}
+	}
+	if len(alpha.Paths) != 3 {
+		t.Fatalf("paths = %v, want exactly the 3-way union", alpha.Paths)
+	}
+	for path, owner := range map[string]string{"/a": "m1", "/b": "m1", "/c": "m2"} {
+		if alpha.PathProvenance[path] != owner {
+			t.Fatalf("provenance[%q] = %q, want %q (full map %+v)",
+				path, alpha.PathProvenance[path], owner, alpha.PathProvenance)
+		}
+	}
+}
+
+func TestMergeRegistryPathClaimedTwiceKeepsOneOwner(t *testing.T) {
+	at := time.Date(2026, 11, 15, 9, 0, 0, 0, time.UTC)
+	base := registryDoc(t,
+		registryProjectWithPaths("alpha", []string{}, nil, at),
+		registryProjectWithPaths("beta", []string{}, nil, at))
+	ours := registryDoc(t,
+		registryProjectWithPaths("alpha", []string{"/shared"}, map[string]string{"/shared": "m1"}, at.Add(time.Hour)),
+		registryProjectWithPaths("beta", []string{}, nil, at))
+	theirs := registryDoc(t,
+		registryProjectWithPaths("alpha", []string{}, nil, at),
+		registryProjectWithPaths("beta", []string{"/shared"}, map[string]string{"/shared": "m2"}, at.Add(2*time.Hour)))
+
+	result, err := mergedriver.MergeRegistry(base, ours, theirs, mergedriver.Options{Path: "registry.json"})
+	if err != nil {
+		t.Fatalf("MergeRegistry: %v", err)
+	}
+	if len(result.Conflicts) != 1 ||
+		!strings.Contains(result.Conflicts[0].Field, "path") ||
+		!strings.Contains(result.Conflicts[0].Field, "shared") {
+		t.Fatalf("conflicts = %+v, want one /shared path claim conflict", result.Conflicts)
+	}
+	var decoded struct {
+		Projects []struct {
+			ID             string            `json:"id"`
+			Paths          []string          `json:"paths"`
+			PathProvenance map[string]string `json:"path_provenance"`
+		} `json:"projects"`
+	}
+	if err := json.Unmarshal(result.Merged, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	owners := make([]string, 0, 2)
+	for _, project := range decoded.Projects {
+		for _, path := range project.Paths {
+			if path == "/shared" {
+				owners = append(owners, project.ID)
+				if project.PathProvenance[path] != "m2" {
+					t.Fatalf("winner provenance = %+v, want m2 (the later updated_at)", project.PathProvenance)
+				}
+			}
+		}
+		if project.ID == "alpha" && len(project.Paths) != 0 {
+			t.Fatalf("losing alpha kept paths %+v", project.Paths)
+		}
+		if project.ID == "alpha" && len(project.PathProvenance) != 0 {
+			t.Fatalf("losing alpha kept provenance %+v", project.PathProvenance)
+		}
+	}
+	if strings.Join(owners, ",") != "beta" {
+		t.Fatalf("/shared owners = %v, want only beta", owners)
+	}
+}
+
+func TestWriteConflictRecordsMachine(t *testing.T) {
+	conflict := mergedriver.Conflict{
+		Kind:    "registry",
+		Field:   "path-/shared",
+		Ours:    "beta",
+		Theirs:  "alpha",
+		Path:    "registry.json",
+		Machine: "m1",
+	}
+	path, err := mergedriver.WriteConflict(t.TempDir(), conflict, time.Date(2026, 11, 15, 9, 0, 0, 0, time.UTC))
+	if err != nil {
+		t.Fatalf("WriteConflict: %v", err)
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(raw), "- machine: m1") {
+		t.Fatalf("conflict record misses the machine provenance:\n%s", raw)
+	}
+}
+
 func TestMergedStateFrontmatterStaysReadable(t *testing.T) {
 	at := time.Date(2026, 11, 15, 10, 0, 0, 0, time.UTC)
 	base := stateDoc(t, at, "ship 0.15", "write docs", nil, nil, nil)

@@ -140,8 +140,10 @@ type ImportReport struct {
 	Unchanged   int      `json:"unchanged"`
 	Conflicts   int      `json:"conflicts"`
 	Quarantined int      `json:"quarantined"`
+	Skipped     int      `json:"skipped"`
 	Projects    int      `json:"projects"`
 	ConflictIDs []string `json:"conflictIds,omitempty"`
+	SkippedIDs  []string `json:"skippedIds,omitempty"`
 }
 
 // ExportOptions controls export.

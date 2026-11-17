@@ -26,6 +26,7 @@ func MergeDrivers() []MergeDriver {
 		{Name: "lv24-state", Description: "lv24 brain state field merge"},
 		{Name: "lv24-notes", Description: "lv24 brain note section merge"},
 		{Name: "lv24-registry", Description: "lv24 brain registry keyed merge"},
+		{Name: "lv24-items", Description: "lv24 brain raw-zone item union merge"},
 	}
 }
 
@@ -110,6 +111,8 @@ func driverCommand(name string) string {
 		return "notes %O %A %B %L %P"
 	case "lv24-registry":
 		return "registry %O %A %B %L %P"
+	case "lv24-items":
+		return "items %O %A %B %L %P"
 	default:
 		return ""
 	}

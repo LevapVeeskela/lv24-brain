@@ -30,13 +30,13 @@ func resolveTaxonomy(subtype string, scope domain.RecordScope, topicKey string) 
 	return taxonomy, nil
 }
 
-// lockTopic takes the per-topic store lock when the store offers one. A store
-// without it keeps append-only behaviour but cannot serialize concurrent
-// upserts; the local and git stores implement it.
+// lockTopic serializes a topic upsert. Topic upserts must refuse on stores
+// that cannot provide a per-(project,kind,topic) lock, because the read/
+// modify/write sequence would otherwise be a TOCTOU duplicate risk.
 func (a *App) lockTopic(ctx context.Context, projectID, kind, topicKey string) (func(), error) {
 	locker, ok := a.deps.Store.(ports.TopicLocker)
 	if !ok {
-		return func() {}, nil
+		return nil, fmt.Errorf("%w: topic upsert is not supported by this store (missing TopicLocker)", domain.ErrUnsupported)
 	}
 	return locker.LockTopic(ctx, projectID, kind, topicKey)
 }

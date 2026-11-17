@@ -47,15 +47,27 @@ func (p *Provider) Status(ctx context.Context) (ports.SyncStatus, error) {
 	if err != nil {
 		return ports.SyncStatus{}, err
 	}
+	records, err := p.conflictRecordPaths(ctx)
+	if err != nil {
+		return ports.SyncStatus{}, err
+	}
 	return ports.SyncStatus{
-		Provider:   ProviderName,
-		Branch:     branch,
-		Ahead:      ahead,
-		Behind:     behind,
-		Dirty:      dirty,
-		Conflicts:  conflicts,
-		LastSynced: p.lastSyncedRevision(ctx),
+		Provider:        ProviderName,
+		Branch:          branch,
+		Ahead:           ahead,
+		Behind:          behind,
+		Dirty:           dirty,
+		Conflicts:       conflicts,
+		ConflictRecords: records,
+		LastSynced:      p.lastSyncedRevision(ctx),
 	}, nil
+}
+
+// RecoverInterruptedSync is the public entry point used by App.Sync before its
+// conflict pre-check. Pull still calls the private helper so a direct Pull
+// recovers a killed earlier run too.
+func (p *Provider) RecoverInterruptedSync(ctx context.Context) (bool, error) {
+	return p.recoverInterruptedSync(ctx)
 }
 
 // Pull repairs an interrupted earlier sync, fetches the remote and rebases

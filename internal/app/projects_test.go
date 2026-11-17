@@ -350,3 +350,47 @@ func TestSaveProjectClearKeepsNonNilEmptySlices(t *testing.T) {
 		t.Fatalf("returned project lost explicit empty slices: %+v", project)
 	}
 }
+
+// Path provenance records which machine registered each checkout path. It is
+// stamped on every path write, a later machine never steals an existing
+// owner's path, and the map survives the registry.json round-trip.
+func TestSaveProjectStampsPathProvenance(t *testing.T) {
+	dataDir := t.TempDir()
+	store, err := fsstore.New(dataDir)
+	if err != nil {
+		t.Fatalf("fsstore.New: %v", err)
+	}
+	ctx := context.Background()
+	cfg := config.Default()
+	cfg.Mode = config.ModeLocal
+	cfg.DataDir = dataDir
+	cfg.MachineID = "m1"
+	first := app.New(cfg, app.Dependencies{Store: store})
+
+	project, err := first.SaveProject(ctx, app.ProjectInput{ID: "demo", Paths: projectValue([]string{"/src/demo"})})
+	if err != nil {
+		t.Fatalf("SaveProject: %v", err)
+	}
+	if owner := project.PathProvenance["/src/demo"]; owner != "m1" {
+		t.Fatalf("provenance = %+v, want /src/demo owned by m1", project.PathProvenance)
+	}
+
+	// A second machine adds a path; the first path keeps its owner.
+	cfg.MachineID = "m2"
+	second := app.New(cfg, app.Dependencies{Store: store})
+	project, err = second.SaveProject(ctx, app.ProjectInput{ID: "demo", Paths: projectValue([]string{"/src/demo", "/src/other"})})
+	if err != nil {
+		t.Fatalf("SaveProject: %v", err)
+	}
+	if project.PathProvenance["/src/demo"] != "m1" || project.PathProvenance["/src/other"] != "m2" {
+		t.Fatalf("provenance = %+v, want m1 for /src/demo and m2 for /src/other", project.PathProvenance)
+	}
+
+	stored, err := second.GetProject(ctx, "demo")
+	if err != nil {
+		t.Fatalf("GetProject: %v", err)
+	}
+	if stored.PathProvenance["/src/demo"] != "m1" || stored.PathProvenance["/src/other"] != "m2" {
+		t.Fatalf("stored provenance = %+v, want the registry to keep both owners", stored.PathProvenance)
+	}
+}

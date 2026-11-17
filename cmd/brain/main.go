@@ -1560,17 +1560,21 @@ func toJSONFindings(findings []app.Finding) []jsonFinding {
 
 // jsonSync is the machine-readable sync report, including --status --json.
 type jsonSync struct {
-	Provider   string               `json:"provider"`
-	Branch     string               `json:"branch"`
-	Ahead      int                  `json:"ahead"`
-	Behind     int                  `json:"behind"`
-	Changed    int                  `json:"changed"`
-	Dirty      bool                 `json:"dirty"`
-	Unmerged   bool                 `json:"unmerged"`
-	Conflicts  []string             `json:"conflicts"`
-	Recovered  bool                 `json:"recovered"`
-	Reindexed  bool                 `json:"reindexed"`
-	LastSynced *domain.SyncRevision `json:"last_synced_revision,omitempty"`
+	Provider  string   `json:"provider"`
+	Branch    string   `json:"branch"`
+	Ahead     int      `json:"ahead"`
+	Behind    int      `json:"behind"`
+	Changed   int      `json:"changed"`
+	Dirty     bool     `json:"dirty"`
+	Unmerged  bool     `json:"unmerged"`
+	Conflicts []string `json:"conflicts"`
+	// ConflictRecords lists driver-generated records kept next to the merged
+	// file. They are also included in conflicts so a dirty tree always has a
+	// corresponding conflict entry.
+	ConflictRecords []string             `json:"conflict_records,omitempty"`
+	Recovered       bool                 `json:"recovered"`
+	Reindexed       bool                 `json:"reindexed"`
+	LastSynced      *domain.SyncRevision `json:"last_synced_revision,omitempty"`
 }
 
 func runSync(args []string, stdout, stderr io.Writer) int {
@@ -1601,7 +1605,8 @@ func runSync(args []string, stdout, stderr io.Writer) int {
 		Push:             *push,
 		DisableAutostash: !*autostash,
 	})
-	conflicts := result.Conflicts
+	conflicts := append([]string{}, result.Conflicts...)
+	conflicts = appendUniqueStrings(conflicts, result.ConflictRecords...)
 	if conflicts == nil {
 		conflicts = []string{}
 	}
@@ -1612,17 +1617,18 @@ func runSync(args []string, stdout, stderr io.Writer) int {
 	}
 	if *asJSON {
 		payload := jsonSync{
-			Provider:   result.Provider,
-			Branch:     result.Branch,
-			Ahead:      result.Ahead,
-			Behind:     result.Behind,
-			Changed:    result.Changed,
-			Dirty:      result.Dirty,
-			Unmerged:   len(conflicts) > 0,
-			Conflicts:  conflicts,
-			Recovered:  result.Recovered,
-			Reindexed:  result.Reindexed,
-			LastSynced: lastSynced,
+			Provider:        result.Provider,
+			Branch:          result.Branch,
+			Ahead:           result.Ahead,
+			Behind:          result.Behind,
+			Changed:         result.Changed,
+			Dirty:           result.Dirty,
+			Unmerged:        len(result.Conflicts) > 0,
+			Conflicts:       conflicts,
+			ConflictRecords: result.ConflictRecords,
+			Recovered:       result.Recovered,
+			Reindexed:       result.Reindexed,
+			LastSynced:      lastSynced,
 		}
 		if code := writeJSONReport(stdout, stderr, "sync", payload); code != 0 {
 			return code

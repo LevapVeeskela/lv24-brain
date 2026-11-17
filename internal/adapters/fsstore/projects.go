@@ -33,8 +33,11 @@ type registryProject struct {
 	Kind          domain.ProjectKind `json:"kind"`
 	RepoURL       string             `json:"repo_url,omitempty"`
 	DefaultBranch string             `json:"default_branch,omitempty"`
-	CreatedAt     time.Time          `json:"created_at"`
-	UpdatedAt     time.Time          `json:"updated_at"`
+	// PathProvenance is the machine id that registered each path. Optional:
+	// registries written by older engines have no such key.
+	PathProvenance map[string]string `json:"path_provenance,omitempty"`
+	CreatedAt      time.Time         `json:"created_at"`
+	UpdatedAt      time.Time         `json:"updated_at"`
 }
 
 // PutProject inserts or replaces one project in the root registry.json. The
@@ -223,15 +226,16 @@ func normalizeProject(project domain.Project) (domain.Project, error) {
 
 func registryProjectFromDomain(project domain.Project) registryProject {
 	return registryProject{
-		ID:            project.ID,
-		Name:          project.Name,
-		Paths:         nonNilStrings(project.Paths),
-		Aliases:       nonNilStrings(project.Aliases),
-		Kind:          project.Kind,
-		RepoURL:       project.RepoURL,
-		DefaultBranch: project.DefaultBranch,
-		CreatedAt:     project.CreatedAt.UTC(),
-		UpdatedAt:     project.UpdatedAt.UTC(),
+		ID:             project.ID,
+		Name:           project.Name,
+		Paths:          nonNilStrings(project.Paths),
+		Aliases:        nonNilStrings(project.Aliases),
+		Kind:           project.Kind,
+		RepoURL:        project.RepoURL,
+		DefaultBranch:  project.DefaultBranch,
+		PathProvenance: project.PathProvenance,
+		CreatedAt:      project.CreatedAt.UTC(),
+		UpdatedAt:      project.UpdatedAt.UTC(),
 	}
 }
 
@@ -244,15 +248,16 @@ func (record registryProject) project() domain.Project {
 		kind = domain.ProjectKindOther
 	}
 	return domain.Project{
-		ID:            record.ID,
-		Name:          record.Name,
-		Paths:         nonNilStrings(record.Paths),
-		Aliases:       nonNilStrings(record.Aliases),
-		Kind:          kind,
-		RepoURL:       record.RepoURL,
-		DefaultBranch: record.DefaultBranch,
-		CreatedAt:     record.CreatedAt.UTC(),
-		UpdatedAt:     record.UpdatedAt.UTC(),
+		ID:             record.ID,
+		Name:           record.Name,
+		Paths:          nonNilStrings(record.Paths),
+		Aliases:        nonNilStrings(record.Aliases),
+		Kind:           kind,
+		RepoURL:        record.RepoURL,
+		DefaultBranch:  record.DefaultBranch,
+		PathProvenance: record.PathProvenance,
+		CreatedAt:      record.CreatedAt.UTC(),
+		UpdatedAt:      record.UpdatedAt.UTC(),
 	}
 }
 

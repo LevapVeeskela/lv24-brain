@@ -113,10 +113,7 @@ func runImport(args []string, stdout, stderr io.Writer) int {
 		b, _ := json.Marshal(report)
 		fmt.Fprintln(stdout, string(b))
 	} else {
-		fmt.Fprintf(stdout, "created %d\nunchanged %d\nconflicts %d\nquarantined %d\n", report.Created, report.Unchanged, report.Conflicts, report.Quarantined)
-	}
-	if report.Conflicts > 0 {
-		return 1
+		fmt.Fprintf(stdout, "created %d\nunchanged %d\nconflicts %d\nquarantined %d\nskipped %d\n", report.Created, report.Unchanged, report.Conflicts, report.Quarantined, report.Skipped)
 	}
 	return 0
 }

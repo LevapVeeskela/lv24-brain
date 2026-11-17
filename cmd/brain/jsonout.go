@@ -77,6 +77,22 @@ func nonNilStrings(values []string) []string {
 	return values
 }
 
+// appendUniqueStrings appends values not already present, preserving order.
+func appendUniqueStrings(base []string, values ...string) []string {
+	seen := make(map[string]struct{}, len(base)+len(values))
+	for _, value := range base {
+		seen[value] = struct{}{}
+	}
+	for _, value := range values {
+		if _, ok := seen[value]; ok {
+			continue
+		}
+		seen[value] = struct{}{}
+		base = append(base, value)
+	}
+	return base
+}
+
 // jsonProject is the project as agents see it.
 type jsonProject struct {
 	ID      string   `json:"id"`

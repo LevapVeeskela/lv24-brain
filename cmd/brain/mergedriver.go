@@ -26,9 +26,9 @@ func runMergeDriver(args []string, stdout, stderr io.Writer) int {
 		return 0
 	}
 	switch driver {
-	case "state", "notes", "registry":
+	case "state", "notes", "registry", "items":
 	default:
-		fmt.Fprintf(stderr, "brain merge-driver: unknown driver %q (want state, notes, or registry)\n", args[0])
+		fmt.Fprintf(stderr, "brain merge-driver: unknown driver %q (want state, notes, registry, or items)\n", args[0])
 		return 2
 	}
 	if len(args) < 4 {
@@ -59,6 +59,7 @@ func runMergeDriver(args []string, stdout, stderr io.Writer) int {
 
 	now := time.Now().UTC()
 	options := mergedriver.Options{Path: filepath.ToSlash(relativePath), Now: now}
+	machine := mergeDriverMachine()
 	var result mergedriver.Result
 	switch driver {
 	case "state":
@@ -67,6 +68,8 @@ func runMergeDriver(args []string, stdout, stderr io.Writer) int {
 		result, err = mergedriver.MergeNotes(base, ours, theirs, options)
 	case "registry":
 		result, err = mergedriver.MergeRegistry(base, ours, theirs, options)
+	case "items":
+		result, err = mergedriver.MergeItems(base, ours, theirs, options)
 	}
 	if err != nil {
 		// Exit 1 makes git fall back to a normal content conflict, which is
@@ -81,6 +84,7 @@ func runMergeDriver(args []string, stdout, stderr io.Writer) int {
 
 	conflictDir := mergeConflictDir(driver, relativePath, oursPath)
 	for _, conflict := range result.Conflicts {
+		conflict.Machine = machine
 		path, writeErr := mergedriver.WriteConflict(conflictDir, conflict, now)
 		if writeErr != nil {
 			fmt.Fprintf(stderr, "brain merge-driver: %v\n", writeErr)
@@ -89,6 +93,18 @@ func runMergeDriver(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "brain merge-driver: %s conflict recorded: %s\n", driver, path)
 	}
 	return 0
+}
+
+// mergeDriverMachine reads the optional machine id that conflict records name
+// as their provenance. It is best effort: a missing or broken config must
+// never fail the driver, because git would fall back to a raw content
+// conflict on registry.json and state.md.
+func mergeDriverMachine() string {
+	cfg, err := loadConfigOrDefault(defaultConfigPath())
+	if err != nil {
+		return ""
+	}
+	return cfg.EffectiveMachineID()
 }
 
 func readMergeInput(path string) ([]byte, error) {
@@ -130,6 +146,7 @@ func printMergeDriverUsage(w io.Writer) {
   brain merge-driver state    <base> <ours> <theirs> [<marker-size> <path>]
   brain merge-driver notes    <base> <ours> <theirs> [<marker-size> <path>]
   brain merge-driver registry <base> <ours> <theirs> [<marker-size> <path>]
+  brain merge-driver items    <base> <ours> <theirs> [<marker-size> <path>]
 
 The command merges the three inputs field by field and rewrites the second
 argument (ours). A field both sides changed differently keeps the current value

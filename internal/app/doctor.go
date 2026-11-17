@@ -6,11 +6,13 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
 	"github.com/levapveeskela/lv24-brain/internal/config"
 	"github.com/levapveeskela/lv24-brain/internal/domain"
+	"github.com/levapveeskela/lv24-brain/internal/gitinfo"
 	"github.com/levapveeskela/lv24-brain/internal/ports"
 	"github.com/levapveeskela/lv24-brain/internal/version"
 )
@@ -54,6 +56,8 @@ func (a *App) Doctor(ctx context.Context, opts DoctorOptions) (DoctorReport, err
 	checks = append(checks, a.doctorRawZone(ctx)...)
 	checks = append(checks, a.doctorPrompts(ctx))
 	checks = append(checks, a.doctorRetiredPaths(ctx))
+	checks = append(checks, a.doctorPendingConflicts(ctx))
+	checks = append(checks, a.doctorDuplicateRepo(ctx))
 	return DoctorReport{Checks: checks}, nil
 }
 
@@ -561,7 +565,7 @@ func (a *App) doctorMergeDrivers(ctx context.Context, fix bool) DoctorCheck {
 		return DoctorCheck{Name: "merge-drivers", Status: doctorFail, Message: err.Error()}
 	}
 	if len(missing) == 0 {
-		return DoctorCheck{Name: "merge-drivers", Status: doctorOK, Message: "state, notes, and registry drivers are registered"}
+		return DoctorCheck{Name: "merge-drivers", Status: doctorOK, Message: "state, notes, registry, and items drivers are registered"}
 	}
 	if fix {
 		executable, execErr := os.Executable()
@@ -734,4 +738,76 @@ func rawZonePath(path string) (string, string, bool) {
 		return "", "", false
 	}
 	return parts[0], parts[1], true
+}
+
+// doctorPendingConflicts counts the conflict artifacts the merge drivers and
+// consolidation wrote: state field conflicts, registry claim conflicts and
+// merge manifests. They are kept in the data repository on purpose — they are
+// the audit of what each machine could not decide alone — so a non-zero count
+// is a warning to reconcile them, never a failure.
+func (a *App) doctorPendingConflicts(_ context.Context) DoctorCheck {
+	if a.cfg.Mode == config.ModeServer || strings.TrimSpace(a.cfg.DataDir) == "" {
+		return DoctorCheck{Name: "conflicts", Status: doctorOK, Message: "not used in this mode"}
+	}
+	dataDir := a.cfg.DataDir
+	stateCount := len(globFiles(filepath.Join(dataDir, "projects", "*", stateConflictDir), ".md")) +
+		len(globFiles(filepath.Join(dataDir, "projects", "*", "notes", notesConflictDir), ".md"))
+	registryCount := len(globFiles(filepath.Join(dataDir, registryConflictDir), ".md"))
+	manifestCount := len(globFiles(filepath.Join(dataDir, mergeManifestDir), ".json"))
+	total := stateCount + registryCount + manifestCount
+	if total == 0 {
+		return DoctorCheck{Name: "conflicts", Status: doctorOK, Message: "no pending conflict artifacts"}
+	}
+	return DoctorCheck{
+		Name:   "conflicts",
+		Status: doctorWarn,
+		Code:   "pending-conflicts",
+		Message: fmt.Sprintf("%d conflict artifacts pending: %d state/notes (state-conflicts/), %d registry (registry-conflicts/), %d merge manifest (merges/); inspect them with `brain review` and delete each artifact once both sides are reconciled",
+			total, stateCount, registryCount, manifestCount),
+	}
+}
+
+// doctorDuplicateRepo reports one repository URL registered under several
+// project ids. Knowledge written under each id stays split — the lv24-ytk
+// variants are the live example — so doctor warns until the owner merges
+// them; it never changes the registry itself.
+func (a *App) doctorDuplicateRepo(ctx context.Context) DoctorCheck {
+	if a.deps.Store == nil || a.cfg.Mode == config.ModeServer {
+		return DoctorCheck{Name: "duplicate-repo", Status: doctorOK, Message: "not checked in this mode"}
+	}
+	projects, err := a.deps.Store.ListProjects(ctx)
+	if err != nil {
+		return DoctorCheck{Name: "duplicate-repo", Status: doctorFail, Message: err.Error()}
+	}
+	groups := map[string][]string{}
+	for _, project := range projects {
+		key := gitinfo.NormalizeRepoURL(project.RepoURL)
+		if key == "" {
+			continue
+		}
+		groups[key] = append(groups[key], project.ID)
+	}
+	var duplicates []string
+	for key, ids := range groups {
+		if len(ids) < 2 {
+			continue
+		}
+		sort.Strings(ids)
+		duplicates = append(duplicates, key+" ("+strings.Join(ids, ", ")+")")
+	}
+	if len(duplicates) == 0 {
+		return DoctorCheck{
+			Name:    "duplicate-repo",
+			Status:  doctorOK,
+			Message: fmt.Sprintf("%d repositories are each owned by one project", len(groups)),
+		}
+	}
+	sort.Strings(duplicates)
+	return DoctorCheck{
+		Name:   "duplicate-repo",
+		Status: doctorWarn,
+		Code:   "duplicate-repo",
+		Message: fmt.Sprintf("%d repositories are registered under more than one project id: %s; pick one id and move the other project's records there (brain record trash/supersede) so later writes do not split",
+			len(duplicates), strings.Join(duplicates, "; ")),
+	}
 }

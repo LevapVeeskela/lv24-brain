@@ -225,7 +225,22 @@ func missingGitattributesLines(dataDir string) ([]string, error) {
 // routes the single mutable files through the deterministic merge drivers.
 // A clone without the drivers registered falls back to a normal conflict,
 // which is safe; brain init and brain doctor --fix register them.
-const gitattributesContent = `# Journals are append-only JSON Lines written by several machines; union
+const gitattributesContent = `# Normalize text to LF in the repository on every platform. Without this, a
+# Windows clone with core.autocrlf=true writes CRLF into the work tree and
+# hashers/diffs of work-tree bytes disagree across machines.
+* text=auto eol=lf
+
+# Binary artifacts never get text normalization or line-based merges.
+*.db binary
+*.sqlite binary
+*.zip binary
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.pdf binary
+
+# Journals are append-only JSON Lines written by several machines; union
 # merge keeps every line from both sides instead of stopping on a conflict.
 journal/*.jsonl merge=union
 
@@ -233,6 +248,15 @@ journal/*.jsonl merge=union
 projects/*/state.md merge=lv24-state
 registry.json merge=lv24-registry
 projects/*/notes/*.md merge=lv24-notes
+
+# Shared raw-zone items are content-addressed and immutable: normalize the
+# host observation time and keep both sides if they genuinely diverge.
+connectors/*/items/*.md merge=lv24-items
+
+# Checkpoints hold host-specific cursors; they are gitignored and must never be
+# merged or end up in a conflict even if an older checkout tracked them.
+connectors/*/checkpoints/*.json -merge -text
+connectors/*/*.lock -merge -text
 `
 
 func ensureGitattributes(dataDir string) error {

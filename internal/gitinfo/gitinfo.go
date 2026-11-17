@@ -94,6 +94,37 @@ func RedactRemote(remote string) string {
 	return remote
 }
 
+// NormalizeRepoURL returns the identity key of a remote URL so the same
+// repository compares equal across machines: credentials and the scheme are
+// dropped, scp-style `user@host:path` becomes `host/path`, the host is
+// lower-cased, and a trailing "/" or ".git" is removed. An empty input stays
+// empty; a value that is not a URL is only case-folded and trimmed.
+func NormalizeRepoURL(remote string) string {
+	s := strings.TrimSpace(RedactRemote(remote))
+	if s == "" {
+		return ""
+	}
+	s = strings.ToLower(s)
+	if i := strings.Index(s, "://"); i >= 0 {
+		s = s[i+3:]
+		if at := strings.IndexByte(s, '@'); at >= 0 {
+			s = s[at+1:]
+		}
+	} else {
+		if at := strings.IndexByte(s, '@'); at >= 0 {
+			s = s[at+1:]
+		}
+		// scp form host:path → host/path; a single-letter prefix is a
+		// Windows drive, not a host, so it is left alone.
+		if colon := strings.IndexByte(s, ':'); colon > 1 && !strings.Contains(s[:colon], "/") && !strings.Contains(s[:colon], `\`) {
+			s = s[:colon] + "/" + strings.TrimLeft(s[colon+1:], "/")
+		}
+	}
+	s = strings.TrimSuffix(s, "/")
+	s = strings.TrimSuffix(s, ".git")
+	return strings.TrimSuffix(s, "/")
+}
+
 // Graph is one code-graph index found for a project.
 type Graph struct {
 	// Kind is "graphify" or "codegraph".

@@ -3,8 +3,10 @@ package gitstore
 import (
 	"context"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/levapveeskela/lv24-brain/internal/domain"
 	"github.com/levapveeskela/lv24-brain/internal/ports"
@@ -20,11 +22,17 @@ var _ ports.GitPathLister = (*Provider)(nil)
 //
 // Files remain on disk. Retrying is harmless, including after a failed run or a
 // previous policy change. Previously published history is retained; this
-// prevents future publication.
+// prevents future publication. The git index mutation is serialized with the
+// checkout sync lock so it cannot interleave with sync/index operations.
 func (p *Provider) PrepareConnectionPublish(ctx context.Context, id string, policy domain.PublishPolicy) error {
 	if err := domain.ValidateConnectionID("connection.id", id); err != nil {
 		return err
 	}
+	release, err := p.lockSync(ctx)
+	if err != nil {
+		return err
+	}
+	defer release()
 	if policy == domain.PublishLocalOnly {
 		if _, err := p.run(ctx, "rm", "--cached", "-r", "--ignore-unmatch", "--", "connectors/"+id+"/"); err != nil {
 			return fmt.Errorf("untrack local-only connection: %w", err)
@@ -35,6 +43,43 @@ func (p *Provider) PrepareConnectionPublish(ctx context.Context, id string, poli
 		return fmt.Errorf("untrack checkpoints: %w", err)
 	}
 	return nil
+}
+
+func (p *Provider) lockSync(ctx context.Context) (func(), error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	path := filepath.Join(p.dir, "sync.lock")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return nil, fmt.Errorf("gitstore: create sync lock dir: %w", err)
+	}
+	const wait = 10 * time.Second
+	deadline := time.Now().Add(wait)
+	for {
+		f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+		if err == nil {
+			_ = f.Close()
+			released := false
+			return func() {
+				if released {
+					return
+				}
+				released = true
+				_ = os.Remove(path)
+			}, nil
+		}
+		if !os.IsExist(err) {
+			return nil, fmt.Errorf("gitstore: acquire sync lock: %w", err)
+		}
+		if time.Now().After(deadline) {
+			return nil, fmt.Errorf("gitstore: acquire sync lock: timed out waiting for %s", path)
+		}
+		select {
+		case <-ctx.Done():
+			return nil, fmt.Errorf("gitstore: acquire sync lock: %w", ctx.Err())
+		case <-time.After(25 * time.Millisecond):
+		}
+	}
 }
 
 // TrackedPaths lists the files under prefix that the repository index tracks

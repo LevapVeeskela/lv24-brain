@@ -463,3 +463,44 @@ func TestConsolidateCapTruncatesThePlan(t *testing.T) {
 		t.Fatalf("capped plan = %+v, want one op and truncated", capped)
 	}
 }
+
+func TestConsolidateApplySkipsStaleArchiveAfterConcurrentWrite(t *testing.T) {
+	ctx := context.Background()
+	f := newConsolidateFixture(t)
+	old, err := f.app.Note(ctx, NoteInput{ProjectID: "p", Title: "Old rule", Body: "the old rule of the project"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.tick(1)
+	if _, err := f.app.Note(ctx, NoteInput{ProjectID: "p", Title: "New rule", Body: "the new rule of the project", Supersedes: old.Note.ID}); err != nil {
+		t.Fatal(err)
+	}
+	f.tick(40)
+	plan, _, err := f.app.Consolidate(ctx, ConsolidateOptions{ProjectID: "p", ArchiveAfterDays: 30})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var archiveID string
+	for _, op := range plan.Ops {
+		if op.Kind == ConsolidateArchive {
+			archiveID = op.ID
+		}
+	}
+	if archiveID == "" {
+		t.Fatalf("expected archive op, got %+v", plan.Ops)
+	}
+	// Concurrent write: add a live link to the archived candidate so it becomes stale.
+	if _, err := f.app.Note(ctx, NoteInput{ProjectID: "p", Title: "Linker", Body: "see [[" + old.Note.ID + "]] for context"}); err != nil {
+		t.Fatal(err)
+	}
+	_, applied, err := f.app.Consolidate(ctx, ConsolidateOptions{
+		ProjectID: "p", Phase: "apply", Ops: []string{archiveID}, Fingerprint: plan.Fingerprint,
+	})
+	if err == nil && applied != nil && len(applied.Archived) > 0 {
+		t.Fatalf("stale archive op was applied: %+v", applied)
+	}
+	// Either refused by stale fingerprint/conflict or applied with skip; record must remain live.
+	if _, err := f.app.GetRecord(ctx, "p", old.Note.ID); err != nil {
+		t.Fatalf("archive candidate should remain live after stale/concurrent write: %v", err)
+	}
+}

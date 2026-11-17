@@ -33,3 +33,28 @@ func TestPrepareConnectionPublishUntracksBeforePrivateWrites(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestPrepareConnectionPublishConcurrent(t *testing.T) {
+	requireGit(t)
+	repo := initRepo(t, t.TempDir(), false)
+	writeFile(t, repo.dir, "connectors/work/items/old.md", "shared")
+	writeFile(t, repo.dir, "connectors/work/checkpoints/c.json", `{"x":1}`)
+	repo.run("add", ".")
+	repo.run("commit", "-qm", "seed")
+	provider := newTestProvider(t, repo.dir)
+	errCh := make(chan error, 4)
+	for i := 0; i < 4; i++ {
+		go func(i int) {
+			policy := domain.PublishLocalOnly
+			if i%2 == 0 {
+				policy = domain.PublishShared
+			}
+			errCh <- provider.PrepareConnectionPublish(context.Background(), "work", policy)
+		}(i)
+	}
+	for i := 0; i < 4; i++ {
+		if err := <-errCh; err != nil {
+			t.Fatal(err)
+		}
+	}
+}

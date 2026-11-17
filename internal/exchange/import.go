@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/levapveeskela/lv24-brain/internal/domain"
 )
@@ -29,11 +30,36 @@ func ImportFromDir(ctx context.Context, dst Source, opts ImportOptions) (ImportR
 	return importBundle(ctx, dst, opts)
 }
 
+type importAction struct {
+	kind   string // project, record
+	status string // create, unchanged, conflict, quarantined, skipped
+	record RecordEntry
+	proj   domain.Project
+}
+
+type importManifest struct {
+	Version   int          `json:"version"`
+	From      string       `json:"from"`
+	StartedAt time.Time    `json:"started_at"`
+	Status    string       `json:"status"`
+	Report    ImportReport `json:"report"`
+	Error     string       `json:"error,omitempty"`
+}
+
 func importBundle(ctx context.Context, dst Source, opts ImportOptions) (ImportReport, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	from := strings.TrimSpace(opts.From)
 	if from == "" {
 		return ImportReport{}, fmt.Errorf("exchange: --from is required")
 	}
+	release, err := lockImport(ctx, dst)
+	if err != nil {
+		return ImportReport{}, err
+	}
+	defer release()
+
 	dir := from
 	tempDir := ""
 	if strings.HasSuffix(strings.ToLower(from), ".zip") {
@@ -50,7 +76,6 @@ func importBundle(ctx context.Context, dst Source, opts ImportOptions) (ImportRe
 	}
 	report := ImportReport{}
 
-	// read manifest
 	manifestPath := filepath.Join(dir, "manifest.json")
 	manifestBytes, _ := os.ReadFile(manifestPath)
 	if len(manifestBytes) > 0 {
@@ -59,7 +84,6 @@ func importBundle(ctx context.Context, dst Source, opts ImportOptions) (ImportRe
 			return report, fmt.Errorf("invalid manifest: %w", err)
 		}
 		if err := ValidateManifestVersion(m.FormatVersion); err != nil {
-			// maybe version field
 			if m.Version != "" {
 				if err2 := ValidateManifestVersion(m.Version); err2 != nil {
 					return report, err
@@ -70,27 +94,113 @@ func importBundle(ctx context.Context, dst Source, opts ImportOptions) (ImportRe
 		}
 	}
 
-	// projects
 	projectEntries := readProjectEntries(filepath.Join(dir, "projects.jsonl"))
-	// map by id
 	projectMap := map[string]ProjectEntry{}
 	for _, pe := range projectEntries {
 		projectMap[pe.ID] = pe
 	}
 
-	// ensure projects
-	existingProjects, _ := dst.ListProjects(ctx)
+	existingProjects, err := dst.ListProjects(ctx)
+	if err != nil {
+		return report, err
+	}
 	existingProjectSet := map[string]bool{}
 	for _, p := range existingProjects {
 		existingProjectSet[p.ID] = true
 	}
 
-	// import projects
-	for _, pe := range projectEntries {
-		if existingProjectSet[pe.ID] {
+	actions, err := planImport(ctx, dst, opts, dir, projectEntries, projectMap, existingProjectSet)
+	if err != nil {
+		return report, err
+	}
+
+	runManifestPath, _, manifestErr := writeImportManifest(dst, from, "in_progress", report, "")
+	if manifestErr != nil {
+		return report, manifestErr
+	}
+
+	if opts.DryRun {
+		report = summarizePlan(actions)
+		_ = finalizeImportManifest(runManifestPath, "dry_run", report, "")
+		return report, nil
+	}
+
+	createdProjects := map[string]bool{}
+	for _, action := range actions {
+		if action.kind != "project" || action.status != "create" {
 			continue
 		}
-		if !opts.CreateProjects {
+		if existingProjectSet[action.proj.ID] || createdProjects[action.proj.ID] {
+			continue
+		}
+		if err := dst.PutProject(ctx, action.proj); err != nil {
+			report.Skipped++
+			if action.proj.ID != "" {
+				report.SkippedIDs = append(report.SkippedIDs, action.proj.ID)
+			}
+			continue
+		}
+		existingProjectSet[action.proj.ID] = true
+		createdProjects[action.proj.ID] = true
+		report.Projects++
+	}
+
+	for _, action := range actions {
+		if action.kind != "record" {
+			continue
+		}
+		switch action.status {
+		case "unchanged":
+			report.Unchanged++
+		case "conflict":
+			report.Conflicts++
+			report.ConflictIDs = append(report.ConflictIDs, action.record.ID)
+		case "quarantined":
+			report.Quarantined++
+		case "skipped":
+			report.Skipped++
+			if action.record.ID != "" {
+				report.SkippedIDs = append(report.SkippedIDs, action.record.ID)
+			}
+		case "create":
+			if !existingProjectSet[action.record.ProjectID] {
+				report.Quarantined++
+				continue
+			}
+			if err := createRecord(ctx, dst, action.record); err != nil {
+				_ = finalizeImportManifest(runManifestPath, "failed", report, err.Error())
+				return report, err
+			}
+			report.Created++
+		default:
+			report.Skipped++
+			if action.record.ID != "" {
+				report.SkippedIDs = append(report.SkippedIDs, action.record.ID)
+			}
+		}
+	}
+	_ = finalizeImportManifest(runManifestPath, "applied", report, "")
+	return report, nil
+}
+
+func lockImport(ctx context.Context, dst Source) (func(), error) {
+	type syncLocker interface {
+		LockSync(context.Context) (func(), error)
+	}
+	if locker, ok := any(dst).(syncLocker); ok {
+		return locker.LockSync(ctx)
+	}
+	return func() {}, nil
+}
+
+func planImport(ctx context.Context, dst Source, opts ImportOptions, stagedDir string, projectEntries []ProjectEntry, projectMap map[string]ProjectEntry, existingProjects map[string]bool) ([]importAction, error) {
+	actions := make([]importAction, 0, len(projectEntries))
+	knownProjects := make(map[string]bool, len(existingProjects))
+	for id := range existingProjects {
+		knownProjects[id] = true
+	}
+	for _, pe := range projectEntries {
+		if knownProjects[pe.ID] || !opts.CreateProjects {
 			continue
 		}
 		proj := domain.Project{
@@ -110,16 +220,11 @@ func importBundle(ctx context.Context, dst Source, opts ImportOptions) (ImportRe
 		if proj.Kind == "" {
 			proj.Kind = domain.ProjectKindOther
 		}
-		if err := dst.PutProject(ctx, proj); err != nil {
-			continue
-		}
-		existingProjectSet[pe.ID] = true
-		report.Projects++
+		actions = append(actions, importAction{kind: "project", status: "create", proj: proj})
+		knownProjects[pe.ID] = true
 	}
 
-	// records
-	records := readRecordEntries(filepath.Join(dir, "records.jsonl"))
-	// sort for determinism
+	records := readRecordEntries(filepath.Join(stagedDir, "records.jsonl"))
 	sort.Slice(records, func(i, j int) bool {
 		if records[i].ProjectID != records[j].ProjectID {
 			return records[i].ProjectID < records[j].ProjectID
@@ -131,10 +236,8 @@ func importBundle(ctx context.Context, dst Source, opts ImportOptions) (ImportRe
 	})
 
 	for _, re := range records {
-		// project existence
-		if !existingProjectSet[re.ProjectID] {
+		if !knownProjects[re.ProjectID] {
 			if opts.CreateProjects {
-				// create minimal project
 				pe, ok := projectMap[re.ProjectID]
 				name := re.ProjectID
 				kind := domain.ProjectKindOther
@@ -146,51 +249,113 @@ func importBundle(ctx context.Context, dst Source, opts ImportOptions) (ImportRe
 						kind = pe.Kind
 					}
 				}
-				if err := dst.PutProject(ctx, domain.Project{ID: re.ProjectID, Name: name, Kind: kind}); err == nil {
-					existingProjectSet[re.ProjectID] = true
-					report.Projects++
-				}
+				proj := domain.Project{ID: re.ProjectID, Name: name, Kind: kind}
+				actions = append(actions, importAction{kind: "project", status: "create", proj: proj})
+				knownProjects[re.ProjectID] = true
 			}
 		}
-		if !existingProjectSet[re.ProjectID] {
-			report.Quarantined++
+		if !knownProjects[re.ProjectID] {
+			actions = append(actions, importAction{kind: "record", status: "quarantined", record: re})
 			continue
 		}
-		if opts.DryRun {
-			// still classify? We'll count as created if not exists
-			existing, err := findExistingRecord(ctx, dst, re.ProjectID, re.Kind, re.ID)
-			if err != nil || existing == nil {
-				report.Created++
-			} else {
-				if existing.ContentHash == re.ContentHash {
-					report.Unchanged++
-				} else {
-					report.Conflicts++
-					report.ConflictIDs = append(report.ConflictIDs, re.ID)
-				}
-			}
+		if !existingProjects[re.ProjectID] {
+			actions = append(actions, importAction{kind: "record", status: "create", record: re})
 			continue
 		}
-
-		// find existing
 		existing, err := findExistingRecord(ctx, dst, re.ProjectID, re.Kind, re.ID)
-		if err == nil && existing != nil {
+		if err != nil {
+			return nil, err
+		}
+		if existing != nil {
 			if existing.ContentHash == re.ContentHash {
-				report.Unchanged++
-				continue
+				actions = append(actions, importAction{kind: "record", status: "unchanged", record: re})
+			} else {
+				actions = append(actions, importAction{kind: "record", status: "conflict", record: re})
 			}
-			report.Conflicts++
-			report.ConflictIDs = append(report.ConflictIDs, re.ID)
 			continue
 		}
-		// create
-		if err := createRecord(ctx, dst, re); err != nil {
-			report.Quarantined++
-			continue
-		}
-		report.Created++
+		actions = append(actions, importAction{kind: "record", status: "create", record: re})
 	}
-	return report, nil
+	return actions, nil
+}
+
+func summarizePlan(actions []importAction) ImportReport {
+	var report ImportReport
+	for _, action := range actions {
+		switch action.kind {
+		case "project":
+			if action.status == "create" {
+				report.Projects++
+			}
+		case "record":
+			switch action.status {
+			case "create":
+				report.Created++
+			case "unchanged":
+				report.Unchanged++
+			case "conflict":
+				report.Conflicts++
+				report.ConflictIDs = append(report.ConflictIDs, action.record.ID)
+			case "quarantined":
+				report.Quarantined++
+			case "skipped":
+				report.Skipped++
+				if action.record.ID != "" {
+					report.SkippedIDs = append(report.SkippedIDs, action.record.ID)
+				}
+			}
+		}
+	}
+	return report
+}
+
+func writeImportManifest(dst Source, from, status string, report ImportReport, errText string) (string, func(), error) {
+	type rooter interface{ Root() string }
+	root := ""
+	if r, ok := any(dst).(rooter); ok {
+		root = r.Root()
+	}
+	if root == "" {
+		return "", func() {}, nil
+	}
+	dir := filepath.Join(root, "backups", "import-"+time.Now().UTC().Format("20060102T150405.000000000Z"))
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return "", func() {}, err
+	}
+	path := filepath.Join(dir, "manifest.json")
+	manifest := importManifest{Version: 1, From: from, StartedAt: time.Now().UTC(), Status: status, Report: report, Error: errText}
+	data, err := json.MarshalIndent(manifest, "", "  ")
+	if err != nil {
+		return "", func() {}, err
+	}
+	data = append(data, '\n')
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		return "", func() {}, err
+	}
+	return path, func() {}, nil
+}
+
+func finalizeImportManifest(path, status string, report ImportReport, errText string) error {
+	if path == "" {
+		return nil
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	var manifest importManifest
+	if err := json.Unmarshal(data, &manifest); err != nil {
+		return err
+	}
+	manifest.Status = status
+	manifest.Report = report
+	manifest.Error = errText
+	out, err := json.MarshalIndent(manifest, "", "  ")
+	if err != nil {
+		return err
+	}
+	out = append(out, '\n')
+	return os.WriteFile(path, out, 0o644)
 }
 
 func readProjectEntries(path string) []ProjectEntry {
@@ -244,7 +409,6 @@ type existingRecord struct {
 }
 
 func findExistingRecord(ctx context.Context, dst Source, projectID, kind, id string) (*existingRecord, error) {
-	// list records of kind and find id
 	switch kind {
 	case "note":
 		notes, err := dst.ListNotes(ctx, projectID)
@@ -327,7 +491,6 @@ func createRecord(ctx context.Context, dst Source, re RecordEntry) error {
 	return fmt.Errorf("unknown kind %s", re.Kind)
 }
 
-// conversion helpers
 func noteToEntry(n domain.Note) RecordEntry {
 	re := RecordEntry{
 		V:              EntryVersion,
@@ -567,7 +730,6 @@ func unzipTo(src, dst string) error {
 	}
 	defer r.Close()
 	for _, f := range r.File {
-		// guard path traversal
 		name := f.Name
 		if strings.Contains(name, "..") {
 			return fmt.Errorf("invalid zip entry path %s", name)
@@ -592,7 +754,6 @@ func unzipTo(src, dst string) error {
 			rc.Close()
 			return err
 		}
-		// zip bomb guard: limit size
 		if f.UncompressedSize64 > 100*1024*1024 {
 			rc.Close()
 			out.Close()

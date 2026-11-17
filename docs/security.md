@@ -105,7 +105,13 @@ matching `.gitignore` into the data directory.
   `publish: shared` commits items, a zone that git already tracks keeps
   publishing unchanged until the owner chooses (grandfathered on upgrade), and a
   new zone publishes nothing. An item file in shared mode omits the host
-  `observed_at`; checkpoints are never committed. `brain doctor` reports tracked
+  `observed_at`; checkpoints are never committed and carry `-merge -text`. Sync preflight pins
+   `* text=auto eol=lf` and binary rules in `.gitattributes` (so a Windows clone
+   cannot create CRLF conflicts) and re-registers the deterministic drivers per
+   clone with the current executable. If two hosts still diverge on a shared
+   item, the item driver keeps both sides under distinct content-hash paths.
+   Driver conflict records are committed in the same sync and surfaced in
+   `sync --status --json`, never silently dropped. `brain doctor` reports tracked
   raw files instead of deleting them: `raw-zone` for an explicitly local-only
   connection (untrack with `git rm --cached -r`), `raw-zone-policy` for a tracked
   zone with no explicit policy (choose with `brain connection publish <id>

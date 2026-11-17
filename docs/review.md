@@ -37,11 +37,21 @@ Severity is the only ordering a caller should branch on:
 | `warn` | Context may be **stale**. | `state-expired`, `next-behind-handoff`, `decision-code-changed`, `near-duplicate` |
 | `info` | Curation hint, nothing is broken. | `next-maybe-done`, `question-answered`, `broken-link`, `supersession-gap` |
 
-Finding kinds: `quarantined`, `state-expired`, `state-behind-commits`,
-`next-behind-handoff`, `next-maybe-done`, `question-answered`,
-`decision-contradicted`, `decision-code-changed`, `broken-link`,
-`near-duplicate`, `supersession-gap`, `stale-superseded`, `proposal-stale`,
-`proposal-orphan`, `proposal-contradicted`, `review-overdue`.
+Finding kinds: `quarantined`, `state-quarantined`, `state-expired`,
+`state-behind-commits`, `next-behind-handoff`, `next-maybe-done`,
+`question-answered`, `decision-contradicted`, `decision-code-changed`,
+`broken-link`, `near-duplicate`, `supersession-gap`, `stale-superseded`,
+`proposal-stale`, `proposal-orphan`, `proposal-contradicted`,
+`review-overdue`, `pending-relations`, `merge-conflict`,
+`registry-conflict`.
+
+`merge-conflict` and `registry-conflict` (both `warn`) are read straight
+from the conflict artifacts the merge drivers commit: `projects/<id>/state-conflicts/`,
+`projects/<id>/notes/merge-conflicts/`, `merges/*.json` for the project
+(`merge-conflict`), and `registry-conflicts/` files naming the project
+(`registry-conflict`). `brain doctor` counts the same files in its `conflicts`
+check and warns about one repository URL registered under several ids in
+`duplicate-repo`.
 
 `quarantined` is always reported first, so a short context or session summary
 never truncates the queue that says external text awaits review.
@@ -265,7 +275,11 @@ merges them. `--max` caps the plan (default 50; `truncated` reports the cut) and
 
 An apply re-derives the plan from the records instead of replaying a stored op
 list, so an op that is no longer current is `not in the current plan`, and a
-stale `--fingerprint` is refused. The run records
+stale `--fingerprint` is refused. 0.21.1 hardening: apply is serialized globally
+(per data directory/project lock when available) and every archive op is
+revalidated at apply time (record still exists, unchanged fingerprint, old
+enough, no new live links/protection). Stale archive ops are refused/skipped
+instead of applied from plan-time state. The run records
 `backups/consolidate-<ts>/manifest.json`, and `--rollback` restores every merge
 and archive it lists. Nothing is deleted: a merge trashes the duplicate and an
 archive trashes the superseded record, and the trash keeps the file.

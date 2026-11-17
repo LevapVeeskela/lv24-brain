@@ -97,8 +97,16 @@ Adapters never leak into domain or app.
 
 `brain.yaml` records `mode`, `data_dir`, `server_url`, `user`,
 `schema_version`, `min_engine_version`, `update_channel`, and optional
-`retired_paths`. Local and Git modes require `data_dir`; server mode requires
-`server_url` and has no data directory.
+`retired_paths` and `machine_id`. Local and Git modes require `data_dir`;
+server mode requires `server_url` and has no data directory.
+
+`machine_id` is an optional stable name for this machine (default: the OS
+host name). It is provenance only: `SaveProject` stamps it as the owner of
+each registry checkout path (`path_provenance`, path → machine id), and the
+merge drivers write it as `- machine:` in conflict records, so a shared
+registry says which machine registered what and recorded a conflict. Nothing
+requires it; a registry without provenance is valid and older engines ignore
+the key.
 
 `retired_paths` maps a checkout that no longer exists to the project that
 replaced it (`path` + `replaced_by`, a project id or alias). The engine ships
@@ -253,7 +261,12 @@ supports writes; context sections simply report nothing.
 ## Git sync
 
 One private data repository is the shared brain. Each user owns
-`journal/<user>.jsonl`; shared files are edited normally.
+`journal/<user>.jsonl`; shared files are edited normally. 0.21.1 parallel-write
+hardening: raw-zone publish preparation takes the checkout sync lock around git
+index mutations, publish marker lazy-creation is synchronized, topic upserts
+require per-(project,kind,topic) locking and a replacing store on every backend
+(otherwise the write is refused as unsupported), and exchange imports are
+serialized with staged planning/manifesting to avoid interleaved partial runs.
 
 - `brain sync --status [--json]` is read-only. It reports branch, ahead/behind,
   dirtiness, unmerged paths, and the revision recorded by the last completed
@@ -266,9 +279,10 @@ One private data repository is the shared brain. Each user owns
 - A rejected push is retried up to 3 attempts with backoff; every retry fetches
   and rebases first. It never force-pushes.
 - A conflict aborts the rebase, restores the autostash, prints the unmerged
-  paths, and exits **3** (0 success, 1 runtime, 2 usage). The next sync also
-  repairs a rebase or autostash left by a killed run, so no manual
-  `git rebase --abort` is required.
+  paths, and exits **3** (0 success, 1 runtime, 2 usage). A rebase or autostash
+  left by a killed run is repaired at the **start** of `App.Sync`, before the
+  conflict pre-check, so no manual `git rebase --abort` is required and a
+  detached HEAD cannot survive a retry.
 - `gitstore` shells out to the git CLI with an argument vector, a per-command
   timeout, `GIT_TERMINAL_PROMPT=0`, and sanitized errors so remote URLs with
   credentials do not leak.
@@ -280,16 +294,31 @@ The data-repository `.gitattributes` (maintained by `brain init` and
 three-way drivers:
 
 ```gitattributes
+* text=auto eol=lf
+*.db binary
+*.sqlite binary
+*.zip binary
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.pdf binary
 journal/*.jsonl merge=union
 projects/*/state.md merge=lv24-state
 registry.json merge=lv24-registry
 projects/*/notes/*.md merge=lv24-notes
+connectors/*/items/*.md merge=lv24-items
+connectors/*/checkpoints/*.json -merge -text
+connectors/*/*.lock -merge -text
 ```
 
-Git stores drivers per clone in `.git/config`; `brain init` and
-`brain doctor --fix` register `merge.<name>.driver` pointing at the current
-`brain` executable, and `brain doctor` warns when they are missing. A clone
-without drivers falls back to a normal content conflict, which is safe.
+Git stores drivers per clone in `.git/config`; `brain init`,
+`brain doctor --fix` and the `brain sync` preflight register
+`merge.<name>.driver` pointing at the current `brain` executable, and
+`brain doctor` warns when they are missing. The preflight also appends missing
+managed `.gitattributes` lines and refuses a data directory nested in a larger
+work tree, where the drivers would apply to unrelated files. A clone without
+drivers falls back to a normal content conflict, which is safe.
 
 - **state** merges `goal` and `next_action` three-way and unions the ordered
   lists `active`, `blocked`, and `open questions`. When both sides changed the
@@ -300,13 +329,28 @@ without drivers falls back to a normal content conflict, which is safe.
   `created_at`, and respects an intentional deletion when the surviving side is
   unchanged.
 - **registry** unions projects by id, takes the record with the later
-  `updated_at`, preserves unknown keys, and reports an alias claimed by two
-  projects in `registry-conflicts/<UTC>-<alias>.md`.
+  `updated_at`, preserves unknown keys, unions checkout `paths` exactly like
+  aliases (a path one machine added while the other edited the record
+  survives, together with its `path_provenance` owner), and reports an alias
+  or path claimed by two projects in `registry-conflicts/<UTC>-<field>.md`;
+  the claim stays on the later `updated_at` and the artifact names both
+  owners, so nothing is dropped silently.
+- **items** normalizes the host-specific `observed_at` out of content-addressed
+  raw-zone item files. When two hosts genuinely diverge, ours stays at the
+  canonical path and theirs is written to a deterministic `*-<hash>.md` sibling;
+  both survive and no rebase is blocked. Checkpoints stay `-merge -text` and
+  gitignored.
 
-The hidden `brain merge-driver <state|notes|registry> %O %A %B %L %P` command is
-what git invokes. It only rewrites `%A` and conflict files; diagnostics name
-paths and field names, while a conflict file carries the current and incoming
-values of that one field.
+The hidden `brain merge-driver <state|notes|registry|items> %O %A %B %L %P`
+command is what git invokes. It rewrites `%A` and conflict files; diagnostics
+name paths and field names, while a conflict file carries the current and
+incoming values of that one field.
+
+Driver-generated records under `state-conflicts/`, `registry-conflicts/` and
+`merge-conflicts/` are committed in the same sync that produced them. `Status`
+reports them in `ConflictRecords`; `sync --status --json` lists them in both
+`conflicts` and `conflict_records` while `unmerged` stays false, so a dirty tree
+with a preserved value is never reported as a blocked sync.
 
 ## Proposals, digest and promotion (Phase 4.1)
 

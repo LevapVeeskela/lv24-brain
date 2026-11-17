@@ -253,12 +253,19 @@ type IndexLister interface {
 
 // SyncStatus is the read-only divergence state of a sync provider.
 type SyncStatus struct {
-	Provider  string
-	Branch    string
-	Ahead     int
-	Behind    int
-	Dirty     bool
+	Provider string
+	Branch   string
+	Ahead    int
+	Behind   int
+	Dirty    bool
+	// Conflicts lists unmerged paths git still considers unresolved. Those
+	// block the next sync.
 	Conflicts []string
+	// ConflictRecords lists driver-generated records (state-conflicts/,
+	// registry-conflicts/, merge-conflicts/) found in the working tree. They
+	// are informational: a dirty tree with such a record must still be
+	// reportable, so callers surface them alongside Conflicts.
+	ConflictRecords []string
 	// LastSynced is the revision recorded after the last completed pull or
 	// push. It is zero when no sync has completed on this checkout yet.
 	LastSynced domain.SyncRevision
@@ -279,6 +286,10 @@ type SyncResult struct {
 	Revision  domain.SyncRevision
 	Changed   int
 	Conflicts []string
+	// ConflictRecords are driver-generated conflict records written or seen
+	// during this sync. They are committed in the same sync and surfaced in
+	// `sync --status --json`.
+	ConflictRecords []string
 	// Recovered reports that an interrupted rebase or a leftover autostash
 	// from an earlier run was repaired before this sync proceeded.
 	Recovered bool
@@ -290,6 +301,32 @@ type SyncProvider interface {
 	Pull(ctx context.Context, opts SyncOptions) (SyncResult, error)
 	Commit(ctx context.Context, message string) (domain.SyncRevision, error)
 	Push(ctx context.Context) (SyncResult, error)
+}
+
+// SyncRecoverer is implemented by providers that can repair an interrupted
+// earlier run (a killed rebase or a leftover autostash). App.Sync calls it
+// before the conflict pre-check so a crashed sync is repaired instead of
+// leaving the checkout detached.
+type SyncRecoverer interface {
+	// RecoverInterruptedSync repairs a killed earlier sync and reports whether
+	// anything was repaired.
+	RecoverInterruptedSync(ctx context.Context) (bool, error)
+}
+
+// SyncConflictCommitter is implemented by providers that can stage and commit
+// driver-generated conflict records in the same sync that produced them.
+type SyncConflictCommitter interface {
+	// CommitConflictRecords commits every driver-generated conflict record in
+	// the working tree. It returns the paths and whether a commit was created.
+	CommitConflictRecords(ctx context.Context, message string) ([]string, bool, error)
+}
+
+// GitLayoutVerifier is implemented by git providers that can check that the
+// data directory is the root of its work tree. Merge drivers and
+// .gitattributes only apply to that repository's paths, so a nested data
+// directory cannot be made safe and must be reported to the operator.
+type GitLayoutVerifier interface {
+	VerifySyncLayout(ctx context.Context) error
 }
 
 // SyncLocker serializes sync runs on one data directory across processes. A

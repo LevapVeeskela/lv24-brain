@@ -404,7 +404,11 @@ type SyncResult struct {
 	Behind    int
 	Changed   int
 	Conflicts []string
-	Dirty     bool
+	// ConflictRecords are driver-generated records (state-conflicts/,
+	// registry-conflicts/, merge-conflicts/) found or committed in this sync.
+	// They are surfaced in `sync --status --json` alongside unmerged paths.
+	ConflictRecords []string
+	Dirty           bool
 	// LastSynced is the revision recorded after the last completed sync on
 	// this checkout, or zero when none has completed yet.
 	LastSynced domain.SyncRevision

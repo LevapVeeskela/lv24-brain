@@ -82,16 +82,29 @@ func runDiscover(args []string, stdout, stderr io.Writer) int {
 		return p
 	}
 	byID := map[string]bool{}
+	byAlias := map[string]string{} // alias → project id
 	knownPaths := map[string]bool{}
+	repoIndex := map[string][]string{}
 	for _, project := range projects {
 		byID[project.ID] = true
+		for _, alias := range project.Aliases {
+			key := strings.ToLower(strings.TrimSpace(alias))
+			if key != "" {
+				if _, taken := byAlias[key]; !taken {
+					byAlias[key] = project.ID
+				}
+			}
+		}
 		for _, path := range project.Paths {
 			knownPaths[pathKey(path)] = true
+		}
+		if key := gitinfo.NormalizeRepoURL(project.RepoURL); key != "" {
+			repoIndex[key] = append(repoIndex[key], project.ID)
 		}
 	}
 
 	claimed := map[string]bool{} // ids already assigned to a new candidate in this run
-	newCount := 0
+	newCount, adoptCount := 0, 0
 	for _, c := range candidates {
 		// A retired checkout is never registered, even when it was recreated
 		// with its own .git; the project that replaced it owns the work.
@@ -99,10 +112,44 @@ func runDiscover(args []string, stdout, stderr io.Writer) int {
 			fmt.Fprintf(stdout, "retired %s %s (replaced by %s)\n", c.id, c.path, entry.ReplacedBy)
 			continue
 		}
-		switch {
-		case knownPaths[pathKey(c.path)]:
+		if knownPaths[pathKey(c.path)] {
 			fmt.Fprintf(stdout, "known %s %s\n", c.id, c.path)
-		case byID[c.id] || claimed[c.id]:
+			continue
+		}
+		// Identity: the normalized repository URL first, then the id or
+		// alias. A checkout of a registered repository at a new path (or
+		// under a new folder name) is adopted into that project instead of
+		// registering a second id for the same repository.
+		owner := ""
+		if byID[c.id] {
+			owner = c.id
+		} else if id, ok := byAlias[strings.ToLower(c.id)]; ok {
+			owner = id
+		}
+		repoURL := discoverRemoteURL(ctx, c.path)
+		repoOwners := repoIndex[gitinfo.NormalizeRepoURL(repoURL)]
+		if len(repoOwners) > 1 {
+			fmt.Fprintf(stdout, "repo-conflict %s %s (repository claimed by %s)\n",
+				c.id, c.path, strings.Join(repoOwners, ", "))
+			continue
+		}
+		adopt := ""
+		if len(repoOwners) == 1 {
+			adopt = repoOwners[0]
+		}
+		switch {
+		case adopt != "":
+			if *apply {
+				_, branch := discoverRepoInfo(ctx, c.path)
+				if err := discoverAdopt(ctx, rt.App, adopt, c, repoURL, branch); err != nil {
+					return reportError(stderr, "discover", err)
+				}
+				fmt.Fprintf(stdout, "adopted %s %s\n", adopt, c.path)
+			} else {
+				adoptCount++
+				fmt.Fprintf(stdout, "adopt %s %s\n", adopt, c.path)
+			}
+		case owner != "" || claimed[c.id]:
 			fmt.Fprintf(stdout, "id-conflict %s %s (id used by another path)\n", c.id, c.path)
 		case *apply:
 			claimed[c.id] = true
@@ -117,9 +164,45 @@ func runDiscover(args []string, stdout, stderr io.Writer) int {
 		}
 	}
 	if !*apply {
-		fmt.Fprintf(stdout, "dry run: %d new project(s); rerun with --apply to register\n", newCount)
+		if adoptCount > 0 {
+			fmt.Fprintf(stdout, "dry run: %d new project(s), %d adoption(s); rerun with --apply to register\n", newCount, adoptCount)
+		} else {
+			fmt.Fprintf(stdout, "dry run: %d new project(s); rerun with --apply to register\n", newCount)
+		}
 	}
 	return 0
+}
+
+// discoverAdopt attaches a checkout path to an existing project instead of
+// registering a second id for the same repository. Only the path list (and a
+// missing repo URL or branch) is written; provenance of the new path is
+// stamped by SaveProject.
+func discoverAdopt(ctx context.Context, a *app.App, id string, c discoverCandidate, repoURL, branch string) error {
+	existing, err := a.GetProject(ctx, id)
+	if err != nil {
+		return err
+	}
+	paths := append([]string{}, existing.Paths...)
+	paths = append(paths, c.path)
+	input := app.ProjectInput{ID: id, Paths: &paths}
+	if strings.TrimSpace(existing.RepoURL) == "" && strings.TrimSpace(repoURL) != "" {
+		input.RepoURL = &repoURL
+	}
+	if strings.TrimSpace(existing.DefaultBranch) == "" && strings.TrimSpace(branch) != "" {
+		input.DefaultBranch = &branch
+	}
+	_, err = a.SaveProject(ctx, input)
+	return err
+}
+
+// discoverRemoteURL reads the redacted origin URL of a repository; a
+// repository without a readable origin yields "".
+func discoverRemoteURL(ctx context.Context, path string) string {
+	out, err := discoverGit(ctx, path, "remote", "get-url", "origin")
+	if err != nil {
+		return ""
+	}
+	return gitinfo.RedactRemote(out)
 }
 
 // discoverRegister upserts one new repository. Only called for candidates

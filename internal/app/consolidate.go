@@ -448,7 +448,8 @@ func consolidateOpLess(a, b ConsolidateOp) bool {
 // consolidationApply executes the named ops (or every executable op) of a
 // fresh plan. Merges run through the two-phase merge, archives through the
 // trash; both are reversible and both keep their own audit trail. The run is
-// recorded in a consolidation manifest under backups/.
+// serialized globally for the data directory and each archive op is revalidated
+// at apply time. The run is recorded in a consolidation manifest under backups/.
 func (a *App) consolidationApply(ctx context.Context, opts ConsolidateOptions, plan ConsolidatePlan) (*ConsolidateApplyResult, error) {
 	recorder, ok := a.deps.Store.(ports.ConsolidationRecorder)
 	if !ok {
@@ -458,13 +459,22 @@ func (a *App) consolidationApply(ctx context.Context, opts ConsolidateOptions, p
 	if err != nil {
 		return nil, err
 	}
+	release, err := a.lockConsolidation(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer release()
+	archiveAfter := opts.ArchiveAfterDays
+	if archiveAfter <= 0 {
+		archiveAfter = consolidateArchiveDays
+	}
 	result := &ConsolidateApplyResult{}
 	for _, op := range selected {
 		switch op.Kind {
 		case ConsolidateMerge:
 			a.consolidationApplyMerge(ctx, op, result)
 		case ConsolidateArchive:
-			a.consolidationApplyArchive(ctx, op, result)
+			a.consolidationApplyArchive(ctx, op, archiveAfter, result)
 		}
 	}
 	if len(result.Merged) == 0 && len(result.Archived) == 0 {
@@ -495,6 +505,13 @@ func (a *App) consolidationApply(ctx context.Context, opts ConsolidateOptions, p
 		return result, fmt.Errorf("consolidation applied but the journal append failed: %w", journalErr)
 	}
 	return result, nil
+}
+
+func (a *App) lockConsolidation(ctx context.Context) (func(), error) {
+	if locker, ok := a.deps.Store.(ports.SyncLocker); ok {
+		return locker.LockSync(ctx)
+	}
+	return func() {}, nil
 }
 
 // consolidationApplyMerge runs one merge op and records the outcome. A merge
@@ -528,11 +545,16 @@ func (a *App) consolidationApplyMerge(ctx context.Context, op ConsolidateOp, res
 	})
 }
 
-// consolidationApplyArchive trashes one record. A record that disappeared or
-// is protected is skipped, not fatal.
-func (a *App) consolidationApplyArchive(ctx context.Context, op ConsolidateOp, result *ConsolidateApplyResult) {
+// consolidationApplyArchive trashes one record after revalidating it at apply
+// time. A record that disappeared, changed, gained links, is too young, or is
+// otherwise no longer eligible is skipped as a stale op.
+func (a *App) consolidationApplyArchive(ctx context.Context, op ConsolidateOp, archiveAfterDays int, result *ConsolidateApplyResult) {
 	if len(op.IDs) != 1 {
 		result.Skipped = append(result.Skipped, ConsolidateSkip{Op: op.ID, Reason: "an archive names exactly one record"})
+		return
+	}
+	if reason := a.revalidateArchiveOp(ctx, op, archiveAfterDays); reason != "" {
+		result.Skipped = append(result.Skipped, ConsolidateSkip{Op: op.ID, Reason: reason})
 		return
 	}
 	record, err := a.TrashRecord(ctx, op.ProjectID, op.IDs[0])
@@ -542,6 +564,43 @@ func (a *App) consolidationApplyArchive(ctx context.Context, op ConsolidateOp, r
 	}
 	summary := record.Summary()
 	result.Archived = append(result.Archived, ConsolidateArchiveResult{Op: op.ID, Kind: summary.Kind, ID: summary.ID})
+}
+
+func (a *App) revalidateArchiveOp(ctx context.Context, op ConsolidateOp, archiveAfterDays int) string {
+	records, err := a.projectRecords(ctx, op.ProjectID)
+	if err != nil {
+		return err.Error()
+	}
+	var target *Record
+	for i := range records {
+		if records[i].Summary().ID == op.IDs[0] {
+			target = &records[i]
+			break
+		}
+	}
+	if target == nil {
+		return "record no longer exists"
+	}
+	if consolidateArchiveFingerprint(*target) != op.Fingerprint {
+		return "stale op: record changed since plan"
+	}
+	summary := target.Summary()
+	if summary.Pinned {
+		return "stale op: record is pinned"
+	}
+	if !consolidateArchivable(*target) {
+		return "stale op: record is no longer superseded/archivable"
+	}
+	if anchor := consolidateArchiveAnchor(*target); anchor.IsZero() || anchor.After(a.now().AddDate(0, 0, -archiveAfterDays)) {
+		return "stale op: record is no longer old enough"
+	}
+	if !a.archiveWithoutLinks(op.ProjectID, records, summary.ID) {
+		return "stale op: record has live links"
+	}
+	if err := a.checkProtectedSelector(op.ProjectID, summary.Kind, summary.Title, false); err != nil {
+		return "stale op: " + err.Error()
+	}
+	return ""
 }
 
 // selectConsolidationOps picks the ops an apply executes: the named ids in

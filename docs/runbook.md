@@ -364,7 +364,7 @@ are available in git mode only; server mode uses the API instead.
 
 ```sh
 brain sync --status --config ~/brain-data/brain.yaml        # read-only summary
-brain sync --status --json --config ~/brain-data/brain.yaml # ahead/behind, dirty, unmerged, last revision
+brain sync --status --json --config ~/brain-data/brain.yaml # ahead/behind, dirty, unmerged, conflict records, last revision
 brain sync --config ~/brain-data/brain.yaml                 # commit local changes, then pull (rebase)
 brain sync --config ~/brain-data/brain.yaml --push          # the same, then push
 brain index --config ~/brain-data/brain.yaml                # after pulled Markdown changed
@@ -374,14 +374,28 @@ What `brain sync` does, in order:
 
 1. Takes the data-directory lock; a second sync waits instead of colliding on
    `.git/index.lock`.
-2. Repairs a rebase or an autostash left by a killed earlier run.
-3. Stops with exit **3** and changes nothing if conflicts are already present.
-4. Commits local changes when the working tree is dirty. The message is
-   `brain sync: <timestamp>`.
-5. Fetches, stashes a tree dirtied by a concurrent writer, rebases onto the
+2. Repairs a rebase or an autostash left by a killed earlier run **before**
+   checking for conflicts, so a killed rebase never leaves a detached HEAD and
+   an unreachable recovery path.
+3. Self-heals the clone: appends any missing managed `.gitattributes` lines (LF
+   normalization, binary rules, driver routes) and re-registers missing merge
+   drivers in `.git/config` with the current `brain` executable. A data
+   directory nested in a larger git work tree is refused with an actionable
+   error instead of silently misconfiguring that repository. `--status` skips
+   these writes.
+4. Stops with exit **3** if conflicts remain after recovery: no commit, rebase,
+   or push is attempted (the preflight repair from step 3 may already have
+   updated the local setup files).
+5. Commits local changes when the working tree is dirty, including the
+   `.gitattributes` upgrade from step 3. The message is `brain sync: <timestamp>`.
+6. Fetches, stashes a tree dirtied by a concurrent writer, rebases onto the
    upstream branch, and restores the stash. `--autostash=false` disables the
-   stash step; the default is on.
-6. Pushes only with `--push`. A rejected push is retried up to 3 times with
+   stash step; the default is on. Driver-generated conflict records written
+   during the rebase are **committed in the same run** and listed in
+   `brain sync --status --json` under both `conflicts` and `conflict_records`;
+   they are informational, not unmerged paths, so they never block the next
+   sync or set `unmerged:true`.
+7. Pushes only with `--push`. A rejected push is retried up to 3 times with
    backoff, fetching and rebasing before each retry. Nothing is ever forced.
 
 Exit codes: **0** success, **1** runtime error, **2** usage error, **3** sync
@@ -394,10 +408,14 @@ conflict with unmerged paths. `--status` never changes anything.
 `unresolved conflicts in <paths>` with exit 3.
 
 Most single-file conflicts never reach you: `.gitattributes` routes
-`projects/*/state.md`, `registry.json`, and `projects/*/notes/*.md` through the
-deterministic drivers. `brain init` and `brain doctor --fix` register them in
-`.git/config`; `brain doctor` warns when a clone is missing them. A clone
-without drivers falls back to a normal Git conflict.
+`projects/*/state.md`, `registry.json`, `projects/*/notes/*.md` and shared raw
+items (`connectors/*/items/*.md`) through deterministic drivers. It also pins
+`* text=auto eol=lf` and marks binaries, so a Windows clone with
+`core.autocrlf=true` cannot create whole-file CRLF conflicts. `brain init`,
+`brain doctor --fix` and every real `brain sync` register the drivers in
+`.git/config` with the current executable; `brain doctor` warns when a clone is
+missing them. A clone without drivers falls back to a normal Git conflict until
+the next sync self-heals it.
 
 - A state field both sides changed differently keeps the current value in
   `state.md` and writes both values to
@@ -405,6 +423,10 @@ without drivers falls back to a normal Git conflict.
 - A registry alias claimed by two projects keeps one owner and writes
   `registry-conflicts/<UTC>-<alias>.md`.
 - Notes are unioned by heading plus body hash and ordered by creation time.
+- Shared raw items are content-addressed. The item driver strips the host
+  `observed_at`; when two hosts still diverge it keeps ours at the canonical
+  path and writes theirs to a deterministic `*-<content-hash>.md` sibling, so
+  neither side is lost and the rebase completes.
 
 To resolve a real conflict:
 
@@ -424,6 +446,11 @@ To resolve a real conflict:
 Do not use `git reset --hard`, do not take one side of a whole directory with
 `--ours` or `--theirs`, and do not force-push. If a conflict cannot be resolved
 safely, stop and ask the maintainer.
+
+`brain import` (LvEF) never overwrites an existing file with different content:
+a skipped record is a reported outcome (`conflicts`/`skipped` in the report and
+`conflictIds` in `--json`), not a failure. Partial imports therefore exit **0**;
+automation must read the report rather than infer success from the exit code.
 
 ### Raw zone and publishing (since 0.15)
 
@@ -456,7 +483,11 @@ brain connection publish gh-acme shared       # publish items, keep checkpoints 
 - `shared` records the policy, keeps items tracked and untracks
   `connectors/<id>/checkpoints/`. Shared item files are written without the host
   `observed_at`, so both machines produce the same bytes at the same path. Items
-  written while the zone was local-only are rewritten once, at the switch.
+  written while the zone was local-only are rewritten once, at the switch. A
+  legacy item that still carries a host clock is normalized by the
+  `lv24-items` merge driver; a genuine divergence is kept under two distinct
+  paths. Checkpoints stay `-merge -text` and gitignored. An explicit
+  `publish: shared` is never silently downgraded to local-only by sync.
 - Both are idempotent and print how many raw-zone files git tracked before and
   after. The command takes the connection lock, so it waits for an active run to
   finish instead of changing a zone mid-run.

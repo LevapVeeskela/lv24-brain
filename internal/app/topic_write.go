@@ -19,6 +19,10 @@ func (a *App) prepareTopicNote(ctx context.Context, projectID string, input Note
 	if !topicUpsertEligible(taxonomy.TopicKey, input.ID, input.Supersedes, input.SupersededBy) {
 		return NoteResult{}, false, nil, nil
 	}
+	replacer, ok := a.deps.Store.(ports.TopicReplacer)
+	if !ok {
+		return NoteResult{}, false, nil, fmt.Errorf("%w: topic upsert is not supported by this store (missing TopicReplacer)", domain.ErrUnsupported)
+	}
 	release, err := a.lockTopic(ctx, projectID, ports.RecordNote, taxonomy.TopicKey)
 	if err != nil {
 		return NoteResult{}, false, nil, err
@@ -26,10 +30,6 @@ func (a *App) prepareTopicNote(ctx context.Context, projectID string, input Note
 	record, found, err := a.findTopicRecord(ctx, projectID, ports.RecordNote, taxonomy.TopicKey)
 	if err != nil || !found {
 		return NoteResult{}, false, release, err
-	}
-	replacer, ok := a.deps.Store.(ports.TopicReplacer)
-	if !ok {
-		return NoteResult{}, false, release, fmt.Errorf("%w: topic upsert is not supported by this store", domain.ErrUnsupported)
 	}
 	existing := *record.Note
 	if topicBodyEqual(existing.Body, input.Body) {
@@ -62,6 +62,10 @@ func (a *App) prepareTopicDecision(ctx context.Context, projectID string, input 
 	if !topicUpsertEligible(taxonomy.TopicKey, input.ID, input.Supersedes, input.SupersededBy) {
 		return DecisionResult{}, false, nil, nil
 	}
+	replacer, ok := a.deps.Store.(ports.TopicReplacer)
+	if !ok {
+		return DecisionResult{}, false, nil, fmt.Errorf("%w: topic upsert is not supported by this store (missing TopicReplacer)", domain.ErrUnsupported)
+	}
 	release, err := a.lockTopic(ctx, projectID, ports.RecordDecision, taxonomy.TopicKey)
 	if err != nil {
 		return DecisionResult{}, false, nil, err
@@ -69,10 +73,6 @@ func (a *App) prepareTopicDecision(ctx context.Context, projectID string, input 
 	record, found, err := a.findTopicRecord(ctx, projectID, ports.RecordDecision, taxonomy.TopicKey)
 	if err != nil || !found {
 		return DecisionResult{}, false, release, err
-	}
-	replacer, ok := a.deps.Store.(ports.TopicReplacer)
-	if !ok {
-		return DecisionResult{}, false, release, fmt.Errorf("%w: topic upsert is not supported by this store", domain.ErrUnsupported)
 	}
 	existing := *record.Decision
 	if topicBodyEqual(decisionTopicBody(existing), decisionTopicBody(domain.Decision{
@@ -113,6 +113,10 @@ func (a *App) prepareTopicAttempt(ctx context.Context, projectID string, input A
 	if !topicUpsertEligible(taxonomy.TopicKey, input.ID, input.Supersedes, input.SupersededBy) {
 		return AttemptResult{}, false, nil, nil
 	}
+	replacer, ok := a.deps.Store.(ports.TopicReplacer)
+	if !ok {
+		return AttemptResult{}, false, nil, fmt.Errorf("%w: topic upsert is not supported by this store (missing TopicReplacer)", domain.ErrUnsupported)
+	}
 	release, err := a.lockTopic(ctx, projectID, ports.RecordAttempt, taxonomy.TopicKey)
 	if err != nil {
 		return AttemptResult{}, false, nil, err
@@ -120,10 +124,6 @@ func (a *App) prepareTopicAttempt(ctx context.Context, projectID string, input A
 	record, found, err := a.findTopicRecord(ctx, projectID, ports.RecordAttempt, taxonomy.TopicKey)
 	if err != nil || !found {
 		return AttemptResult{}, false, release, err
-	}
-	replacer, ok := a.deps.Store.(ports.TopicReplacer)
-	if !ok {
-		return AttemptResult{}, false, release, fmt.Errorf("%w: topic upsert is not supported by this store", domain.ErrUnsupported)
 	}
 	existing := *record.Attempt
 	if topicBodyEqual(attemptTopicBody(existing), attemptTopicBody(domain.Attempt{
@@ -157,6 +157,10 @@ func (a *App) prepareTopicHandoff(ctx context.Context, projectID string, input H
 	if !topicUpsertEligible(taxonomy.TopicKey, "", input.Supersedes, input.SupersededBy) {
 		return HandoffResult{}, false, nil, nil
 	}
+	replacer, ok := a.deps.Store.(ports.TopicReplacer)
+	if !ok {
+		return HandoffResult{}, false, nil, fmt.Errorf("%w: topic upsert is not supported by this store (missing TopicReplacer)", domain.ErrUnsupported)
+	}
 	release, err := a.lockTopic(ctx, projectID, ports.RecordHandoff, taxonomy.TopicKey)
 	if err != nil {
 		return HandoffResult{}, false, nil, err
@@ -164,10 +168,6 @@ func (a *App) prepareTopicHandoff(ctx context.Context, projectID string, input H
 	record, found, err := a.findTopicRecord(ctx, projectID, ports.RecordHandoff, taxonomy.TopicKey)
 	if err != nil || !found {
 		return HandoffResult{}, false, release, err
-	}
-	replacer, ok := a.deps.Store.(ports.TopicReplacer)
-	if !ok {
-		return HandoffResult{}, false, release, fmt.Errorf("%w: topic upsert is not supported by this store", domain.ErrUnsupported)
 	}
 	existing := *record.Handoff
 	if topicBodyEqual(handoffTopicBody(existing), handoffTopicBody(domain.Handoff{

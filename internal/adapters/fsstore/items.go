@@ -431,7 +431,8 @@ func (s *ItemStore) PublishPolicy(ctx context.Context, connectionID string) (dom
 
 // publishesItems reports whether item files of the connection are host-neutral
 // because they may be committed. It writes the local-only default marker when
-// the connection has none yet.
+// the connection has none yet. Creation is synchronized so concurrent first
+// access cannot race on the marker file.
 func (s *ItemStore) publishesItems(connectionID string) (bool, error) {
 	dir, err := s.store.connectionDir(connectionID)
 	if err != nil {
@@ -440,10 +441,27 @@ func (s *ItemStore) publishesItems(connectionID string) (bool, error) {
 	path := filepath.Join(dir, connectionIgnoreFile)
 	raw, err := os.ReadFile(path)
 	if errors.Is(err, fs.ErrNotExist) {
-		if err := writeFileAtomic(path, []byte(localOnlyIgnore)); err != nil {
-			return false, err
+		if mkErr := os.MkdirAll(dir, 0o755); mkErr != nil {
+			return false, fmt.Errorf("fsstore: create %s: %w", dir, mkErr)
 		}
-		return false, nil
+		f, createErr := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
+		if createErr == nil {
+			_, writeErr := f.Write([]byte(localOnlyIgnore))
+			closeErr := f.Close()
+			if writeErr != nil {
+				_ = os.Remove(path)
+				return false, fmt.Errorf("fsstore: write publish marker %s: %w", path, writeErr)
+			}
+			if closeErr != nil {
+				_ = os.Remove(path)
+				return false, fmt.Errorf("fsstore: close publish marker %s: %w", path, closeErr)
+			}
+			return false, nil
+		}
+		if !os.IsExist(createErr) {
+			return false, fmt.Errorf("fsstore: create publish marker %s: %w", path, createErr)
+		}
+		raw, err = os.ReadFile(path)
 	}
 	if err != nil {
 		return false, fmt.Errorf("fsstore: check %s: %w", path, err)

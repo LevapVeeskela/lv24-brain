@@ -58,6 +58,8 @@ const (
 	FindingStateQuarantined     FindingKind = "state-quarantined"
 	FindingReviewOverdue        FindingKind = "review-overdue"
 	FindingPendingRelations     FindingKind = "pending-relations"
+	FindingMergeConflict        FindingKind = "merge-conflict"
+	FindingRegistryConflict     FindingKind = "registry-conflict"
 )
 
 var findingKinds = []FindingKind{
@@ -67,6 +69,7 @@ var findingKinds = []FindingKind{
 	FindingQuarantined, FindingStateQuarantined, FindingSupersessionGap, FindingStaleSuperseded,
 	FindingProposalStale, FindingProposalOrphan, FindingProposalContradicted,
 	FindingReviewOverdue, FindingPendingRelations,
+	FindingMergeConflict, FindingRegistryConflict,
 }
 
 // findingSpec is the review metadata of one finding kind: how much it matters,
@@ -191,6 +194,18 @@ var findingSpecs = map[FindingKind]findingSpec{
 		Why:      "a pending relation is unjudged, so it is ignored by search and context and the pair stays ambiguous.",
 		Next:     "judge the pair with `brain relation judge <from> <to> --verdict <relation> --reason <text>`.",
 		Confirm:  "whether the two records agree, contradict each other, or are unrelated.",
+	},
+	FindingMergeConflict: {
+		Severity: SeverityWarn,
+		Why:      "a merge left a conflict artifact, so the kept value may not be the one both machines meant and one side's change lives only in the artifact.",
+		Next:     "open the newest artifact under state-conflicts/ (or the merges/ manifest), compare both sides, fix the record if needed, then delete the artifact.",
+		Confirm:  "the merged file kept the right value, or was edited to the right one.",
+	},
+	FindingRegistryConflict: {
+		Severity: SeverityWarn,
+		Why:      "an alias or checkout path was claimed by two projects during a registry merge, so one claim was dropped and selection may resolve to the other project.",
+		Next:     "open the artifact under registry-conflicts/ and move the alias or path to the right project with `brain project set <id> --alias/--add-path`.",
+		Confirm:  "which project owns the aliased name or the checkout path.",
 	},
 }
 
@@ -387,6 +402,7 @@ func (a *App) Findings(ctx context.Context, projectID string) ([]Finding, error)
 	findings = append(findings, quarantinedFindings(in)...)
 	findings = append(findings, stateQuarantinedFinding(in)...)
 	findings = append(findings, stateFindings(in, now)...)
+	findings = append(findings, a.conflictFindings(in.state.ProjectID)...)
 	findings = append(findings, nextActionFindings(in)...)
 	findings = append(findings, questionFindings(in)...)
 	findings = append(findings, decisionFindings(in)...)

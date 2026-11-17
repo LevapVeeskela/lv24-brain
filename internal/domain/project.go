@@ -34,8 +34,12 @@ type Project struct {
 	Kind          ProjectKind `json:"kind"`
 	RepoURL       string      `json:"repoUrl,omitempty"`
 	DefaultBranch string      `json:"defaultBranch,omitempty"`
-	CreatedAt     time.Time   `json:"createdAt"`
-	UpdatedAt     time.Time   `json:"updatedAt"`
+	// PathProvenance records which machine registered each checkout path
+	// (path → machine id). Optional provenance: a registry without it is
+	// valid and older engines ignore the key.
+	PathProvenance map[string]string `json:"pathProvenance,omitempty"`
+	CreatedAt      time.Time         `json:"createdAt"`
+	UpdatedAt      time.Time         `json:"updatedAt"`
 }
 
 // Validate checks required project fields.

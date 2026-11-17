@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"path/filepath"
 	"sort"
 	"strings"
 
@@ -103,6 +104,7 @@ func (a *App) SaveProject(ctx context.Context, input ProjectInput) (domain.Proje
 	}
 	if input.Paths != nil {
 		project.Paths = append([]string{}, (*input.Paths)...)
+		project.PathProvenance = stampPathProvenance(project.PathProvenance, project.Paths, a.cfg.EffectiveMachineID())
 	}
 	if input.Aliases != nil {
 		project.Aliases = append([]string{}, (*input.Aliases)...)
@@ -133,4 +135,52 @@ func (a *App) SaveProject(ctx context.Context, input ProjectInput) (domain.Proje
 		return domain.Project{}, err
 	}
 	return a.deps.Store.GetProject(ctx, projectID)
+}
+
+// stampPathProvenance keeps the recorded owner of every path that stays
+// registered and stamps a newly added path with the current machine id, so a
+// shared registry says which machine contributed which checkout. Provenance is
+// optional: without a machine id and without stored entries there is none.
+func stampPathProvenance(existing map[string]string, paths []string, machine string) map[string]string {
+	if len(existing) == 0 && strings.TrimSpace(machine) == "" {
+		return nil
+	}
+	out := make(map[string]string, len(paths))
+	for _, path := range paths {
+		trimmed := strings.TrimSpace(path)
+		if trimmed == "" {
+			continue
+		}
+		if owner, ok := lookupPathProvenance(existing, trimmed); ok {
+			out[trimmed] = owner
+			continue
+		}
+		if strings.TrimSpace(machine) != "" {
+			out[trimmed] = strings.TrimSpace(machine)
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+// lookupPathProvenance finds the recorded owner of path, tolerating a stored
+// key that differs only in case or slash direction (paths travel between
+// Windows and macOS checkouts).
+func lookupPathProvenance(existing map[string]string, path string) (string, bool) {
+	if owner, ok := existing[path]; ok {
+		return owner, true
+	}
+	want := provenanceKey(path)
+	for key, owner := range existing {
+		if provenanceKey(key) == want {
+			return owner, true
+		}
+	}
+	return "", false
+}
+
+func provenanceKey(path string) string {
+	return strings.ToLower(strings.TrimSuffix(filepath.ToSlash(strings.TrimSpace(path)), "/"))
 }
