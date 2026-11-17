@@ -20,6 +20,8 @@ import (
 //	projects/<id>/notes/merge-conflicts/*.md notes file conflicts
 //	registry-conflicts/*.md                 alias/path claims dropped by a merge
 //	merges/*.json                           consolidation merge manifests
+//	                                        (status "applied" is finished audit,
+//	                                        not a pending conflict)
 const (
 	stateConflictDir      = "state-conflicts"
 	notesConflictDir      = "merge-conflicts"
@@ -56,7 +58,8 @@ func (a *App) conflictFindings(projectID string) []Finding {
 }
 
 // mergeConflictArtifacts lists this project's state/notes conflict files and
-// the consolidation manifests recorded for it, newest first.
+// the consolidation manifests recorded for it, newest first. A manifest that
+// records a finished merge (status "applied") is audit, not a pending conflict.
 func mergeConflictArtifacts(dataDir, projectID string) []string {
 	var files []string
 	for _, dir := range []string{
@@ -65,20 +68,47 @@ func mergeConflictArtifacts(dataDir, projectID string) []string {
 	} {
 		files = append(files, globFiles(dir, ".md")...)
 	}
-	manifests, err := filepath.Glob(filepath.Join(dataDir, mergeManifestDir, "*.json"))
-	if err == nil {
-		if len(manifests) > maxManifestScanFiles {
-			manifests = manifests[:maxManifestScanFiles]
-		}
-		for _, path := range manifests {
-			if manifestNamesProject(path, projectID) {
-				files = append(files, path)
-			}
+	for _, path := range pendingMergeManifests(dataDir) {
+		if manifestNamesProject(path, projectID) {
+			files = append(files, path)
 		}
 	}
 	sort.Sort(sort.Reverse(sort.StringSlice(files)))
 	return files
 }
+
+// pendingMergeManifests lists the merges/*.json manifests that still wait for a
+// decision. A manifest with status "applied" records a consolidation that
+// already happened; review and doctor must not count it as pending. A manifest
+// whose status cannot be read counts as pending, so a real artifact is never
+// hidden.
+func pendingMergeManifests(dataDir string) []string {
+	manifests := globFiles(filepath.Join(dataDir, mergeManifestDir), ".json")
+	if len(manifests) > maxManifestScanFiles {
+		manifests = manifests[:maxManifestScanFiles]
+	}
+	pending := make([]string, 0, len(manifests))
+	for _, path := range manifests {
+		if !mergeManifestApplied(path) {
+			pending = append(pending, path)
+		}
+	}
+	return pending
+}
+
+// mergeManifestApplied reports whether a merge manifest records a finished
+// consolidation. Only the head of the file is read: status is written near the
+// top and a manifest embeds the touched files.
+func mergeManifestApplied(path string) bool {
+	raw, err := readFileHead(path, maxConflictFileBytes)
+	if err != nil {
+		return false
+	}
+	match := mergeManifestStatusPattern.FindSubmatch(raw)
+	return len(match) == 2 && string(match[1]) == "applied"
+}
+
+var mergeManifestStatusPattern = regexp.MustCompile(`"status"\s*:\s*"([^"]*)"`)
 
 // registryConflictArtifacts lists registry conflict files whose kept or
 // incoming side names this project, newest first.

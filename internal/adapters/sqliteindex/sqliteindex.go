@@ -289,6 +289,97 @@ func (i *Index) Upsert(ctx context.Context, doc ports.Document) error {
 	})
 }
 
+// UpsertBatch writes a whole slice of documents in one transaction with one
+// prepared statement set, which is what a reindex needs: a per-document
+// transaction costs a commit each and dominates a corpus rebuild. Every
+// document is validated before the transaction opens, so a malformed document
+// writes nothing. Like Upsert, a lost write lock retries the whole batch; the
+// writes are idempotent upserts, so a retry is safe. Callers with a large
+// corpus chunk the slice to bound the transaction and its WAL growth.
+func (i *Index) UpsertBatch(ctx context.Context, docs []ports.Document) error {
+	if len(docs) == 0 {
+		return nil
+	}
+	for _, doc := range docs {
+		if err := validateDocument(doc); err != nil {
+			return err
+		}
+		if err := validateRelations(doc); err != nil {
+			return err
+		}
+	}
+	return retryOnBusy(ctx, busyTimeout, func() error {
+		return i.upsertBatchOnce(ctx, docs)
+	})
+}
+
+// Optimize compacts the FTS5 index and truncates the write-ahead log. A reindex
+// writes every document, which leaves the FTS b-tree fragmented and the WAL
+// large; both are pure size and read-cost overhead until the segments are
+// merged. The merge is required; the log truncation is best effort, because a
+// concurrent reader may hold the log and that must not fail a completed reindex.
+func (i *Index) Optimize(ctx context.Context) error {
+	if _, err := i.db.ExecContext(ctx, `INSERT INTO documents_fts(documents_fts) VALUES('optimize')`); err != nil {
+		return fmt.Errorf("sqliteindex: optimize full-text index: %w", err)
+	}
+	if err := i.Checkpoint(ctx); err != nil && !errors.Is(err, errCheckpointBusy) {
+		return err
+	}
+	return nil
+}
+
+// errCheckpointBusy reports that an active reader kept the write-ahead log from
+// being truncated. The index is consistent; only the log file stays large.
+var errCheckpointBusy = errors.New("checkpoint blocked by an active reader")
+
+// Checkpoint truncates the write-ahead log, retrying while another process or
+// connection holds a read lock. An in-memory index has no WAL and succeeds
+// without touching a file.
+func (i *Index) Checkpoint(ctx context.Context) error {
+	deadline := time.Now().Add(busyTimeout)
+	delay := retryInitialDelay
+	for {
+		busy, err := i.checkpointOnce(ctx)
+		if err != nil {
+			return err
+		}
+		if busy == 0 {
+			return nil
+		}
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			return fmt.Errorf("sqliteindex: %w", errCheckpointBusy)
+		}
+		wait := min(delay, remaining)
+		timer := time.NewTimer(wait)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return ctx.Err()
+		case <-timer.C:
+		}
+		delay *= 2
+		if delay > retryMaxDelay {
+			delay = retryMaxDelay
+		}
+	}
+}
+
+// checkpointOnce runs PRAGMA wal_checkpoint(TRUNCATE) and reports whether the
+// truncation had to stop for a reader. The first column is that busy flag; the
+// other two are the log size and the frames checkpointed.
+func (i *Index) checkpointOnce(ctx context.Context) (int, error) {
+	var (
+		busy    int
+		log     int
+		checked int
+	)
+	if err := i.db.QueryRowContext(ctx, "PRAGMA wal_checkpoint(TRUNCATE)").Scan(&busy, &log, &checked); err != nil {
+		return 0, fmt.Errorf("sqliteindex: checkpoint the write-ahead log: %w", err)
+	}
+	return busy, nil
+}
+
 // upsertOnce performs one upsert transaction.
 func (i *Index) upsertOnce(ctx context.Context, doc ports.Document) error {
 	tx, err := i.db.BeginTx(ctx, nil)
@@ -296,7 +387,138 @@ func (i *Index) upsertOnce(ctx context.Context, doc ports.Document) error {
 		return fmt.Errorf("sqliteindex: begin upsert %q: %w", doc.ID, err)
 	}
 	defer func() { _ = tx.Rollback() }()
-	if _, err := tx.ExecContext(ctx, upsertSQL,
+	if err := writeDocument(ctx, txWriter{tx: tx}, doc); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("sqliteindex: commit upsert %q: %w", doc.ID, err)
+	}
+	return nil
+}
+
+// upsertBatchOnce performs one batch transaction. The statements are prepared
+// once for the transaction, so a batch compiles its SQL a fixed number of times
+// instead of three times per document.
+func (i *Index) upsertBatchOnce(ctx context.Context, docs []ports.Document) error {
+	tx, err := i.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("sqliteindex: begin batch of %d documents: %w", len(docs), err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	writer, err := newStmtWriter(ctx, tx)
+	if err != nil {
+		return err
+	}
+	for _, doc := range docs {
+		if err := writeDocument(ctx, writer, doc); err != nil {
+			return err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("sqliteindex: commit batch of %d documents: %w", len(docs), err)
+	}
+	return nil
+}
+
+// docWriter writes one document and its derived relation rows. Both the
+// per-document transaction and the batch use it, so the two paths cannot drift.
+type docWriter interface {
+	upsertDocument(ctx context.Context, doc ports.Document) error
+	clearRelations(ctx context.Context, id string) error
+	addRelation(ctx context.Context, doc ports.Document, relation ports.RelationLink) error
+}
+
+// writeDocument replaces one document and its relation projection.
+func writeDocument(ctx context.Context, writer docWriter, doc ports.Document) error {
+	if err := writer.upsertDocument(ctx, doc); err != nil {
+		return err
+	}
+	if err := writer.clearRelations(ctx, doc.ID); err != nil {
+		return err
+	}
+	for _, relation := range doc.Relations {
+		if err := writer.addRelation(ctx, doc, relation); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// txWriter runs the statements unprepared, for the single-document path.
+type txWriter struct{ tx *sql.Tx }
+
+func (w txWriter) upsertDocument(ctx context.Context, doc ports.Document) error {
+	if _, err := w.tx.ExecContext(ctx, upsertSQL, documentArgs(doc)...); err != nil {
+		return fmt.Errorf("sqliteindex: upsert %q: %w", doc.ID, err)
+	}
+	return nil
+}
+
+func (w txWriter) clearRelations(ctx context.Context, id string) error {
+	if _, err := w.tx.ExecContext(ctx, deleteRelationsSQL, id); err != nil {
+		return fmt.Errorf("sqliteindex: clear relations of %q: %w", id, err)
+	}
+	return nil
+}
+
+func (w txWriter) addRelation(ctx context.Context, doc ports.Document, relation ports.RelationLink) error {
+	if _, err := w.tx.ExecContext(ctx, upsertRelationSQL, relationArgs(doc, relation)...); err != nil {
+		return fmt.Errorf("sqliteindex: index relation %q of %q: %w", relation.Target, doc.ID, err)
+	}
+	return nil
+}
+
+// stmtWriter runs the prepared statements of one batch transaction. The
+// statements belong to the transaction, so Commit or Rollback releases them.
+type stmtWriter struct {
+	upsert   *sql.Stmt
+	clear    *sql.Stmt
+	relation *sql.Stmt
+}
+
+func newStmtWriter(ctx context.Context, tx *sql.Tx) (stmtWriter, error) {
+	writer := stmtWriter{}
+	for _, spec := range []struct {
+		sql string
+		dst **sql.Stmt
+	}{
+		{upsertSQL, &writer.upsert},
+		{deleteRelationsSQL, &writer.clear},
+		{upsertRelationSQL, &writer.relation},
+	} {
+		stmt, err := tx.PrepareContext(ctx, spec.sql)
+		if err != nil {
+			return stmtWriter{}, fmt.Errorf("sqliteindex: prepare batch statement: %w", err)
+		}
+		*spec.dst = stmt
+	}
+	return writer, nil
+}
+
+func (w stmtWriter) upsertDocument(ctx context.Context, doc ports.Document) error {
+	if _, err := w.upsert.ExecContext(ctx, documentArgs(doc)...); err != nil {
+		return fmt.Errorf("sqliteindex: upsert %q: %w", doc.ID, err)
+	}
+	return nil
+}
+
+func (w stmtWriter) clearRelations(ctx context.Context, id string) error {
+	if _, err := w.clear.ExecContext(ctx, id); err != nil {
+		return fmt.Errorf("sqliteindex: clear relations of %q: %w", id, err)
+	}
+	return nil
+}
+
+func (w stmtWriter) addRelation(ctx context.Context, doc ports.Document, relation ports.RelationLink) error {
+	if _, err := w.relation.ExecContext(ctx, relationArgs(doc, relation)...); err != nil {
+		return fmt.Errorf("sqliteindex: index relation %q of %q: %w", relation.Target, doc.ID, err)
+	}
+	return nil
+}
+
+// documentArgs binds one document to upsertSQL.
+func documentArgs(doc ports.Document) []any {
+	return []any{
 		doc.ID,
 		doc.ProjectID,
 		doc.Kind,
@@ -314,31 +536,22 @@ func (i *Index) upsertOnce(ctx context.Context, doc ports.Document) error {
 		doc.TopicKey,
 		normalizedOccurrences(doc.Occurrences),
 		boolToInt(doc.Pinned),
-	); err != nil {
-		return fmt.Errorf("sqliteindex: upsert %q: %w", doc.ID, err)
 	}
-	if _, err := tx.ExecContext(ctx, deleteRelationsSQL, doc.ID); err != nil {
-		return fmt.Errorf("sqliteindex: clear relations of %q: %w", doc.ID, err)
+}
+
+// relationArgs binds one relation row to upsertRelationSQL.
+func relationArgs(doc ports.Document, relation ports.RelationLink) []any {
+	return []any{
+		doc.ID,
+		doc.ProjectID,
+		relation.Target,
+		relation.Relation,
+		relation.Status,
+		relation.Confidence,
+		relation.Reason,
+		nullableNanos(relation.JudgedAt),
+		relation.VerdictBy,
 	}
-	for _, relation := range doc.Relations {
-		if _, err := tx.ExecContext(ctx, upsertRelationSQL,
-			doc.ID,
-			doc.ProjectID,
-			relation.Target,
-			relation.Relation,
-			relation.Status,
-			relation.Confidence,
-			relation.Reason,
-			nullableNanos(relation.JudgedAt),
-			relation.VerdictBy,
-		); err != nil {
-			return fmt.Errorf("sqliteindex: index relation %q of %q: %w", relation.Target, doc.ID, err)
-		}
-	}
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("sqliteindex: commit upsert %q: %w", doc.ID, err)
-	}
-	return nil
 }
 
 // validFromNanos is the stored valid_from. A document without one became true

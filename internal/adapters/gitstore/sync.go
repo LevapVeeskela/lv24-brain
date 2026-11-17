@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/levapveeskela/lv24-brain/internal/adapters/fsstore"
 	"github.com/levapveeskela/lv24-brain/internal/domain"
 	"github.com/levapveeskela/lv24-brain/internal/ports"
 )
@@ -149,11 +150,12 @@ func (p *Provider) rebasePull(ctx context.Context, autostash bool, behind int) (
 		}
 		_, stashConflicts, restoreErr := p.restoreAutostash(ctx, stashed)
 		paths := uniquePaths(append(conflicts, stashConflicts...))
+		if restoreErr != nil {
+			// The autostash was kept: its error names the ref and the paths.
+			return ports.SyncResult{Conflicts: paths}, fmt.Errorf("pull stopped and the autostash was kept: %w", restoreErr)
+		}
 		if len(paths) > 0 || rebase {
 			return ports.SyncResult{Conflicts: paths}, &ConflictError{Operation: "pull", Paths: paths, Aborted: rebase}
-		}
-		if restoreErr != nil {
-			return ports.SyncResult{}, restoreErr
 		}
 		return ports.SyncResult{}, err
 	}
@@ -279,6 +281,10 @@ func (p *Provider) recoverInterruptedSync(ctx context.Context) (bool, error) {
 		recovered = true
 	}
 	if len(conflicts) > 0 {
+		// err already names the kept stash ref and the conflicting paths.
+		if err != nil {
+			return recovered, err
+		}
 		return recovered, &ConflictError{Operation: "stash restore", Paths: conflicts}
 	}
 	return recovered, err
@@ -305,10 +311,9 @@ func (p *Provider) stashIfDirty(ctx context.Context, autostash bool) (bool, erro
 }
 
 // restoreAutostash pops our stashes until none is left. When enabled is false
-// it does nothing. A pop conflict is reported with the unmerged paths; the
-// stash entry is then dropped because git has already written both sides into
-// the working tree as conflict markers, and keeping it would re-apply the same
-// changes on the next sync.
+// it does nothing. A failed pop never drops the stash: the entry keeps the only
+// copy of the local changes, so the error names the ref and the conflicting
+// paths and asks for a manual resolution.
 func (p *Provider) restoreAutostash(ctx context.Context, enabled bool) (int, []string, error) {
 	if !enabled {
 		return 0, nil, nil
@@ -323,11 +328,26 @@ func (p *Provider) restoreAutostash(ctx context.Context, enabled bool) (int, []s
 		}
 		if _, err := p.run(ctx, "stash", "pop", ref); err != nil {
 			conflicts, _ := p.conflictedPaths(ctx)
-			_, _ = p.run(ctx, "stash", "drop", ref)
-			return restored + 1, conflicts, &ConflictError{Operation: "stash restore", Paths: conflicts}
+			message := fmt.Sprintf("gitstore: git stash pop %s failed (%v); the stash %s was kept because it still holds the local changes",
+				ref, err, ref)
+			if len(conflicts) > 0 {
+				message += " conflicting with " + strings.Join(conflicts, ", ")
+			}
+			message += fmt.Sprintf("; resolve them, then restore it with `git stash pop %s` or drop it with `git stash drop %s`: ",
+				ref, ref)
+			return restored + 1, conflicts, fmt.Errorf("%s%w", message,
+				&ConflictError{Operation: "stash restore", Paths: conflicts})
 		}
 	}
 	return maxRecoveredStashes, nil, nil
+}
+
+// lockSync takes the interprocess sync lock of the checkout through the same
+// owner-aware implementation the data store uses (pid, host, TTL, token), so a
+// publish and a sync contend on <root>/sync.lock and neither can break or
+// delete the other's lock.
+func (p *Provider) lockSync(ctx context.Context) (func(), error) {
+	return fsstore.AcquirePathLock(ctx, filepath.Join(p.dir, "sync.lock"))
 }
 
 // autostashRef finds the newest stash created by this package.

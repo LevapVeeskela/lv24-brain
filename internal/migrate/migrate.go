@@ -63,6 +63,8 @@ const (
 	StatusConflict Status = "conflict"
 	// StatusFailed means the source file could not be read or converted.
 	StatusFailed Status = "failed"
+	// StatusRemoved means a stale target file was renamed aside by a repair.
+	StatusRemoved Status = "removed"
 )
 
 // FileResult describes one source file and what happened to it.
@@ -88,6 +90,8 @@ type Result struct {
 	Unchanged int          `json:"unchanged"`
 	Conflicts int          `json:"conflicts"`
 	Failed    int          `json:"failed"`
+	// Removed counts stale target files a timestamp repair set aside.
+	Removed int `json:"removed,omitempty"`
 
 	// SourceSystem names the adapter that produced the run ("engram" for the
 	// engram importer). It is empty for the legacy .brain importer.
@@ -184,6 +188,17 @@ type IncompleteError struct {
 
 func (e *IncompleteError) Error() string {
 	return fmt.Sprintf("migrate: %d conflict(s), %d failed file(s); resolve them and rerun", e.Conflicts, e.Failed)
+}
+
+// AbortedError is returned when the plan has conflicting targets and the run
+// refused to write anything. Everything that failed or would conflict is
+// reported before the first write, so the target is untouched.
+type AbortedError struct {
+	Conflicts int
+}
+
+func (e *AbortedError) Error() string {
+	return fmt.Sprintf("migrate: aborted before writing: %d conflict(s); nothing was written (rerun with --skip-conflicts to import the other files, or --repair-timestamps for the old engram note layout)", e.Conflicts)
 }
 
 // Run imports the legacy knowledge records. A nil context is treated as

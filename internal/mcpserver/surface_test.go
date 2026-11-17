@@ -290,9 +290,32 @@ func TestSurfacePromptActionsRoute(t *testing.T) {
 	if save["isError"] != false || len(backend.promptSaves) != 1 || backend.promptSaves[0].Text != "remember this" {
 		t.Fatalf("save = %v, saves = %v", save, backend.promptSaves)
 	}
-	search := toolCall(t, backend, "brain_prompt", `{"action":"search","query":"handoff"}`)
+	search := toolCall(t, backend, "brain_prompt", `{"action":"search","query":"handoff","project":"alpha"}`)
 	if search["isError"] != false || len(structured(t, search)["hits"].([]any)) != 1 {
 		t.Fatalf("search = %v", search)
+	}
+}
+
+// brain_prompt(action=search) needs an explicit scope too: a project, or
+// all=true for every project.
+func TestSurfacePromptSearchRequiresScope(t *testing.T) {
+	backend := newSurfaceFake()
+	unscoped := toolCall(t, backend, "brain_prompt", `{"action":"search","query":"handoff"}`)
+	if unscoped["isError"] != true || structured(t, unscoped)["code"] != RefusalInvalidArguments {
+		t.Fatalf("unscoped prompt search = %v, want a typed invalid refusal", unscoped)
+	}
+	if text := unscoped["content"].([]any)[0].(map[string]any)["text"].(string); !strings.Contains(text, "all=true") {
+		t.Fatalf("refusal does not name all=true: %q", text)
+	}
+	explicitAll := toolCall(t, backend, "brain_prompt", `{"action":"search","query":"handoff","all":true}`)
+	if explicitAll["isError"] != false || len(structured(t, explicitAll)["hits"].([]any)) != 1 {
+		t.Fatalf("prompt search all=true = %v", explicitAll)
+	}
+	if both := toolCall(t, backend, "brain_prompt", `{"action":"search","project":"alpha","all":true}`); both["isError"] != true {
+		t.Fatalf("project and all together accepted: %v", both)
+	}
+	if saveAll := toolCall(t, backend, "brain_prompt", `{"action":"save","content":"x","all":true}`); saveAll["isError"] != true {
+		t.Fatalf("all outside search accepted: %v", saveAll)
 	}
 }
 

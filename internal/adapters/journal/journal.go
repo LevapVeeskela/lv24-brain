@@ -9,7 +9,9 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
@@ -33,6 +35,20 @@ const (
 	maxLineBytes = 4 << 10
 	// maxFieldRunes bounds every string value written.
 	maxFieldRunes = 500
+
+	// lockSuffix names the cross-process lock of one journal file.
+	lockSuffix = ".lock"
+	// appendLockWait bounds how long an append waits for a live holder.
+	appendLockWait = 10 * time.Second
+	// readLockWait is short: a reader falls back to an unlocked read rather
+	// than block a listing while a writer holds the lock.
+	readLockWait = 250 * time.Millisecond
+	// lockStaleAfter is how long a lock may belong to a crashed writer before
+	// another process clears it.
+	lockStaleAfter = 30 * time.Second
+	// lockRetryMin and lockRetryMax bound the acquisition backoff.
+	lockRetryMin = 2 * time.Millisecond
+	lockRetryMax = 50 * time.Millisecond
 )
 
 var reserved = map[string]struct{}{
@@ -94,6 +110,11 @@ func (s *Store) Append(ctx context.Context, entry ports.JournalEntry) error {
 		return fmt.Errorf("journal: create directory: %w", err)
 	}
 	path := filepath.Join(s.dir, FileName(entry.User))
+	release, err := journalLock(ctx, path, appendLockWait)
+	if err != nil {
+		return err
+	}
+	defer release()
 	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o644)
 	if err != nil {
 		return fmt.Errorf("journal: open %s: %w", filepath.Base(path), err)
@@ -101,6 +122,10 @@ func (s *Store) Append(ctx context.Context, entry ports.JournalEntry) error {
 	if _, err := file.Write(line); err != nil {
 		_ = file.Close()
 		return fmt.Errorf("journal: append %s: %w", filepath.Base(path), err)
+	}
+	if err := file.Sync(); err != nil {
+		_ = file.Close()
+		return fmt.Errorf("journal: sync %s: %w", filepath.Base(path), err)
 	}
 	return file.Close()
 }
@@ -169,7 +194,7 @@ func (s *Store) Read(ctx context.Context, query ports.JournalQuery) ([]ports.Jou
 			return nil, err
 		}
 		stem := strings.TrimSuffix(filepath.Base(path), ".jsonl")
-		entries, err := readFile(path, stem)
+		entries, err := readFile(ctx, path, stem)
 		if err != nil {
 			return nil, err
 		}
@@ -180,13 +205,44 @@ func (s *Store) Read(ctx context.Context, query ports.JournalQuery) ([]ports.Jou
 		}
 	}
 	sort.SliceStable(out, func(i, j int) bool { return out[i].Time.After(out[j].Time) })
+	out = dedupeEntries(out)
 	if len(out) > limit {
 		out = out[:limit]
 	}
 	return out, nil
 }
 
-func readFile(path, stem string) ([]ports.JournalEntry, error) {
+// journalKey is the identity of one journal line for read deduplication. A
+// retried append or a replayed legacy line therefore counts once.
+type journalKey struct {
+	ts    int64
+	event string
+	id    string
+}
+
+// dedupeEntries drops repeated (ts, event, id) entries, keeping the first in
+// the given order.
+func dedupeEntries(entries []ports.JournalEntry) []ports.JournalEntry {
+	seen := make(map[journalKey]struct{}, len(entries))
+	out := entries[:0]
+	for _, entry := range entries {
+		key := journalKey{ts: entry.Time.UTC().UnixNano(), event: entry.Event, id: entry.ID}
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		out = append(out, entry)
+	}
+	return out
+}
+
+func readFile(ctx context.Context, path, stem string) ([]ports.JournalEntry, error) {
+	// A writer holds the lock for one small append, so a reader normally
+	// waits a few milliseconds. On a timeout it reads anyway: every line is a
+	// single O_APPEND write and dedupe absorbs a line read twice.
+	if release, lockErr := journalLock(ctx, path, readLockWait); lockErr == nil {
+		defer release()
+	}
 	file, err := os.Open(path)
 	if err != nil {
 		return nil, fmt.Errorf("journal: open %s: %w", filepath.Base(path), err)
@@ -271,4 +327,70 @@ func matches(entry ports.JournalEntry, query ports.JournalQuery) bool {
 		return false
 	}
 	return true
+}
+
+// journalLock serializes appends (and best-effort reads) of one journal file
+// across processes. The lock is "<file>.jsonl.lock", created with O_EXCL next
+// to the journal; it holds no payload, so it is cleared only after
+// lockStaleAfter, which is far longer than one append.
+func journalLock(ctx context.Context, path string, wait time.Duration) (func(), error) {
+	lockPath := path + lockSuffix
+	deadline := time.Now().Add(wait)
+	backoff := lockRetryMin
+	for {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		file, err := os.OpenFile(lockPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
+		if err == nil {
+			_ = file.Close()
+			released := false
+			return func() {
+				if released {
+					return
+				}
+				released = true
+				_ = os.Remove(lockPath)
+			}, nil
+		}
+		// Windows reports a lock that is still being deleted as access denied
+		// rather than exists; both mean busy.
+		busy := os.IsExist(err) || errors.Is(err, fs.ErrPermission)
+		if !busy {
+			return nil, fmt.Errorf("journal: create lock %s: %w", filepath.Base(lockPath), err)
+		}
+		if staleJournalLock(lockPath) {
+			continue
+		}
+		if time.Now().After(deadline) {
+			return nil, fmt.Errorf("journal: lock %s after %s", filepath.Base(lockPath), wait)
+		}
+		timer := time.NewTimer(backoff)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return nil, ctx.Err()
+		case <-timer.C:
+		}
+		if backoff *= 2; backoff > lockRetryMax {
+			backoff = lockRetryMax
+		}
+	}
+}
+
+// staleJournalLock removes a lock left by a crashed writer. The mtime is read
+// twice so a lock created between the checks is not deleted.
+func staleJournalLock(lockPath string) bool {
+	info, err := os.Stat(lockPath)
+	if err != nil {
+		return os.IsNotExist(err)
+	}
+	if time.Since(info.ModTime()) < lockStaleAfter {
+		return false
+	}
+	current, err := os.Stat(lockPath)
+	if err != nil || !current.ModTime().Equal(info.ModTime()) {
+		return false
+	}
+	return os.Remove(lockPath) == nil
 }

@@ -104,6 +104,21 @@ func runDiscover(args []string, stdout, stderr io.Writer) int {
 	}
 
 	claimed := map[string]bool{} // ids already assigned to a new candidate in this run
+	// scannedRepos maps a repository URL to the project this scan registered
+	// for it, so a second clone in the same scan is reported instead of being
+	// registered as a second project.
+	scannedRepos := map[string]string{}
+	addRepoOwner := func(key, owner string) {
+		if key == "" {
+			return
+		}
+		for _, existing := range repoIndex[key] {
+			if existing == owner {
+				return
+			}
+		}
+		repoIndex[key] = append(repoIndex[key], owner)
+	}
 	newCount, adoptCount := 0, 0
 	for _, c := range candidates {
 		// A retired checkout is never registered, even when it was recreated
@@ -127,7 +142,15 @@ func runDiscover(args []string, stdout, stderr io.Writer) int {
 			owner = id
 		}
 		repoURL := discoverRemoteURL(ctx, c.path)
-		repoOwners := repoIndex[gitinfo.NormalizeRepoURL(repoURL)]
+		repoKey := gitinfo.NormalizeRepoURL(repoURL)
+		if repoKey != "" {
+			if registered, duplicate := scannedRepos[repoKey]; duplicate {
+				fmt.Fprintf(stdout, "repo-duplicate %s %s (repository already registered as %s in this scan)\n",
+					c.id, c.path, registered)
+				continue
+			}
+		}
+		repoOwners := repoIndex[repoKey]
 		if len(repoOwners) > 1 {
 			fmt.Fprintf(stdout, "repo-conflict %s %s (repository claimed by %s)\n",
 				c.id, c.path, strings.Join(repoOwners, ", "))
@@ -144,6 +167,8 @@ func runDiscover(args []string, stdout, stderr io.Writer) int {
 				if err := discoverAdopt(ctx, rt.App, adopt, c, repoURL, branch); err != nil {
 					return reportError(stderr, "discover", err)
 				}
+				knownPaths[pathKey(c.path)] = true
+				addRepoOwner(repoKey, adopt)
 				fmt.Fprintf(stdout, "adopted %s %s\n", adopt, c.path)
 			} else {
 				adoptCount++
@@ -156,10 +181,19 @@ func runDiscover(args []string, stdout, stderr io.Writer) int {
 			if err := discoverRegister(ctx, rt.App, c); err != nil {
 				return reportError(stderr, "discover", err)
 			}
+			knownPaths[pathKey(c.path)] = true
+			addRepoOwner(repoKey, c.id)
+			if repoKey != "" {
+				scannedRepos[repoKey] = c.id
+			}
 			fmt.Fprintf(stdout, "registered %s\n", c.id)
 		default:
 			claimed[c.id] = true
 			newCount++
+			addRepoOwner(repoKey, c.id)
+			if repoKey != "" {
+				scannedRepos[repoKey] = c.id
+			}
 			fmt.Fprintf(stdout, "new %s %s\n", c.id, c.path)
 		}
 	}

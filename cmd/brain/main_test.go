@@ -1304,6 +1304,11 @@ func TestSearchServerModeCLI(t *testing.T) {
 	const token = "brain_server_search_test"
 	var gotQuery string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet && r.URL.Path == "/v1/projects" {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"items":[{"id":"demo","name":"Demo","kind":"other"}]}`)
+			return
+		}
 		if r.URL.Path != "/v1/search" || r.Method != http.MethodGet {
 			http.NotFound(w, r)
 			return
@@ -1719,6 +1724,8 @@ func TestProjectClearServerModeSendsEmptyArrays(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/projects":
+			_ = json.NewEncoder(w).Encode(map[string]any{"items": []domain.Project{project}})
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/projects/demo":
 			_ = json.NewEncoder(w).Encode(project)
 		case r.Method == http.MethodPatch && r.URL.Path == "/v1/projects/demo":

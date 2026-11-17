@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"github.com/levapveeskela/lv24-brain/internal/config"
@@ -34,6 +35,9 @@ type IndexResult struct {
 	// Pruned counts documents removed because their source is gone.
 	Pruned  int
 	Rebuild bool
+	// Warnings reports ambiguous registry data the indexer worked around
+	// instead of guessing, for example one repository claimed by two projects.
+	Warnings []string
 }
 
 // Reindex rebuilds the local search projection from Markdown files. The caller
@@ -55,6 +59,10 @@ func (a *App) Reindex(ctx context.Context, opts IndexOptions) (IndexResult, erro
 
 	result := IndexResult{Rebuild: opts.Rebuild}
 	seen := map[string]struct{}{}
+	// A reindex writes every document, so the writes go in chunks: one
+	// transaction per document made a corpus rebuild pay a commit and a WAL
+	// checkpoint per record instead of per few hundred records.
+	batch := newIndexWriteBatch(ctx, a.deps.Index)
 	upsert := func(doc ports.Document) error {
 		if _, duplicate := seen[doc.ID]; duplicate {
 			// A legacy duplicate id would make search pick an arbitrary
@@ -64,7 +72,7 @@ func (a *App) Reindex(ctx context.Context, opts IndexOptions) (IndexResult, erro
 			return nil
 		}
 		seen[doc.ID] = struct{}{}
-		return a.deps.Index.Upsert(ctx, doc)
+		return batch.add(doc)
 	}
 	projects, err := a.deps.Store.ListProjects(ctx)
 	if err != nil {
@@ -133,8 +141,9 @@ func (a *App) Reindex(ctx context.Context, opts IndexOptions) (IndexResult, erro
 			result.Documents++
 		}
 	}
-	dumps, err := a.indexDumps(ctx, projects, upsert)
+	dumps, warnings, err := a.indexDumps(ctx, projects, upsert)
 	result.Dumps = dumps
+	result.Warnings = append(result.Warnings, warnings...)
 	result.Documents += dumps
 	if err != nil {
 		return result, err
@@ -145,13 +154,96 @@ func (a *App) Reindex(ctx context.Context, opts IndexOptions) (IndexResult, erro
 	if err != nil {
 		return result, err
 	}
+	if err := batch.flush(); err != nil {
+		return result, err
+	}
 	pruned, err := a.pruneIndex(ctx, seen)
 	result.Pruned = pruned
 	if err != nil {
 		return result, err
 	}
+	// The run left a fragmented full-text index and a large WAL; compacting
+	// them is part of the rebuild, not of the next query.
+	if compactor, ok := a.deps.Index.(indexCompactor); ok {
+		if err := compactor.Optimize(ctx); err != nil {
+			return result, fmt.Errorf("compact the search index: %w", err)
+		}
+	}
 	a.clearIndexDirty()
 	return result, nil
+}
+
+// indexBatchSize bounds one reindex transaction: a few hundred documents
+// commit together, so a corpus rebuild costs tens of transactions instead of one
+// per record, without holding the write lock for the whole run.
+const indexBatchSize = 500
+
+// indexBatchWriter is the optional batch capability of the search index.
+type indexBatchWriter interface {
+	UpsertBatch(ctx context.Context, docs []ports.Document) error
+}
+
+// indexCompactor is the optional compaction capability of the search index: it
+// merges the full-text segments and truncates the write-ahead log a reindex
+// leaves behind.
+type indexCompactor interface {
+	Optimize(ctx context.Context) error
+}
+
+// indexWriteBatch buffers reindex documents and writes them in chunks. An index
+// without the batch capability keeps the per-document path, so the reindex stays
+// correct for any implementation.
+type indexWriteBatch struct {
+	ctx     context.Context
+	index   ports.Index
+	batcher indexBatchWriter
+	pending []ports.Document
+}
+
+func newIndexWriteBatch(ctx context.Context, index ports.Index) *indexWriteBatch {
+	batch := &indexWriteBatch{ctx: ctx, index: index}
+	batch.batcher, _ = index.(indexBatchWriter)
+	return batch
+}
+
+// add buffers one document and writes the chunk when it is full.
+func (b *indexWriteBatch) add(doc ports.Document) error {
+	b.pending = append(b.pending, doc)
+	if len(b.pending) < indexBatchSize {
+		return nil
+	}
+	return b.flush()
+}
+
+// flush writes every buffered document.
+func (b *indexWriteBatch) flush() error {
+	for len(b.pending) > 0 {
+		size := minInt(len(b.pending), indexBatchSize)
+		if b.batcher == nil {
+			size = 1
+		}
+		if err := b.write(b.pending[:size]); err != nil {
+			return err
+		}
+		b.pending = b.pending[size:]
+	}
+	return nil
+}
+
+// write persists one chunk in one transaction when the index supports batches.
+func (b *indexWriteBatch) write(chunk []ports.Document) error {
+	if b.batcher != nil {
+		if err := b.batcher.UpsertBatch(b.ctx, chunk); err != nil {
+			return fmt.Errorf("index %d documents: %w", len(chunk), err)
+		}
+		return nil
+	}
+	for _, doc := range chunk {
+		if err := b.index.Upsert(b.ctx, doc); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // pruneIndex deletes documents a complete reindex did not produce: records
@@ -189,29 +281,32 @@ func (a *App) IndexDumps(ctx context.Context) (int, error) {
 		return 0, err
 	}
 	upsert := func(doc ports.Document) error { return a.deps.Index.Upsert(ctx, doc) }
-	count, err := a.indexDumps(ctx, projects, upsert)
+	count, _, err := a.indexDumps(ctx, projects, upsert)
 	if err != nil {
 		a.markIndexDirty()
 	}
 	return count, err
 }
 
-func (a *App) indexDumps(ctx context.Context, projects []domain.Project, upsert func(ports.Document) error) (int, error) {
+// indexDumps indexes connector dumps and returns the ambiguous repository
+// mappings it refused to guess. Reindex reports them; a connector-triggered
+// refresh looks only at its own dumps, so it discards them.
+func (a *App) indexDumps(ctx context.Context, projects []domain.Project, upsert func(ports.Document) error) (int, []string, error) {
 	lister, ok := a.deps.Store.(ports.DumpLister)
 	if !ok {
-		return 0, nil
+		return 0, nil, nil
 	}
 	dumps, err := lister.ListDumps(ctx)
 	if err != nil {
-		return 0, fmt.Errorf("list connector dumps: %w", err)
+		return 0, nil, fmt.Errorf("list connector dumps: %w", err)
 	}
-	byRepo := projectsByRepo(projects)
+	byRepo, warnings := projectsByRepo(projects)
 	for i, dump := range dumps {
 		if err := upsert(dumpDocument(dump, byRepo)); err != nil {
-			return i, fmt.Errorf("index dump %s: %w", dump.Path, err)
+			return i, warnings, fmt.Errorf("index dump %s: %w", dump.Path, err)
 		}
 	}
-	return len(dumps), nil
+	return len(dumps), warnings, nil
 }
 
 // dumpDocument indexes a dump under the registered project whose repository
@@ -429,14 +524,32 @@ func itemDocument(item domain.Item) ports.Document {
 }
 
 // projectsByRepo maps "owner/repo" (lowercase, from repo_url) to project id.
-func projectsByRepo(projects []domain.Project) map[string]string {
-	byRepo := make(map[string]string, len(projects))
+// A repository claimed by several projects is ambiguous: it maps to no project
+// and a warning names the candidates in id order, so a dump is never
+// attributed to whichever project the registry returned last. The dump then
+// stays under its connector project ("github:owner/repo") until the owner
+// merges the registry entries.
+func projectsByRepo(projects []domain.Project) (map[string]string, []string) {
+	owners := make(map[string][]string, len(projects))
 	for _, project := range projects {
 		if repo := repoPath(project.RepoURL); repo != "" {
-			byRepo[repo] = project.ID
+			owners[repo] = append(owners[repo], project.ID)
 		}
 	}
-	return byRepo
+	byRepo := make(map[string]string, len(owners))
+	var warnings []string
+	for repo, ids := range owners {
+		sort.Strings(ids)
+		if len(ids) > 1 {
+			warnings = append(warnings, fmt.Sprintf(
+				"repository %s is claimed by %s; dumps stay under their connector project until one owner is chosen",
+				repo, strings.Join(ids, ", ")))
+			continue
+		}
+		byRepo[repo] = ids[0]
+	}
+	sort.Strings(warnings)
+	return byRepo, warnings
 }
 
 // repoPath extracts "owner/repo" from https or ssh remote URLs.

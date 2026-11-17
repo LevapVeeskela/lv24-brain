@@ -70,6 +70,10 @@ func TestFindingsSurfaceConflictArtifacts(t *testing.T) {
 		"# Merge conflict: notes 2026-11-17.md\n")
 	writeArtifact(t, filepath.Join(dataDir, "merges", "2026-11-17T041222.000000000Z.json"),
 		"{\n  \"version\": 1,\n  \"project_id\": \"p\",\n  \"status\": \"applied\"\n}\n")
+	// An applied manifest records a finished consolidation and must not be
+	// counted as pending; a pending one still waits for a decision.
+	writeArtifact(t, filepath.Join(dataDir, "merges", "2026-11-17T041230.000000000Z.json"),
+		"{\n  \"version\": 1,\n  \"project_id\": \"p\",\n  \"status\": \"pending\"\n}\n")
 	// Another project's manifest and an unrelated registry conflict must not
 	// leak into this project's findings.
 	writeArtifact(t, filepath.Join(dataDir, "merges", "2026-11-17T041251.000000000Z.json"),
@@ -91,10 +95,13 @@ func TestFindingsSurfaceConflictArtifacts(t *testing.T) {
 	if merge.Severity != app.SeverityWarn {
 		t.Fatalf("merge-conflict severity = %q, want warn", merge.Severity)
 	}
-	// state artifact + notes artifact + this project's manifest (the q
-	// manifest and the unrelated registry file are excluded).
+	// state artifact + notes artifact + the pending manifest (the applied
+	// manifests and the unrelated registry file are excluded).
 	if !strings.Contains(merge.Message, "3 merge conflict artifacts") {
 		t.Fatalf("merge-conflict message = %q, want a count of 3", merge.Message)
+	}
+	if strings.Contains(merge.Message, "041222") || strings.Contains(merge.Message, "041251") {
+		t.Fatalf("merge-conflict message = %q, want applied manifests excluded", merge.Message)
 	}
 	if !strings.Contains(merge.Evidence, "state-conflicts") {
 		t.Fatalf("merge-conflict evidence = %q, want a state-conflicts path", merge.Evidence)
@@ -134,6 +141,14 @@ func TestDoctorCountsPendingConflictArtifacts(t *testing.T) {
 	}
 	if check := findCheck(); check.Status != "ok" || !strings.Contains(check.Message, "no pending conflict artifacts") {
 		t.Fatalf("clean conflicts check = %+v", check)
+	}
+
+	// An applied manifest is the audit of a finished consolidation: it must
+	// not count as pending, while a status-less (pending) one must.
+	writeArtifact(t, filepath.Join(dataDir, "merges", "2026-11-17T041200.000000000Z.json"),
+		"{\n  \"version\": 1,\n  \"project_id\": \"p\",\n  \"status\": \"applied\"\n}\n")
+	if check := findCheck(); check.Status != "ok" {
+		t.Fatalf("applied manifest counted as pending: %+v", check)
 	}
 
 	writeArtifact(t, filepath.Join(dataDir, "projects", "p", "state-conflicts", "2026-11-17-goal.md"), "# conflict\n")

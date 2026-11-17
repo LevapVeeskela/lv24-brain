@@ -98,6 +98,40 @@ func TestPullAutostashRestoresDirtyTree(t *testing.T) {
 	}
 }
 
+// TestFailedStashPopKeepsTheStash proves a conflicted pop keeps the only copy
+// of the local changes: the error names the ref and the paths, and the stash
+// entry is still listed for a manual retry.
+func TestFailedStashPopKeepsTheStash(t *testing.T) {
+	provider, repo, _ := setup(t)
+	ctx := context.Background()
+
+	writeFile(t, repo.dir, "projects/demo/state.md", "goal: stashed\n")
+	repo.run("stash", "push", "--message=brain-sync-autostash test")
+	writeFile(t, repo.dir, "projects/demo/state.md", "goal: newer\n")
+	repo.run("add", "--all")
+	repo.run("commit", "-qm", "newer")
+
+	restored, conflicts, err := provider.restoreAutostash(ctx, true)
+	if !errors.Is(err, domain.ErrConflict) {
+		t.Fatalf("restoreAutostash error = %v, want ErrConflict", err)
+	}
+	if restored != 1 {
+		t.Fatalf("restored = %d, want 1", restored)
+	}
+	if len(conflicts) != 1 || conflicts[0] != "projects/demo/state.md" {
+		t.Fatalf("conflicts = %v, want the state file", conflicts)
+	}
+	if !strings.Contains(err.Error(), "stash@{0}") {
+		t.Fatalf("error does not name the stash ref: %v", err)
+	}
+	if !strings.Contains(err.Error(), "projects/demo/state.md") {
+		t.Fatalf("error does not name the conflicting path: %v", err)
+	}
+	if stashes := repo.run("stash", "list"); strings.TrimSpace(stashes) == "" {
+		t.Fatal("the failed pop dropped the stash")
+	}
+}
+
 func TestPullRecoversInterruptedRebaseAndAutostash(t *testing.T) {
 	provider, repo, other := setup(t)
 	ctx := context.Background()

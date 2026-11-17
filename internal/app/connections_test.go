@@ -349,3 +349,83 @@ func TestMailAccountDaysDoesNotNarrowResumedImports(t *testing.T) {
 		t.Fatalf("explicit cutoff=%v, %v", got, err)
 	}
 }
+
+type runSummaryStore struct {
+	runs []domain.ConnectorRun
+	err  error
+}
+
+func (s runSummaryStore) AppendConnectorRun(context.Context, domain.ConnectorRun) error { return nil }
+
+func (s runSummaryStore) ListConnectorRuns(context.Context, string, int) ([]domain.ConnectorRun, error) {
+	return s.runs, s.err
+}
+
+func TestConnectionRunSummariesPickNewestRunAndRedactCause(t *testing.T) {
+	token := "ghp_0123456789abcdefghijklmnopqrstuvwxyzAB"
+	started := time.Date(2026, 11, 18, 9, 0, 0, 0, time.UTC)
+	finished := started.Add(time.Minute)
+	store := runSummaryStore{runs: []domain.ConnectorRun{
+		{ID: "run-2", Source: "github", ConnectionID: "work", Status: domain.ConnectorFailed, StartedAt: started.Add(time.Hour), FinishedAt: &finished, Error: "github check: 401 using " + token + "\nsecond line"},
+		{ID: "run-1", Source: "github", ConnectionID: "work", Status: domain.ConnectorSuccess, StartedAt: started},
+		{ID: "legacy", Source: "github", Status: domain.ConnectorSuccess, StartedAt: started.Add(2 * time.Hour)},
+	}}
+	summaries, err := app.ConnectionRunSummaries(context.Background(), store, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(summaries) != 1 {
+		t.Fatalf("summaries = %+v", summaries)
+	}
+	summary, ok := summaries["work"]
+	if !ok || summary.Status != "failed" || !summary.StartedAt.Equal(started.Add(time.Hour)) || summary.FinishedAt == nil {
+		t.Fatalf("summary = %+v", summary)
+	}
+	if strings.Contains(summary.Error, token) || !strings.Contains(summary.Error, "[redacted]") {
+		t.Fatalf("cause not redacted: %q", summary.Error)
+	}
+	if strings.Contains(summary.Error, "\n") {
+		t.Fatalf("cause not one line: %q", summary.Error)
+	}
+}
+
+func TestConnectionRunSummariesMapOkAndIgnoreEmptyConnection(t *testing.T) {
+	started := time.Date(2026, 11, 18, 9, 0, 0, 0, time.UTC)
+	store := runSummaryStore{runs: []domain.ConnectorRun{
+		{ID: "run-1", Source: "imap", ConnectionID: "mail", Status: domain.ConnectorPartial, StartedAt: started},
+		{ID: "legacy", Source: "github", Status: domain.ConnectorSuccess, StartedAt: started},
+	}}
+	summaries, err := app.ConnectionRunSummaries(context.Background(), store, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if summary := summaries["mail"]; summary.Status != "ok" {
+		t.Fatalf("partial outcome = %+v", summary)
+	}
+	if _, ok := summaries[""]; ok || len(summaries) != 1 {
+		t.Fatalf("legacy run was mapped: %+v", summaries)
+	}
+}
+
+func TestDescribeConnectionCheckErrorMapsAndSanitizes(t *testing.T) {
+	token := "ghp_0123456789abcdefghijklmnopqrstuvwxyzAB"
+	missing := app.DescribeConnectionCheckError(fmt.Errorf("credential lookup failed for %s: %w", token, domain.ErrNotFound))
+	if missing.Code != app.ConnectionCodeCredentialMissing || missing.Message == "" {
+		t.Fatalf("missing = %+v", missing)
+	}
+	if strings.Contains(missing.Cause, token) || !strings.Contains(missing.Cause, "[redacted]") {
+		t.Fatalf("missing cause = %q", missing.Cause)
+	}
+	if got := app.DescribeConnectionCheckError(domain.NewValidationError("endpoint", "is invalid")); got.Code != app.ConnectionCodeInvalid {
+		t.Fatalf("validation = %+v", got)
+	}
+	if got := app.DescribeConnectionCheckError(fmt.Errorf("boom %s", token)); got.Code != app.ConnectionCodeCheckFailed || strings.Contains(got.Cause, token) {
+		t.Fatalf("generic = %+v", got)
+	}
+	if got := app.DescribeConnectionBuildError(fmt.Errorf("unknown provider %q: %w", "nope", domain.ErrNotFound)); got.Code != app.ConnectionCodeUnsupported {
+		t.Fatalf("unknown provider = %+v", got)
+	}
+	if got := app.SanitizeConnectorError("  one\n\t two  "); got != "one two" {
+		t.Fatalf("sanitize = %q", got)
+	}
+}

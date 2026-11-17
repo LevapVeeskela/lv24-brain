@@ -131,10 +131,59 @@ func (a *App) SaveProject(ctx context.Context, input ProjectInput) (domain.Proje
 	if err := project.Validate(); err != nil {
 		return domain.Project{}, err
 	}
+	if err := a.validateProjectUniqueness(ctx, project); err != nil {
+		return domain.Project{}, err
+	}
 	if err := a.deps.Store.PutProject(ctx, project); err != nil {
 		return domain.Project{}, err
 	}
 	return a.deps.Store.GetProject(ctx, projectID)
+}
+
+// validateProjectUniqueness rejects registry values that make a selector
+// ambiguous: an alias that equals another project's id or alias, and a
+// checkout path another project already registers. The project's own stored
+// values are fine, and comparisons fold case and slash direction the same way
+// ResolveSelector does.
+func (a *App) validateProjectUniqueness(ctx context.Context, project domain.Project) error {
+	projects, err := a.deps.Store.ListProjects(ctx)
+	if err != nil {
+		return err
+	}
+	for _, other := range projects {
+		if strings.EqualFold(other.ID, project.ID) {
+			continue
+		}
+		for _, alias := range project.Aliases {
+			alias = strings.TrimSpace(alias)
+			if alias == "" {
+				continue
+			}
+			if strings.EqualFold(alias, other.ID) {
+				return domain.NewValidationError("project.aliases",
+					fmt.Sprintf("%q is already the id of project %s", alias, other.ID))
+			}
+			if containsFold(other.Aliases, alias) {
+				return domain.NewValidationError("project.aliases",
+					fmt.Sprintf("%q is already an alias of project %s", alias, other.ID))
+			}
+		}
+		for _, path := range project.Paths {
+			if strings.TrimSpace(path) == "" {
+				continue
+			}
+			for _, otherPath := range other.Paths {
+				if strings.TrimSpace(otherPath) == "" {
+					continue
+				}
+				if normalizePath(path) == normalizePath(otherPath) {
+					return domain.NewValidationError("project.paths",
+						fmt.Sprintf("%q is already registered by project %s", cleanPath(path), other.ID))
+				}
+			}
+		}
+	}
+	return nil
 }
 
 // stampPathProvenance keeps the recorded owner of every path that stays

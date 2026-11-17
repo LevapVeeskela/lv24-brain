@@ -1154,6 +1154,9 @@ func TestSourceStreamsMatchDescriptorAndKinds(t *testing.T) {
 	if descriptor.DefaultPublish != domain.PublishShared {
 		t.Fatalf("default publish = %q", descriptor.DefaultPublish)
 	}
+	if !descriptor.PersonalData {
+		t.Fatal("PersonalData must be true: commit items embed the author e-mail")
+	}
 	if len(descriptor.Streams) != 0 {
 		t.Fatalf("descriptor streams = %v; GitLab streams are per-project and dynamic", descriptor.Streams)
 	}

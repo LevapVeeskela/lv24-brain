@@ -320,6 +320,42 @@ func (a *App) ListRecords(ctx context.Context, opts ListRecordsOptions) ([]Recor
 	return out, nil
 }
 
+// RecordsByIDs loads the records with these ids with one listing of the
+// project, keyed by id. It is the batch form of GetRecord: a caller that needs
+// several records of one project (the context link layer) must not pay one full
+// listing per record. Unknown ids and ids of another kind are absent from the
+// result, exactly like a failed GetRecord.
+func (a *App) RecordsByIDs(ctx context.Context, projectID string, ids []string) (map[string]Record, error) {
+	if err := a.requireStore(); err != nil {
+		return nil, err
+	}
+	wanted := make(map[string]struct{}, len(ids))
+	for _, id := range ids {
+		if id = strings.TrimSpace(id); id != "" {
+			wanted[id] = struct{}{}
+		}
+	}
+	if len(wanted) == 0 {
+		return map[string]Record{}, nil
+	}
+	project, err := a.ensureProject(ctx, projectID, false)
+	if err != nil {
+		return nil, err
+	}
+	records, err := a.projectRecords(ctx, project.ID)
+	if err != nil {
+		return nil, err
+	}
+	out := make(map[string]Record, len(wanted))
+	for _, record := range records {
+		id := record.Summary().ID
+		if _, ok := wanted[id]; ok {
+			out[id] = record
+		}
+	}
+	return out, nil
+}
+
 // GetRecord finds one live record of a project by ID.
 func (a *App) GetRecord(ctx context.Context, projectID, id string) (Record, error) {
 	if err := a.requireStore(); err != nil {

@@ -31,6 +31,14 @@ type EngramOptions struct {
 	PromptsEnabled bool
 	// ProjectMap overrides the default project remapping rules.
 	ProjectMap ProjectMap
+	// SkipConflicts imports the files that do not collide with the target and
+	// reports the rest. Without it a plan with any conflicting target aborts
+	// before a single file is written.
+	SkipConflicts bool
+	// RepairTimestamps rewrites the note files of an earlier import so every
+	// note keeps its own updated_at. Legacy daily files that the new
+	// per-timestamp files replace are kept aside with a .replaced suffix.
+	RepairTimestamps bool
 	// Now supplies the record clock for rows with unusable timestamps. It
 	// defaults to time.Now; a deterministic value makes a test reproducible.
 	Now func() time.Time
@@ -160,6 +168,47 @@ func RunEngram(ctx context.Context, opts EngramOptions) (Result, error) {
 	if err := renderEngramFiles(ctx, plan, &result); err != nil {
 		return result, err
 	}
+	// A daily file from an earlier import already holds notes this plan would
+	// write again. Reporting it as a conflict keeps the target free of duplicate
+	// notes; --repair-timestamps is the explicit way to replace that layout.
+	legacyBlocked, err := legacyLayoutDays(target, plan)
+	if err != nil {
+		return result, err
+	}
+	if opts.RepairTimestamps {
+		if opts.DryRun {
+			if err := repairEngramNoteFiles(target, plan, true, &result); err != nil {
+				return result, err
+			}
+		}
+	} else if len(legacyBlocked) > 0 {
+		conflicts := legacyConflictResults(legacyBlocked)
+		if opts.DryRun || opts.SkipConflicts {
+			dropBlockedDays(plan, legacyBlocked, &result)
+			result.Conflicts += len(conflicts)
+			result.Files = append(result.Files, conflicts...)
+		} else {
+			result.Conflicts = len(conflicts)
+			result.Files = conflicts
+			result.TreeHashAfter = result.TreeHashBefore
+			return result, &AbortedError{Conflicts: len(conflicts)}
+		}
+	}
+	// The plan is complete now. A conflicting target means the run cannot
+	// apply the plan as a whole, so refuse before touching any file.
+	if !opts.DryRun && !opts.SkipConflicts {
+		if conflicts := plannedConflicts(target, plan.files); len(conflicts) > 0 {
+			result.Conflicts = len(conflicts)
+			result.Files = conflicts
+			result.TreeHashAfter = result.TreeHashBefore
+			return result, &AbortedError{Conflicts: len(conflicts)}
+		}
+	}
+	if opts.RepairTimestamps && !opts.DryRun {
+		if err := repairEngramNoteFiles(target, plan, false, &result); err != nil {
+			return result, err
+		}
+	}
 	for _, file := range plan.files {
 		if err := ctx.Err(); err != nil {
 			return result, err
@@ -177,6 +226,23 @@ func RunEngram(ctx context.Context, opts EngramOptions) (Result, error) {
 		return result, &IncompleteError{Conflicts: result.Conflicts, Failed: result.Failed}
 	}
 	return result, nil
+}
+
+// plannedConflicts reports the planned files whose target already exists with
+// different content. It never writes: the same comparison storeFile performs is
+// run against a throwaway result.
+func plannedConflicts(target string, files []engramPlannedFile) []FileResult {
+	preview := Result{Files: []FileResult{}}
+	for _, file := range files {
+		storeFile(target, file.rel, file.content, file.project, file.kind, file.source, true, &preview)
+	}
+	conflicts := make([]FileResult, 0, preview.Conflicts)
+	for _, file := range preview.Files {
+		if file.Status == StatusConflict {
+			conflicts = append(conflicts, file)
+		}
+	}
+	return conflicts
 }
 
 func resolveEngramDirs(opts EngramOptions) (string, string, error) {

@@ -195,6 +195,38 @@ func mustJSON(v any) []byte {
 	return b
 }
 
+// bothRefreshManifest rewrites the manifest checksums of a bundle a test edited
+// on purpose, so the import can exercise content conflicts instead of stopping
+// at the integrity check.
+func bothRefreshManifest(t *testing.T, dir string) {
+	t.Helper()
+	manifestPath := filepath.Join(dir, "manifest.json")
+	raw, err := os.ReadFile(manifestPath)
+	if err != nil {
+		t.Fatalf("read manifest: %v", err)
+	}
+	var manifest Manifest
+	if err := json.Unmarshal(raw, &manifest); err != nil {
+		t.Fatalf("parse manifest: %v", err)
+	}
+	for i := range manifest.Files {
+		fileRaw, err := os.ReadFile(filepath.Join(dir, manifest.Files[i].Path))
+		if err != nil {
+			t.Fatalf("read %s: %v", manifest.Files[i].Path, err)
+		}
+		manifest.Files[i].Bytes = len(fileRaw)
+		manifest.Files[i].SHA256 = sha256Hex(fileRaw)
+		manifest.Files[i].Entries = bytes.Count(fileRaw, []byte("\n"))
+	}
+	encoded, err := json.MarshalIndent(manifest, "", "  ")
+	if err != nil {
+		t.Fatalf("encode manifest: %v", err)
+	}
+	if err := os.WriteFile(manifestPath, append(encoded, '\n'), 0o644); err != nil {
+		t.Fatalf("write manifest: %v", err)
+	}
+}
+
 func TestZipRoundTrip(t *testing.T) {
 	ctx := context.Background()
 	srcDir := filepath.Join(t.TempDir(), "src")
@@ -325,6 +357,9 @@ func TestImportIdempotencyAndDryRun(t *testing.T) {
 	if len(notes) != 0 {
 		t.Fatalf("dry run wrote %d notes", len(notes))
 	}
+	if _, err := os.Stat(filepath.Join(dstDir, "backups")); !os.IsNotExist(err) {
+		t.Fatalf("dry run wrote a backups/ directory: %v", err)
+	}
 }
 
 func TestConflictNoOverwrite(t *testing.T) {
@@ -351,6 +386,7 @@ func TestConflictNoOverwrite(t *testing.T) {
 	rec.ContentHash = contentHashOf(rec)
 	out, _ := json.Marshal(rec)
 	os.WriteFile(filepath.Join(exportDir, "records.jsonl"), append(out, '\n'), 0644)
+	bothRefreshManifest(t, exportDir)
 
 	report, err := Import(ctx, dst, ImportOptions{From: exportDir, CreateProjects: true})
 	if err != nil {
@@ -482,7 +518,10 @@ func TestManifestChecksums(t *testing.T) {
 	if err := ValidateManifestVersion(m.FormatVersion); err != nil {
 		t.Fatalf("validate: %v", err)
 	}
-	if err := ValidateManifestVersion("2.0"); err == nil {
+	if err := ValidateManifestVersion("1.0"); err != nil {
+		t.Fatalf("v1 bundles must stay readable: %v", err)
+	}
+	if err := ValidateManifestVersion("3.0"); err == nil {
 		t.Fatal("expected unsupported version error")
 	}
 }

@@ -506,8 +506,8 @@ func TestEngramRerunIsIdempotentAndConflictsNeverOverwrite(t *testing.T) {
 	if err == nil {
 		t.Fatal("third run with an edited target must report a conflict")
 	}
-	var incomplete *migrate.IncompleteError
-	if !errors.As(err, &incomplete) || third.Conflicts != 1 {
+	var aborted *migrate.AbortedError
+	if !errors.As(err, &aborted) || third.Conflicts != 1 {
 		t.Fatalf("third run conflicts=%d err=%v", third.Conflicts, err)
 	}
 	raw, err := os.ReadFile(edited)

@@ -1,6 +1,6 @@
 # Release 0.24.0 — path provenance backfill
 
-Status: release candidate on `main`.
+Status: released on `main` (2026-11-17).
 
 0.23.0 added `path_provenance` to the project registry but only stamped it when
 a machine registered a path. Registries written earlier had paths without

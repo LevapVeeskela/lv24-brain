@@ -46,11 +46,12 @@ type PromptBackend interface {
 }
 
 func (s *Server) promptTool() tool {
-	project := stringProp("Project id, alias or checkout path. Omit to use the project of the working directory.")
+	project := stringProp("Project id, alias or checkout path. action=save defaults to the working directory's project; action=search requires project or all=true.")
 	return tool{
 		Name:        "brain_prompt",
 		Annotations: unrepeatedDestructiveAnnotations("Local-only prompt zone"),
 		Description: "Store a user prompt in the opt-in local prompt zone (action=save), search stored prompts (action=search) or discard one (action=discard). " +
+			"action=search requires project or all=true. " +
 			"Prompts are machine-local: they are never committed, indexed, exposed as resources or returned by brain_search. " +
 			"When prompts.enabled is false every action is refused.",
 		InputSchema: objectSchema(nil, map[string]any{
@@ -59,6 +60,7 @@ func (s *Server) promptTool() tool {
 			"query":   stringProp("Case-insensitive words to keep (action=search); omit for the newest prompts."),
 			"session": stringProp("Optional session id recorded with the prompt (action=save)."),
 			"project": project,
+			"all":     boolProp("action=search only: read stored prompts of every project. Required when project is omitted; mutually exclusive with project."),
 			"limit":   intProp("Maximum prompts returned; 0 selects the default of 20, the maximum is 50.", 0),
 		}),
 		OutputSchema: outputObject(map[string]any{
@@ -80,6 +82,7 @@ type promptArgs struct {
 	Query   string `json:"query"`
 	Session string `json:"session"`
 	Project string `json:"project"`
+	All     bool   `json:"all"`
 	Limit   int    `json:"limit"`
 }
 
@@ -93,6 +96,9 @@ func (s *Server) prompt(ctx context.Context, raw json.RawMessage) (toolResult, e
 	case "save", "search", "discard":
 	default:
 		return toolResult{}, refusalInvalidf("unknown action %q (save, search, discard)", action)
+	}
+	if args.All && action != "search" {
+		return toolResult{}, refusalInvalid("all is only available with action=search")
 	}
 	backend, ok := s.backend.(PromptBackend)
 	if !ok {
@@ -148,7 +154,7 @@ func (s *Server) searchPrompts(ctx context.Context, backend PromptBackend, args 
 	if limit > promptMaxPageSize {
 		limit = promptMaxPageSize
 	}
-	projectID, err := s.optionalProject(ctx, args.Project)
+	projectID, err := s.scopedReadProject(ctx, args.Project, args.All, "every project's stored prompts")
 	if err != nil {
 		return toolResult{}, err
 	}

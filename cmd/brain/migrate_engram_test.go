@@ -188,3 +188,138 @@ func TestMigrateEngramProjectMapOverride(t *testing.T) {
 		t.Fatalf("project map override not reported:\n%s", stdout)
 	}
 }
+
+func TestMigrateEngramConflictAbortsBeforeWriting(t *testing.T) {
+	source := writeCLIEngram(t)
+	target := filepath.Join(t.TempDir(), "data")
+	code, stdout, stderr := runCLIEngram(t, "--from", "engram", "--db", source, "--data-dir", target)
+	if code != 0 {
+		t.Fatalf("apply exit %d\nstdout:\n%s\nstderr:\n%s", code, stdout, stderr)
+	}
+	notes, err := filepath.Glob(filepath.Join(target, "projects", "lv24", "notes", "engram-*.md"))
+	if err != nil || len(notes) == 0 {
+		t.Fatalf("imported note files = %v, %v", notes, err)
+	}
+	if err := os.WriteFile(notes[0], []byte("owner edit\n"), 0o644); err != nil {
+		t.Fatalf("edit imported file: %v", err)
+	}
+
+	before := rbCLISnapshot(t, target)
+	backupsBefore := backupDirs(t, target)
+	code, _, stderr = runCLIEngram(t, "--from", "engram", "--db", source, "--data-dir", target)
+	if code != 1 {
+		t.Fatalf("conflict exit = %d, want 1; stderr: %s", code, stderr)
+	}
+	if !strings.Contains(stderr, "aborted before writing: 1 conflict") {
+		t.Fatalf("abort message does not name the conflict count: %s", stderr)
+	}
+	rbCLIAssertSame(t, before, rbCLISnapshot(t, target))
+	if after := backupDirs(t, target); after != backupsBefore {
+		t.Fatalf("aborted run created %d backup directories", after-backupsBefore)
+	}
+
+	// --skip-conflicts writes the rest and keeps the owner's edit.
+	code, stdout, stderr = runCLIEngram(t, "--from", "engram", "--db", source, "--data-dir", target, "--skip-conflicts")
+	if code != 1 || !strings.Contains(stdout, "conflicts   1 (files)") {
+		t.Fatalf("skip-conflicts exit %d\nstdout:\n%s\nstderr:\n%s", code, stdout, stderr)
+	}
+	if raw, err := os.ReadFile(notes[0]); err != nil || string(raw) != "owner edit\n" {
+		t.Fatalf("skip-conflicts overwrote the conflict: %q %v", raw, err)
+	}
+}
+
+func backupDirs(t *testing.T, target string) int {
+	t.Helper()
+	entries, err := os.ReadDir(filepath.Join(target, "backups"))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return 0
+		}
+		t.Fatalf("read backups: %v", err)
+	}
+	count := 0
+	for _, entry := range entries {
+		if entry.IsDir() {
+			count++
+		}
+	}
+	return count
+}
+
+func TestMigrateEngramRepairTimestampsFlag(t *testing.T) {
+	source := writeCLIEngram(t)
+	target := filepath.Join(t.TempDir(), "data")
+	code, _, stderr := runCLIEngram(t, "--from", "engram", "--db", source, "--data-dir", target)
+	if code != 0 {
+		t.Fatalf("apply exit %d: %s", code, stderr)
+	}
+	before := rbCLISnapshot(t, target)
+	code, stdout, stderr := runCLIEngram(t, "--from", "engram", "--db", source, "--data-dir", target, "--repair-timestamps", "--json")
+	if code != 0 {
+		t.Fatalf("repair exit %d\nstdout:\n%s\nstderr:\n%s", code, stdout, stderr)
+	}
+	var report struct {
+		Created    int    `json:"created"`
+		Removed    int    `json:"removed"`
+		Conflicts  int    `json:"conflicts"`
+		Unchanged  int    `json:"unchanged"`
+		TreeBefore string `json:"tree_hash_before"`
+		TreeAfter  string `json:"tree_hash_after"`
+	}
+	if err := json.Unmarshal([]byte(stdout), &report); err != nil {
+		t.Fatalf("parse repair report: %v\n%s", err, stdout)
+	}
+	if report.Created != 0 || report.Removed != 0 || report.Conflicts != 0 || report.Unchanged == 0 {
+		t.Fatalf("repair report = %+v", report)
+	}
+	rbCLIAssertSame(t, before, rbCLISnapshot(t, target))
+
+	code, _, stderr = runCLIEngram(t, "--from", "engram", "--db", source, "--data-dir", target, "--repair-timestamps", "--skip-conflicts")
+	if code != 0 {
+		t.Fatalf("repair with skip-conflicts exit %d: %s", code, stderr)
+	}
+}
+
+func TestMigrateEngramDryRunLeavesATargetWithIndexAlone(t *testing.T) {
+	source := writeCLIEngram(t)
+	target := filepath.Join(t.TempDir(), "data")
+	indexFile := filepath.Join(target, "index", "search.db")
+	if err := os.MkdirAll(filepath.Dir(indexFile), 0o755); err != nil {
+		t.Fatalf("prepare index: %v", err)
+	}
+	if err := os.WriteFile(indexFile, []byte("index bytes"), 0o644); err != nil {
+		t.Fatalf("write index: %v", err)
+	}
+	curated := filepath.Join(target, "projects", "lv24", "notes", "2026-10-01.md")
+	if err := os.MkdirAll(filepath.Dir(curated), 0o755); err != nil {
+		t.Fatalf("prepare curated note: %v", err)
+	}
+	if err := os.WriteFile(curated, []byte("owner note\n"), 0o644); err != nil {
+		t.Fatalf("write curated note: %v", err)
+	}
+
+	before := rbCLISnapshot(t, target)
+	code, stdout, stderr := runCLIEngram(t, "--from", "engram", "--db", source,
+		"--data-dir", target, "--dry-run", "--json")
+	if code != 0 {
+		t.Fatalf("dry run exit %d\nstdout:\n%s\nstderr:\n%s", code, stdout, stderr)
+	}
+	var report struct {
+		Created    int    `json:"created"`
+		TreeBefore string `json:"tree_hash_before"`
+		TreeAfter  string `json:"tree_hash_after"`
+	}
+	if err := json.Unmarshal([]byte(stdout), &report); err != nil {
+		t.Fatalf("parse report: %v\n%s", err, stdout)
+	}
+	if report.Created == 0 || report.TreeBefore != report.TreeAfter {
+		t.Fatalf("dry-run report = %+v", report)
+	}
+	rbCLIAssertSame(t, before, rbCLISnapshot(t, target))
+	if _, err := os.Stat(filepath.Join(target, "backups")); !os.IsNotExist(err) {
+		t.Fatalf("dry run created backups/: %v", err)
+	}
+	if raw, err := os.ReadFile(curated); err != nil || string(raw) != "owner note\n" {
+		t.Fatalf("dry run touched a curated note: %q %v", raw, err)
+	}
+}

@@ -17,6 +17,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/levapveeskela/lv24-brain/internal/app"
 	"github.com/levapveeskela/lv24-brain/internal/domain"
 )
 
@@ -117,7 +118,10 @@ type fakeChecker struct{ err error }
 
 func (f fakeChecker) Check(context.Context) error { return f.err }
 
-type fakeRegistry struct{ checkErr error }
+type fakeRegistry struct {
+	checkErr   error
+	checkerErr error
+}
 
 func (f fakeRegistry) Descriptor(provider string) (domain.SourceDescriptor, error) {
 	if provider != "demo" {
@@ -126,6 +130,9 @@ func (f fakeRegistry) Descriptor(provider string) (domain.SourceDescriptor, erro
 	return demoDescriptor(), nil
 }
 func (f fakeRegistry) Checker(context.Context, domain.Connection) (SourceChecker, error) {
+	if f.checkerErr != nil {
+		return nil, f.checkerErr
+	}
 	return fakeChecker{f.checkErr}, nil
 }
 func demoDescriptor() domain.SourceDescriptor {
@@ -518,8 +525,46 @@ func TestTestEndpointSanitizesProviderFailure(t *testing.T) {
 	_ = f.connections.Create(context.Background(), domain.Connection{ID: "demo-1", Provider: "demo"})
 	f.handler.opts.Sources = fakeRegistry{checkErr: errors.New("request failed using " + testToken)}
 	w := request(f, http.MethodPost, "/v1/connections/demo-1/test", "", nil)
-	if w.Code != 500 || strings.Contains(w.Body.String(), testToken) {
+	if w.Code != http.StatusBadGateway || strings.Contains(w.Body.String(), testToken) {
 		t.Fatalf("unsafe test response: %d %s", w.Code, w.Body.String())
+	}
+	envelope := decodeMap(t, w.Body.String())
+	errorBody, ok := envelope["error"].(map[string]any)
+	if !ok || errorBody["code"] != app.ConnectionCodeCheckFailed {
+		t.Fatalf("envelope=%s", w.Body.String())
+	}
+	if message, _ := errorBody["message"].(string); message == "" || !strings.Contains(message, "[redacted]") {
+		t.Fatalf("message=%q", message)
+	}
+}
+
+func TestTestEndpointReportsMissingCredential(t *testing.T) {
+	f := newFixture(t)
+	_ = f.connections.Create(context.Background(), domain.Connection{ID: "demo-1", Provider: "demo"})
+	f.handler.opts.Sources = fakeRegistry{checkErr: fmt.Errorf("credential lookup for %s: %w", testToken, domain.ErrNotFound)}
+	w := request(f, http.MethodPost, "/v1/connections/demo-1/test", "", nil)
+	if w.Code != http.StatusBadRequest || strings.Contains(w.Body.String(), testToken) {
+		t.Fatalf("missing credential response: %d %s", w.Code, w.Body.String())
+	}
+	envelope := decodeMap(t, w.Body.String())
+	errorBody, ok := envelope["error"].(map[string]any)
+	if !ok || errorBody["code"] != app.ConnectionCodeCredentialMissing {
+		t.Fatalf("envelope=%s", w.Body.String())
+	}
+}
+
+func TestTestEndpointReportsUnsupportedProviderWithoutInternalError(t *testing.T) {
+	f := newFixture(t)
+	_ = f.connections.Create(context.Background(), domain.Connection{ID: "demo-1", Provider: "demo"})
+	f.handler.opts.Sources = fakeRegistry{checkerErr: fmt.Errorf("unknown provider: %w", domain.ErrNotFound)}
+	w := request(f, http.MethodPost, "/v1/connections/demo-1/test", "", nil)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("unsupported response: %d %s", w.Code, w.Body.String())
+	}
+	envelope := decodeMap(t, w.Body.String())
+	errorBody, ok := envelope["error"].(map[string]any)
+	if !ok || errorBody["code"] != app.ConnectionCodeUnsupported {
+		t.Fatalf("envelope=%s", w.Body.String())
 	}
 }
 

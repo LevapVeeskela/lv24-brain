@@ -12,10 +12,12 @@
  *     command never runs twice for one session. Empty output, errors and a
  *     10 s timeout inject nothing.
  *   - Session end: the event stream runs `brain session end --hook opencode`
- *     when a session goes idle or closes. The engine writes a handoff only when
- *     something was recorded since the latest one and no handoff was written
- *     in the last 30 minutes, so idle checkpoints no longer pile up placeholder
- *     handoffs.
+ *     when a session goes idle or closes. The final assistant text seen in the
+ *     event stream is passed as JSON on stdin (the same contract as Claude Code
+ *     and Codex), so the engine captures "Decision:" lines. The engine writes a
+ *     handoff only when something was recorded since the latest one and no
+ *     handoff was written in the last 30 minutes, so idle checkpoints no longer
+ *     pile up placeholder handoffs.
  *
  * Every failure is swallowed so the brain CLI can never break an OpenCode
  * session. Builds without `ctx.session.hook` skip injection and keep the end
@@ -118,18 +120,37 @@ function killQuietly(child) {
   }
 }
 
-function runBrainHandoff(deps, directory) {
+/**
+ * Runs the session-end command and writes the hook JSON to its stdin. The
+ * engine reads the final message from there, exactly like the Claude Code and
+ * Codex hooks, so "Decision:" lines become proposed decisions.
+ */
+function runBrainHandoff(deps, directory, sessionID, message) {
   return new Promise((resolvePromise) => {
     let child;
     try {
       child = deps.spawn(deps.bin, brainArgs("end", directory, deps.config), {
         cwd: directory,
         windowsHide: true,
-        stdio: "ignore",
+        stdio: ["pipe", "ignore", "ignore"],
       });
     } catch {
       resolvePromise();
       return;
+    }
+
+    try {
+      child.stdin?.on?.("error", () => {});
+      child.stdin?.end?.(
+        JSON.stringify({
+          hook_event_name: "SessionEnd",
+          session_id: sessionID || "",
+          cwd: directory,
+          last_assistant_message: message || "",
+        })
+      );
+    } catch {
+      // A child without a writable stdin still runs the handoff.
     }
 
     let settled = false;
@@ -219,6 +240,34 @@ function deletedSessionId(event) {
   return typeof id === "string" ? id : "";
 }
 
+/** Reads the session id from either event shape (V1 and V2). */
+function eventSessionId(event) {
+  const data = event?.data ?? {};
+  const properties = data.properties ?? event?.properties ?? {};
+  const id = properties.sessionID ?? data.sessionID ?? event?.sessionID;
+  return typeof id === "string" ? id : "";
+}
+
+/**
+ * Extracts the final assistant text carried by an event, if any. Handles the
+ * explicit `last_assistant_message` field and text parts of message events;
+ * user parts are ignored so the prompt never becomes the handoff.
+ */
+function assistantTextFromEvent(event) {
+  const data = event?.data ?? {};
+  const properties = data.properties ?? event?.properties ?? {};
+  const direct =
+    properties.lastAssistantMessage ??
+    data.lastAssistantMessage ??
+    event?.lastAssistantMessage;
+  if (typeof direct === "string" && direct.trim()) return direct;
+
+  const part = properties.part ?? data.part;
+  if (!part || part.type !== "text" || typeof part.text !== "string") return "";
+  if (part.role === "user" || properties.role === "user") return "";
+  return part.text;
+}
+
 /**
  * Builds the plugin instance. `deps` is a test seam:
  * { spawn, bin, config, startTimeoutMs }; defaults come from the template.
@@ -229,6 +278,8 @@ export function createServer(ctx, deps = {}) {
   let lastHandoffAt = 0;
   // sessionID -> Promise<string> of the start context (run once per session).
   const startContexts = new Map();
+  // sessionID -> newest assistant text seen in the event stream.
+  const lastMessages = new Map();
   let contextRegistration = null;
 
   const getStartContext = (directory, sessionID) => {
@@ -271,6 +322,9 @@ export function createServer(ctx, deps = {}) {
       try {
         const event = input?.event;
         const forgotten = deletedSessionId(event);
+        const sessionID = eventSessionId(event) || forgotten;
+        const message = assistantTextFromEvent(event);
+        if (sessionID && message) rememberSession(lastMessages, sessionID, message);
         if (forgotten) startContexts.delete(forgotten);
 
         if (disposed || !isConfigured(d.bin)) return;
@@ -289,15 +343,25 @@ export function createServer(ctx, deps = {}) {
         if (now - lastHandoffAt < debounceMs) return;
 
         lastHandoffAt = now;
-        await runBrainHandoff(d, projectDirectory);
+        await runBrainHandoff(
+          d,
+          projectDirectory,
+          sessionID,
+          sessionID ? lastMessages.get(sessionID) ?? "" : ""
+        );
       } catch {
         // Handoff failures are never surfaced to OpenCode.
+      } finally {
+        const event = input?.event;
+        const forgotten = deletedSessionId(event);
+        if (forgotten) lastMessages.delete(forgotten);
       }
     },
 
     dispose: () => {
       disposed = true;
       startContexts.clear();
+      lastMessages.clear();
       contextRegistration
         ?.then((registration) => registration?.dispose?.())
         .catch(() => {});

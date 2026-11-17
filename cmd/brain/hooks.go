@@ -17,7 +17,8 @@ const (
 	hookBackupBase = "post-commit.lv24-brain-backup"
 	hooksUsage     = "usage: brain hooks install [--repo <path>] [--force] [--config <brain.yaml>]\n" +
 		"       brain hooks uninstall [--repo <path>]\n" +
-		"       brain hooks status [--repo <path>]\n"
+		"       brain hooks status [--repo <path>] [--json]\n" +
+		"       brain hooks status --agents [--home <dir>] [--json] [--config <brain.yaml>]\n"
 )
 
 // hookState classifies the post-commit hook file of a repository.
@@ -159,12 +160,19 @@ func runHooksUninstall(args []string, stdout, stderr io.Writer) int {
 func runHooksStatus(args []string, stdout, stderr io.Writer) int {
 	fs := newFlagSet("hooks status", stderr)
 	repo := fs.String("repo", ".", "git repository (default: current directory)")
+	agents := fs.Bool("agents", false, "report installed coding-agent hooks instead of the git post-commit hook")
+	home := fs.String("home", "", "home directory for agent config dirs (default: user home)")
+	asJSON := fs.Bool("json", false, "print JSON")
+	cfgPath := fs.String("config", defaultConfigPath(), "path to brain.yaml (agent hooks)")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
 	if fs.NArg() > 0 {
 		fmt.Fprintf(stderr, "brain hooks status: unexpected arguments: %s\n", strings.Join(fs.Args(), " "))
 		return 2
+	}
+	if *agents {
+		return runHooksStatusAgents(*home, *cfgPath, *asJSON, stdout, stderr)
 	}
 	_, hooksDir, err := hooksLocate(*repo)
 	if err != nil {
@@ -176,6 +184,12 @@ func runHooksStatus(args []string, stdout, stderr io.Writer) int {
 	if err != nil {
 		fmt.Fprintf(stderr, "brain hooks status: %v\n", err)
 		return 1
+	}
+	if *asJSON {
+		return writeJSONReport(stdout, stderr, "hooks status", struct {
+			State string `json:"state"`
+			Path  string `json:"path"`
+		}{State: string(state), Path: hookPath})
 	}
 	fmt.Fprintf(stdout, "%s %s\n", state, hookPath)
 	return 0

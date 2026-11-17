@@ -23,6 +23,18 @@ func TestResolveSelectorMatchesLegacyRules(t *testing.T) {
 	}
 	harvest := filepath.Join(root, "lv24-harvest", "main")
 	city := filepath.Join(root, "lv24")
+	// Registered checkouts and the subdirectories resolved below exist on this
+	// machine; a missing path under a project is rejected (see the test below).
+	for _, dir := range []string{
+		city,
+		filepath.Join(city, "web", "src"),
+		filepath.Join(city, "services", "nested", "cmd"),
+		harvest,
+	} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
 	for _, project := range []domain.Project{
 		{ID: "lv24", Name: "lv24", Kind: domain.ProjectKindApp, Paths: []string{city}, Aliases: []string{"city"}},
 		{ID: "lv24-harvest", Name: "harvest", Kind: domain.ProjectKindApp, Paths: []string{harvest}},
@@ -80,6 +92,48 @@ func TestResolveSelectorMatchesLegacyRules(t *testing.T) {
 	note, err := a.Note(ctx, app.NoteInput{Body: "from the harvest checkout"})
 	if err != nil || note.Note.ProjectID != "lv24-harvest" {
 		t.Fatalf("Note without project = %+v, %v", note.Note, err)
+	}
+}
+
+func TestResolveSelectorRejectsMissingPathUnderProject(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	store, err := fsstore.New(filepath.Join(root, "data"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	checkout := filepath.Join(root, "checkout")
+	if err := os.MkdirAll(checkout, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// A checkout that only exists on another machine: the exact registered
+	// path still resolves, so cross-machine selectors keep working.
+	otherMachine := filepath.Join(root, "other-machine")
+	if err := store.PutProject(ctx, domain.Project{
+		ID: "alpha", Name: "alpha", Kind: domain.ProjectKindApp, Paths: []string{checkout},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.PutProject(ctx, domain.Project{
+		ID: "beta", Name: "beta", Kind: domain.ProjectKindApp, Paths: []string{otherMachine},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	a := app.New(config.Default(), app.Dependencies{Store: store})
+
+	missing := filepath.Join(checkout, "nope")
+	if got, err := a.ResolveSelector(ctx, missing); !errors.Is(err, domain.ErrValidation) {
+		t.Fatalf("ResolveSelector(%q) = %+v, %v; want a validation error", missing, got, err)
+	}
+	if got, err := a.ResolveSelector(ctx, otherMachine); err != nil || got.Project.ID != "beta" {
+		t.Fatalf("exact registered path = %+v, %v; want beta", got, err)
+	}
+	sub := filepath.Join(checkout, "sub")
+	if err := os.MkdirAll(sub, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := a.ResolveSelector(ctx, sub); err != nil || got.Project.ID != "alpha" {
+		t.Fatalf("existing subdirectory = %+v, %v; want alpha", got, err)
 	}
 }
 

@@ -96,7 +96,8 @@ func printAgentsUsage(w io.Writer) {
 	fmt.Fprint(w, `Keep shared agent instructions identical on every machine.
 
 Usage:
-  brain agents sync [--check] [--hooks] [--source <file>] [--root <dir>] [--home <dir>] [--config <brain.yaml>]
+  brain agents sync [--check] [--hooks] [--host claude|codex|opencode]...
+                    [--source <file>] [--root <dir>] [--home <dir>] [--config <brain.yaml>]
 
 The canonical file is <data_dir>/global/AGENTS.md unless --source is given.
 Each target receives a managed block between LV24_SHARED markers:
@@ -106,14 +107,20 @@ Each target receives a managed block between LV24_SHARED markers:
   <home>/.claude/CLAUDE.md              @import of the canonical file (if the directory exists)
 
 --hooks also installs brain session hooks (off by default; the nightly job does not pass it):
-  <home>/.claude/settings.json          SessionStart and SessionEnd hook groups
+  <home>/.claude/settings.json          SessionStart and SessionEnd hook groups; created when ~/.claude exists
   <home>/.codex/hooks.json              SessionStart, Stop and SessionEnd hook groups
   <home>/.config/opencode/plugins/      brain-session-end.js, or brain-handoff.js
 Other settings and hooks are kept; a one-time <file>.pre-brain-hooks backup is written
-before the first change. Codex keeps new hooks disabled until you approve them in Codex;
-brain never edits ~/.codex/config.toml.
+before the first change. --host installs only the named agent and creates its config
+directory when it is missing. Codex keeps new hooks disabled until you approve them in
+Codex; brain never edits ~/.codex/config.toml. A changed command (moved binary or config)
+is reported so the hooks can be approved again.
 
---check writes nothing and exits 1 if any file would change.
+--check writes nothing and reports installed, would create/update, or not installed.
+It exits 1 if any file would change.
+
+Inspect the installed agent hooks with:
+  brain hooks status --agents [--json]
 `)
 }
 
@@ -124,6 +131,8 @@ func runAgentsSync(args []string, stdout, stderr io.Writer) int {
 	root := fs.String("root", "", "workspace root for <root>/AGENTS.md (default: parent of data_dir)")
 	home := fs.String("home", "", "home directory for agent config dirs (default: user home)")
 	hooks := fs.Bool("hooks", false, "also install brain session hooks for Claude Code, Codex and OpenCode")
+	var hosts hostFlag
+	fs.Var(&hosts, "host", "install hooks for this agent only, creating its config directory (repeatable: claude, codex, opencode)")
 	cfgPath := configFlag(fs)
 	positional, err := parseInterspersed(fs, args)
 	if err != nil {
@@ -157,7 +166,7 @@ func runAgentsSync(args []string, stdout, stderr io.Writer) int {
 	// A new instance has no shared instructions yet; --hooks still installs
 	// the session hooks, which do not depend on them.
 	_, statErr := os.Stat(sourcePath)
-	skipInstructions := *hooks && *source == "" && errors.Is(statErr, os.ErrNotExist)
+	skipInstructions := (*hooks || len(hosts) > 0) && *source == "" && errors.Is(statErr, os.ErrNotExist)
 	content := ""
 	if skipInstructions {
 		fmt.Fprintf(stdout, "skipped (no shared instructions; create %s to sync them) agent instructions\n", sourcePath)
@@ -235,7 +244,7 @@ func runAgentsSync(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stdout, "%s %s\n", out.status, target.path)
 	}
 
-	if *hooks {
+	if *hooks || len(hosts) > 0 {
 		exe, err := os.Executable()
 		if err != nil {
 			return reportError(stderr, "agents", err)
@@ -244,7 +253,14 @@ func runAgentsSync(args []string, stdout, stderr io.Writer) int {
 		if err != nil {
 			return reportError(stderr, "agents", err)
 		}
-		if syncAgentHooks(homeDir, exe, cfgAbs, *check, stdout, stderr) != 0 {
+		if syncAgentHooks(agentHookSyncOptions{
+			home:    homeDir,
+			exe:     exe,
+			cfg:     cfgAbs,
+			dataDir: dataDir,
+			check:   *check,
+			hosts:   hosts,
+		}, stdout, stderr) != 0 {
 			exit = 1
 		}
 	}

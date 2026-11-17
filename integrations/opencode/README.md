@@ -13,10 +13,18 @@ Older OpenCode builds without `ctx.session.hook` skip injection silently.
 
 **Session end (handoff).** On `session.idle` (10-minute debounce),
 `session.deleted`, and — on V1 only — `global.disposed` (1-minute debounce) it
-runs `brain session end --hook opencode --cwd <dir>`. The engine writes an
+runs `brain session end --hook opencode --cwd <dir>` with a JSON hook payload on
+stdin (`hook_event_name`, `session_id`, `cwd`, `last_assistant_message`). That is
+the same contract as the Claude Code and Codex hooks, so `Decision:` lines in
+the final assistant message become proposed decisions. The engine writes an
 `[auto]` handoff summarizing what was recorded since the latest handoff, and
 skips it when nothing was recorded or a handoff is less than 30 minutes old. A
 `session.deleted` event also drops that session's cached start context.
+
+Every hook invocation appends one JSON line to `<data_dir>/index/hooks.log`
+(host, event, duration, exit, first stderr line). The log is local to the
+machine and disabled with `BRAIN_HOOK_OFF=1`; `brain hooks status --agents`
+reads it.
 
 One file supports both runtimes. V1 (1.18.29–2.1.x) loads the default export
 and calls `server(ctx)`; V2 (2.2.x) requires an `id` and calls `setup(ctx)`, so
@@ -26,7 +34,7 @@ the subscription reconnects with a bounded backoff and the cleanup returned by
 `setup` aborts it. All failures are swallowed, so a missing binary or config can
 never break an OpenCode session.
 
-Tests: `node --test integrations/opencode/` (no dependencies).
+Tests: `node --test integrations/opencode/brain-handoff.test.mjs` (no dependencies).
 
 ## Install
 

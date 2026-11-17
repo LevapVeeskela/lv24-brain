@@ -74,16 +74,17 @@ const DefaultTimelineWindow = 3
 const maxTimelineWindow = 5
 
 func (s *Server) catchupTool() tool {
-	project := stringProp("Project id, alias or checkout path. Omit to use the project of the working directory.")
+	project := stringProp("Project id, alias or checkout path. Omit to use the project of the working directory with mode=changes or timeline; mode=journal requires project or all=true.")
 	return tool{
 		Name:        "brain_catchup",
 		Annotations: readOnlyAnnotations("Catch up on recent activity"),
 		Description: "What changed in a project: mode=changes (default) reports notes, decisions, attempts, handoffs, state changes " +
-			"and commits since the latest handoff or since_hours; mode=journal lists the activity journal newest first; " +
+			"and commits since the latest handoff or since_hours; mode=journal lists the activity journal newest first and requires project or all=true; " +
 			"mode=timeline places one record (record_id) among its neighbours of the same kind.",
 		InputSchema: objectSchema(nil, map[string]any{
 			"mode":        enumProp("changes (default), journal or timeline.", []string{"changes", "journal", "timeline"}),
 			"project":     project,
+			"all":         boolProp("mode=journal only: read every project's journal. Required when project is omitted; mutually exclusive with project."),
 			"since_hours": intProp("Look back this many hours instead of to the latest handoff; 0 uses the latest handoff.", 0),
 			"record_id":   stringProp("Record to centre a timeline on (mode=timeline)."),
 			"limit":       intProp("Maximum items per list (changes), page size (journal) or neighbours per side (timeline, at most 5).", 0),
@@ -148,6 +149,7 @@ func timelinePreviewSchema() map[string]any {
 type catchupArgs struct {
 	Mode       string `json:"mode"`
 	Project    string `json:"project"`
+	All        bool   `json:"all"`
 	SinceHours int    `json:"since_hours"`
 	RecordID   string `json:"record_id"`
 	Limit      int    `json:"limit"`
@@ -162,6 +164,9 @@ func (s *Server) catchup(ctx context.Context, raw json.RawMessage) (toolResult, 
 	mode := strings.TrimSpace(args.Mode)
 	if mode == "" {
 		mode = "changes"
+	}
+	if args.All && mode != "journal" {
+		return toolResult{}, refusalInvalid("all is only available with mode=journal")
 	}
 	switch mode {
 	case "changes":
@@ -204,10 +209,11 @@ func (s *Server) catchupChanges(ctx context.Context, args catchupArgs) (toolResu
 	return toolResult{Text: catchupText(result), Structured: result}, nil
 }
 
-// journal lists the activity journal with the pagination contract. The cursor
-// tool name stays brain_journal so cursors issued before 0.17 still decode.
+// journal lists the activity journal with the pagination contract. The scope
+// is explicit: a project, or all=true for every project. The cursor tool name
+// stays brain_journal so cursors issued before 0.17 still decode.
 func (s *Server) journal(ctx context.Context, args catchupArgs) (toolResult, error) {
-	projectID, err := s.optionalProject(ctx, args.Project)
+	projectID, err := s.scopedReadProject(ctx, args.Project, args.All, "every project's journal")
 	if err != nil {
 		return toolResult{}, err
 	}

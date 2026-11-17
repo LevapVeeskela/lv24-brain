@@ -2,6 +2,8 @@ package main
 
 import (
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"unicode/utf8"
@@ -12,6 +14,43 @@ func createNoteForTest(t *testing.T, cfgPath, title, body string) {
 	t.Helper()
 	if code, _, stderr := runForTest(t, "note", "--config", cfgPath, "--project", "demo", "--title", title, "--body", body); code != 0 {
 		t.Fatalf("note %q: %s", title, stderr)
+	}
+}
+
+// --project uses the shared selector: an id, an alias, an existing checkout
+// path or a directory under one. An unknown value is exit 2 with a clear
+// error, never a successful "0 hits" that looks like an empty index.
+func TestSearchProjectSelectorResolvesAliasAndPath(t *testing.T) {
+	t.Setenv("BRAIN_CONFIG", "")
+	root := t.TempDir()
+	dataDir := filepath.Join(root, "brain")
+	cfgPath := filepath.Join(dataDir, "brain.yaml")
+	if code, _, stderr := runForTest(t, "init", "--mode", "local", "--data-dir", dataDir); code != 0 {
+		t.Fatalf("init: %s", stderr)
+	}
+	checkout := filepath.Join(root, "checkout")
+	if err := os.MkdirAll(filepath.Join(checkout, "sub"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if code, _, stderr := runForTest(t, "project", "set", "demo",
+		"--path", checkout, "--alias", "d", "--config", cfgPath); code != 0 {
+		t.Fatalf("project set: %s", stderr)
+	}
+	createNoteForTest(t, cfgPath, "Selector note", "selector needle")
+	if code, _, stderr := runForTest(t, "index", "--config", cfgPath); code != 0 {
+		t.Fatalf("index: %s", stderr)
+	}
+
+	for _, selector := range []string{"DEMO", "d", checkout, filepath.Join(checkout, "sub")} {
+		code, stdout, stderr := runForTest(t, "search", "--config", cfgPath, "--project", selector, "needle")
+		if code != 0 || !strings.Contains(stdout, "note/demo/") {
+			t.Fatalf("search --project %q: exit %d, stdout %q, stderr %q", selector, code, stdout, stderr)
+		}
+	}
+
+	code, stdout, stderr := runForTest(t, "search", "--config", cfgPath, "--project", "lv24-brian", "needle")
+	if code != 2 || !strings.Contains(stderr, "not a registered project") {
+		t.Fatalf("unknown project: exit %d, stdout %q, stderr %q; want exit 2 and a clear error", code, stdout, stderr)
 	}
 }
 

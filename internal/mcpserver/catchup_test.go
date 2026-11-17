@@ -57,6 +57,44 @@ func TestMCPServerCatchupTool(t *testing.T) {
 	}
 }
 
+// brain_journal needs an explicit scope: a project, or all=true for every
+// project. The schema says the same, so a caller is never surprised by an
+// implicit all-project stream.
+func TestMCPServerJournalRequiresProjectOrDefaultAll(t *testing.T) {
+	backend := &fakeBackend{}
+	unscoped := toolCall(t, backend, "brain_catchup", `{"mode":"journal"}`)
+	if unscoped["isError"] != true || structured(t, unscoped)["code"] != RefusalInvalidArguments {
+		t.Fatalf("journal without scope = %v, want a typed invalid refusal", unscoped)
+	}
+	if !strings.Contains(unscoped["content"].([]any)[0].(map[string]any)["text"].(string), "all=true") {
+		t.Fatalf("refusal does not name all=true: %v", unscoped)
+	}
+
+	explicitAll := toolCall(t, backend, "brain_catchup", `{"mode":"journal","all":true}`)
+	if explicitAll["isError"] == true || backend.journalQuery.ProjectID != "" {
+		t.Fatalf("journal with all=true = %v, query = %+v", explicitAll, backend.journalQuery)
+	}
+	if both := toolCall(t, backend, "brain_catchup", `{"mode":"journal","project":"alpha","all":true}`); both["isError"] != true {
+		t.Fatalf("project and all together accepted: %v", both)
+	}
+	if changes := toolCall(t, backend, "brain_catchup", `{"all":true}`); changes["isError"] != true {
+		t.Fatalf("all outside mode=journal accepted: %v", changes)
+	}
+
+	var schema tool
+	for _, candidate := range New(backend, "test").toolList() {
+		if candidate.Name == "brain_catchup" {
+			schema = candidate
+		}
+	}
+	if _, ok := schema.InputSchema["properties"].(map[string]any)["all"]; !ok {
+		t.Fatalf("brain_catchup schema has no all property: %v", schema.InputSchema)
+	}
+	if !strings.Contains(schema.Description, "requires project or all=true") {
+		t.Fatalf("brain_catchup description does not state the scope rule: %q", schema.Description)
+	}
+}
+
 func TestMCPServerCatchupToolIsAlwaysListed(t *testing.T) {
 	names := func(backend Backend) string {
 		var list []string

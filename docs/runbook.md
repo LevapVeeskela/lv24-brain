@@ -157,8 +157,8 @@ brain record restore <id>
   index at once. Trash is reversible and lives in the data repository, so it
   syncs like any record. Notes written by hand without an id marker cannot be
   trashed; edit the daily file instead.
-- Agents get `brain_records`, `brain_record` and `brain_decision_status` over
-  MCP; trash and restore stay CLI-only.
+- Agents get `brain_record` (list/get) and `brain_judge` (accept/reject/supersede)
+  over MCP; trash and restore stay CLI-only.
 
 ### Temporal validity and supersede
 
@@ -238,8 +238,8 @@ brain doctor                                   # quarantine: warn with N records
   pass `--include-unreviewed`; the report prints `quarantined: N (ids)` either
   way.
 - `brain record review` is local/git only for now; server mode has no
-  provenance-edit route. `brain_review_record` is the temporary MCP equivalent
-  and is listed only for backends that can review records. `state.md` has no
+  provenance-edit route. `brain_judge(action=review)` is the temporary MCP
+  equivalent and is listed only for backends that can review records. `state.md` has no
   provenance yet, so state writes are always trusted.
 
 ### Links between records (since v0.8.0)
@@ -525,9 +525,10 @@ To resolve a real conflict:
    records (for example with `brain note`), and open the newest
    `state-conflicts/` or `registry-conflicts/` record when one exists.
 3. Stage the files with `git add` and commit, or remove the conflict markers the
-   stash restore left and stage the result. If a stash restore conflicted, its
-   entry is dropped after the markers are written; resolve the markers and do
-   not pop it again.
+   stash restore left and stage the result. If a stash restore conflicts,
+   `brain sync` keeps the stash ref and names it in the error; resolve the
+   markers and stage the result, then verify with `git stash list` and drop the
+   entry only after the resolved files are committed.
 4. Run `brain sync --status` until it reports no conflicts, then `brain sync --push`.
 
 Do not use `git reset --hard`, do not take one side of a whole directory with
@@ -719,25 +720,25 @@ handshake revision for older clients. Tool annotations, output schemas, the
 typed refusal envelope, pagination limits and the raw JSON-RPC harness are
 documented in [mcp.md](mcp.md).
 
-The 17 tools are:
+The 17 tools are (9 read-only, 5 append-only, 3 destructive):
 
 - `brain_open` - load a project's state, recent decisions, attempts and last handoff.
 - `brain_context` - context for one task: state, review findings, latest handoff, best-matching decisions/attempts/notes and failed attempts to avoid (`query`, optional `project`, `budget`, `kinds`, `since`).
 - `brain_search` - full-text search over notes, decisions, attempts and handoffs (English and Russian word forms match; optional `since`); connector dumps only with `include_dumps` or `kinds` containing `dump`.
-- `brain_note` - append a dated note.
+- `brain_record` - read records by id: `get`, `list` (paginated), `relations`, `history` and `links`.
+- `brain_note` - append a dated note; `suggest_topic` proposes a topic key without writing.
 - `brain_decision` - record a decision with its context, alternatives and consequences.
 - `brain_attempt` - record an attempt with its result and reason.
 - `brain_handoff` - record a session handoff with a summary and next action.
-- `brain_journal` - list recent activity, newest first.
-- `brain_projects` - list registered projects with kind, paths and repository URL.
-- `brain_state_get` - read a project's goal, next action, active work, blockers and open questions.
-- `brain_state_set` - update the state; only the given fields change.
-- `brain_catchup` - what changed since the latest handoff (or the last `since_hours`).
+- `brain_state` - read (`get`) or update the goal, next action, active work, blockers and open questions; only the given fields change.
+- `brain_catchup` - what changed since the latest handoff (or the last `since_hours`); also lists the journal and places one record in a timeline.
 - `brain_review` - find stale or contradictory knowledge; read-only, `brain review --fix` applies fixes in a shell.
-- `brain_records` - list a project's records with ids and status, newest first (`limit`, `cursor`; paginated).
-- `brain_record` - read one record in full by id.
-- `brain_decision_status` - accept, reject or supersede a decision; a 2026 client that declared elicitation is asked to confirm a supersede first.
-- `brain_review_record` - clear a record's quarantine (`id` or `all`, optional `trust`); temporary 0.15 tool, merged into `brain_judge` in 0.17.
+- `brain_judge` - judge or reclassify existing knowledge: relation verdicts, accept/reject/supersede, quarantine review, pin/unpin and dedup consolidation (`list` is the read action).
+- `brain_projects` - list registered projects with kind, paths and repository URL; `current` resolves the working directory.
+- `brain_prompt` - store, search or discard prompts in the local-only prompt zone (`search` is the read action); every action is refused when `prompts.enabled` is false.
+- `brain_code` - query the code graph of one checkout: `status`, `search`, `node`, `explore`, `impact`, plus the local `index`/`sync` refresh.
+- `brain_graph` - inspect the graph: `stats`, `neighbors`, `path`, `communities`, `god_nodes`, `cycles`, `diff`, `pr_impact` and `surprises`.
+- `brain_capabilities` - report the active profile, engine version, tool counts, features, limits, gaps and refusal codes.
 
 `brain mcp --list-tools --json` prints the whole contract (titles, annotations,
 schemas, page limits) without a config or a running server.
@@ -823,8 +824,10 @@ Codex yourself (the owner approves hooks; brain does not). Brain never edits
 `~/.codex/config.toml`. `--check --hooks` reports what would change and exits 1.
 
 Scheduled refresh: on Windows the nightly "Company Brain Graph Refresh" task
-runs `scripts/brain-graphs.bat` (graphs, connectors, `brain sync --push` and
-`brain agents sync`), and the 30-minute "Company Brain Update" task runs
+runs the checkout's `scripts/brain-graphs.bat`
+(`C:\0project\lv24-brain\scripts\brain-graphs.bat`), which applies
+`brain update --yes` first, then runs graphs, connectors, `brain sync --push`
+and `brain agents sync`; the 30-minute "Company Brain Update" task runs
 `scripts/brain-update.bat` (signed update, then `brain sync --push`). On macOS
 the LaunchAgent `by.lv24.brain-daily` (`~/Library/LaunchAgents/`, script
 `~/.local/bin/brain-daily.sh`, log `~/Library/Logs/lv24-brain-daily.log`) runs
@@ -843,8 +846,9 @@ Projects with nothing to report are omitted. Flags: `--project <id>` for one pro
 `--json` for the envelope, `--write` to save the human digest to
 `<data_dir>/digests/YYYY-MM-DD.md` (local/git mode; one file per day, overwritten on
 rerun). The digests directory syncs with the data repo by design. Optional: add
-`brain digest --write` to the nightly job (Windows `C:\0project\.brain\bin\brain-graphs.bat`,
-macOS `~/.local/bin/brain-daily.sh`); the scripts are not changed by brain.
+`brain digest --write` to the nightly job (Windows
+`C:\0project\lv24-brain\scripts\brain-graphs.bat`, macOS
+`~/.local/bin/brain-daily.sh`); the scripts are not changed by brain.
 
 `brain digest --source <connection>` is a separate, offline mode: it previews
 proposal candidates from the raw items that connection already stored. It never
@@ -1227,7 +1231,7 @@ A short checklist; the reasons are in [release-0.16.md](release-0.16.md) and
    rebuilds itself when its stored version differs, but a manual rebuild is the
    cheapest way to prove it.
 4. **Restart every MCP host.** The tool list is read at startup.
-   `brain mcp --list-tools --json` must report 15 tools (8 under `--read-only`);
+   `brain mcp --list-tools --json` must report 17 tools (9 under `--read-only`);
    `--profile=lv24` is the only profile in 0.17. A retired 0.16 name answers
    `NOT_FOUND` with `try_instead`; move the client to the new tool and action,
    not just to a renamed name.

@@ -397,7 +397,9 @@ func (r contextRanking) background(kind string, exclude map[string]bool) []Conte
 // contextLinkedCandidates returns the 1-hop neighbours of the selected records.
 // Only references inside the same project resolve: a cross-project link would
 // widen the answer beyond the curated project. The target metadata comes from
-// the catalog already loaded for this call.
+// the catalog already loaded for this call, and the selected records themselves
+// are read in one batch listing: one listing per selected record would make the
+// layer cost N full parses of the project.
 func (a *App) contextLinkedCandidates(
 	ctx context.Context, ranking contextRanking, selected []string, kinds []string,
 ) ([]ContextRecord, error) {
@@ -412,13 +414,17 @@ func (a *App) contextLinkedCandidates(
 	for _, id := range selected {
 		chosen[id] = true
 	}
+	sources, err := a.RecordsByIDs(ctx, ranking.projectID, selected)
+	if err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return nil, ctxErr
+		}
+		return nil, err
+	}
 	references := map[string]int{}
 	for _, id := range selected {
-		record, err := a.GetRecord(ctx, ranking.projectID, id)
-		if err != nil {
-			if ctxErr := ctx.Err(); ctxErr != nil {
-				return nil, ctxErr
-			}
+		record, ok := sources[id]
+		if !ok {
 			// A record can be removed between the listing and the read; a
 			// missing neighbour is not a reason to fail the context.
 			continue

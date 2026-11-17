@@ -25,6 +25,7 @@ var buildIngestion = bootstrap.BuildIngestion
 func printConnectionUsage(w io.Writer) {
 	fmt.Fprint(w, `Usage:
   brain connection list [--json]
+  brain connection test <id> [--json]
   brain connection add <provider> --id <id> [--account a] [--base-url u]
       [--project p]... [--schedule s] [--publish local-only|shared]
       [--setting key=value]... [--json]
@@ -37,6 +38,9 @@ func printConnectionUsage(w io.Writer) {
   brain connection auth <id> [--client-id <id>] [--scopes a,b] [--remove]
 
 All commands accept --config <path> and require local or git mode.
+list shows the newest run of each connection: last-run time, status and the
+redacted cause of a failed run. test runs the provider's non-mutating check
+(the same Source.Check the agent uses) and exits non-zero on failure.
 Use providers to inspect required settings. Secret fields must be set from
 stdin with connection secret set; never put them in --setting.
 publish records the explicit raw-zone policy: local-only untracks
@@ -90,7 +94,7 @@ func runConnection(args []string, stdin io.Reader, stdout, stderr io.Writer) int
 		fs.StringVar(&clientID, "client-id", "", "OAuth public client ID (or BRAIN_OAUTH_CLIENT_ID)")
 		fs.StringVar(&scopesRaw, "scopes", "", "comma-separated OAuth scopes (default: provider defaults)")
 		fs.BoolVar(&remove, "remove", false, "remove the stored OAuth session for this connection")
-	case "list", "providers":
+	case "list", "providers", "test":
 		fs.BoolVar(&asJSON, "json", false, "print JSON")
 	case "publish":
 		fs.BoolVar(&asJSON, "json", false, "print JSON")
@@ -121,7 +125,7 @@ func runConnection(args []string, stdin io.Reader, stdout, stderr io.Writer) int
 	}
 	wantArgs := 0
 	switch command {
-	case "add", "remove", "run", "auth":
+	case "add", "remove", "run", "auth", "test":
 		wantArgs = 1
 	case "publish":
 		wantArgs = 2
@@ -168,6 +172,9 @@ func runConnection(args []string, stdin io.Reader, stdout, stderr io.Writer) int
 		}
 		return runConfiguredConnection(context.Background(), cfg, positional[0], since, limit, asJSON, stdout, stderr)
 	}
+	if command == "test" {
+		return connectionTest(context.Background(), cfg, positional[0], asJSON, stdout, stderr)
+	}
 	runtime, err := buildConnections(cfg, bootstrap.Options{})
 	if err != nil {
 		return reportError(stderr, "connection "+command, err)
@@ -177,7 +184,7 @@ func runConnection(args []string, stdin io.Reader, stdout, stderr io.Writer) int
 	case "providers":
 		return connectionProviders(runtime, asJSON, stdout, stderr)
 	case "list":
-		return connectionList(ctx, runtime, asJSON, stdout, stderr)
+		return connectionList(ctx, runtime, cfg.DataDir, asJSON, stdout, stderr)
 	case "add":
 		connection := domain.Connection{ID: id, Provider: positional[0], Account: account, BaseURL: baseURL, Projects: projects, Schedule: schedule, Publish: domain.PublishPolicy(publish), Backend: domain.BackendNative, Settings: map[string]string{}}
 		return connectionAdd(ctx, runtime, connection, settings, asJSON, stdout, stderr)
@@ -191,6 +198,63 @@ func runConnection(args []string, stdin io.Reader, stdout, stderr io.Writer) int
 		return connectionMigrate(ctx, runtime, copySecrets, asJSON, stdout, stderr)
 	}
 	return 2
+}
+
+// connectionCheckTimeout bounds one non-mutating provider check.
+const connectionCheckTimeout = 30 * time.Second
+
+// connectionTest runs the same Source.Check the agent performs, using the
+// ingestion runtime's registry and dependency set, so a manual test cannot
+// drift from a real run. Failures are always reported sanitized.
+func connectionTest(ctx context.Context, cfg config.BrainConfig, id string, asJSON bool, stdout, stderr io.Writer) int {
+	runtime, err := buildIngestion(cfg, bootstrap.Options{})
+	if err != nil {
+		return reportError(stderr, "connection test", err)
+	}
+	defer runtime.Close()
+	host := runtime.Ingestion
+	connection, err := host.Connections.Get(ctx, id)
+	if err != nil {
+		return reportError(stderr, "connection test", err)
+	}
+	source, err := host.Registry.Build(connection, host.Deps)
+	if err != nil {
+		return reportConnectionFailure(stdout, stderr, id, app.DescribeConnectionBuildError(err), asJSON)
+	}
+	checkCtx, cancel := context.WithTimeout(ctx, connectionCheckTimeout)
+	defer cancel()
+	if err := source.Check(checkCtx); err != nil {
+		return reportConnectionFailure(stdout, stderr, id, app.DescribeConnectionCheckError(err), asJSON)
+	}
+	if asJSON {
+		return writeJSONReport(stdout, stderr, "connection test", struct {
+			ID string `json:"id"`
+			OK bool   `json:"ok"`
+		}{id, true})
+	}
+	fmt.Fprintf(stdout, "%s: ok\n", id)
+	return 0
+}
+
+func reportConnectionFailure(stdout, stderr io.Writer, id string, failure app.ConnectionFailure, asJSON bool) int {
+	if asJSON {
+		if code := writeJSONReport(stdout, stderr, "connection test", struct {
+			ID      string `json:"id"`
+			OK      bool   `json:"ok"`
+			Code    string `json:"code"`
+			Message string `json:"message"`
+			Cause   string `json:"cause,omitempty"`
+		}{id, false, failure.Code, failure.Message, failure.Cause}); code != 0 {
+			return code
+		}
+		return 1
+	}
+	message := failure.Message
+	if failure.Cause != "" {
+		message += ": " + failure.Cause
+	}
+	fmt.Fprintf(stderr, "brain connection test %s: %s (%s)\n", id, message, failure.Code)
+	return 1
 }
 
 func runConfiguredConnection(ctx context.Context, cfg config.BrainConfig, id string, since *time.Time, limit int, asJSON bool, stdout, stderr io.Writer) int {
@@ -243,7 +307,7 @@ func connectionProviders(runtime *bootstrap.ConnectionRuntime, asJSON bool, stdo
 	return 0
 }
 
-func connectionList(ctx context.Context, runtime *bootstrap.ConnectionRuntime, asJSON bool, stdout, stderr io.Writer) int {
+func connectionList(ctx context.Context, runtime *bootstrap.ConnectionRuntime, dataDir string, asJSON bool, stdout, stderr io.Writer) int {
 	connections, err := runtime.Connections.List(ctx)
 	if err != nil {
 		return reportError(stderr, "connection list", err)
@@ -251,6 +315,23 @@ func connectionList(ctx context.Context, runtime *bootstrap.ConnectionRuntime, a
 	views, err := connectionViews(runtime, connections)
 	if err != nil {
 		return reportError(stderr, "connection list", err)
+	}
+	if len(views) > 0 {
+		store, err := fsstore.New(dataDir)
+		if err != nil {
+			return reportError(stderr, "connection list", err)
+		}
+		summaries, err := app.ConnectionRunSummaries(ctx, store, 0)
+		if err != nil {
+			return reportError(stderr, "connection list", err)
+		}
+		for i := range views {
+			if summary, ok := summaries[views[i].ID]; ok {
+				views[i].LastRunAt = &summary.StartedAt
+				views[i].LastRunStatus = summary.Status
+				views[i].LastRunError = summary.Error
+			}
+		}
 	}
 	if asJSON {
 		return writeJSONReport(stdout, stderr, "connection list", views)
@@ -495,6 +576,12 @@ type connectionView struct {
 	Schedule string               `json:"schedule"`
 	Publish  domain.PublishPolicy `json:"publish"`
 	Backend  domain.Backend       `json:"backend"`
+	// LastRunAt, LastRunStatus and LastRunError are the newest recorded run of
+	// the connection. They stay empty when it has never run. LastRunError is
+	// already redacted by app.ConnectionRunSummaries.
+	LastRunAt     *time.Time `json:"lastRunAt,omitempty"`
+	LastRunStatus string     `json:"lastRunStatus,omitempty"`
+	LastRunError  string     `json:"lastRunError,omitempty"`
 }
 
 func viewConnection(connection domain.Connection, descriptor domain.SourceDescriptor) connectionView {
@@ -505,7 +592,16 @@ func viewConnection(connection domain.Connection, descriptor domain.SourceDescri
 	if schedule == "" {
 		schedule = "manual"
 	}
-	return connectionView{connection.ID, connection.Provider, connection.Account, connection.BaseURL, nonNilStrings(connection.Projects), schedule, connection.EffectivePublish(descriptor), backend}
+	return connectionView{
+		ID:       connection.ID,
+		Provider: connection.Provider,
+		Account:  connection.Account,
+		BaseURL:  connection.BaseURL,
+		Projects: nonNilStrings(connection.Projects),
+		Schedule: schedule,
+		Publish:  connection.EffectivePublish(descriptor),
+		Backend:  backend,
+	}
 }
 
 func connectionViews(runtime *bootstrap.ConnectionRuntime, connections []domain.Connection) ([]connectionView, error) {
@@ -522,6 +618,15 @@ func connectionViews(runtime *bootstrap.ConnectionRuntime, connections []domain.
 
 func printConnection(w io.Writer, connection connectionView) {
 	fmt.Fprintf(w, "%s provider=%s account=%q base-url=%q projects=%s schedule=%q publish=%s backend=%s\n", connection.ID, connection.Provider, connection.Account, connection.BaseURL, strings.Join(connection.Projects, ","), connection.Schedule, connection.Publish, connection.Backend)
+	if connection.LastRunAt == nil {
+		fmt.Fprintln(w, "  last-run=never")
+		return
+	}
+	fmt.Fprintf(w, "  last-run=%s status=%s", connection.LastRunAt.UTC().Format(time.RFC3339), connection.LastRunStatus)
+	if connection.LastRunError != "" {
+		fmt.Fprintf(w, " error=%q", connection.LastRunError)
+	}
+	fmt.Fprintln(w)
 }
 
 func printConnectionSecretHints(w io.Writer, id string, descriptor domain.SourceDescriptor) {

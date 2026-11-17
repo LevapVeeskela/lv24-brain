@@ -10,36 +10,44 @@ import (
 	"strings"
 )
 
-// hashTargetTree hashes every curated file under target, excluding migration
-// backups and git internals. A dry run reports the same value before and after
-// and fails if anything was written.
+// hashTargetTree hashes the curated records under <target>/projects only. The
+// search index, backups, journal and connector dumps are deliberately outside
+// the fingerprint: a dry run must not read or touch them, and the index rewrites
+// itself after every run. A dry run reports the same value before and after and
+// fails if anything was written.
 func hashTargetTree(target string) (string, error) {
 	info, err := os.Stat(target)
 	if err != nil {
 		if os.IsNotExist(err) {
-			sum := sha256.Sum256(nil)
-			return "sha256:" + hex.EncodeToString(sum[:]), nil
+			return emptyTreeHash(), nil
 		}
 		return "", fmt.Errorf("migrate: inspect target %s: %w", target, err)
 	}
 	if !info.IsDir() {
 		return "", fmt.Errorf("migrate: target %s is not a directory", target)
 	}
+	root := filepath.Join(target, projectsDir)
+	if _, err := os.Stat(root); err != nil {
+		if os.IsNotExist(err) {
+			return emptyTreeHash(), nil
+		}
+		return "", fmt.Errorf("migrate: inspect target %s: %w", root, err)
+	}
 	type file struct {
 		rel  string
 		full string
 	}
 	files := []file{}
-	err = walkRegularFiles(target, func(rel, full string, entry os.DirEntry) error {
+	err = walkRegularFiles(root, func(rel, full string, entry os.DirEntry) error {
 		base := filepath.Base(full)
 		if strings.HasPrefix(base, ".tmp-") || strings.HasSuffix(base, ".lock") {
 			return nil
 		}
-		files = append(files, file{rel: rel, full: full})
+		files = append(files, file{rel: filepath.ToSlash(filepath.Join(projectsDir, filepath.FromSlash(rel))), full: full})
 		return nil
 	})
 	if err != nil {
-		return "", fmt.Errorf("migrate: scan target %s: %w", target, err)
+		return "", fmt.Errorf("migrate: scan target %s: %w", root, err)
 	}
 	sort.Slice(files, func(i, j int) bool { return files[i].rel < files[j].rel })
 	hash := sha256.New()
@@ -54,4 +62,9 @@ func hashTargetTree(target string) (string, error) {
 		hash.Write([]byte{0})
 	}
 	return "sha256:" + hex.EncodeToString(hash.Sum(nil)), nil
+}
+
+func emptyTreeHash() string {
+	sum := sha256.Sum256(nil)
+	return "sha256:" + hex.EncodeToString(sum[:])
 }

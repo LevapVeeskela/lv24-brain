@@ -1259,6 +1259,31 @@ func (s *Server) optionalProject(ctx context.Context, selector string) (string, 
 	return target.ID, nil
 }
 
+// scopedReadProject resolves an explicit read scope: a project selector or
+// all=true for every project. Unlike optionalProject it never widens or
+// narrows to "every project" silently, so a paginated stream cannot mix
+// projects the cursor does not describe.
+func (s *Server) scopedReadProject(ctx context.Context, selector string, all bool, what string) (string, error) {
+	selector = strings.TrimSpace(selector)
+	if selector != "" && all {
+		return "", refusalInvalid("pass either project or all=true, not both")
+	}
+	if all {
+		if len(s.policy.Projects) > 0 {
+			return "", refusalInvalidf("all=true is not available: this server is limited to %s", s.policy.projectList())
+		}
+		return "", nil
+	}
+	if selector == "" {
+		return "", refusalInvalid("project is required: pass project or all=true to read " + what)
+	}
+	target, err := s.resolveTarget(ctx, selector)
+	if err != nil {
+		return "", err
+	}
+	return target.ID, nil
+}
+
 // resolveTarget resolves a selector and enforces the project allowlist.
 func (s *Server) resolveTarget(ctx context.Context, selector string) (Target, error) {
 	target, err := s.backend.Resolve(ctx, selector)

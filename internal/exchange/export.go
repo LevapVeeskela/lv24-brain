@@ -102,6 +102,7 @@ func exportBundle(ctx context.Context, src Source, opts ExportOptions) (Manifest
 				TopicHistory:   n.TopicHistory,
 				Relations:      n.Relations,
 				ReviewSchedule: n.ReviewSchedule,
+				Pinned:         n.Pinned,
 				CreatedAt:      n.CreatedAt.UTC(),
 				UpdatedAt:      n.UpdatedAt.UTC(),
 			}
@@ -135,6 +136,7 @@ func exportBundle(ctx context.Context, src Source, opts ExportOptions) (Manifest
 				TopicHistory:   d.TopicHistory,
 				Relations:      d.Relations,
 				ReviewSchedule: d.ReviewSchedule,
+				Pinned:         d.Pinned,
 				CreatedAt:      d.CreatedAt.UTC(),
 				UpdatedAt:      d.UpdatedAt.UTC(),
 			}
@@ -164,6 +166,7 @@ func exportBundle(ctx context.Context, src Source, opts ExportOptions) (Manifest
 				TopicHistory:   a.TopicHistory,
 				Relations:      a.Relations,
 				ReviewSchedule: a.ReviewSchedule,
+				Pinned:         a.Pinned,
 				CreatedAt:      a.CreatedAt.UTC(),
 				UpdatedAt:      a.UpdatedAt.UTC(),
 			}
@@ -192,6 +195,7 @@ func exportBundle(ctx context.Context, src Source, opts ExportOptions) (Manifest
 				TopicHistory:   h.TopicHistory,
 				Relations:      h.Relations,
 				ReviewSchedule: h.ReviewSchedule,
+				Pinned:         h.Pinned,
 				CreatedAt:      h.CreatedAt.UTC(),
 				UpdatedAt:      h.UpdatedAt.UTC(),
 			}
@@ -217,16 +221,17 @@ func exportBundle(ctx context.Context, src Source, opts ExportOptions) (Manifest
 	projectEntries := make([]ProjectEntry, 0, len(projects))
 	for _, p := range projects {
 		pe := ProjectEntry{
-			V:             EntryVersion,
-			ID:            p.ID,
-			Name:          p.Name,
-			Paths:         p.Paths,
-			Aliases:       p.Aliases,
-			Kind:          p.Kind,
-			RepoURL:       p.RepoURL,
-			DefaultBranch: p.DefaultBranch,
-			CreatedAt:     p.CreatedAt.UTC(),
-			UpdatedAt:     p.UpdatedAt.UTC(),
+			V:              EntryVersion,
+			ID:             p.ID,
+			Name:           p.Name,
+			Paths:          p.Paths,
+			Aliases:        p.Aliases,
+			Kind:           p.Kind,
+			RepoURL:        p.RepoURL,
+			DefaultBranch:  p.DefaultBranch,
+			PathProvenance: p.PathProvenance,
+			CreatedAt:      p.CreatedAt.UTC(),
+			UpdatedAt:      p.UpdatedAt.UTC(),
 		}
 		pe.Key = projectKey(pe.ID)
 		projectEntries = append(projectEntries, pe)
@@ -266,7 +271,7 @@ func exportBundle(ctx context.Context, src Source, opts ExportOptions) (Manifest
 	manifest.FormatVersion = FormatVersion
 	manifest.Version = FormatVersion
 	manifest.Generator.Name = "lv24-brain"
-	manifest.Generator.Version = "0.24.0"
+	manifest.Generator.Version = "0.25.0"
 	manifest.Generator.Profile = "engine"
 	manifest.CreatedAt = time.Now().UTC().Format(time.RFC3339Nano)
 	manifest.Source.System = "lv24-brain"

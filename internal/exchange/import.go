@@ -4,10 +4,13 @@ import (
 	"archive/zip"
 	"bufio"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
 	"os"
+	"path"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -92,6 +95,9 @@ func importBundle(ctx context.Context, dst Source, opts ImportOptions) (ImportRe
 				return report, err
 			}
 		}
+		if err := verifyManifestFiles(dir, m.Files); err != nil {
+			return report, err
+		}
 	}
 
 	projectEntries := readProjectEntries(filepath.Join(dir, "projects.jsonl"))
@@ -114,15 +120,14 @@ func importBundle(ctx context.Context, dst Source, opts ImportOptions) (ImportRe
 		return report, err
 	}
 
+	if opts.DryRun {
+		// A dry run writes nothing, including no run manifest under backups/.
+		return summarizePlan(actions), nil
+	}
+
 	runManifestPath, _, manifestErr := writeImportManifest(dst, from, "in_progress", report, "")
 	if manifestErr != nil {
 		return report, manifestErr
-	}
-
-	if opts.DryRun {
-		report = summarizePlan(actions)
-		_ = finalizeImportManifest(runManifestPath, "dry_run", report, "")
-		return report, nil
 	}
 
 	createdProjects := map[string]bool{}
@@ -204,15 +209,16 @@ func planImport(ctx context.Context, dst Source, opts ImportOptions, stagedDir s
 			continue
 		}
 		proj := domain.Project{
-			ID:            pe.ID,
-			Name:          pe.Name,
-			Paths:         pe.Paths,
-			Aliases:       pe.Aliases,
-			Kind:          pe.Kind,
-			RepoURL:       pe.RepoURL,
-			DefaultBranch: pe.DefaultBranch,
-			CreatedAt:     pe.CreatedAt,
-			UpdatedAt:     pe.UpdatedAt,
+			ID:             pe.ID,
+			Name:           pe.Name,
+			Paths:          pe.Paths,
+			Aliases:        pe.Aliases,
+			Kind:           pe.Kind,
+			RepoURL:        pe.RepoURL,
+			DefaultBranch:  pe.DefaultBranch,
+			PathProvenance: pe.PathProvenance,
+			CreatedAt:      pe.CreatedAt,
+			UpdatedAt:      pe.UpdatedAt,
 		}
 		if proj.Name == "" {
 			proj.Name = proj.ID
@@ -249,7 +255,7 @@ func planImport(ctx context.Context, dst Source, opts ImportOptions, stagedDir s
 						kind = pe.Kind
 					}
 				}
-				proj := domain.Project{ID: re.ProjectID, Name: name, Kind: kind}
+				proj := domain.Project{ID: re.ProjectID, Name: name, Kind: kind, PathProvenance: pe.PathProvenance}
 				actions = append(actions, importAction{kind: "project", status: "create", proj: proj})
 				knownProjects[re.ProjectID] = true
 			}
@@ -267,7 +273,7 @@ func planImport(ctx context.Context, dst Source, opts ImportOptions, stagedDir s
 			return nil, err
 		}
 		if existing != nil {
-			if existing.ContentHash == re.ContentHash {
+			if contentHashAt(*existing, entryVersion(re.V)) == re.ContentHash {
 				actions = append(actions, importAction{kind: "record", status: "unchanged", record: re})
 			} else {
 				actions = append(actions, importAction{kind: "record", status: "conflict", record: re})
@@ -358,6 +364,46 @@ func finalizeImportManifest(path, status string, report ImportReport, errText st
 	return os.WriteFile(path, out, 0o644)
 }
 
+// verifyManifestFiles checks every bundled file against the SHA256 the manifest
+// recorded for it. A bundle that was edited, truncated or half-copied after
+// export is rejected before a single record is planned.
+func verifyManifestFiles(dir string, files []FileEntry) error {
+	for _, file := range files {
+		rel, err := bundleRel(file.Path)
+		if err != nil {
+			return err
+		}
+		if strings.TrimSpace(file.SHA256) == "" {
+			return fmt.Errorf("exchange: manifest has no sha256 for %s", file.Path)
+		}
+		raw, err := os.ReadFile(filepath.Join(dir, rel))
+		if err != nil {
+			return fmt.Errorf("exchange: manifest lists %s but it cannot be read: %w", file.Path, err)
+		}
+		if file.Bytes != 0 && len(raw) != file.Bytes {
+			return fmt.Errorf("exchange: %s is %d bytes, manifest says %d", file.Path, len(raw), file.Bytes)
+		}
+		sum := sha256.Sum256(raw)
+		if got := hex.EncodeToString(sum[:]); !strings.EqualFold(got, file.SHA256) {
+			return fmt.Errorf("exchange: manifest SHA256 mismatch for %s: got %s, want %s", file.Path, got, file.SHA256)
+		}
+	}
+	return nil
+}
+
+// bundleRel validates a manifest file path and returns it relative to the
+// bundle directory.
+func bundleRel(name string) (string, error) {
+	if name == "" || filepath.IsAbs(name) || strings.ContainsAny(name, `\:`) {
+		return "", fmt.Errorf("exchange: unsafe bundle path %q", name)
+	}
+	clean := path.Clean(name)
+	if clean != name || clean == "." || clean == ".." || strings.HasPrefix(clean, "../") {
+		return "", fmt.Errorf("exchange: unsafe bundle path %q", name)
+	}
+	return filepath.FromSlash(clean), nil
+}
+
 func readProjectEntries(path string) []ProjectEntry {
 	f, err := os.Open(path)
 	if err != nil {
@@ -404,11 +450,9 @@ func readRecordEntries(path string) []RecordEntry {
 	return out
 }
 
-type existingRecord struct {
-	ContentHash string
-}
-
-func findExistingRecord(ctx context.Context, dst Source, projectID, kind, id string) (*existingRecord, error) {
+// findExistingRecord renders one stored record the same way export does, so the
+// import can compare content without trusting the bundle's own hash.
+func findExistingRecord(ctx context.Context, dst Source, projectID, kind, id string) (*RecordEntry, error) {
 	switch kind {
 	case "note":
 		notes, err := dst.ListNotes(ctx, projectID)
@@ -418,7 +462,7 @@ func findExistingRecord(ctx context.Context, dst Source, projectID, kind, id str
 		for _, n := range notes {
 			if n.ID == id {
 				re := noteToEntry(n)
-				return &existingRecord{ContentHash: re.ContentHash}, nil
+				return &re, nil
 			}
 		}
 	case "decision":
@@ -429,7 +473,7 @@ func findExistingRecord(ctx context.Context, dst Source, projectID, kind, id str
 		for _, d := range decs {
 			if d.ID == id {
 				re := decisionToEntry(d)
-				return &existingRecord{ContentHash: re.ContentHash}, nil
+				return &re, nil
 			}
 		}
 	case "attempt":
@@ -440,7 +484,7 @@ func findExistingRecord(ctx context.Context, dst Source, projectID, kind, id str
 		for _, a := range atts {
 			if a.ID == id {
 				re := attemptToEntry(a)
-				return &existingRecord{ContentHash: re.ContentHash}, nil
+				return &re, nil
 			}
 		}
 	case "handoff":
@@ -451,7 +495,7 @@ func findExistingRecord(ctx context.Context, dst Source, projectID, kind, id str
 		for _, h := range hs {
 			if h.ID == id {
 				re := handoffToEntry(h)
-				return &existingRecord{ContentHash: re.ContentHash}, nil
+				return &re, nil
 			}
 		}
 	case "state":
@@ -459,8 +503,8 @@ func findExistingRecord(ctx context.Context, dst Source, projectID, kind, id str
 		if err != nil {
 			return nil, nil
 		}
-		rex := stateToEntry(st)
-		return &existingRecord{ContentHash: rex.ContentHash}, nil
+		re := stateToEntry(st)
+		return &re, nil
 	}
 	return nil, nil
 }
@@ -509,6 +553,7 @@ func noteToEntry(n domain.Note) RecordEntry {
 		TopicHistory:   n.TopicHistory,
 		Relations:      n.Relations,
 		ReviewSchedule: n.ReviewSchedule,
+		Pinned:         n.Pinned,
 		CreatedAt:      n.CreatedAt.UTC(),
 		UpdatedAt:      n.UpdatedAt.UTC(),
 	}
@@ -539,6 +584,7 @@ func decisionToEntry(d domain.Decision) RecordEntry {
 		TopicHistory:   d.TopicHistory,
 		Relations:      d.Relations,
 		ReviewSchedule: d.ReviewSchedule,
+		Pinned:         d.Pinned,
 		CreatedAt:      d.CreatedAt.UTC(),
 		UpdatedAt:      d.UpdatedAt.UTC(),
 	}
@@ -566,6 +612,7 @@ func attemptToEntry(a domain.Attempt) RecordEntry {
 		TopicHistory:   a.TopicHistory,
 		Relations:      a.Relations,
 		ReviewSchedule: a.ReviewSchedule,
+		Pinned:         a.Pinned,
 		CreatedAt:      a.CreatedAt.UTC(),
 		UpdatedAt:      a.UpdatedAt.UTC(),
 	}
@@ -592,6 +639,7 @@ func handoffToEntry(h domain.Handoff) RecordEntry {
 		TopicHistory:   h.TopicHistory,
 		Relations:      h.Relations,
 		ReviewSchedule: h.ReviewSchedule,
+		Pinned:         h.Pinned,
 		CreatedAt:      h.CreatedAt.UTC(),
 		UpdatedAt:      h.UpdatedAt.UTC(),
 	}
@@ -616,6 +664,7 @@ func entryToNote(re RecordEntry) domain.Note {
 		TopicHistory:   re.TopicHistory,
 		Relations:      re.Relations,
 		ReviewSchedule: re.ReviewSchedule,
+		Pinned:         re.Pinned,
 		CreatedAt:      re.CreatedAt,
 		UpdatedAt:      re.UpdatedAt,
 	}
@@ -641,6 +690,7 @@ func entryToDecision(re RecordEntry) domain.Decision {
 		TopicHistory:   re.TopicHistory,
 		Relations:      re.Relations,
 		ReviewSchedule: re.ReviewSchedule,
+		Pinned:         re.Pinned,
 		CreatedAt:      re.CreatedAt,
 		UpdatedAt:      re.UpdatedAt,
 	}
@@ -663,6 +713,7 @@ func entryToAttempt(re RecordEntry) domain.Attempt {
 		TopicHistory:   re.TopicHistory,
 		Relations:      re.Relations,
 		ReviewSchedule: re.ReviewSchedule,
+		Pinned:         re.Pinned,
 		CreatedAt:      re.CreatedAt,
 		UpdatedAt:      re.UpdatedAt,
 	}

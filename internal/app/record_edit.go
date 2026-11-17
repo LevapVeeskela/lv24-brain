@@ -21,7 +21,9 @@ type RecordEdit struct {
 	// Title, Body and Tags are nil when the caller leaves that field alone.
 	// For a note Body is its text; for a decision it is the context; for an
 	// attempt it is the result; for a handoff it is the summary. A handoff has
-	// no title, so setting Title on one is a validation error.
+	// no title, so setting Title on one is a validation error. Every value the
+	// caller sets is passed through the ingest redactor before it is stored, so
+	// a credential pasted into an edit never reaches the Markdown file or git.
 	Title *string
 	Body  *string
 	Tags  *[]string
@@ -121,7 +123,10 @@ func (a *App) EditRecord(ctx context.Context, edit RecordEdit) (RecordEditResult
 
 // applyRecordEdit builds the edited record. It reports whether title or body
 // changed (the duplicate check is about text) and whether anything changed at
-// all (a tags-only update is still a write).
+// all (a tags-only update is still a write). Redaction runs before those
+// comparisons, so both see exactly the text that will be persisted: an edit
+// that only repeats already-redacted text is a no-op, and a secret stripped
+// here still takes part in duplicate detection.
 func applyRecordEdit(record Record, edit RecordEdit) (Record, bool, bool, error) {
 	next := copyRecord(record)
 	if edit.Tags != nil && record.Kind != ports.RecordNote {
@@ -132,7 +137,7 @@ func applyRecordEdit(record Record, edit RecordEdit) (Record, bool, bool, error)
 			return Record{}, false, false, domain.NewValidationError("title",
 				"a handoff has no title; edit its summary with body")
 		}
-		title := strings.TrimSpace(*edit.Title)
+		title := strings.TrimSpace(redactEditedText(*edit.Title))
 		switch {
 		case next.Note != nil:
 			next.Note.Title = title
@@ -143,19 +148,20 @@ func applyRecordEdit(record Record, edit RecordEdit) (Record, bool, bool, error)
 		}
 	}
 	if edit.Body != nil {
+		body := redactEditedText(*edit.Body)
 		switch {
 		case next.Note != nil:
-			next.Note.Body = *edit.Body
+			next.Note.Body = body
 		case next.Decision != nil:
-			next.Decision.Context = *edit.Body
+			next.Decision.Context = body
 		case next.Attempt != nil:
-			next.Attempt.Result = *edit.Body
+			next.Attempt.Result = body
 		case next.Handoff != nil:
-			next.Handoff.Summary = *edit.Body
+			next.Handoff.Summary = body
 		}
 	}
 	if edit.Tags != nil && next.Note != nil {
-		next.Note.Tags = normalizeRecordTags(*edit.Tags)
+		next.Note.Tags = normalizeRecordTags(redactEditedTags(*edit.Tags))
 	}
 	beforeTitle, beforeBody, beforeTags := recordEditableText(record)
 	afterTitle, afterBody, afterTags := recordEditableText(next)
@@ -235,6 +241,27 @@ func withRecordHistory(record Record, history []domain.HistoryEntry) Record {
 		record.Handoff.History = domain.BoundedHistory(history)
 	}
 	return record
+}
+
+// redactEditedText applies the ingest-grade redactor to text the caller wants
+// to store. Curated writes use the narrower curated redactor, but an edit is
+// pasted text from a user or agent, so it gets the same treatment as ingested
+// external text: bearer and authorization headers, URL query tokens and the
+// wider provider token shapes. ApplyIngest is idempotent, so redacting an
+// already-redacted edit changes nothing.
+func redactEditedText(text string) string {
+	redacted, _ := RedactIngest(text)
+	return redacted
+}
+
+// redactEditedTags redacts a copy of the caller's tags, so the edit never
+// mutates the slice the caller still owns.
+func redactEditedTags(tags []string) []string {
+	out := make([]string, len(tags))
+	for i, tag := range tags {
+		out[i] = redactEditedText(tag)
+	}
+	return out
 }
 
 // normalizeRecordTags trims tags, drops empty entries and removes repeats while

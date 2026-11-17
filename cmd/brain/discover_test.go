@@ -270,6 +270,50 @@ func TestDiscoverAdoptsCheckoutByRepoURL(t *testing.T) {
 	}
 }
 
+// Two clones of the same repository in one --apply scan register one project;
+// the second clone is a warning, not a second registry entry.
+func TestDiscoverDoesNotRegisterSecondCloneOfSameRepo(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git is not installed")
+	}
+	base := t.TempDir()
+	root := filepath.Join(base, "workspace")
+	dataDir := filepath.Join(base, "brain")
+	cfgPath := filepath.Join(dataDir, "brain.yaml")
+	if code, _, stderr := runForTest(t, "init", "--mode", "local", "--data-dir", dataDir); code != 0 {
+		t.Fatalf("init: %s", stderr)
+	}
+	for _, name := range []string{"clone-one", "clone-two"} {
+		clone := filepath.Join(root, name)
+		discoverGitInit(t, clone)
+		discoverGitRun(t, clone, "remote", "add", "origin", "https://example.test/dup.git")
+	}
+
+	var stdout, stderr bytes.Buffer
+	if code := runDiscover([]string{"--root", root, "--apply", "--config", cfgPath}, &stdout, &stderr); code != 0 {
+		t.Fatalf("apply exit %d: %s", code, stderr.String())
+	}
+	want := strings.Join([]string{
+		"registered clone-one",
+		"repo-duplicate clone-two " + filepath.Join(root, "clone-two") + " (repository already registered as clone-one in this scan)",
+		"",
+	}, "\n")
+	if stdout.String() != want {
+		t.Fatalf("apply stdout = %q, want %q", stdout.String(), want)
+	}
+	code, list, stderrText := runForTest(t, "project", "list", "--json", "--config", cfgPath)
+	if code != 0 {
+		t.Fatalf("project list: %s", stderrText)
+	}
+	var projects []domain.Project
+	if err := json.Unmarshal([]byte(list), &projects); err != nil {
+		t.Fatalf("project list json: %v", err)
+	}
+	if len(projects) != 1 || projects[0].ID != "clone-one" || len(projects[0].Paths) != 1 {
+		t.Fatalf("projects = %+v, want only clone-one with one path", projects)
+	}
+}
+
 // One repository registered under two project ids is reported, never adopted
 // into either: only the owner can merge the split ids.
 func TestDiscoverReportsRepositoryClaimedTwice(t *testing.T) {

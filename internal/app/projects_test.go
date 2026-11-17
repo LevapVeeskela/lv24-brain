@@ -3,6 +3,8 @@ package app_test
 import (
 	"context"
 	"errors"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -81,6 +83,72 @@ func TestSaveProjectCreatesWithMetadata(t *testing.T) {
 	}
 	if project.RepoURL != "https://example.test/demo.git" || project.DefaultBranch != "main" {
 		t.Fatalf("repo metadata = %+v", project)
+	}
+}
+
+func TestSaveProjectRejectsAliasCollisions(t *testing.T) {
+	useCase, _ := newProjectTestApp(t)
+	ctx := context.Background()
+	if _, err := useCase.SaveProject(ctx, app.ProjectInput{
+		ID:      "alpha",
+		Aliases: projectValue([]string{"a"}),
+	}); err != nil {
+		t.Fatalf("SaveProject(alpha): %v", err)
+	}
+
+	// An alias may not shadow another project's id (case-insensitively).
+	_, err := useCase.SaveProject(ctx, app.ProjectInput{
+		ID:      "beta",
+		Aliases: projectValue([]string{"ALPHA"}),
+	})
+	if !errors.Is(err, domain.ErrValidation) || !strings.Contains(err.Error(), "alpha") {
+		t.Fatalf("alias = other id: err = %v, want a validation error naming alpha", err)
+	}
+
+	// Nor another project's alias.
+	_, err = useCase.SaveProject(ctx, app.ProjectInput{
+		ID:      "gamma",
+		Aliases: projectValue([]string{"A"}),
+	})
+	if !errors.Is(err, domain.ErrValidation) || !strings.Contains(err.Error(), "alpha") {
+		t.Fatalf("alias = other alias: err = %v, want a validation error naming alpha", err)
+	}
+
+	// A project may keep its own id and alias.
+	if _, err := useCase.SaveProject(ctx, app.ProjectInput{
+		ID:      "alpha",
+		Aliases: projectValue([]string{"alpha", "a"}),
+	}); err != nil {
+		t.Fatalf("same project's own values rejected: %v", err)
+	}
+}
+
+func TestSaveProjectRejectsPathRegisteredByAnotherProject(t *testing.T) {
+	useCase, _ := newProjectTestApp(t)
+	ctx := context.Background()
+	checkout := filepath.Join(t.TempDir(), "checkout")
+	if _, err := useCase.SaveProject(ctx, app.ProjectInput{
+		ID:    "alpha",
+		Paths: projectValue([]string{checkout}),
+	}); err != nil {
+		t.Fatalf("SaveProject(alpha): %v", err)
+	}
+
+	_, err := useCase.SaveProject(ctx, app.ProjectInput{
+		ID:    "beta",
+		Paths: projectValue([]string{checkout}),
+	})
+	if !errors.Is(err, domain.ErrValidation) || !strings.Contains(err.Error(), "alpha") {
+		t.Fatalf("shared path: err = %v, want a validation error naming alpha", err)
+	}
+
+	// Re-saving the owner with its own path is fine.
+	if _, err := useCase.SaveProject(ctx, app.ProjectInput{
+		ID:    "alpha",
+		Name:  projectValue("Alpha"),
+		Paths: projectValue([]string{checkout}),
+	}); err != nil {
+		t.Fatalf("same project's own path rejected: %v", err)
 	}
 }
 

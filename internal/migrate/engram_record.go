@@ -65,6 +65,11 @@ func buildEngramRecord(row *engramRowPlan, now time.Time, result *Result) *engra
 	if updatedAt.Before(createdAt) {
 		updatedAt = createdAt
 	}
+	// Engram stores whole seconds. Truncating here keeps the per-timestamp note
+	// file name exact, so a sub-second difference can never put two groups in
+	// one file and silently drop one group's name.
+	createdAt = createdAt.UTC().Truncate(time.Second)
+	updatedAt = updatedAt.UTC().Truncate(time.Second)
 	title := singleLine(observation.Title)
 	if title == "" {
 		title = "Engram " + strings.TrimPrefix(engramExternalID(observation), EngramSourceSystem+":")

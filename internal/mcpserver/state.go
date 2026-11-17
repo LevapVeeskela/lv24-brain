@@ -3,9 +3,12 @@ package mcpserver
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/levapveeskela/lv24-brain/internal/domain"
 )
 
 // State is a project's curated state as returned to clients.
@@ -42,6 +45,15 @@ type StateBackend interface {
 	SetState(ctx context.Context, in StateInput) (State, error)
 }
 
+// StateRevisionBackend is implemented by backends that can compare and write
+// state in one operation. When available, brain_state(action=set,
+// expected_revision=...) takes exactly this path, so a concurrent writer cannot
+// slip between the revision check and the write. A backend that does not
+// implement it falls back to a read-then-check, which is not atomic.
+type StateRevisionBackend interface {
+	SetStateIfRevision(ctx context.Context, in StateInput, expected string) (State, error)
+}
+
 func (s *Server) stateTool() tool {
 	project := stringProp("Project id, alias or checkout path. Omit to use the project of the working directory.")
 	return tool{
@@ -49,7 +61,7 @@ func (s *Server) stateTool() tool {
 		Annotations: mutatingAnnotations("Read or replace project state"),
 		Description: "Read a project's state (action=get, the default) or update it (action=set). " +
 			"On set, only the given fields change; a list replaces the stored list and an empty list clears it. " +
-			"expected_revision is compared with the stored state before the write and refuses it with CONFLICT when they differ; the check is best effort, not a transaction.",
+			"expected_revision is compared with the stored state under the backend's lock (when it supports the atomic write) before the write and refuses it with CONFLICT when they differ.",
 		InputSchema: objectSchema(nil, map[string]any{
 			"action":            enumProp("get reads (default); set replaces the given fields.", []string{"get", "set"}),
 			"project":           project,
@@ -170,7 +182,15 @@ func (s *Server) stateSet(ctx context.Context, args stateSetArgs) (toolResult, e
 	if err := s.policy.checkWrite(target.ID); err != nil {
 		return toolResult{}, err
 	}
+	in.ProjectID = target.ID
 	if args.ExpectedRevision != "" {
+		if cas, ok := backend.(StateRevisionBackend); ok {
+			state, err := cas.SetStateIfRevision(ctx, in, args.ExpectedRevision)
+			if err != nil {
+				return toolResult{}, stateWriteError(ctx, backend, target.ID, args.ExpectedRevision, err)
+			}
+			return stateResult(state), nil
+		}
 		current, err := backend.GetState(ctx, target.ID)
 		if err != nil {
 			return toolResult{}, err
@@ -186,12 +206,31 @@ func (s *Server) stateSet(ctx context.Context, args stateSetArgs) (toolResult, e
 				"read the state with brain_state(action=get) and retry the change")
 		}
 	}
-	in.ProjectID = target.ID
 	state, err := backend.SetState(ctx, in)
 	if err != nil {
 		return toolResult{}, err
 	}
 	return stateResult(state), nil
+}
+
+// stateWriteError maps a refused guarded write to the CONFLICT refusal shape.
+// The current revision is read back so the client can reconcile, exactly like
+// the version read before an unconditional write.
+func stateWriteError(ctx context.Context, backend StateBackend, projectID, expected string, err error) error {
+	if !errors.Is(err, domain.ErrConflict) {
+		return err
+	}
+	currentRevision := ""
+	if current, getErr := backend.GetState(ctx, projectID); getErr == nil {
+		currentRevision = current.Revision
+		if currentRevision == "" {
+			currentRevision = stateRevision(current)
+		}
+	}
+	return refusalConflict(
+		fmt.Sprintf("state of %s changed since revision %s", projectID, expected),
+		currentRevision,
+		"read the state with brain_state(action=get) and retry the change")
 }
 
 func stateResult(state State) toolResult {

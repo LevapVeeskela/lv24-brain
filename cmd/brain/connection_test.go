@@ -642,3 +642,174 @@ func TestConnectionAuthRemoveAndUnsupportedProvider(t *testing.T) {
 		t.Fatalf("unsupported provider auth = %d %s", code, stderr)
 	}
 }
+
+type failingCheckSource struct{ err error }
+
+func (s failingCheckSource) Descriptor() domain.SourceDescriptor { return cliItemSource{}.Descriptor() }
+func (s failingCheckSource) Check(context.Context) error         { return s.err }
+func (s failingCheckSource) Read(context.Context, ports.ReadRequest) (ports.ReadBatch, error) {
+	return ports.ReadBatch{}, nil
+}
+
+func TestConnectionListShowsLastRunStatusAndRedactedCause(t *testing.T) {
+	cfg, dataDir := connectionConfig(t, config.ModeLocal)
+	ctx := context.Background()
+	connections, err := fsstore.NewConnectionStore(dataDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []string{"work", "other"} {
+		if err := connections.Create(ctx, domain.Connection{ID: id, Provider: "github", Account: id, Settings: map[string]string{"repos": "acme/widgets"}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	raw, err := fsstore.New(dataDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	token := "ghp_0123456789abcdefghijklmnopqrstuvwxyzAB"
+	started := time.Date(2026, 11, 18, 9, 0, 0, 0, time.UTC)
+	if err := raw.AppendConnectorRun(ctx, domain.ConnectorRun{ID: "run-1", Source: "github", ConnectionID: "work", Status: domain.ConnectorFailed, StartedAt: started, Error: "github check: 401 using " + token}); err != nil {
+		t.Fatal(err)
+	}
+
+	code, out, errOut := runForTest(t, "connection", "list", "--config", cfg)
+	if code != 0 {
+		t.Fatalf("list = %d %s", code, errOut)
+	}
+	for _, want := range []string{"last-run=2026-11-18T09:00:00Z", "status=failed", "[redacted]", "last-run=never"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("list missing %q: %s", want, out)
+		}
+	}
+	if strings.Contains(out+errOut, token) {
+		t.Fatalf("list leaked a credential: %s", out)
+	}
+
+	code, out, errOut = runForTest(t, "connection", "list", "--json", "--config", cfg)
+	if code != 0 {
+		t.Fatalf("json list = %d %s", code, errOut)
+	}
+	type listView struct {
+		ID            string     `json:"id"`
+		LastRunAt     *time.Time `json:"lastRunAt"`
+		LastRunStatus string     `json:"lastRunStatus"`
+		LastRunError  string     `json:"lastRunError"`
+	}
+	views := connectionJSON[[]listView](t, out)
+	if len(views) != 2 {
+		t.Fatalf("views = %+v", views)
+	}
+	byID := map[string]listView{}
+	for _, view := range views {
+		byID[view.ID] = view
+	}
+	failed := byID["work"]
+	if failed.LastRunAt == nil || failed.LastRunStatus != "failed" || strings.Contains(failed.LastRunError, token) || !strings.Contains(failed.LastRunError, "[redacted]") {
+		t.Fatalf("failed view = %+v", failed)
+	}
+	if other := byID["other"]; other.LastRunAt != nil || other.LastRunStatus != "" {
+		t.Fatalf("never-run view = %+v", other)
+	}
+}
+
+func TestConnectionTestReportsSanitizedOutcome(t *testing.T) {
+	cfg, dataDir := connectionConfig(t, config.ModeLocal)
+	ctx := context.Background()
+	connections, err := fsstore.NewConnectionStore(dataDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []string{"fixture-ok", "fixture-fail"} {
+		if err := connections.Create(ctx, domain.Connection{ID: id, Provider: "fixture", Account: id, Settings: map[string]string{}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := connections.Create(ctx, domain.Connection{ID: "gh", Provider: "github", Account: "gh", Settings: map[string]string{"repos": "acme/widgets"}}); err != nil {
+		t.Fatal(err)
+	}
+	token := "ghp_0123456789abcdefghijklmnopqrstuvwxyzAB"
+	secrets := newCLISecretStore()
+	previous := buildIngestion
+	buildIngestion = func(cfg config.BrainConfig, opts bootstrap.Options) (*bootstrap.IngestionRuntime, error) {
+		opts.Secrets = secrets
+		runtime, err := bootstrap.BuildIngestion(cfg, opts)
+		if err != nil {
+			return nil, err
+		}
+		if err := runtime.Ingestion.Registry.Register(cliItemSource{}.Descriptor(), func(connection domain.Connection, _ connectorbuild.Deps) (ports.Source, error) {
+			if connection.ID == "fixture-fail" {
+				return failingCheckSource{err: errors.New("provider rejected token " + token)}, nil
+			}
+			return cliItemSource{}, nil
+		}); err != nil {
+			runtime.Close()
+			return nil, err
+		}
+		return runtime, nil
+	}
+	t.Cleanup(func() { buildIngestion = previous })
+
+	code, out, errOut := runForTest(t, "connection", "test", "fixture-ok", "--config", cfg)
+	if code != 0 || !strings.Contains(out, "fixture-ok: ok") {
+		t.Fatalf("ok test = %d %s %s", code, out, errOut)
+	}
+
+	code, out, errOut = runForTest(t, "connection", "test", "fixture-fail", "--config", cfg)
+	if code != 1 || !strings.Contains(errOut, "connection_check_failed") || !strings.Contains(errOut, "[redacted]") || strings.Contains(out+errOut, token) {
+		t.Fatalf("failed test = %d %s %s", code, out, errOut)
+	}
+
+	code, out, errOut = runForTest(t, "connection", "test", "fixture-fail", "--json", "--config", cfg)
+	if code != 1 || strings.Contains(out+errOut, token) {
+		t.Fatalf("json failed test = %d %s %s", code, out, errOut)
+	}
+	report := connectionJSON[struct {
+		OK      bool   `json:"ok"`
+		Code    string `json:"code"`
+		Message string `json:"message"`
+		Cause   string `json:"cause"`
+	}](t, out)
+	if report.OK || report.Code != app.ConnectionCodeCheckFailed || report.Message == "" || !strings.Contains(report.Cause, "[redacted]") {
+		t.Fatalf("report = %+v", report)
+	}
+
+	// The real provider path fails at credential resolution: the cause must stay
+	// sanitized and the command must not exit zero.
+	code, out, errOut = runForTest(t, "connection", "test", "gh", "--config", cfg)
+	if code != 1 || !strings.Contains(errOut, "credential") || !strings.Contains(errOut, "not found") {
+		t.Fatalf("missing credential = %d %s %s", code, out, errOut)
+	}
+
+	// A run of the same broken connection records a failed run; list must name
+	// the redacted cause instead of hiding it.
+	if code, _, errOut = runForTest(t, "connection", "run", "gh", "--config", cfg); code != 1 {
+		t.Fatalf("run without credential = %d %s", code, errOut)
+	}
+	// The list command builds the real provider registry; drop the fixture
+	// connections that only the test runtime knows about.
+	for _, id := range []string{"fixture-ok", "fixture-fail"} {
+		if err := connections.Delete(ctx, id); err != nil {
+			t.Fatal(err)
+		}
+	}
+	code, out, errOut = runForTest(t, "connection", "list", "--json", "--config", cfg)
+	if code != 0 {
+		t.Fatalf("list after failed run = %d %s", code, errOut)
+	}
+	type listView struct {
+		ID            string `json:"id"`
+		LastRunStatus string `json:"lastRunStatus"`
+		LastRunError  string `json:"lastRunError"`
+	}
+	for _, view := range connectionJSON[[]listView](t, out) {
+		if view.ID != "gh" {
+			continue
+		}
+		if view.LastRunStatus != "failed" || !strings.Contains(view.LastRunError, "credential") || strings.Contains(view.LastRunError, token) {
+			t.Fatalf("missing credential list view = %+v", view)
+		}
+		return
+	}
+	t.Fatalf("connection gh missing from list: %s", out)
+}

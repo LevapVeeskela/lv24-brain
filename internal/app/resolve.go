@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -76,6 +77,13 @@ func (a *App) ResolveSelector(ctx context.Context, selector string) (Resolved, e
 		}
 	}
 	if bestPath != "" {
+		// A registered checkout may be missing on this machine (paths travel
+		// between machines), but a missing path *under* one is a typo, not the
+		// project: never resolve it to the enclosing checkout.
+		if normalizePath(bestPath) != full && !pathExists(full) {
+			return Resolved{}, domain.NewValidationError("project",
+				fmt.Sprintf("%q does not exist; it is not a registered checkout of project %s (%s)", cleanPath(target), best.ID, bestPath))
+		}
 		return Resolved{Project: best, Path: bestPath}, nil
 	}
 
@@ -141,6 +149,12 @@ func pathWithin(child, parent string) bool {
 	}
 	rel, err := filepath.Rel(parent, child)
 	return err == nil && rel != "." && !strings.HasPrefix(rel, "..") && !filepath.IsAbs(rel)
+}
+
+// pathExists reports whether path exists on this machine.
+func pathExists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
 }
 
 func containsFold(values []string, want string) bool {

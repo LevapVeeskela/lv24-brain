@@ -183,6 +183,16 @@ func createBackupDir(root, base string) (string, error) {
 	return "", fmt.Errorf("migrate: too many backups created at %s", base)
 }
 
+// Discard removes a backup directory that was created before a run that then
+// refused to write anything. The directory only holds the copies captureState
+// made, never target data.
+func (b *Backup) Discard() {
+	if b == nil || strings.TrimSpace(b.dir) == "" {
+		return
+	}
+	_ = os.RemoveAll(b.dir)
+}
+
 // Finish writes manifest.json for the migration described by result and returns
 // its path. Call it even when the migration returned an IncompleteError or the
 // CLI failed afterwards, so files that were created can still be rolled back.

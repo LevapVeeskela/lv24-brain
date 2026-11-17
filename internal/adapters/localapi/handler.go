@@ -440,18 +440,41 @@ func (h *Handler) testConnection(w http.ResponseWriter, r *http.Request, id stri
 	}
 	checker, err := h.opts.Sources.Checker(r.Context(), connection)
 	if err != nil {
-		internal(w)
+		h.writeConnectionFailure(w, app.DescribeConnectionBuildError(err))
 		return
 	}
 	if checker == nil {
-		internal(w)
+		h.writeConnectionFailure(w, app.ConnectionFailure{
+			Code:    app.ConnectionCodeUnavailable,
+			Message: "the connection source could not be prepared",
+		})
 		return
 	}
 	if err := checker.Check(r.Context()); err != nil {
-		internal(w)
+		h.writeConnectionFailure(w, app.DescribeConnectionCheckError(err))
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+}
+
+// writeConnectionFailure renders a failed connection check with a stable code
+// instead of the generic internal_error. Configuration and credential problems
+// are client-actionable (400); a provider-side failure is a bad gateway (502).
+// The message is always sanitized: checks receive raw provider responses that
+// may echo a credential.
+func (h *Handler) writeConnectionFailure(w http.ResponseWriter, failure app.ConnectionFailure) {
+	status := http.StatusBadGateway
+	switch failure.Code {
+	case app.ConnectionCodeCredentialMissing, app.ConnectionCodeInvalid, app.ConnectionCodeUnsupported:
+		status = http.StatusBadRequest
+	case app.ConnectionCodeUnavailable:
+		status = http.StatusInternalServerError
+	}
+	message := failure.Message
+	if failure.Cause != "" {
+		message += ": " + failure.Cause
+	}
+	writeError(w, status, failure.Code, h.redact(message))
 }
 
 func (h *Handler) runConnection(w http.ResponseWriter, r *http.Request, id string) {

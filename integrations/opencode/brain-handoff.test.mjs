@@ -84,6 +84,12 @@ function fakeSpawn(script) {
   const spawn = (bin, args, options) => {
     const child = new EventEmitter();
     child.stdout = new EventEmitter();
+    child.stdin = new EventEmitter();
+    child.stdin.chunks = [];
+    child.stdin.end = (data) => {
+      if (data !== undefined) child.stdin.chunks.push(String(data));
+      child.stdin.emit("end", data);
+    };
     child.killed = false;
     child.kill = () => {
       child.killed = true;
@@ -94,6 +100,12 @@ function fakeSpawn(script) {
     return child;
   };
   return { spawn, calls };
+}
+
+/** Parses the hook JSON a child received on stdin. */
+function stdinJSON(call) {
+  const raw = call.child.stdin.chunks.join("");
+  return raw ? JSON.parse(raw) : null;
 }
 
 /** Child that writes `text` to stdout and exits with `code`. */
@@ -209,7 +221,13 @@ test("missing ctx.session.hook skips injection and keeps the end handoff", async
   assert.equal(startCalls(calls).length, 0);
   assert.equal(calls.length, 1);
   assert.equal(calls[0].args[1], "end");
-  assert.equal(calls[0].options.stdio, "ignore");
+  assert.deepEqual(calls[0].options.stdio, ["pipe", "ignore", "ignore"]);
+  assert.deepEqual(stdinJSON(calls[0]), {
+    hook_event_name: "SessionEnd",
+    session_id: "",
+    cwd: DIRECTORY,
+    last_assistant_message: "",
+  });
 });
 
 test("non-array system or missing sessionID spawns nothing", async () => {
@@ -307,7 +325,56 @@ test("V2 setup runs the end handoff from the event stream", async () => {
   assert.equal(calls.length, 1);
   assert.equal(calls[0].args[1], "end");
   assert.equal(calls[0].args[5], DIRECTORY);
-  assert.equal(calls[0].options.stdio, "ignore");
+  assert.deepEqual(calls[0].options.stdio, ["pipe", "ignore", "ignore"]);
+  await cleanup();
+});
+
+test("the final assistant text reaches the engine via stdin JSON", async () => {
+  const { spawn, calls } = fakeSpawn(exitsWith(""));
+  const f = fakeV2Ctx();
+  const cleanup = await setupV2(f.ctx, { ...BASE_DEPS, spawn });
+
+  f.push({
+    type: "message.part.updated",
+    data: {
+      properties: {
+        sessionID: "s1",
+        part: { type: "text", text: "Done.\nDecision: keep OpenCode on stdin JSON" },
+      },
+    },
+  });
+  f.push({ type: "session.idle", data: { properties: { sessionID: "s1" } } });
+  await flush();
+
+  assert.equal(calls.length, 1);
+  assert.deepEqual(stdinJSON(calls[0]), {
+    hook_event_name: "SessionEnd",
+    session_id: "s1",
+    cwd: DIRECTORY,
+    last_assistant_message: "Done.\nDecision: keep OpenCode on stdin JSON",
+  });
+  await cleanup();
+});
+
+test("user text parts are never sent as the final message", async () => {
+  const { spawn, calls } = fakeSpawn(exitsWith(""));
+  const f = fakeV2Ctx();
+  const cleanup = await setupV2(f.ctx, { ...BASE_DEPS, spawn });
+
+  f.push({
+    type: "message.part.updated",
+    data: {
+      properties: {
+        sessionID: "s1",
+        part: { type: "text", role: "user", text: "please fix it" },
+      },
+    },
+  });
+  f.push({ type: "session.idle", data: { properties: { sessionID: "s1" } } });
+  await flush();
+
+  assert.equal(calls.length, 1);
+  assert.equal(stdinJSON(calls[0]).last_assistant_message, "");
   await cleanup();
 });
 

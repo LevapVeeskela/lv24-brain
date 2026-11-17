@@ -3,6 +3,7 @@ package app_test
 import (
 	"context"
 	"errors"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -241,6 +242,137 @@ func TestEditRecordEnforcesLimitsAndProtection(t *testing.T) {
 			t.Fatalf("protected error = %+v", protectedErr)
 		}
 	})
+}
+
+func TestRecordEditRedactsCredentialsBeforePersisting(t *testing.T) {
+	fixture := newMemoryAPIFixture(t)
+	ctx := context.Background()
+	created, err := fixture.app.Note(ctx, app.NoteInput{ProjectID: "demo", Title: "Deploy log", Body: "old body"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	before, err := fixture.app.GetRecord(ctx, "demo", created.Note.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	beforeSummary := before.Summary()
+
+	var (
+		bearer      = "abcdefghijklmnopqrstuvwxyz012345"
+		titleSecret = "titletoken123"
+		querySecret = "querysecret999"
+		tagSecret   = "tagsecret123"
+		title       = "Deploy ?x=1&token=" + titleSecret
+		rawBody     = "Deploy happened\nAuthorization: Bearer " + bearer + "\nGET https://example.test/x?keep=1&token=" + querySecret + "\nDone"
+		wantTitle   = "Deploy ?x=1&token=[redacted]"
+		wantBody    = "Deploy happened\nAuthorization: Bearer [redacted]\nGET https://example.test/x?keep=1&token=[redacted]\nDone"
+		wantTag     = "token=[redacted]"
+	)
+	body := rawBody
+	tags := []string{"cache", "token=" + tagSecret}
+	edited, err := fixture.app.EditRecord(ctx, app.RecordEdit{
+		ProjectID: "demo", ID: created.Note.ID,
+		Title: &title, Body: &body, Tags: &tags,
+		ExpectedUpdatedAt: beforeSummary.UpdatedAt,
+	})
+	if err != nil {
+		t.Fatalf("EditRecord: %v", err)
+	}
+	if !edited.Changed || edited.Record.Note == nil {
+		t.Fatalf("edit result = %+v", edited)
+	}
+	note := edited.Record.Note
+	if note.Title != wantTitle || note.Body != wantBody {
+		t.Fatalf("stored text = %q / %q, want redacted text %q / %q", note.Title, note.Body, wantTitle, wantBody)
+	}
+	if len(note.Tags) != 2 || note.Tags[0] != "cache" || note.Tags[1] != wantTag {
+		t.Fatalf("stored tags = %v, want cache and %q", note.Tags, wantTag)
+	}
+	if !note.UpdatedAt.After(beforeSummary.UpdatedAt) {
+		t.Fatalf("updated_at did not move: %v -> %v", beforeSummary.UpdatedAt, note.UpdatedAt)
+	}
+
+	files := recordFiles(t, fixture.dataDir, "demo", "notes")
+	if len(files) != 1 {
+		t.Fatalf("record files = %v", files)
+	}
+	raw, err := os.ReadFile(files[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	stored := string(raw)
+	for _, secret := range []string{bearer, titleSecret, querySecret, tagSecret} {
+		if strings.Contains(stored, secret) {
+			t.Fatalf("stored Markdown still contains %q:\n%s", secret, stored)
+		}
+	}
+	for _, kept := range []string{wantTitle, "Deploy happened", "keep=1", "Done", "[redacted]"} {
+		if !strings.Contains(stored, kept) {
+			t.Fatalf("stored Markdown lost %q:\n%s", kept, stored)
+		}
+	}
+
+	// The same edit with the already-redacted text is an idempotent no-op:
+	// no second write, no history entry, and the revision stays put.
+	storedBefore := note.UpdatedAt
+	repeat, err := fixture.app.EditRecord(ctx, app.RecordEdit{
+		ProjectID: "demo", ID: created.Note.ID,
+		Title: &wantTitle, Body: &wantBody, Tags: &note.Tags,
+		ExpectedUpdatedAt: storedBefore,
+	})
+	if err != nil {
+		t.Fatalf("repeated edit: %v", err)
+	}
+	if repeat.Changed || repeat.DryRun {
+		t.Fatalf("repeated redacted edit = %+v, want no change", repeat)
+	}
+	if !repeat.Record.Summary().UpdatedAt.Equal(storedBefore) || len(repeat.Record.Note.History) != 1 {
+		t.Fatalf("repeated edit wrote: updated_at %v, history %+v", repeat.Record.Summary().UpdatedAt, repeat.Record.Note.History)
+	}
+}
+
+func TestRedactIngestTwiceIsStable(t *testing.T) {
+	text := "Authorization: Bearer abcdefghijklmnopqrstuvwxyz012345\n" +
+		"GET https://example.test/x?keep=1&token=querysecret999\n" +
+		"deploy with token=firstsecret123"
+	once, count := app.RedactIngest(text)
+	if count == 0 {
+		t.Fatalf("RedactIngest(%q) found no secret", text)
+	}
+	twice, _ := app.RedactIngest(once)
+	if twice != once {
+		t.Fatalf("second redaction changed text:\n once: %q\ntwice: %q", once, twice)
+	}
+	for _, secret := range []string{"abcdefghijklmnopqrstuvwxyz012345", "querysecret999", "firstsecret123"} {
+		if strings.Contains(once, secret) {
+			t.Fatalf("redacted text still contains %q: %q", secret, once)
+		}
+	}
+}
+
+func TestRecordEditDuplicateSeesRedactedText(t *testing.T) {
+	fixture := newMemoryAPIFixture(t)
+	ctx := context.Background()
+	first, err := fixture.app.Note(ctx, app.NoteInput{
+		ProjectID: "demo", Title: "Token note", Body: "deploy with token=firstsecret123",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := fixture.app.Note(ctx, app.NoteInput{
+		ProjectID: "demo", Title: "Token note", Body: "other body",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := "deploy with token=secondsecret456"
+	_, err = fixture.app.EditRecord(ctx, app.RecordEdit{
+		ProjectID: "demo", ID: second.Note.ID, Body: &body,
+	})
+	var duplicate *domain.DuplicateError
+	if !errors.As(err, &duplicate) || duplicate.ID != first.Note.ID {
+		t.Fatalf("edit that redacts to an existing body = %v, want DuplicateError naming %s", err, first.Note.ID)
+	}
 }
 
 func TestEditRecordDecisionAttemptHandoffAndLifecycle(t *testing.T) {

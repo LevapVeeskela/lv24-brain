@@ -1813,7 +1813,7 @@ func runIndex(args []string, stdout, stderr io.Writer) int {
 
 func runSearch(args []string, stdout, stderr io.Writer) int {
 	fs := newFlagSet("search", stderr)
-	project := fs.String("project", "", "project id filter")
+	project := fs.String("project", "", "project id, alias or checkout path; unknown values are an error")
 	limit := fs.Int("limit", app.DefaultSearchLimit, "maximum results on this page")
 	kinds := fs.String("kind", "", "comma-separated kinds to keep: note, decision, attempt, handoff, dump, item (raw-zone external items; excluded by default)")
 	dumps := fs.Bool("dumps", false, "include connector dumps (mail, GitHub/GitLab issues and PRs)")
@@ -1897,14 +1897,6 @@ func runSearch(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "brain search: query is required")
 		return 1
 	}
-	filter := searchFilterFingerprint(query, *project, strings.ToLower(strings.TrimSpace(*matchMode)),
-		fmt.Sprint(*minScore), fmt.Sprint(*dumps), *kinds, *since, asOf.Format(time.RFC3339Nano), fmt.Sprint(includeSuperseded),
-		strings.TrimSpace(*subtype), strings.TrimSpace(*scope), strings.TrimSpace(*topic))
-	offset, err := decodeSearchCursor(*cursor, filter)
-	if err != nil {
-		fmt.Fprintf(stderr, "brain search: --cursor: %v\n", err)
-		return 2
-	}
 	cfg, err := loadRequiredConfig(*cfgPath)
 	if err != nil {
 		return reportError(stderr, "search", err)
@@ -1914,10 +1906,33 @@ func runSearch(args []string, stdout, stderr io.Writer) int {
 		return reportError(stderr, "search", err)
 	}
 	defer func() { _ = runtime.Close() }()
+	// --project accepts the same selector as every other command: an id, an
+	// alias or a checkout path. An unknown value is an error, never an empty
+	// result set that looks like "nothing matched".
+	projectID := strings.TrimSpace(*project)
+	if projectID != "" {
+		resolved, resolveErr := runtime.App.ResolveSelector(context.Background(), projectID)
+		if resolveErr != nil {
+			fmt.Fprintf(stderr, "brain search: --project: %v\n", resolveErr)
+			return 2
+		}
+		if resolved.Warning != "" {
+			fmt.Fprintf(stderr, "brain search: %s\n", resolved.Warning)
+		}
+		projectID = resolved.Project.ID
+	}
+	filter := searchFilterFingerprint(query, projectID, strings.ToLower(strings.TrimSpace(*matchMode)),
+		fmt.Sprint(*minScore), fmt.Sprint(*dumps), *kinds, *since, asOf.Format(time.RFC3339Nano), fmt.Sprint(includeSuperseded),
+		strings.TrimSpace(*subtype), strings.TrimSpace(*scope), strings.TrimSpace(*topic))
+	offset, err := decodeSearchCursor(*cursor, filter)
+	if err != nil {
+		fmt.Fprintf(stderr, "brain search: --cursor: %v\n", err)
+		return 2
+	}
 	requested := searchFetchLimit(offset, size)
 	report, err := runtime.App.SearchWithReport(context.Background(), app.SearchOptions{
 		Text:              query,
-		ProjectID:         *project,
+		ProjectID:         projectID,
 		Limit:             requested,
 		Kinds:             splitList(*kinds),
 		IncludeDumps:      *dumps,
@@ -2214,6 +2229,8 @@ func runMigrate(args []string, stdout, stderr io.Writer) int {
 	db := fs.String("db", "", "engram database or JSON export (requires --from engram)")
 	includePrompts := fs.Bool("include-prompts", false, "import engram prompts into the local-only prompt zone")
 	projectMap := fs.String("project-map", "", "JSON project remapping overrides for the engram importer")
+	skipConflicts := fs.Bool("skip-conflicts", false, "engram: import the non-conflicting files when a target differs")
+	repairTimestamps := fs.Bool("repair-timestamps", false, "engram: rewrite note files so every note keeps its own updated_at")
 	asJSON := fs.Bool("json", false, "print the engram report as JSON")
 	dataDir := fs.String("data-dir", "", "target data directory")
 	dryRun := fs.Bool("dry-run", false, "report without writing")
@@ -2229,7 +2246,8 @@ func runMigrate(args []string, stdout, stderr io.Writer) int {
 	setFlags := map[string]bool{}
 	fs.Visit(func(f *flag.Flag) { setFlags[f.Name] = true })
 	if setFlags["rollback"] {
-		if setFlags["from"] || setFlags["db"] || setFlags["include-prompts"] || setFlags["project-map"] || setFlags["json"] {
+		if setFlags["from"] || setFlags["db"] || setFlags["include-prompts"] || setFlags["project-map"] || setFlags["json"] ||
+			setFlags["skip-conflicts"] || setFlags["repair-timestamps"] {
 			if setFlags["from"] {
 				fmt.Fprintln(stderr, "brain migrate: --rollback cannot be combined with --from")
 			} else {
@@ -2250,10 +2268,19 @@ func runMigrate(args []string, stdout, stderr io.Writer) int {
 			fmt.Fprintln(stderr, "brain migrate: --from engram requires --db <engram.db|export.json>")
 			return 2
 		}
-		return runEngramMigrate(*db, *projectMap, *includePrompts, *asJSON, *dataDir, *cfgPath, *dryRun, stdout, stderr)
+		return runEngramMigrate(*db, *projectMap, *includePrompts, *asJSON, *dataDir, *cfgPath, *dryRun,
+			*skipConflicts, *repairTimestamps, stdout, stderr)
 	}
 	if setFlags["db"] {
 		fmt.Fprintln(stderr, "brain migrate: --db requires --from engram")
+		return 2
+	}
+	if setFlags["skip-conflicts"] {
+		fmt.Fprintln(stderr, "brain migrate: --skip-conflicts requires --from engram")
+		return 2
+	}
+	if setFlags["repair-timestamps"] {
+		fmt.Fprintln(stderr, "brain migrate: --repair-timestamps requires --from engram")
 		return 2
 	}
 	if setFlags["include-prompts"] {
@@ -2316,7 +2343,7 @@ func runMigrate(args []string, stdout, stderr io.Writer) int {
 
 // runEngramMigrate imports an engram SQLite database or JSON export. The source
 // is read-only; the manifest makes the applied import reversible.
-func runEngramMigrate(dbPath, projectMapPath string, includePrompts, asJSON bool, dataDir, cfgPath string, dryRun bool, stdout, stderr io.Writer) int {
+func runEngramMigrate(dbPath, projectMapPath string, includePrompts, asJSON bool, dataDir, cfgPath string, dryRun, skipConflicts, repairTimestamps bool, stdout, stderr io.Writer) int {
 	target, configPath, err := resolveMigrateTarget(dataDir, cfgPath)
 	if err != nil {
 		return reportError(stderr, "migrate", err)
@@ -2340,12 +2367,14 @@ func runEngramMigrate(dbPath, projectMapPath string, includePrompts, asJSON bool
 		}
 	}
 	opts := migrate.EngramOptions{
-		SourcePath:     dbPath,
-		TargetDir:      target,
-		DryRun:         dryRun,
-		IncludePrompts: includePrompts,
-		PromptsEnabled: promptsEnabled,
-		ProjectMap:     projectMap,
+		SourcePath:       dbPath,
+		TargetDir:        target,
+		DryRun:           dryRun,
+		IncludePrompts:   includePrompts,
+		PromptsEnabled:   promptsEnabled,
+		ProjectMap:       projectMap,
+		SkipConflicts:    skipConflicts,
+		RepairTimestamps: repairTimestamps,
 	}
 	var backup *migrate.Backup
 	if !dryRun {
@@ -2366,8 +2395,11 @@ func runEngramMigrate(dbPath, projectMapPath string, includePrompts, asJSON bool
 		runErr = finishMigratedTargets(result, configPath)
 	}
 	if backup != nil {
-		manifestPath, manifestErr := backup.Finish(result)
-		if manifestErr != nil {
+		if _, aborted := runErr.(*migrate.AbortedError); aborted {
+			// Nothing was written, so the empty backup directory is removed as
+			// well: a refused run leaves no trace under backups/.
+			backup.Discard()
+		} else if manifestPath, manifestErr := backup.Finish(result); manifestErr != nil {
 			manifestErr = fmt.Errorf("write rollback manifest: %w", manifestErr)
 			if runErr == nil {
 				runErr = manifestErr
@@ -2655,6 +2687,9 @@ func printEngramMigrateResult(w io.Writer, result migrate.Result) {
 	fmt.Fprintf(w, "created     %d (files)\n", result.Created)
 	fmt.Fprintf(w, "unchanged   %d (files)\n", result.Unchanged)
 	fmt.Fprintf(w, "conflicts   %d (files)\n", result.Conflicts)
+	if result.Removed > 0 {
+		fmt.Fprintf(w, "removed     %d (legacy note files set aside)\n", result.Removed)
+	}
 	fmt.Fprintf(w, "relations   %d (skipped %d)\n", result.Relations, result.RelationsSkipped)
 	if result.Prompts > 0 || result.PromptRows > 0 {
 		if result.PromptsOptIn {
@@ -2723,6 +2758,9 @@ func printEngramFiles(w io.Writer, files []migrate.FileResult) {
 			group.unchanged++
 		case migrate.StatusConflict:
 			group.conflict++
+		case migrate.StatusRemoved:
+			// A repair sets a stale file aside; it is not part of this plan.
+			continue
 		}
 	}
 	sort.Strings(keys)

@@ -15,6 +15,18 @@ import (
 
 const engramNotesPerFile = 200
 
+// engramNoteFileStamp names a notes file after the exact updated_at of the
+// records it holds. Grouping by the timestamp instead of only the created date
+// keeps one note's updated_at from being applied to every other note that was
+// created the same day, because the store reads a file's frontmatter timestamp
+// for every entry in it.
+func engramNoteFileStamp(at time.Time) string {
+	if at.IsZero() {
+		return "000000"
+	}
+	return at.UTC().Format("150405")
+}
+
 type engramNoteFileFrontmatter struct {
 	markdown.Frontmatter `yaml:",inline"`
 	Date                 string `yaml:"date,omitempty"`
@@ -65,6 +77,10 @@ type engramNoteMarker struct {
 	Title     string           `json:"title"`
 	Source    *engramSourceOut `json:"source,omitempty"`
 	CreatedAt time.Time        `json:"created_at"`
+	// UpdatedAt is the source updated_at of this note. The daily file
+	// frontmatter holds one timestamp per file, so without this field every
+	// note that shares a file would be read back with the file's maximum.
+	UpdatedAt time.Time `json:"updated_at,omitzero"`
 }
 
 type engramDecisionFrontmatter struct {
@@ -98,7 +114,8 @@ func renderEngramFiles(ctx context.Context, plan *engramPlan, result *Result) er
 			decisions = append(decisions, record)
 		default:
 			date := record.createdAt.UTC().Format("2006-01-02")
-			key := record.project + "\x00" + date
+			stamp := engramNoteFileStamp(record.updatedAt)
+			key := record.project + "\x00" + date + "\x00" + stamp
 			if _, ok := notes[key]; !ok {
 				noteOrder = append(noteOrder, key)
 			}
@@ -114,17 +131,17 @@ func renderEngramFiles(ctx context.Context, plan *engramPlan, result *Result) er
 			}
 			return group[i].externalID < group[j].externalID
 		})
-		parts := strings.SplitN(key, "\x00", 2)
-		project, date := parts[0], parts[1]
+		parts := strings.SplitN(key, "\x00", 3)
+		project, date, stamp := parts[0], parts[1], parts[2]
 		for index := 0; index < len(group); index += engramNotesPerFile {
 			end := index + engramNotesPerFile
 			if end > len(group) {
 				end = len(group)
 			}
 			file := index / engramNotesPerFile
-			name := "engram-" + date + ".md"
+			name := fmt.Sprintf("engram-%s-%s.md", date, stamp)
 			if file > 0 {
-				name = fmt.Sprintf("engram-%s-%d.md", date, file+1)
+				name = fmt.Sprintf("engram-%s-%s-%d.md", date, stamp, file+1)
 			}
 			content, err := renderEngramNoteFile(project, date, group[index:end])
 			if err != nil {
@@ -189,6 +206,7 @@ func renderEngramNoteFile(project, date string, records []*engramRecord) ([]byte
 			Title:               record.title,
 			Source:              sourceOut(record),
 			CreatedAt:           record.createdAt.UTC(),
+			UpdatedAt:           record.updatedAt.UTC(),
 		}
 		raw, err := json.Marshal(marker)
 		if err != nil {

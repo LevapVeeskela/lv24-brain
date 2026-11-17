@@ -4,8 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -55,6 +57,7 @@ func (a *App) Doctor(ctx context.Context, opts DoctorOptions) (DoctorReport, err
 	checks = append(checks, a.doctorMergeDrivers(ctx, opts.Fix))
 	checks = append(checks, a.doctorRawZone(ctx)...)
 	checks = append(checks, a.doctorLegacyDumpZones(ctx))
+	checks = append(checks, a.doctorTrackedPII(ctx))
 	checks = append(checks, a.doctorPrompts(ctx))
 	checks = append(checks, a.doctorRetiredPaths(ctx))
 	checks = append(checks, a.doctorPendingConflicts(ctx))
@@ -804,11 +807,134 @@ func (a *App) doctorLegacyDumpZones(ctx context.Context) DoctorCheck {
 	}
 }
 
+// trackedPIIConnectorRoots are the connectors/ subtrees that hold exported
+// provider data or run records: a tracked file there can publish personal data.
+var trackedPIIConnectorRoots = []string{"runs", "github", "gitlab"}
+
+const (
+	// maxTrackedPIIScanFiles bounds one doctor pass: the legacy dump zones can
+	// hold tens of thousands of files and doctor must stay fast. The check
+	// reports the files it inspected, never a silent all-clear.
+	maxTrackedPIIScanFiles = 500
+	// maxTrackedPIIFileBytes bounds the head read of one tracked file.
+	maxTrackedPIIFileBytes = 1 << 20
+)
+
+// mailboxFieldPattern matches a JSON string field that names a mailbox or a
+// login. The value is a likely user name even when the domain was stripped, so
+// it counts as personal data in a published file.
+var mailboxFieldPattern = regexp.MustCompile(`(?i)"(?:e-?mail|author_email|committer_email|user_email|mail|mailbox|login|username)"\s*:\s*"[^"]+"`)
+
+// doctorTrackedPII reports tracked files under connectors/ that contain e-mail
+// addresses or likely mailbox user names: connectors/*.json (the connection
+// catalogue), connectors/runs/ and the legacy connectors/github and
+// connectors/gitlab dump zones. Such files were published before the raw-zone
+// policy existed and stay in the shared tree until the owner untracks them.
+// Fixtures (*_test*, testdata/) are ignored. Report only: doctor never
+// untracks, rewrites or deletes a file.
+func (a *App) doctorTrackedPII(ctx context.Context) DoctorCheck {
+	if a.cfg.Mode != config.ModeGit || a.deps.Sync == nil {
+		return DoctorCheck{Name: "tracked-pii", Status: doctorOK, Message: "not used in this mode"}
+	}
+	lister, ok := a.deps.Sync.(ports.GitPathLister)
+	if !ok {
+		return DoctorCheck{Name: "tracked-pii", Status: doctorOK, Message: "not checked for this sync provider"}
+	}
+	paths, err := lister.TrackedPaths(ctx, "connectors")
+	if err != nil {
+		return DoctorCheck{Name: "tracked-pii", Status: doctorWarn, Message: "cannot list tracked connector files: " + err.Error()}
+	}
+	checked := 0
+	offending := 0
+	listed := make([]string, 0, maxListedProblems)
+	for _, path := range paths {
+		if !trackedPIIPath(path) {
+			continue
+		}
+		if checked >= maxTrackedPIIScanFiles {
+			break
+		}
+		checked++
+		raw, err := a.readTrackedConnectorFile(path)
+		if err != nil {
+			continue
+		}
+		if emailPattern.Match(raw) || mailboxFieldPattern.Match(raw) {
+			offending++
+			if len(listed) < maxListedProblems {
+				listed = append(listed, path)
+			}
+		}
+	}
+	if offending == 0 {
+		return DoctorCheck{
+			Name:    "tracked-pii",
+			Status:  doctorOK,
+			Message: fmt.Sprintf("%d tracked connector files hold no e-mail address or mailbox user name", checked),
+		}
+	}
+	return DoctorCheck{
+		Name:   "tracked-pii",
+		Status: doctorWarn,
+		Code:   "tracked-pii",
+		Message: fmt.Sprintf("%d of %d checked tracked connector files hold e-mail addresses or mailbox user names: %s; untrack each with git rm --cached <path> (the files and the git history are kept) and keep the value in the credential store or a local-only zone; doctor changes nothing (warning until the identity fields move to the credential store)",
+			offending, checked, strings.Join(listed, ", ")),
+	}
+}
+
+// trackedPIIPath reports whether a tracked connector path belongs to the PII
+// surface: a direct connectors/*.json file, or any file under connectors/runs,
+// connectors/github or connectors/gitlab. Test fixtures are ignored.
+func trackedPIIPath(path string) bool {
+	rest, ok := strings.CutPrefix(filepath.ToSlash(path), "connectors/")
+	if !ok || rest == "" {
+		return false
+	}
+	segments := strings.Split(rest, "/")
+	for _, segment := range segments {
+		if strings.Contains(segment, "_test") || strings.EqualFold(segment, "testdata") {
+			return false
+		}
+	}
+	if len(segments) == 1 {
+		return strings.HasSuffix(segments[0], ".json")
+	}
+	for _, root := range trackedPIIConnectorRoots {
+		if segments[0] == root {
+			return true
+		}
+	}
+	return false
+}
+
+// readTrackedConnectorFile reads the head of a tracked connector file, refusing
+// a path that escapes the data directory.
+func (a *App) readTrackedConnectorFile(path string) ([]byte, error) {
+	dataDir := strings.TrimSpace(a.cfg.DataDir)
+	if dataDir == "" {
+		return nil, errors.New("config.data_dir is empty")
+	}
+	root := filepath.Clean(dataDir)
+	full := filepath.Join(root, filepath.FromSlash(path))
+	rel, err := filepath.Rel(root, full)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return nil, fmt.Errorf("tracked path %s escapes the data directory", path)
+	}
+	file, err := os.Open(full)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+	return io.ReadAll(io.LimitReader(file, maxTrackedPIIFileBytes))
+}
+
 // doctorPendingConflicts counts the conflict artifacts the merge drivers and
 // consolidation wrote: state field conflicts, registry claim conflicts and
-// merge manifests. They are kept in the data repository on purpose — they are
-// the audit of what each machine could not decide alone — so a non-zero count
-// is a warning to reconcile them, never a failure.
+// pending merge manifests. An applied manifest is the audit of a finished
+// consolidation and is not counted. The artifacts are kept in the data
+// repository on purpose — they are the audit of what each machine could not
+// decide alone — so a non-zero count is a warning to reconcile them, never a
+// failure.
 func (a *App) doctorPendingConflicts(_ context.Context) DoctorCheck {
 	if a.cfg.Mode == config.ModeServer || strings.TrimSpace(a.cfg.DataDir) == "" {
 		return DoctorCheck{Name: "conflicts", Status: doctorOK, Message: "not used in this mode"}
@@ -817,7 +943,7 @@ func (a *App) doctorPendingConflicts(_ context.Context) DoctorCheck {
 	stateCount := len(globFiles(filepath.Join(dataDir, "projects", "*", stateConflictDir), ".md")) +
 		len(globFiles(filepath.Join(dataDir, "projects", "*", "notes", notesConflictDir), ".md"))
 	registryCount := len(globFiles(filepath.Join(dataDir, registryConflictDir), ".md"))
-	manifestCount := len(globFiles(filepath.Join(dataDir, mergeManifestDir), ".json"))
+	manifestCount := len(pendingMergeManifests(dataDir))
 	total := stateCount + registryCount + manifestCount
 	if total == 0 {
 		return DoctorCheck{Name: "conflicts", Status: doctorOK, Message: "no pending conflict artifacts"}

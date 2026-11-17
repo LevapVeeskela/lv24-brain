@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -53,7 +54,49 @@ type mergeManifestFile struct {
 	BeforeBase64  string `json:"before_base64,omitempty"`
 	BeforeMissing bool   `json:"before_missing,omitempty"`
 	MovedTo       string `json:"moved_to,omitempty"`
+	// After is the full on-disk identity of the applied result. Old manifests
+	// have no stamp; their rollback falls back to the hash checks.
+	After mergeFileStamp `json:"after,omitzero"`
 }
+
+// mergeFileStamp is the on-disk identity of a merge target: existence plus
+// SHA-256, size and modification time. Apply and rollback compare it under the
+// per-file lock before writing, so a plan built against other bytes is refused
+// instead of overwriting newer work.
+type mergeFileStamp struct {
+	Exists  bool      `json:"exists,omitempty"`
+	SHA256  string    `json:"sha256,omitempty"`
+	Size    int64     `json:"size,omitempty"`
+	ModTime time.Time `json:"mtime,omitzero"`
+}
+
+// StalePlanError reports that the files a merge plan or merge rollback targets
+// changed after the plan was computed. Nothing was written. It unwraps to
+// domain.ErrConflict and carries the "stale_plan" code for machine callers.
+type StalePlanError struct {
+	Operation   string
+	Paths       []string
+	Fingerprint string
+}
+
+// Error implements error.
+func (e *StalePlanError) Error() string {
+	message := "stale_plan: " + e.Operation + " refused because the records changed since the plan was shown; nothing was written, run the plan again"
+	if len(e.Paths) > 0 {
+		message += ": " + strings.Join(e.Paths, ", ")
+	}
+	if e.Fingerprint != "" {
+		message += " (plan " + e.Fingerprint + ")"
+	}
+	return message
+}
+
+// Unwrap maps a stale plan to the domain conflict sentinel so existing error
+// branching keeps working.
+func (e *StalePlanError) Unwrap() error { return domain.ErrConflict }
+
+// Code returns the stable machine-readable code of the refusal.
+func (e *StalePlanError) Code() string { return "stale_plan" }
 
 // ApplyMerge writes a merge plan in two phases: the manifest is published
 // before the first record changes, and every byte the merge replaced is stored
@@ -82,8 +125,25 @@ func (s *Store) ApplyMerge(ctx context.Context, plan ports.MergePlan) (ports.Mer
 		return ports.MergeOutcome{}, nil
 	}
 	if plan.Fingerprint != "" && work.plan.Fingerprint != plan.Fingerprint {
-		return ports.MergeOutcome{}, fmt.Errorf("merge %s: the records changed since the plan was shown, run the merge again: %w",
-			plan.Survivor.ID, domain.ErrConflict)
+		return ports.MergeOutcome{}, fmt.Errorf("merge %s: %w", plan.Survivor.ID, &StalePlanError{
+			Operation: "merge apply", Fingerprint: plan.Fingerprint,
+		})
+	}
+	stamps, err := planMergeStamps(work.files)
+	if err != nil {
+		return ports.MergeOutcome{}, fmt.Errorf("merge %s: %w", plan.Survivor.ID, err)
+	}
+	// Every target takes its own lock before the plan is re-checked, so a
+	// writer that changed a file after the plan was computed is refused
+	// instead of being overwritten. Locks are taken in sorted order, which
+	// keeps concurrent merges from deadlocking on each other.
+	release, err := lockMergePaths(ctx, mergeWorkLockPaths(work.files))
+	if err != nil {
+		return ports.MergeOutcome{}, err
+	}
+	defer release()
+	if err := s.verifyMergeStamps(stamps); err != nil {
+		return ports.MergeOutcome{}, fmt.Errorf("merge %s: %w", plan.Survivor.ID, err)
 	}
 	manifest := s.newMergeManifest(work)
 	manifestPath, err := s.writeMergeManifest(manifest)
@@ -97,6 +157,9 @@ func (s *Store) ApplyMerge(ctx context.Context, plan ports.MergePlan) (ports.Mer
 		_ = s.rewriteMergeManifest(manifestPath, manifest)
 		return outcome, applyErr
 	}
+	// Record what the merge actually wrote, so a rollback can prove the files
+	// are still the applied result and not a newer edit.
+	s.stampAppliedMergeFiles(manifest)
 	manifest.Status = mergeManifestApplied
 	if err := s.rewriteMergeManifest(manifestPath, manifest); err != nil {
 		// The merge happened; a manifest that could not be re-stamped still
@@ -126,20 +189,37 @@ func (s *Store) RollbackMerge(ctx context.Context, manifestRef string) (ports.Ro
 		outcome.AlreadyRolledBack = true
 		return outcome, nil
 	}
+	lockPaths, err := s.mergeManifestLockPaths(manifest.Files)
+	if err != nil {
+		return outcome, err
+	}
+	release, err := lockMergePaths(ctx, lockPaths)
+	if err != nil {
+		return outcome, err
+	}
+	defer release()
 	var conflicts []string
+	var stale []string
 	for _, file := range manifest.Files {
 		conflict, err := s.mergeRollbackConflict(file)
 		if err != nil {
 			return outcome, err
 		}
+		if conflict == "" {
+			conflict, err = s.mergeRollbackStampConflict(file)
+			if err != nil {
+				return outcome, err
+			}
+		}
 		if conflict != "" {
 			conflicts = append(conflicts, conflict)
+			stale = append(stale, file.Path)
 		}
 	}
 	if len(conflicts) > 0 {
 		outcome.Conflicts = conflicts
-		return outcome, fmt.Errorf("merge rollback %s refused, files changed since the merge: %w",
-			s.manifestRef(path), domain.ErrConflict)
+		return outcome, fmt.Errorf("merge rollback %s refused, files changed since the merge: %s: %w",
+			s.manifestRef(path), strings.Join(conflicts, "; "), &StalePlanError{Operation: "merge rollback", Paths: stale})
 	}
 	for _, file := range manifest.Files {
 		if err := s.restoreMergeFile(file); err != nil {
@@ -450,4 +530,223 @@ func hashFile(path string) (string, bool, error) {
 		return "", false, fmt.Errorf("fsstore: read %s: %w", path, err)
 	}
 	return hashBytes(raw), true, nil
+}
+
+// captureMergeStamp reads the current identity of a merge target. A missing
+// file is a valid identity (Exists false), so a plan that creates a file can
+// still be verified.
+func captureMergeStamp(path string) (mergeFileStamp, error) {
+	info, err := os.Stat(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return mergeFileStamp{}, nil
+		}
+		return mergeFileStamp{}, fmt.Errorf("fsstore: inspect merge target %s: %w", path, err)
+	}
+	if info.IsDir() {
+		return mergeFileStamp{}, domain.NewValidationError("merge.target", path+" is a directory")
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return mergeFileStamp{}, nil
+		}
+		return mergeFileStamp{}, fmt.Errorf("fsstore: read merge target %s: %w", path, err)
+	}
+	return mergeFileStamp{
+		Exists: true, SHA256: hashBytes(raw), Size: int64(len(raw)), ModTime: info.ModTime().UTC(),
+	}, nil
+}
+
+// sameMergeStamp reports whether two identities name the same unchanged file.
+func sameMergeStamp(a, b mergeFileStamp) bool {
+	if a.Exists != b.Exists {
+		return false
+	}
+	if !a.Exists {
+		return true
+	}
+	return a.SHA256 == b.SHA256 && a.Size == b.Size && a.ModTime.Equal(b.ModTime)
+}
+
+// mergeTargetStamp is one expected on-disk identity and the label used in
+// refusal messages.
+type mergeTargetStamp struct {
+	path  string
+	label string
+	stamp mergeFileStamp
+}
+
+// planMergeStamps records every target right after the plan was built and
+// refuses the plan when a file no longer matches the bytes it was planned
+// against. A move destination must still be free. The apply re-checks these
+// stamps under the per-file lock.
+func planMergeStamps(files []*mergeFileWork) ([]mergeTargetStamp, error) {
+	stamps := make([]mergeTargetStamp, 0, len(files)*2)
+	var stale []string
+	for _, file := range files {
+		stamp, err := captureMergeStamp(file.absPath)
+		if err != nil {
+			return nil, err
+		}
+		switch {
+		case file.beforeMissing:
+			if stamp.Exists {
+				stale = append(stale, file.relPath)
+				continue
+			}
+		case !stamp.Exists, stamp.SHA256 != hashBytes(file.before):
+			stale = append(stale, file.relPath)
+			continue
+		}
+		stamps = append(stamps, mergeTargetStamp{path: file.absPath, label: file.relPath, stamp: stamp})
+		if file.moveToAbs == "" {
+			continue
+		}
+		destination, err := captureMergeStamp(file.moveToAbs)
+		if err != nil {
+			return nil, err
+		}
+		if destination.Exists {
+			stale = append(stale, file.movedTo)
+			continue
+		}
+		stamps = append(stamps, mergeTargetStamp{path: file.moveToAbs, label: file.movedTo, stamp: destination})
+	}
+	if len(stale) > 0 {
+		return nil, &StalePlanError{Operation: "merge apply", Paths: stale}
+	}
+	return stamps, nil
+}
+
+// verifyMergeStamps re-reads every target while its lock is held and reports a
+// stale plan when sha256, size or mtime differs from the recorded identity.
+func (s *Store) verifyMergeStamps(stamps []mergeTargetStamp) error {
+	var stale []string
+	for _, target := range stamps {
+		current, err := captureMergeStamp(target.path)
+		if err != nil {
+			return err
+		}
+		if !sameMergeStamp(target.stamp, current) {
+			stale = append(stale, target.label)
+		}
+	}
+	if len(stale) > 0 {
+		return &StalePlanError{Operation: "merge apply", Paths: stale}
+	}
+	return nil
+}
+
+// lockMergePaths takes the per-file lock of every path, in sorted order, and
+// returns one release function. Sorting makes concurrent merges acquire the
+// same set in the same order, so they cannot deadlock.
+func lockMergePaths(ctx context.Context, paths []string) (func(), error) {
+	unique := make([]string, 0, len(paths))
+	seen := make(map[string]struct{}, len(paths))
+	for _, path := range paths {
+		if path == "" {
+			continue
+		}
+		if _, ok := seen[path]; ok {
+			continue
+		}
+		seen[path] = struct{}{}
+		unique = append(unique, path)
+	}
+	sort.Strings(unique)
+	releases := make([]func(), 0, len(unique))
+	releaseAll := func() {
+		for i := len(releases) - 1; i >= 0; i-- {
+			releases[i]()
+		}
+	}
+	for _, path := range unique {
+		release, err := acquireFileLock(ctx, path)
+		if err != nil {
+			releaseAll()
+			return nil, err
+		}
+		releases = append(releases, release)
+	}
+	return releaseAll, nil
+}
+
+// mergeWorkLockPaths lists every file an apply writes, including trash targets.
+func mergeWorkLockPaths(files []*mergeFileWork) []string {
+	paths := make([]string, 0, len(files)*2)
+	for _, file := range files {
+		paths = append(paths, file.absPath)
+		if file.moveToAbs != "" {
+			paths = append(paths, file.moveToAbs)
+		}
+	}
+	return paths
+}
+
+// mergeManifestLockPaths lists every file a rollback restores.
+func (s *Store) mergeManifestLockPaths(files []mergeManifestFile) ([]string, error) {
+	paths := make([]string, 0, len(files)*2)
+	for _, file := range files {
+		for _, rel := range []string{file.Path, file.MovedTo} {
+			if rel == "" {
+				continue
+			}
+			abs, err := s.manifestPath(rel)
+			if err != nil {
+				return nil, err
+			}
+			paths = append(paths, abs)
+		}
+	}
+	return paths, nil
+}
+
+// mergeRollbackStampConflict reports a target whose recorded applied identity
+// no longer matches the disk. A file already restored by an interrupted
+// rollback has a different hash and is left to mergeRollbackConflict.
+func (s *Store) mergeRollbackStampConflict(file mergeManifestFile) (string, error) {
+	if file.After.SHA256 == "" {
+		return "", nil
+	}
+	rel := file.Path
+	if file.MovedTo != "" {
+		rel = file.MovedTo
+	}
+	abs, err := s.manifestPath(rel)
+	if err != nil {
+		return "", err
+	}
+	current, err := captureMergeStamp(abs)
+	if err != nil {
+		return "", err
+	}
+	if !current.Exists || current.SHA256 != file.After.SHA256 {
+		return file.Path + " changed after the merge", nil
+	}
+	if current.Size != file.After.Size || !current.ModTime.Equal(file.After.ModTime) {
+		return file.Path + " changed after the merge", nil
+	}
+	return "", nil
+}
+
+// stampAppliedMergeFiles records the identity of what the merge wrote, so a
+// later rollback can prove the files were not edited since.
+func (s *Store) stampAppliedMergeFiles(manifest *mergeManifest) {
+	for i := range manifest.Files {
+		file := &manifest.Files[i]
+		rel := file.Path
+		if file.MovedTo != "" {
+			rel = file.MovedTo
+		}
+		abs, err := s.manifestPath(rel)
+		if err != nil {
+			continue
+		}
+		stamp, err := captureMergeStamp(abs)
+		if err != nil {
+			continue
+		}
+		file.After = stamp
+	}
 }

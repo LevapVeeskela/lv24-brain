@@ -668,6 +668,21 @@ func (b mcpBackend) SetState(ctx context.Context, in mcpserver.StateInput) (mcps
 	return toMCPState(state), nil
 }
 
+// SetStateIfRevision implements mcpserver.StateRevisionBackend: the revision
+// check and the write happen under the same lock, so two MCP agents cannot
+// both pass an advisory read-then-write check.
+func (b mcpBackend) SetStateIfRevision(ctx context.Context, in mcpserver.StateInput, expected string) (mcpserver.State, error) {
+	state, err := b.app.SetStateIfRevision(ctx, app.StateInput{
+		ProjectID: in.ProjectID, Goal: in.Goal, NextAction: in.NextAction,
+		Active: in.Active, Blocked: in.Blocked, OpenQuestions: in.OpenQuestions, FreshUntil: in.FreshUntil,
+		Provenance: b.writeProvenance(),
+	}, expected)
+	if err != nil {
+		return mcpserver.State{}, err
+	}
+	return toMCPState(state), nil
+}
+
 func toMCPState(state domain.State) mcpserver.State {
 	nonNil := func(values []string) []string {
 		if values == nil {

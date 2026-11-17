@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 const (
@@ -42,11 +43,44 @@ func (f agentHookFixture) installAll(t *testing.T) {
 	}
 }
 
+// dataDir sits outside home so a trust file never changes the home layout
+// assertions.
+func (f agentHookFixture) dataDir() string {
+	return filepath.Join(filepath.Dir(f.home), "brain")
+}
+
 func runAgentHooksForTest(t *testing.T, home, exe, cfg string, check bool) (int, string, string) {
 	t.Helper()
+	return runAgentHooksHostsForTest(t, home, exe, cfg, check)
+}
+
+func runAgentHooksHostsForTest(t *testing.T, home, exe, cfg string, check bool, hosts ...string) (int, string, string) {
+	t.Helper()
 	var stdout, stderr bytes.Buffer
-	code := syncAgentHooks(home, exe, cfg, check, &stdout, &stderr)
+	code := syncAgentHooks(agentHookSyncOptions{
+		home:    home,
+		exe:     exe,
+		cfg:     cfg,
+		dataDir: filepath.Join(filepath.Dir(home), "brain"),
+		check:   check,
+		hosts:   hosts,
+	}, &stdout, &stderr)
 	return code, stdout.String(), stderr.String()
+}
+
+// writeHookStatusConfig creates a minimal brain.yaml for agent hook status.
+func writeHookStatusConfig(t *testing.T, f agentHookFixture) string {
+	t.Helper()
+	dataDir := f.dataDir()
+	if err := os.MkdirAll(dataDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfgPath := filepath.Join(dataDir, "brain.yaml")
+	content := "mode: local\ndata_dir: " + filepath.ToSlash(dataDir) + "\n"
+	if err := os.WriteFile(cfgPath, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return cfgPath
 }
 
 // agentHookCommands returns the commands under hooks.<event> for a JSON file.
@@ -349,5 +383,231 @@ func TestJSONObjectRoundTripKeepsValues(t *testing.T) {
 	}
 	if strings.Index(out, `"n"`) > strings.Index(out, `"nest"`) {
 		t.Error("key order changed")
+	}
+}
+
+// HOK-1: a missing ~/.claude/settings.json is created when the directory
+// exists, and --check names created, installed and not installed with paths.
+func TestAgentHooksCreatesClaudeSettingsWhenDirExists(t *testing.T) {
+	f := newAgentHookFixture(t)
+	if err := os.MkdirAll(filepath.Dir(f.claude), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	code, stdout, stderr := runAgentHooksForTest(t, f.home, hookTestExe, hookTestCfg, true)
+	if code != 1 {
+		t.Fatalf("--check exit = %d, want 1 (stderr: %s)", code, stderr)
+	}
+	if !strings.Contains(stdout, "would create "+f.claude+"\n") {
+		t.Errorf("--check must report the created settings.json path:\n%s", stdout)
+	}
+	if _, err := os.Stat(f.claude); !os.IsNotExist(err) {
+		t.Fatal("--check created settings.json")
+	}
+
+	code, stdout, stderr = runAgentHooksForTest(t, f.home, hookTestExe, hookTestCfg, false)
+	if code != 0 {
+		t.Fatalf("sync exit = %d (stderr: %s)", code, stderr)
+	}
+	if !strings.Contains(stdout, "updated "+f.claude+"\n") {
+		t.Errorf("sync did not report settings.json:\n%s", stdout)
+	}
+	if got := agentHookCommands(t, f.claude, "SessionStart"); len(got) != 1 ||
+		got[0] != `"C:/tools/brain/brain.exe" session start --hook claude --config C:/data/brain.yaml` {
+		t.Errorf("SessionStart commands = %q", got)
+	}
+
+	code, stdout, _ = runAgentHooksForTest(t, f.home, hookTestExe, hookTestCfg, true)
+	if code != 0 {
+		t.Fatalf("--check after install exit = %d:\n%s", code, stdout)
+	}
+	if !strings.Contains(stdout, "installed "+f.claude+"\n") {
+		t.Errorf("--check must report installed with the path:\n%s", stdout)
+	}
+	if !strings.Contains(stdout, "not installed (Codex not installed) "+f.codex+"\n") ||
+		!strings.Contains(stdout, "not installed (OpenCode not installed) "+f.opencode) {
+		t.Errorf("--check must report not installed with paths:\n%s", stdout)
+	}
+}
+
+// An explicitly selected host is installed even when its config directory is
+// absent, and the other hosts are reported as not selected.
+func TestAgentHooksSelectedHostCreatesMissingDir(t *testing.T) {
+	f := newAgentHookFixture(t)
+
+	code, stdout, stderr := runAgentHooksHostsForTest(t, f.home, hookTestExe, hookTestCfg, false, "claude")
+	if code != 0 {
+		t.Fatalf("exit = %d (stderr: %s)", code, stderr)
+	}
+	if !strings.Contains(stdout, "updated "+f.claude+"\n") ||
+		!strings.Contains(stdout, "skipped (not selected: codex) "+f.codex+"\n") {
+		t.Errorf("selected host output:\n%s", stdout)
+	}
+	if _, err := os.Stat(f.claude); err != nil {
+		t.Fatalf("settings.json not created: %v", err)
+	}
+	if _, err := os.Stat(f.codex); !os.IsNotExist(err) {
+		t.Error("an unselected host must not be installed")
+	}
+}
+
+// HOK-5: a moved executable changes the Codex command, so the old approval is
+// stale and the owner must be told to re-approve.
+func TestCodexTrustDriftReportsChangedExe(t *testing.T) {
+	f := newAgentHookFixture(t)
+	f.installAll(t)
+
+	if code, _, stderr := runAgentHooksForTest(t, f.home, hookTestExe, hookTestCfg, false); code != 0 {
+		t.Fatalf("first sync exit = %d (stderr: %s)", code, stderr)
+	}
+	code, stdout, stderr := runAgentHooksForTest(t, f.home, "C:/moved/brain.exe", hookTestCfg, false)
+	if code != 0 {
+		t.Fatalf("second sync exit = %d (stderr: %s)", code, stderr)
+	}
+	if !strings.Contains(stdout, "updated "+f.codex+"\n") {
+		t.Errorf("changed exe must update hooks.json:\n%s", stdout)
+	}
+	for _, want := range []string{"trust hash", "re-approve", "sha256:"} {
+		if !strings.Contains(stderr, want) {
+			t.Errorf("drift warning missing %q:\n%s", want, stderr)
+		}
+	}
+	state := loadAgentHookTrust(f.dataDir())
+	desired := ""
+	for _, target := range agentHookTargets(f.home, "C:/moved/brain.exe", hookTestCfg) {
+		if target.host == "codex" {
+			desired = agentHookTrustHash(target, "C:/moved/brain.exe", hookTestCfg)
+		}
+	}
+	if desired == "" || state.Hosts["codex"].Hash != desired {
+		t.Errorf("the new Codex trust hash was not recorded: state=%q desired=%q", state.Hosts["codex"].Hash, desired)
+	}
+}
+
+// HOK-3: hooks status reports installed, the Codex trust hash, last run and
+// last error per host.
+func TestHooksStatusAgentsReportsHosts(t *testing.T) {
+	t.Setenv("BRAIN_HOOK_OFF", "")
+	f := newAgentHookFixture(t)
+	f.installAll(t)
+	cfgPath := writeHookStatusConfig(t, f)
+	if code, _, stderr := runAgentHooksForTest(t, f.home, hookTestExe, cfgPath, false); code != 0 {
+		t.Fatalf("sync exit = %d (stderr: %s)", code, stderr)
+	}
+	appendHookLog(f.dataDir(), hookLogEntry{
+		Time: time.Now().UTC(), Host: "claude", Event: "session.end", Exit: 0,
+	})
+	appendHookLog(f.dataDir(), hookLogEntry{
+		Time: time.Now().UTC(), Host: "claude", Event: "session.start", Exit: 0,
+		Error: "brain session start: token=supersecret boom",
+	})
+
+	var stdout, stderr bytes.Buffer
+	code := runHooksStatus([]string{"--agents", "--home", f.home, "--config", cfgPath}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("hooks status --agents exit = %d (stderr: %s)", code, stderr.String())
+	}
+	out := stdout.String()
+	for _, want := range []string{
+		"installed", "trust approved sha256:", "last run", "last error: brain session start: token=<redacted> boom",
+		f.claude, f.codex, f.opencode,
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("status missing %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "supersecret") {
+		t.Error("status leaked a secret from the hook log")
+	}
+
+	stdout.Reset()
+	if code := runHooksStatus([]string{"--agents", "--json", "--home", f.home, "--config", cfgPath}, &stdout, &stderr); code != 0 {
+		t.Fatalf("hooks status --agents --json exit = %d", code)
+	}
+	var envelope struct {
+		Data agentHooksStatusReport `json:"data"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &envelope); err != nil {
+		t.Fatalf("decode status JSON: %v\n%s", err, stdout.String())
+	}
+	if len(envelope.Data.Hosts) != 3 {
+		t.Fatalf("hosts = %+v", envelope.Data.Hosts)
+	}
+	for _, host := range envelope.Data.Hosts {
+		if !host.Installed {
+			t.Errorf("%s is not installed: %s", host.Host, host.Detail)
+		}
+		if host.Host == "codex" && (host.Trusted == nil || !*host.Trusted || host.Trust != "approved") {
+			t.Errorf("codex trust = %+v", host)
+		}
+		if host.Host == "claude" && (host.LastRun == nil || host.LastError == "") {
+			t.Errorf("claude run log missing: %+v", host)
+		}
+	}
+}
+
+// An externally edited hooks.json is trust drift, and status says how to fix it.
+func TestHooksStatusAgentsReportsTrustDrift(t *testing.T) {
+	f := newAgentHookFixture(t)
+	f.installAll(t)
+	cfgPath := writeHookStatusConfig(t, f)
+	if code, _, stderr := runAgentHooksForTest(t, f.home, hookTestExe, cfgPath, false); code != 0 {
+		t.Fatalf("sync exit = %d (stderr: %s)", code, stderr)
+	}
+	agentsWrite(t, f.codex, `{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"\"D:/other/brain.exe\" session start --hook codex --config C:/data/brain.yaml"}]}]}}`)
+
+	var stdout, stderr bytes.Buffer
+	if code := runHooksStatus([]string{"--agents", "--home", f.home, "--config", cfgPath}, &stdout, &stderr); code != 0 {
+		t.Fatalf("exit = %d (stderr: %s)", code, stderr.String())
+	}
+	for _, want := range []string{"trust drift", "re-approve", f.codex} {
+		if !strings.Contains(stdout.String(), want) {
+			t.Errorf("status missing %q:\n%s", want, stdout.String())
+		}
+	}
+}
+
+// HOK-2: the liveness log is one JSON line per hook run, redacts secrets and
+// is disabled by BRAIN_HOOK_OFF.
+func TestHookLogAppendsRedactsAndHonorsKillSwitch(t *testing.T) {
+	dataDir := t.TempDir()
+	t.Setenv("BRAIN_HOOK_OFF", "")
+	appendHookLog(dataDir, hookLogEntry{
+		Time: time.Now().UTC(), Host: "codex", Event: "session.end",
+		DurationMS: 12, Exit: 0, Error: "brain session end: password=hunter2 failed",
+	})
+	entries := readHookLog(dataDir)
+	if len(entries) != 1 {
+		t.Fatalf("entries = %+v", entries)
+	}
+	if entries[0].Host != "codex" || entries[0].Event != "session.end" ||
+		entries[0].DurationMS != 12 || entries[0].Exit != 0 {
+		t.Errorf("entry = %+v", entries[0])
+	}
+	if strings.Contains(entries[0].Error, "hunter2") || !strings.Contains(entries[0].Error, "<redacted>") {
+		t.Errorf("secret not redacted: %q", entries[0].Error)
+	}
+	raw, err := os.ReadFile(hookLogPath(dataDir))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lines := strings.Count(string(raw), "\n"); lines != 1 {
+		t.Errorf("log lines = %d, want 1 per invocation", lines)
+	}
+
+	t.Setenv("BRAIN_HOOK_OFF", "1")
+	appendHookLog(dataDir, hookLogEntry{Host: "claude", Event: "session.end"})
+	if entries := readHookLog(dataDir); len(entries) != 1 {
+		t.Errorf("BRAIN_HOOK_OFF=1 still appended: %+v", entries)
+	}
+}
+
+func TestRedactHookErrorKeepsFirstLine(t *testing.T) {
+	got := redactHookError("first glpat-abcdefgh12345678 line\nsecond line")
+	if strings.Contains(got, "glpat-abcdefgh12345678") || strings.Contains(got, "second line") {
+		t.Errorf("redact = %q", got)
+	}
+	if !strings.HasPrefix(got, "first ") {
+		t.Errorf("redact dropped the first line: %q", got)
 	}
 }

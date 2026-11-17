@@ -15,8 +15,10 @@ import (
 
 const (
 	FormatName    = "lv24-exchange"
-	FormatVersion = "1.0"
-	EntryVersion  = 1
+	FormatVersion = "2.0"
+	// MinFormatVersion is the oldest bundle this build still imports.
+	MinFormatVersion = "1.0"
+	EntryVersion     = 2
 )
 
 // Source is the store capability required by the exchange package.
@@ -84,6 +86,7 @@ type RecordEntry struct {
 	TopicHistory   domain.TopicHistory   `json:"topicHistory,omitempty"`
 	Relations      domain.RelationList   `json:"relations,omitempty"`
 	ReviewSchedule domain.ReviewSchedule `json:"reviewSchedule,omitempty"`
+	Pinned         bool                  `json:"pinned,omitempty"`
 	CreatedAt      time.Time             `json:"createdAt,omitzero"`
 	UpdatedAt      time.Time             `json:"updatedAt,omitzero"`
 	// Decision fields
@@ -121,8 +124,15 @@ type ProjectEntry struct {
 	Kind          domain.ProjectKind `json:"kind"`
 	RepoURL       string             `json:"repoUrl,omitempty"`
 	DefaultBranch string             `json:"defaultBranch,omitempty"`
-	CreatedAt     time.Time          `json:"createdAt,omitzero"`
-	UpdatedAt     time.Time          `json:"updatedAt,omitzero"`
+	// PathProvenance is the machine id that registered each checkout path.
+	// Registries written before path provenance have no key and import as a
+	// project without owners.
+	PathProvenance map[string]string `json:"path_provenance,omitempty"`
+	// Pinned is written on every v2 project line so a bundle always carries the
+	// key, even though the registry has no project-level pin yet.
+	Pinned    bool      `json:"pinned"`
+	CreatedAt time.Time `json:"createdAt,omitzero"`
+	UpdatedAt time.Time `json:"updatedAt,omitzero"`
 }
 
 // TombstoneEntry placeholder.
@@ -204,7 +214,8 @@ func MarshalLine(v any) ([]byte, error) {
 	return append(b, '\n'), nil
 }
 
-// ValidateManifestVersion checks major version.
+// ValidateManifestVersion checks the major version. v1 bundles stay readable;
+// v2 adds path provenance, pin state and per-entry revisions.
 func ValidateManifestVersion(v string) error {
 	if v == "" {
 		return fmt.Errorf("missing format version")
@@ -213,8 +224,28 @@ func ValidateManifestVersion(v string) error {
 	if i := strings.IndexByte(v, '.'); i >= 0 {
 		major = v[:i]
 	}
-	if major != "1" {
-		return fmt.Errorf("unsupported format version %s (want 1.x)", v)
+	switch major {
+	case "1", "2":
+		return nil
+	default:
+		return fmt.Errorf("unsupported format version %s (want 1.x or 2.x)", v)
 	}
-	return nil
+}
+
+// contentHashAt recomputes an entry's content hash as the given bundle version
+// defines it. A v1 entry has no pinned key, so pin state is not part of its
+// hash; without this a v1 bundle would look changed after one import.
+func contentHashAt(e RecordEntry, version int) string {
+	if version < 2 {
+		e.Pinned = false
+		e.V = 1
+	}
+	return contentHashOf(e)
+}
+
+func entryVersion(v int) int {
+	if v <= 0 {
+		return 1
+	}
+	return v
 }

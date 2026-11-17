@@ -66,12 +66,28 @@ type fileLock struct {
 // called (defer it); it removes the lock only while the file still carries
 // this acquisition's token.
 func acquireFileLock(ctx context.Context, target string) (func(), error) {
+	return acquireFileLockPath(ctx, target+lockFileSuffix)
+}
+
+// AcquirePathLock takes the owner-aware lock file at lockPath verbatim (it must
+// already end in ".lock"). It is the shared primitive behind Store.LockSync and
+// the git provider's publish lock, so a data-store sync and a publish contend
+// on the same file with the same pid, host and TTL rules and neither can steal
+// or delete the other's lock.
+func AcquirePathLock(ctx context.Context, lockPath string) (func(), error) {
+	if !strings.HasSuffix(lockPath, lockFileSuffix) {
+		return nil, fmt.Errorf("fsstore: lock path %s must end in %s", lockPath, lockFileSuffix)
+	}
+	return acquireFileLockPath(ctx, lockPath)
+}
+
+// acquireFileLockPath is the implementation of every owner-aware lock.
+func acquireFileLockPath(ctx context.Context, lockPath string) (func(), error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	lockPath := target + lockFileSuffix
 	if err := os.MkdirAll(filepath.Dir(lockPath), 0o755); err != nil {
-		return nil, fmt.Errorf("fsstore: create lock directory for %s: %w", target, err)
+		return nil, fmt.Errorf("fsstore: create lock directory for %s: %w", lockPath, err)
 	}
 	owner, err := newFileLock()
 	if err != nil {
@@ -79,7 +95,7 @@ func acquireFileLock(ctx context.Context, target string) (func(), error) {
 	}
 	payload, err := json.Marshal(owner)
 	if err != nil {
-		return nil, fmt.Errorf("fsstore: encode lock for %s: %w", target, err)
+		return nil, fmt.Errorf("fsstore: encode lock for %s: %w", lockPath, err)
 	}
 	deadline := time.Now().Add(fileLockTimeout)
 	backoff := fileLockRetryMin

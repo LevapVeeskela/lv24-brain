@@ -83,6 +83,11 @@ type Source struct {
 // connection settings and the access token is held only by the credential
 // provider.
 //
+// PersonalData is set because commit items embed the author as
+// "Name <author_email>": the ingest policy replaces every e-mail address with a
+// stable per-connection placeholder, so a shared raw zone never publishes the
+// address even though GitLab items stay shared by default.
+//
 // Streams is deliberately empty: checkpoint streams are per project
 // (p-<project hash>-issues|merge_requests|commits) because one connection may
 // read several projects, so there is no provider-wide stream list the host
@@ -93,6 +98,7 @@ func Descriptor() domain.SourceDescriptor {
 		DisplayName:    "GitLab",
 		Capabilities:   domain.Capabilities{Backfill: true, Incremental: true, AuthModes: []domain.AuthMode{domain.AuthToken, domain.AuthOAuthPKCE}},
 		DefaultPublish: domain.PublishShared,
+		PersonalData:   true,
 		ConfigFields: []domain.ConfigField{
 			{Key: "projects", Label: "Projects", Required: true, Help: "Comma-separated GitLab project paths or numeric IDs."},
 			{Key: "token", Label: "Personal access token", Required: true, Secret: true},

@@ -3,9 +3,12 @@ package mcpserver
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/levapveeskela/lv24-brain/internal/domain"
 )
 
 type stateFake struct {
@@ -82,6 +85,81 @@ func TestMCPServerStateTool(t *testing.T) {
 	}
 	if got = callTool(t, backend, "brain_state", `{"action":"get","goal":"x"}`); got["isError"] != true {
 		t.Fatalf("action=get accepted a set field: %+v", got)
+	}
+}
+
+// stateConflict is the typed conflict a CAS backend returns; it unwraps to
+// domain.ErrConflict like app.StateRevisionConflict.
+type stateConflict struct{ current string }
+
+func (e stateConflict) Error() string { return "state changed since revision " + e.current }
+func (e stateConflict) Unwrap() error { return domain.ErrConflict }
+
+// stateCASFake implements StateRevisionBackend: the revision check and the
+// write happen in one call, as a two-process writer test requires.
+type stateCASFake struct {
+	stateFake
+	atomic int
+	plain  int
+}
+
+func (f *stateCASFake) SetState(ctx context.Context, in StateInput) (State, error) {
+	f.plain++
+	return f.stateFake.SetState(ctx, in)
+}
+
+func (f *stateCASFake) SetStateIfRevision(_ context.Context, in StateInput, expected string) (State, error) {
+	f.atomic++
+	current := f.state.Revision
+	if current == "" {
+		current = stateRevision(f.state)
+	}
+	if expected != current {
+		return State{}, stateConflict{current: current}
+	}
+	f.last = in
+	if in.Goal != nil {
+		f.state.Goal = *in.Goal
+	}
+	if in.NextAction != nil {
+		f.state.NextAction = *in.NextAction
+	}
+	f.state.ProjectID = in.ProjectID
+	f.state.Revision = fmt.Sprintf("rev-%d", f.atomic+1)
+	return f.state, nil
+}
+
+func TestMCPServerStateUsesAtomicRevisionWrite(t *testing.T) {
+	backend := &stateCASFake{stateFake: stateFake{state: State{Goal: "old goal", Revision: "rev-1"}}}
+
+	got := callTool(t, backend, "brain_state",
+		`{"action":"set","project":"alpha","goal":"new goal","expected_revision":"rev-1"}`)
+	if got["isError"] == true {
+		t.Fatalf("atomic state set refused: %+v", got)
+	}
+	if backend.atomic != 1 || backend.plain != 0 {
+		t.Fatalf("atomic=%d plain=%d, want the SetStateIfRevision path only", backend.atomic, backend.plain)
+	}
+	if backend.state.Goal != "new goal" || backend.state.Revision != "rev-2" {
+		t.Fatalf("state after the atomic write = %+v", backend.state)
+	}
+
+	// A second writer that still holds rev-1 must receive the CONFLICT shape
+	// and must not overwrite the first write.
+	stale := callTool(t, backend, "brain_state",
+		`{"action":"set","project":"alpha","next":"lost update","expected_revision":"rev-1"}`)
+	if stale["isError"] != true {
+		t.Fatalf("stale atomic write accepted: %+v", stale)
+	}
+	refusal := stale["structuredContent"].(map[string]any)
+	if refusal["code"] != RefusalConflict || refusal["current_revision"] != "rev-2" {
+		t.Fatalf("conflict refusal = %v", refusal)
+	}
+	if backend.state.Goal != "new goal" || backend.state.NextAction != "" {
+		t.Fatalf("a refused write changed the state: %+v", backend.state)
+	}
+	if backend.atomic != 2 || backend.plain != 0 {
+		t.Fatalf("atomic=%d plain=%d after the conflict", backend.atomic, backend.plain)
 	}
 }
 

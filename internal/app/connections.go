@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/levapveeskela/lv24-brain/internal/connectorbuild"
 	"github.com/levapveeskela/lv24-brain/internal/domain"
@@ -247,6 +248,143 @@ func safeMigrationCredentialError(ctx context.Context, operation string, ref Leg
 	// Backend errors can contain process output. Do not attach them (or values)
 	// to a report that a CLI/UI may print.
 	return fmt.Errorf("migration: %s credential failed for connection %q field %q", operation, ref.ConnectionID, ref.Field)
+}
+
+// Stable codes of a failed connection check, shared by the CLI exit report and
+// the local API error envelope. Clients branch on the code, not the message.
+const (
+	ConnectionCodeCredentialMissing = "credential_missing"
+	ConnectionCodeInvalid           = "connection_invalid"
+	ConnectionCodeUnsupported       = "connection_unsupported"
+	ConnectionCodeCheckFailed       = "connection_check_failed"
+	ConnectionCodeUnavailable       = "connection_unavailable"
+)
+
+// ConnectionFailure is the sanitized, stable description of a connection
+// failure. Message is fit for an end user; Cause is the redacted provider
+// detail and may be empty. Neither field ever contains a credential.
+type ConnectionFailure struct {
+	Code    string `json:"code"`
+	Message string `json:"message"`
+	Cause   string `json:"cause,omitempty"`
+}
+
+// SanitizeConnectorError turns a connector error into one redacted line fit
+// for CLI output, run listings, logs and API messages. It removes provider
+// credentials, collapses control characters and whitespace, and bounds the
+// length so a dump or a multi-line process error cannot flood a terminal.
+func SanitizeConnectorError(text string) string {
+	const maxRunes = 300
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return ""
+	}
+	text, _ = RedactIngest(text)
+	text = strings.Join(strings.Fields(text), " ")
+	if runes := []rune(text); len(runes) > maxRunes {
+		text = string(runes[:maxRunes]) + "..."
+	}
+	return text
+}
+
+// DescribeConnectionCheckError classifies a failed Source.Check. Providers
+// report a missing secret as domain.ErrNotFound, so that carries the specific
+// credential_missing code instead of a generic failure.
+func DescribeConnectionCheckError(err error) ConnectionFailure {
+	failure := ConnectionFailure{Code: ConnectionCodeCheckFailed, Message: "the provider check failed"}
+	switch {
+	case errors.Is(err, domain.ErrNotFound):
+		failure.Code = ConnectionCodeCredentialMissing
+		failure.Message = "the connection is missing a required credential"
+	case errors.Is(err, domain.ErrValidation):
+		failure.Code = ConnectionCodeInvalid
+		failure.Message = "the connection configuration is invalid"
+	case errors.Is(err, domain.ErrUnsupported):
+		failure.Code = ConnectionCodeUnsupported
+		failure.Message = "the connection provider is not supported"
+	}
+	if err != nil {
+		failure.Cause = SanitizeConnectorError(err.Error())
+		if failure.Cause == failure.Message {
+			failure.Cause = ""
+		}
+	}
+	return failure
+}
+
+// DescribeConnectionBuildError classifies a failure to construct the source
+// before Check runs. An unknown provider is unsupported, not missing data.
+func DescribeConnectionBuildError(err error) ConnectionFailure {
+	failure := ConnectionFailure{Code: ConnectionCodeUnavailable, Message: "the connection source could not be prepared"}
+	switch {
+	case errors.Is(err, domain.ErrValidation):
+		failure.Code = ConnectionCodeInvalid
+		failure.Message = "the connection configuration is invalid"
+	case errors.Is(err, domain.ErrNotFound), errors.Is(err, domain.ErrUnsupported):
+		failure.Code = ConnectionCodeUnsupported
+		failure.Message = "the connection provider is not supported"
+	}
+	if err != nil {
+		failure.Cause = SanitizeConnectorError(err.Error())
+		if failure.Cause == failure.Message {
+			failure.Cause = ""
+		}
+	}
+	return failure
+}
+
+// ConnectionRunSummary is the newest recorded run of one connection, reduced
+// to what a list view needs. Status is ok, failed or running.
+type ConnectionRunSummary struct {
+	StartedAt  time.Time  `json:"startedAt"`
+	FinishedAt *time.Time `json:"finishedAt,omitempty"`
+	Status     string     `json:"status"`
+	Error      string     `json:"error,omitempty"`
+}
+
+// ConnectionRunSummaries reads run history read-only and keeps the newest run
+// per connection. Legacy runs without a ConnectionID are ignored. Errors in
+// run records are sanitized before they can reach a terminal or API client.
+func ConnectionRunSummaries(ctx context.Context, runs ports.ConnectorRunStore, limit int) (map[string]ConnectionRunSummary, error) {
+	summaries := map[string]ConnectionRunSummary{}
+	if runs == nil {
+		return summaries, nil
+	}
+	if limit <= 0 {
+		limit = 200
+	}
+	stored, err := runs.ListConnectorRuns(ctx, "", limit)
+	if err != nil {
+		return nil, err
+	}
+	for _, run := range stored {
+		if run.ConnectionID == "" {
+			continue
+		}
+		if _, seen := summaries[run.ConnectionID]; seen {
+			continue
+		}
+		summaries[run.ConnectionID] = ConnectionRunSummary{
+			StartedAt:  run.StartedAt,
+			FinishedAt: run.FinishedAt,
+			Status:     connectionRunOutcome(run.Status),
+			Error:      SanitizeConnectorError(run.Error),
+		}
+	}
+	return summaries, nil
+}
+
+func connectionRunOutcome(status domain.ConnectorStatus) string {
+	switch status {
+	case domain.ConnectorFailed:
+		return "failed"
+	case domain.ConnectorRunning:
+		return "running"
+	case domain.ConnectorSuccess, domain.ConnectorPartial:
+		return "ok"
+	default:
+		return strings.TrimSpace(string(status))
+	}
 }
 
 func legacyConnectionSlug(conn domain.Connection) string {

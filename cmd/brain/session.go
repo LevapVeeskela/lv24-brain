@@ -33,8 +33,9 @@ const (
 )
 
 // hookInput is the subset of the JSON a coding agent passes to a session hook
-// on stdin (Claude Code: SessionStart / SessionEnd; Codex: SessionStart /
-// Stop, which carries the last assistant message).
+// on stdin. Claude Code and Codex pass SessionStart / SessionEnd (Codex also
+// Stop, which carries the last assistant message); the OpenCode plugin passes
+// the same SessionEnd shape so "Decision:" lines are captured too.
 type hookInput struct {
 	Cwd                  string `json:"cwd"`
 	TranscriptPath       string `json:"transcript_path"`
@@ -45,8 +46,9 @@ type hookInput struct {
 	HookEventName        string `json:"hook_event_name"`
 }
 
-// jsonHook reports hook protocols that pass JSON on stdin and expect the
-// Claude-style hookSpecificOutput on stdout (Claude Code and Codex share it).
+// jsonHook reports hook protocols that expect the Claude-style
+// hookSpecificOutput on stdout (Claude Code and Codex share it). OpenCode reads
+// the JSON input but expects plain-text session-start context.
 func jsonHook(hook string) bool {
 	return hook == "claude" || hook == "codex"
 }
@@ -60,32 +62,35 @@ type sessionOptions struct {
 
 // runSession implements `brain session start|end`, the handlers behind agent
 // session hooks. In hook mode it never fails the agent: problems go to stderr
-// and the exit code is 0; an unregistered directory is silently ignored.
+// and the exit code is 0; an unregistered directory is silently ignored. Every
+// hook invocation appends one line to <data_dir>/index/hooks.log.
 func runSession(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	if len(args) == 0 || (args[0] != "start" && args[0] != "end") {
 		fmt.Fprintln(stderr, "usage: brain session start|end [--hook claude|codex|opencode] [--cwd <dir>]")
 		return 2
 	}
 	action := args[0]
-	fs := newFlagSet("session "+action, stderr)
-	hook := fs.String("hook", "", "agent hook protocol: claude or codex (JSON on stdin), or opencode")
+	rec := &firstLineWriter{w: stderr}
+	fs := newFlagSet("session "+action, rec)
+	hook := fs.String("hook", "", "agent hook protocol: claude or codex (JSON output), opencode; all read JSON on stdin")
 	cwd := fs.String("cwd", "", "project directory (default: from the hook input, else the working directory)")
 	cfgPath := configFlag(fs)
 	if err := fs.Parse(args[1:]); err != nil {
 		return 2
 	}
 	if fs.NArg() > 0 {
-		fmt.Fprintf(stderr, "brain session %s: unexpected arguments: %s\n", action, strings.Join(fs.Args(), " "))
+		fmt.Fprintf(rec, "brain session %s: unexpected arguments: %s\n", action, strings.Join(fs.Args(), " "))
 		return 2
 	}
 	switch *hook {
 	case "", "claude", "codex", "opencode":
 	default:
-		fmt.Fprintf(stderr, "brain session %s: unknown --hook %q (want claude, codex or opencode)\n", action, *hook)
+		fmt.Fprintf(rec, "brain session %s: unknown --hook %q (want claude, codex or opencode)\n", action, *hook)
 		return 2
 	}
 	opts := sessionOptions{hook: *hook, cwd: strings.TrimSpace(*cwd), cfgPath: *cfgPath}
-	if jsonHook(opts.hook) {
+	started := time.Now()
+	if opts.hook != "" {
 		opts.input = readHookInput(stdin)
 		if opts.cwd == "" {
 			opts.cwd = strings.TrimSpace(opts.input.Cwd)
@@ -105,19 +110,45 @@ func runSession(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	default:
 		err = sessionEnd(ctx, opts, stdout)
 	}
-	if err == nil {
-		return 0
+	code := 0
+	if err != nil {
+		code = reportError(rec, "session "+action, err)
+		if opts.hook != "" {
+			code = 0
+		}
 	}
-	code := reportError(stderr, "session "+action, err)
 	if opts.hook != "" {
-		return 0
+		logSessionHookRun(opts, action, started, code, rec.firstLine())
 	}
 	return code
 }
 
+// logSessionHookRun appends one liveness entry. It never fails the hook: a
+// missing config or an unwritable log is ignored.
+func logSessionHookRun(opts sessionOptions, action string, started time.Time, code int, stderrLine string) {
+	cfg, err := loadRequiredConfig(opts.cfgPath)
+	if err != nil {
+		return
+	}
+	dataDir := strings.TrimSpace(cfg.DataDir)
+	if dataDir == "" {
+		return
+	}
+	appendHookLog(dataDir, hookLogEntry{
+		Time:       time.Now().UTC(),
+		Host:       opts.hook,
+		Event:      "session." + action,
+		Machine:    hookLogMachine(),
+		Session:    strings.TrimSpace(opts.input.SessionID),
+		DurationMS: time.Since(started).Milliseconds(),
+		Exit:       code,
+		Error:      stderrLine,
+	})
+}
+
 func readHookInput(stdin io.Reader) hookInput {
 	var input hookInput
-	if stdin == nil {
+	if stdin == nil || hookInputIsTerminal(stdin) {
 		return input
 	}
 	data, err := io.ReadAll(io.LimitReader(stdin, 1<<20))
@@ -126,6 +157,17 @@ func readHookInput(stdin io.Reader) hookInput {
 	}
 	_ = json.Unmarshal(data, &input)
 	return input
+}
+
+// hookInputIsTerminal keeps a manual `brain session end --hook ...` run from
+// blocking on an interactive terminal; agents always pipe stdin.
+func hookInputIsTerminal(stdin io.Reader) bool {
+	file, ok := stdin.(*os.File)
+	if !ok {
+		return false
+	}
+	info, err := file.Stat()
+	return err == nil && info.Mode()&os.ModeCharDevice != 0
 }
 
 // errNotRegistered marks a directory that belongs to no registered project;
