@@ -201,7 +201,10 @@ func (s *Source) Read(ctx context.Context, req ports.ReadRequest) (ports.ReadBat
 		}
 		pagesRead++
 		if cursor.Offset > len(raw) {
-			return ports.ReadBatch{}, domain.NewValidationError("github.checkpoint", "offset exceeds provider page")
+			// The provider returned a shorter page than the checkpoint expects:
+			// results shifted, or the run uses a different --since window.
+			// Re-read this page from the start instead of failing the run.
+			cursor.Offset = 0
 		}
 		for cursor.Offset < len(raw) && len(items) < limit {
 			obj := raw[cursor.Offset]

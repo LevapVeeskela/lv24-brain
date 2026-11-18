@@ -142,7 +142,7 @@ class MainTests(unittest.TestCase):
         )
 
     def test_version_matches_expected_release(self):
-        self.assertEqual(__version__, "0.26.2")
+        self.assertEqual(__version__, "0.26.3")
 
     def test_uses_env_override_and_inherits_it(self):
         code, stderr = self._invoke(
