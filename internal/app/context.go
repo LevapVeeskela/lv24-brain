@@ -109,6 +109,15 @@ type ContextRecord struct {
 	Quarantined bool
 	// Pinned is the explicit pin flag set by the owner.
 	Pinned bool
+	// Paths are the repo-relative files or directories a decision governs.
+	// Only decisions carry them, so only a decision can earn a path signal.
+	Paths []string
+	// PathSignal is the additive ranking bonus of the changed-file signal and
+	// is zero unless ranking.paths is on and Paths overlap the checkout.
+	PathSignal float64 `json:"path_signal,omitempty"`
+	// PathSignalMatch names the matched tier (exact, dir or branch) and the
+	// path, for the --explain table.
+	PathSignalMatch string
 }
 
 // ContextExcerpt is one raw-zone item body allowed by context-allow.json.
@@ -221,6 +230,18 @@ func (a *App) Context(ctx context.Context, opts ContextOptions) (ContextResult, 
 	if err != nil {
 		return ContextResult{}, err
 	}
+	// ranking.paths is opt-in: with the switch off no git command runs and the
+	// answer is byte-identical to the flagless engine. The checkout is read
+	// only when a decision in the catalog actually carries paths, so a project
+	// without them pays no git cost. A directory that is not a repository, a
+	// missing git binary or a timeout yields no signal instead of an error.
+	var pathSignal *contextPathSignal
+	if rankingPathsEnabled() && contextCatalogHasPaths(catalog) {
+		if dir := checkoutDir(project); dir != "" {
+			changed, branch := repoChangeSignal(ctx, dir)
+			pathSignal = newContextPathSignal(changed, branch)
+		}
+	}
 	handoffs, err := a.listHandoffs(ctx, project.ID)
 	if err != nil {
 		return ContextResult{}, err
@@ -245,7 +266,7 @@ func (a *App) Context(ctx context.Context, opts ContextOptions) (ContextResult, 
 	}
 	ranking := contextRanking{
 		catalog: catalog, projectID: project.ID, since: since, now: now,
-		includeUnreviewed: opts.IncludeUnreviewed, filter: filter,
+		includeUnreviewed: opts.IncludeUnreviewed, filter: filter, paths: pathSignal,
 	}
 
 	hits, err := a.contextSearch(ctx, query, project.ID, kinds, since, opts)
@@ -298,6 +319,11 @@ func (a *App) Context(ctx context.Context, opts ContextOptions) (ContextResult, 
 		result.Skipped = append(result.Skipped, "linked records: "+packErr.Error())
 	}
 	result.Pack = pack
+	if pathSignal != nil {
+		result.Pack.PathSignal = true
+		result.Pack.PathChangedFiles = pathSignal.changedCount
+		result.Pack.PathBranch = pathSignal.branch
+	}
 	applyContextExclusions(&result)
 	failedIDs := recordIDs(result.FailedAttempts)
 	result.Records, result.FailedAttempts = splitQuerySection(pack, failedIDs)
@@ -378,6 +404,7 @@ func (a *App) contextCatalog(ctx context.Context, projectID string) (contextCata
 				UpdatedAt: decision.UpdatedAt, ContentUpdatedAt: decision.ContentUpdatedAt,
 				Path:     contextRecordPath(projectID, ContextKindDecision, decision.ID),
 				Validity: decision.Validity, Quarantined: decision.Quarantined(),
+				Paths: append([]string(nil), decision.Paths...),
 			}
 			if decision.Quarantined() {
 				catalog.quarantined = append(catalog.quarantined, decision.ID)
@@ -425,6 +452,18 @@ func (a *App) contextCatalog(ctx context.Context, projectID string) (contextCata
 	return catalog, nil
 }
 
+// contextCatalogHasPaths reports whether any listed record carries the
+// repo-relative paths the changed-file signal needs. Without one the git read
+// is skipped entirely.
+func contextCatalogHasPaths(catalog contextCatalog) bool {
+	for _, record := range catalog.records {
+		if len(record.Paths) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
 func attemptDetail(attempt domain.Attempt) string {
 	for _, text := range []string{attempt.Reason, attempt.Result, attempt.Hypothesis} {
 		if line := SummarizeLine(text, promptLineRunes); line != "" {
@@ -453,6 +492,9 @@ type contextRanking struct {
 	now               time.Time
 	includeUnreviewed bool
 	filter            domain.ValidityFilter
+	// paths is the changed-file signal of this checkout; nil when
+	// ranking.paths is off or the checkout yielded no signal.
+	paths *contextPathSignal
 	// dropped is the exclusion bookkeeping the filters fill before packing.
 	dropped []ContextTruncation
 	// droppedIDs keeps one reason per record, whichever stage dropped it
@@ -541,6 +583,14 @@ func (r *contextRanking) rank(hits []ports.Hit, exclude map[string]bool, limit i
 	records := r.candidates(hits, exclude, ContextLayerQuery)
 	for i := range records {
 		records[i].Score = contextScore(i, len(records), records[i], r.now)
+		if r.paths == nil {
+			continue
+		}
+		if bonus, match := r.paths.signal(records[i].Paths); bonus > 0 {
+			records[i].PathSignal = bonus
+			records[i].PathSignalMatch = match
+			records[i].Score = roundContextScore(records[i].Score + bonus)
+		}
 	}
 	sort.SliceStable(records, func(i, j int) bool {
 		if records[i].Score != records[j].Score {
@@ -583,7 +633,13 @@ func contextScore(position, total int, record ContextRecord, now time.Time) floa
 		recency = 1 / (1 + ageDays/contextRecencyDays)
 	}
 	score := contextWeightRank*relevance + contextWeightRecency*recency + contextWeightKind*contextKindWeights[record.Kind]
-	return math.Round(score*1000) / 1000
+	return roundContextScore(score)
+}
+
+// roundContextScore keeps the ranking scores at the precision the answer
+// reports, so the printed score and the sort order cannot drift apart.
+func roundContextScore(value float64) float64 {
+	return math.Round(value*1000) / 1000
 }
 
 func recordIDs(records []ContextRecord) map[string]bool {

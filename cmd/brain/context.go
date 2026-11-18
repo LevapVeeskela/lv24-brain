@@ -203,6 +203,7 @@ func toMCPContextRecord(record app.ContextRecord) mcpserver.ContextRecord {
 	return mcpserver.ContextRecord{
 		ID: record.ID, Kind: record.Kind, Title: record.Title, Status: record.Status,
 		Detail: record.Detail, CreatedAt: record.CreatedAt, Score: record.Score,
+		PathSignal: record.PathSignal,
 	}
 }
 

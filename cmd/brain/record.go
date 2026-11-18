@@ -61,6 +61,12 @@ Trash is reversible: restore brings a trashed record back.
 		return runRecordStatus(args[1:], stdout, stderr)
 	case "supersede":
 		return runRecordSupersede(args[1:], stdout, stderr)
+	case "supersede-review":
+		return runRecordSupersedeReview(args[1:], stdout, stderr)
+	case "invalidate":
+		return runRecordInvalidate(args[1:], stdout, stderr)
+	case "archive":
+		return runRecordArchive(args[1:], stdout, stderr)
 	case "review":
 		return runRecordReview(args[1:], stdout, stderr)
 	case "trash":
@@ -405,6 +411,141 @@ func runRecordSupersede(args []string, stdout, stderr io.Writer) int {
 		return 0
 	}
 	fmt.Fprintf(stdout, "%s %s: superseded by %s\n", decision.Old.Kind, decision.Old.ID, decision.New.ID)
+	return 0
+}
+
+// runRecordSupersedeReview accepts, rejects or rolls back one supersede case.
+func runRecordSupersedeReview(args []string, stdout, stderr io.Writer) int {
+	fs := newFlagSet("record supersede-review", stderr)
+	project := fs.String("project", "", "project id or alias")
+	accept := fs.Bool("accept", false, "accept the case and end the predecessor")
+	reject := fs.Bool("reject", false, "reject the case; the predecessor stays valid")
+	rollback := fs.Bool("rollback", false, "restore the predecessor's previous validity")
+	reason := fs.String("reason", "", "why the case is rejected (required with --reject)")
+	expectedHash := fs.String("expected-hash", "", "refuse when the record changed since approval")
+	asJSON := fs.Bool("json", false, "print JSON")
+	cfgPath := configFlag(fs)
+	positional, err := parseInterspersed(fs, args)
+	if err != nil {
+		return 2
+	}
+	if !expectArgs("record supersede-review", positional, 1, "<old-id> --accept|--reject|--rollback", stderr) {
+		return 2
+	}
+	actions := 0
+	for _, set := range []bool{*accept, *reject, *rollback} {
+		if set {
+			actions++
+		}
+	}
+	if actions != 1 {
+		fmt.Fprintln(stderr, "brain record supersede-review: pass exactly one of --accept, --reject, --rollback")
+		return 2
+	}
+	action := app.SupersedeAccept
+	if *reject {
+		action = app.SupersedeReject
+	}
+	if *rollback {
+		action = app.SupersedeRollback
+	}
+	ctx := context.Background()
+	runtime, target, code := stateTarget(ctx, *cfgPath, *project, nil, stderr, "record supersede-review")
+	if code != 0 {
+		return code
+	}
+	defer func() { _ = runtime.Close() }()
+	result, err := runtime.App.ReviewSupersede(ctx, app.SupersedeReviewInput{
+		ProjectID: target.Project.ID, OldID: positional[0], Action: action,
+		Reason: *reason, ExpectedHash: *expectedHash,
+	})
+	if err != nil {
+		return reportError(stderr, "record supersede-review", err)
+	}
+	if *asJSON {
+		return writeJSONReport(stdout, stderr, "record supersede-review", map[string]any{
+			"old_id": result.OldID, "new_id": result.NewID, "status": string(result.Status),
+			"revision": result.Revision, "reason": result.Reason,
+		})
+	}
+	fmt.Fprintf(stdout, "supersede %s: %s (successor %s)\n", result.OldID, result.Status, result.NewID)
+	return 0
+}
+
+// runRecordInvalidate ends a record's validity with a reason.
+func runRecordInvalidate(args []string, stdout, stderr io.Writer) int {
+	fs := newFlagSet("record invalidate", stderr)
+	project := fs.String("project", "", "project id or alias")
+	reason := fs.String("reason", "", "why the record is no longer valid (required)")
+	asJSON := fs.Bool("json", false, "print JSON")
+	cfgPath := configFlag(fs)
+	positional, err := parseInterspersed(fs, args)
+	if err != nil {
+		return 2
+	}
+	if !expectArgs("record invalidate", positional, 1, "<id> --reason <text>", stderr) {
+		return 2
+	}
+	if strings.TrimSpace(*reason) == "" {
+		fmt.Fprintln(stderr, "brain record invalidate: --reason is required")
+		return 2
+	}
+	ctx := context.Background()
+	runtime, target, code := stateTarget(ctx, *cfgPath, *project, nil, stderr, "record invalidate")
+	if code != 0 {
+		return code
+	}
+	defer func() { _ = runtime.Close() }()
+	result, err := runtime.App.InvalidateRecord(ctx, target.Project.ID, positional[0], *reason)
+	if err != nil {
+		return reportError(stderr, "record invalidate", err)
+	}
+	if *asJSON {
+		return writeJSONReport(stdout, stderr, "record invalidate", result)
+	}
+	fmt.Fprintf(stdout, "%s %s: invalidated (%s)\n", result.Record.Kind, result.Record.ID, result.Reason)
+	return 0
+}
+
+// runRecordArchive lists records whose validity ended.
+func runRecordArchive(args []string, stdout, stderr io.Writer) int {
+	fs := newFlagSet("record archive", stderr)
+	project := fs.String("project", "", "project id or alias")
+	asJSON := fs.Bool("json", false, "print JSON")
+	cfgPath := configFlag(fs)
+	positional, err := parseInterspersed(fs, args)
+	if err != nil {
+		return 2
+	}
+	if len(positional) > 0 {
+		fmt.Fprintf(stderr, "brain record archive: unexpected arguments: %s\n", strings.Join(positional, " "))
+		return 2
+	}
+	ctx := context.Background()
+	runtime, target, code := stateTarget(ctx, *cfgPath, *project, nil, stderr, "record archive")
+	if code != 0 {
+		return code
+	}
+	defer func() { _ = runtime.Close() }()
+	entries, err := runtime.App.Archive(ctx, target.Project.ID)
+	if err != nil {
+		return reportError(stderr, "record archive", err)
+	}
+	if *asJSON {
+		return writeJSONReport(stdout, stderr, "record archive", entries)
+	}
+	if len(entries) == 0 {
+		fmt.Fprintln(stdout, "archive: empty")
+		return 0
+	}
+	for _, entry := range entries {
+		by := ""
+		if entry.SupersededBy != "" {
+			by = " by " + entry.SupersededBy
+		}
+		fmt.Fprintf(stdout, "%s %s/%s%s - %s\n",
+			entry.InvalidatedAt.UTC().Format(time.RFC3339), entry.Kind, entry.ID, by, entry.Reason)
+	}
 	return 0
 }
 

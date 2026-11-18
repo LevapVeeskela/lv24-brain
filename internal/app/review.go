@@ -136,6 +136,13 @@ func (a *App) Review(ctx context.Context, opts ReviewOptions) (ReviewResult, err
 	if a.deps.Proposals != nil {
 		writeReviewProposals(&out, proposals, pendingProposals, snoozedProposals)
 	}
+	cases, err := a.SupersedeCases(ctx, project.ID, false)
+	if err != nil {
+		return ReviewResult{}, err
+	}
+	if len(cases) > 0 {
+		writeReviewSupersedeCases(&out, &items, cases)
+	}
 
 	return ReviewResult{
 		Summary:              out.String(),
@@ -144,6 +151,21 @@ func (a *App) Review(ctx context.Context, opts ReviewOptions) (ReviewResult, err
 		PendingProposalCount: pendingProposals,
 		SnoozedProposalCount: snoozedProposals,
 	}, nil
+}
+
+// writeReviewSupersedeCases renders the staged supersede cases. They are the
+// decisions the review queue owes the owner: until one is accepted, both the
+// predecessor and the successor are valid.
+func writeReviewSupersedeCases(out *strings.Builder, items *[]string, cases []SupersedeCase) {
+	fmt.Fprintf(out, "\n## Supersede cases (%d proposed)\n", len(cases))
+	for i, c := range cases {
+		if i >= maxListedItems {
+			fmt.Fprintf(out, "- … %d more\n", len(cases)-i)
+			break
+		}
+		fmt.Fprintf(out, "- [%s] %s → %s: %s\n", c.Status, c.OldID, c.NewID, SummarizeLine(c.Reason, promptLineRunes))
+		*items = append(*items, "supersede: "+c.OldID+" -> "+c.NewID)
+	}
 }
 
 // reviewProposals lists pending candidates for the review report. It is only

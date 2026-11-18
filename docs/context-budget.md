@@ -67,11 +67,20 @@ so a reader can tell a filtered record from a budget cut.
 |---|---|
 | `over-budget` | the record did not fit the room its layer had left. |
 | `lower-rank` | the record matched but ranked below a record that fit. |
-| `superseded` | a newer record replaced it; `--include-superseded` keeps it. |
+| `superseded` | the record's validity ended: an approved supersede or an explicit invalidation. `--include-superseded` / `--all-time` keeps it. |
 | `stale` | outside the `--since` window. |
 | `quarantined` | untrusted provenance; `--include-unreviewed` keeps it. |
 | `other-owner` | a `[[...]]` neighbour that resolves outside the curated project; only same-project links are followed. |
 | `other` | fallback for a truncation written before the codes existed. |
+
+The default answer is current knowledge. A record whose validity ended — by an
+approved supersede or by an explicit invalidation — is filtered before packing,
+so it consumes no budget. `--include-superseded` / `--all-time` opens the
+archive; the list API names the filter `include_invalidated` and context uses
+the same validity filter. `--as-of` takes precedence and selects the record set
+valid at that instant. `brain_context` over MCP has no archive switch: it always
+answers with current records. An invalidated record keeps its file and text, and
+`brain record show` still reads it by id; the archive is history, not trash.
 
 `brain context --json` and `brain_context` return two record-level lists beside
 `truncated[]`:
@@ -117,6 +126,61 @@ The ordering is deterministic:
 Two runs over the same store and clock produce the same sections, tokens and
 summary.
 
+## Path signal
+
+A task usually names work in one checkout, and a decision often names the files
+it governs (`brain decision ... --paths`). The path signal adds a small bonus to
+query-layer decisions whose `paths` overlap the files changed in that checkout.
+
+The signal is **off by default**. Enable it with `BRAIN_RANKING_PATHS=1` (also
+`true`, `yes` or `on`; any other value leaves it off). The YAML key
+`ranking.paths` is the intended configuration spelling but is not wired in
+0.27.1: only the environment switch has an effect.
+
+When the switch is on, the engine reads the checkout that owns the resolved
+project:
+
+- `git diff --name-only HEAD` plus untracked
+  `git ls-files --others --exclude-standard`;
+- the current branch from `git rev-parse --abbrev-ref HEAD`;
+- two seconds for both reads, at most 2 000 changed files.
+
+Paths are normalized to the project checkout, lowercased and compared as slash
+paths. A directory that is not a repository, a missing git binary or a timeout
+produces no signal and no error. The read is skipped entirely when no record in
+the catalog carries `paths`.
+
+Only decisions carry `paths` in 0.27.1, and only candidates in the **query**
+layer are rescored. The background decisions layer keeps its status-based score.
+The bonus is additive and capped at **0.05** per record. The strongest matching
+tier wins:
+
+| Tier | Bonus | Match |
+|---|---|---|
+| exact | 0.05 | a decision path is a changed file |
+| directory | 0.03 (0.6 × cap) | a decision path is a changed file's directory or an ancestor |
+| branch | 0.013 (0.25 × cap) | a decision path shares a word of at least three letters with the branch name |
+
+A default branch (`main`, `master`, `trunk`, `develop`), a detached HEAD and a
+branch with no word of three letters contribute no branch match. The bonus is
+folded into the score before sorting, and the sum is rounded to three decimals,
+so the printed score and the order agree.
+
+`--explain` reports the switch and every contribution:
+
+```text
+paths: on, 12 changed files, branch feature/ret-5
+paths: decision-2026-11-19-paths +0.050 exact internal/app/context.go
+paths: decision-2026-11-19-paths +0.030 dir internal/app
+paths: decision-2026-11-19-paths +0.013 branch feature/ret-5
+```
+
+JSON adds `path_signal` to `records[]` and `failed_attempts[]` when the bonus is
+non-zero; the same value travels through `brain_context`. `sections[].records[]`
+carry the adjusted `score` but not the separate field, and the `paths:` lines
+are in `explain[]` only when `explain` is requested. The signal never changes a
+record's preview or token count, and it does not change the layer caps.
+
 ## Token counting
 
 Tokens come from `internal/textbudget`: Latin text packs about four characters
@@ -160,10 +224,13 @@ brain context "add retry to sync push" --json
   (`name`, `cap`, `tokens`, `records[]` with `id`, `kind`, `title`, `path`,
   `tokens`, `score`), `truncated[]` (at most 20 entries), `total_truncated`,
   `excluded[]` (at most 50 entries), `excluded_total`, `near_misses[]` (at most
-  3), `state_as_of`, and `quarantined_count`.
-- `--include-unreviewed`, `--as-of`, `--include-superseded`, `--kind`,
-  `--since` and `--raw` keep their meaning. Quarantined and superseded records
-  are filtered before packing, so a filtered hit cannot consume budget.
+  3), `state_as_of`, and `quarantined_count`. With the path signal on,
+  `records[]` and `failed_attempts[]` also carry `path_signal`, and
+  `explain[]` carries the `paths:` lines.
+- `--include-unreviewed`, `--as-of`, `--include-superseded`, `--all-time`,
+  `--kind`, `--since` and `--raw` keep their meaning. Quarantined and ended
+  records (superseded or invalidated) are filtered before packing, so a filtered
+  hit cannot consume budget.
 
 `brain open` uses the same packer for its full summary (state + handoff +
 recent decisions + recent attempts). `brain open --brief` stays state-only.
@@ -186,7 +253,9 @@ The value is validated: negative and above 32 000 are configuration errors.
 `total_tokens` and `quarantined_count` fields as `--json`; `truncated[]` is
 capped at 20 entries, `excluded[]` at 50 and `near_misses[]` at 3, while
 `total_truncated` and `excluded_total` keep the full counts. A bad budget is a
-validation refusal, not a silent clamp.
+validation refusal, not a silent clamp. Ranked records carry `path_signal` when
+the switch is on; `explain[]` carries the `paths:` lines. `brain_context` has no
+archive switch and always answers with current records.
 
 ## Tuning
 
@@ -197,6 +266,7 @@ validation refusal, not a silent clamp.
 | Less background noise | pass `--kind decision` (or `note`/`attempt`) to skip the other background layers |
 | A larger curated baseline | raise `context.budget`; 12 000–16 000 is a comfortable ceiling for one task |
 | Debugging a drop | run `--explain` and read `excluded[]` / `near_misses[]`; the code says whether a filter or the budget dropped it |
+| Prefer decisions about the files you are changing | set `BRAIN_RANKING_PATHS=1`; the bonus is capped at 0.05, so it reorders near-ties rather than replacing relevance |
 
 Because the caps are shares, raising the total raises every cap with it. A layer
 that does not spend its share does not waste the tokens: the unused part is

@@ -64,7 +64,7 @@ const (
 
 var findingKinds = []FindingKind{
 	FindingNextBehindHandoff, FindingNextMaybeDone, FindingQuestionAnswered,
-	FindingDecisionContradicted, FindingStateExpired, FindingStateBehindCommits,
+	FindingDecisionContradicted, FindingSuspectedContradiction, FindingStateExpired, FindingStateBehindCommits,
 	FindingDecisionCodeChanged, FindingBrokenLink, FindingNearDuplicate,
 	FindingQuarantined, FindingStateQuarantined, FindingSupersessionGap, FindingStaleSuperseded,
 	FindingProposalStale, FindingProposalOrphan, FindingProposalContradicted,
@@ -140,6 +140,12 @@ var findingSpecs = map[FindingKind]findingSpec{
 		Why:      "files the decision governs changed, so the decision may describe code that no longer exists.",
 		Next:     "re-read the decision and supersede or reaffirm it.",
 		Confirm:  "the rule still holds for the changed files.",
+	},
+	FindingSuspectedContradiction: {
+		Severity: SeverityWarn,
+		Why:      "two current records disagree about one subject, so search, context and the next agent may act on both as if each were still true.",
+		Next:     "open both records, accept the one that is true now and reject or supersede the other with `brain record supersede <older-id> --by <newer-id>`.",
+		Confirm:  "both ids name the same subject and only one of the two statements is true now.",
 	},
 	FindingBrokenLink: {
 		Severity: SeverityInfo,
@@ -432,6 +438,7 @@ func (a *App) Findings(ctx context.Context, projectID string) ([]Finding, error)
 	findings = append(findings, nextActionFindings(in)...)
 	findings = append(findings, questionFindings(in)...)
 	findings = append(findings, decisionFindings(in)...)
+	findings = append(findings, contradictionFindings(in, now, false)...)
 	findings = append(findings, decisionCodeFindings(ctx, in)...)
 	findings = append(findings, a.linkFindings(ctx, in)...)
 	findings = append(findings, supersessionGapFindings(in)...)

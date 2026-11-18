@@ -5,12 +5,12 @@
 before and after it. The three commands share one rule: never spend tokens on
 text the model did not ask for.
 
-This page documents search v2 (WB-1.2), the 0.27 support gate and progressive
-disclosure (WB-1.4). Server mode keeps its own Postgres ranking, so it omits
-`match_reasons`, does not evaluate support, and refuses the local ranking
-controls (`--match-mode`, `--relaxed`, `--min-score`, `--explain`, `--full`)
-instead of silently ignoring them. Previews, pagination, `brain get` and
-`brain timeline` work in both modes.
+This page documents search v2 (WB-1.2), the 0.27 support gate, the 0.27.1
+archive selector and progressive disclosure (WB-1.4). Server mode keeps its own
+Postgres ranking, so it omits `match_reasons`, does not evaluate support, and
+refuses the local ranking controls (`--match-mode`, `--relaxed`, `--min-score`,
+`--explain`, `--full`) instead of silently ignoring them. Previews, pagination,
+`brain get` and `brain timeline` work in both modes.
 
 ## Composite score
 
@@ -74,6 +74,16 @@ exactly; each contribution's share of the score is the signal's weight times its
 strength. An unexplained ranking position can therefore be read off the numbers
 instead of guessed. Reasons and contributions describe the score, they never
 adjust it.
+
+### Path relevance is context-only
+
+`brain search` has no task checkout, so the path signal never changes a search
+score or order. `brain context` can add it when `BRAIN_RANKING_PATHS=1` is set:
+a decision whose `paths` overlap the checkout gets at most **0.05**, split into
+an exact changed file (0.05), a changed directory (0.03) and a shared branch
+word (0.013). The switch, formula and `--explain` lines are documented in
+[context-budget.md](context-budget.md#path-signal). The YAML key `ranking.paths`
+is not wired in 0.27.1; only the environment switch works.
 
 ## Support tiers
 
@@ -163,6 +173,31 @@ always hides them; `brain context` has no override either, and review's
 supersession, contradiction and near-duplicate checks skip stubs. The flag is
 derived, never stored in Markdown, and reverses itself when the file changes.
 
+## Archive: superseded and invalidated records
+
+Default search returns current records only. A record whose validity ended — by
+an approved supersede or by an explicit invalidation — is not matched unless the
+caller asks for the archive:
+
+```sh
+brain search "cache design" --include-superseded
+brain search "cache design" --all-time
+```
+
+`--include-superseded` and `--all-time` are the same selector. The list API
+names the same filter `include_invalidated`; search keeps the older
+`--include-superseded` spelling. A separate `--archive` spelling is not wired in
+0.27.1. MCP `brain_search` has no archive switch and searches current records
+only.
+
+`--as-of <time>` takes precedence: it selects the records valid at that instant,
+so an ended record can appear because it was current then. In `brain context`
+the same default applies, and an ended record that the budget would have
+considered is reported with reason `superseded`; explicit invalidation uses the
+same code because the record's validity ended. The archive is history, not
+trash: the file, its id and its text stay, and `brain record show` still reads
+it by id.
+
 ## Flags
 
 | Flag | Effect |
@@ -171,6 +206,7 @@ derived, never stored in Markdown, and reverses itself when the file changes.
 | `--match-mode any` | any term may match (OR); no fallback, and the page is reported as `related`. |
 | `--relaxed` | allow the OR fallback when the strict pass finds fewer than five hits; the pages are merged and the response reports `relaxed: true`. It also marks the page `related` (the caller accepts partial matches). |
 | `--include-stubs` | keep low-signal stub records that search hides by default. |
+| `--include-superseded` / `--all-time` | search the archive: records whose validity ended, by supersede or invalidation. |
 | `--min-score <0..1>` | drop hits below the composite score. |
 | `--explain` | add per-signal contributions (JSON `explain`, text `score`/`reasons` lines). |
 | `--full` | return each hit's whole body alongside its preview (JSON `body`). |
@@ -283,6 +319,8 @@ would pick, so the fixture can be reviewed without the live corpus.
   `match_reasons`, `explain`, `body`; 0.27 adds `support`
   (`tier`, `best`, `threshold`, `reason`), `hits[].tier` and `excluded[]`
   (`id`, `kind`, `title`, `score`, `reason`; MCP also carries `project_id`).
+  0.27.1 adds no search field: the archive selector keeps its pre-0.27
+  meaning and path relevance stays a context signal.
 - `score` changed meaning in 0.16 from the raw BM25 rank to the composite score
   in `[0, 1]`.
 - `brain get` prints the text fields of a record; `brain record show` keeps

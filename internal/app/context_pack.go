@@ -4,10 +4,13 @@ import (
 	"context"
 	"fmt"
 	"math"
+	"os"
+	"os/exec"
 	"slices"
 	"sort"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/levapveeskela/lv24-brain/internal/domain"
 	"github.com/levapveeskela/lv24-brain/internal/textbudget"
@@ -59,6 +62,13 @@ type ContextSectionRecord struct {
 	Quarantined bool
 	Tokens      int
 	Score       float64
+	// Paths are the repo-relative paths a decision governs.
+	Paths []string
+	// PathSignal is the changed-file bonus folded into Score, and
+	// PathSignalMatch names the tier that earned it. Both are zero unless
+	// ranking.paths is on.
+	PathSignal      float64
+	PathSignalMatch string
 }
 
 // ContextSection is one packed layer: its configured cap, the tokens it uses
@@ -136,6 +146,12 @@ type ContextPack struct {
 	Truncated []ContextTruncation
 	// Quarantined is the number of ids excluded from trusted context.
 	Quarantined int
+	// PathSignal reports that ranking.paths was on and the checkout produced
+	// a changed-file signal. PathChangedFiles and PathBranch describe it for
+	// --explain; a checkout without git leaves PathSignal false.
+	PathSignal       bool
+	PathChangedFiles int
+	PathBranch       string
 }
 
 // contextPackInput is what the packer needs to fill the layers.
@@ -452,6 +468,224 @@ func contextSectionHeaderTokenCost(name string) int {
 	return 0
 }
 
+// RankingPathsEnv is the environment switch of the ranking.paths feature. The
+// feature is off by default: with no switch no git command runs and no score
+// changes. The config key of the same feature is `ranking.paths`.
+const RankingPathsEnv = "BRAIN_RANKING_PATHS"
+
+// ContextPathSignalCap bounds the whole changed-file bonus. A record that only
+// earns the signal can never beat a record with the same base score by more
+// than this value, which is what keeps the signal additive and honest.
+const ContextPathSignalCap = 0.05
+
+// Tier shares of the cap. An exact changed file is stronger than a changed
+// directory, which is stronger than a token shared with the branch name.
+const (
+	contextPathExactShare  = 1.0
+	contextPathDirShare    = 0.6
+	contextPathBranchShare = 0.25
+)
+
+// contextPathSignalTimeout bounds both git reads together, so a hung checkout
+// can delay one context call by a couple of seconds, never longer.
+const contextPathSignalTimeout = 2 * time.Second
+
+// contextPathSignalMaxFiles bounds the changed-file set. A generated tree can
+// list hundreds of thousands of untracked paths; the signal keeps a sample and
+// never grows the context answer with it.
+const contextPathSignalMaxFiles = 2000
+
+// contextPathSignal is the read-only view of the checkout a context call ranks
+// against: changed files, the directories that contain them, and the tokens of
+// the current branch name.
+type contextPathSignal struct {
+	files        map[string]bool
+	dirs         map[string]bool
+	branchTokens map[string]bool
+	branch       string
+	changedCount int
+}
+
+// rankingPathsEnabled reports the ranking.paths switch. The environment value
+// accepts the usual truthy spellings; anything else keeps the feature off.
+func rankingPathsEnabled() bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv(RankingPathsEnv))) {
+	case "1", "true", "yes", "on":
+		return true
+	default:
+		return false
+	}
+}
+
+// repoChangeSignal reads the changed files and the branch of one checkout. It
+// is deliberately read-only and best-effort: a missing git, a directory that
+// is not a repository, an unborn HEAD or a timeout all yield whatever partial
+// information is available, never an error. Paths are normalized to the
+// project checkout, not to the repository root, so they compare with the
+// repo-relative paths a decision records.
+func repoChangeSignal(ctx context.Context, dir string) ([]string, string) {
+	runCtx, cancel := context.WithTimeout(ctx, contextPathSignalTimeout)
+	defer cancel()
+	run := func(args ...string) (string, bool) {
+		out, err := exec.CommandContext(runCtx, "git", append([]string{"-C", dir}, args...)...).Output()
+		if err != nil {
+			return "", false
+		}
+		return string(out), true
+	}
+	prefix := ""
+	if out, ok := run("rev-parse", "--show-prefix"); ok {
+		prefix = strings.TrimSuffix(strings.TrimSpace(out), "/")
+	}
+	changed := make([]string, 0, 16)
+	add := func(out string) {
+		for _, line := range strings.Split(strings.ReplaceAll(out, "\r\n", "\n"), "\n") {
+			if len(changed) >= contextPathSignalMaxFiles {
+				return
+			}
+			if path := contextRepoPath(line, prefix); path != "" {
+				changed = append(changed, path)
+			}
+		}
+	}
+	if out, ok := run("diff", "--name-only", "HEAD"); ok {
+		add(out)
+	}
+	if len(changed) < contextPathSignalMaxFiles {
+		if out, ok := run("ls-files", "--others", "--exclude-standard"); ok {
+			add(out)
+		}
+	}
+	branch, _ := run("rev-parse", "--abbrev-ref", "HEAD")
+	return changed, strings.TrimSpace(branch)
+}
+
+// contextRepoPath normalizes one git path to the project checkout and to the
+// lowercase slash form the matcher compares. A path outside the checkout
+// prefix (git reports repository-root paths) is dropped instead of guessed at.
+func contextRepoPath(raw, prefix string) string {
+	path := strings.ReplaceAll(strings.TrimSpace(raw), "\\", "/")
+	path = strings.TrimPrefix(path, "./")
+	path = strings.Trim(path, "/")
+	if path == "" || path == "." || path == ".." || strings.HasPrefix(path, "../") {
+		return ""
+	}
+	prefix = strings.Trim(strings.ReplaceAll(strings.TrimSpace(prefix), "\\", "/"), "/")
+	if prefix != "" {
+		if path == prefix || !strings.HasPrefix(path, prefix+"/") {
+			return ""
+		}
+		path = strings.TrimPrefix(path, prefix+"/")
+	}
+	return strings.ToLower(path)
+}
+
+// newContextPathSignal builds the matcher. nil means the feature has nothing
+// to say: no changed files and no usable branch tokens.
+func newContextPathSignal(changed []string, branch string) *contextPathSignal {
+	files := make(map[string]bool, len(changed))
+	dirs := make(map[string]bool, len(changed)*2)
+	for _, raw := range changed {
+		path := contextRepoPath(raw, "")
+		if path == "" {
+			continue
+		}
+		files[path] = true
+		for dir := path; ; {
+			index := strings.LastIndexByte(dir, '/')
+			if index < 0 {
+				break
+			}
+			dir = dir[:index]
+			if dirs[dir] {
+				break
+			}
+			dirs[dir] = true
+		}
+	}
+	signal := &contextPathSignal{
+		files: files, dirs: dirs, branch: strings.TrimSpace(branch), changedCount: len(files),
+	}
+	signal.branchTokens = contextBranchTokens(signal.branch)
+	if len(files) == 0 && len(signal.branchTokens) == 0 {
+		return nil
+	}
+	return signal
+}
+
+// contextBranchTokens splits a feature branch into comparable words. A default
+// branch, a detached HEAD or an empty name contributes no token: those names
+// say nothing about the task and would only add noise.
+func contextBranchTokens(branch string) map[string]bool {
+	branch = strings.ToLower(strings.TrimSpace(branch))
+	switch branch {
+	case "", "head", "main", "master", "trunk", "develop":
+		return nil
+	}
+	tokens := make(map[string]bool, 4)
+	for _, token := range strings.FieldsFunc(branch, contextPathTokenSep) {
+		if len(token) >= 3 {
+			tokens[token] = true
+		}
+	}
+	if len(tokens) == 0 {
+		return nil
+	}
+	return tokens
+}
+
+// contextPathTokenSep is the separator set of path and branch words: anything
+// that is not a letter or a digit, so "internal/app/context.go" yields four
+// words and "feat/ret-5" yields three.
+func contextPathTokenSep(r rune) bool {
+	return !unicode.IsLetter(r) && !unicode.IsDigit(r)
+}
+
+// signal returns the capped bonus of one decision's paths and the tier that
+// earned it. Tiers are exclusive in strength order: exact file, directory
+// prefix, branch-name token. The caller adds the value to the base score; the
+// value never exceeds ContextPathSignalCap.
+func (s *contextPathSignal) signal(paths []string) (float64, string) {
+	if s == nil || len(paths) == 0 {
+		return 0, ""
+	}
+	best := 0.0
+	bestMatch := ""
+	for _, raw := range paths {
+		path := contextRepoPath(raw, "")
+		if path == "" {
+			continue
+		}
+		switch {
+		case s.files[path]:
+			return roundContextScore(ContextPathSignalCap * contextPathExactShare), "exact " + path
+		case s.dirs[path]:
+			if bonus := roundContextScore(ContextPathSignalCap * contextPathDirShare); bonus > best {
+				best, bestMatch = bonus, "dir "+path
+			}
+		case s.branchMatch(path):
+			if bonus := roundContextScore(ContextPathSignalCap * contextPathBranchShare); bonus > best {
+				best, bestMatch = bonus, "branch "+s.branch
+			}
+		}
+	}
+	return best, bestMatch
+}
+
+// branchMatch reports whether a decision path shares a word with the branch
+// name, which is the weakest and last-resort tier of the signal.
+func (s *contextPathSignal) branchMatch(path string) bool {
+	if len(s.branchTokens) == 0 {
+		return false
+	}
+	for _, token := range strings.FieldsFunc(path, contextPathTokenSep) {
+		if s.branchTokens[token] {
+			return true
+		}
+	}
+	return false
+}
+
 // sortContextCandidates orders a layer by score, then update time, then id.
 func sortContextCandidates(records []ContextRecord) {
 	sort.SliceStable(records, func(i, j int) bool {
@@ -470,6 +704,7 @@ func contextSectionRecord(record ContextRecord) ContextSectionRecord {
 		ID: record.ID, Kind: record.Kind, Title: record.Title, Status: record.Status,
 		Path: record.Path, Detail: record.Detail, CreatedAt: record.CreatedAt, UpdatedAt: record.UpdatedAt,
 		Quarantined: record.Quarantined, Tokens: contextRecordTokens(record), Score: record.Score,
+		Paths: record.Paths, PathSignal: record.PathSignal, PathSignalMatch: record.PathSignalMatch,
 	}
 }
 
@@ -499,6 +734,7 @@ func sectionRecords(pack ContextPack, name string) []ContextRecord {
 			ID: record.ID, Kind: record.Kind, Title: record.Title, Status: record.Status,
 			Detail: record.Detail, CreatedAt: record.CreatedAt, UpdatedAt: record.UpdatedAt,
 			Score: record.Score, Quarantined: record.Quarantined, Path: record.Path,
+			Paths: record.Paths, PathSignal: record.PathSignal, PathSignalMatch: record.PathSignalMatch,
 		})
 	}
 	return out
@@ -528,6 +764,21 @@ func (p ContextPack) ExplainLines() []string {
 		lines = append(lines, fmt.Sprintf("%s: %d/%d tokens, %d records", layer.name, tokens, capTokens, records))
 	}
 	lines = append(lines, fmt.Sprintf("total: %d/%d tokens, %d dropped", p.TotalTokens, p.Budget, len(p.Truncated)))
+	if p.PathSignal {
+		branch := p.PathBranch
+		if branch == "" {
+			branch = "unknown"
+		}
+		lines = append(lines, fmt.Sprintf("paths: on, %d changed files, branch %s", p.PathChangedFiles, branch))
+		for _, section := range p.Sections {
+			for _, record := range section.Records {
+				if record.PathSignal <= 0 {
+					continue
+				}
+				lines = append(lines, fmt.Sprintf("paths: %s +%.3f %s", record.ID, record.PathSignal, record.PathSignalMatch))
+			}
+		}
+	}
 	return lines
 }
 

@@ -127,6 +127,10 @@ type ListRecordsOptions struct {
 	// IncludeSuperseded lists records whose validity ended too. An AsOf
 	// instant selects the point in time and takes precedence.
 	IncludeSuperseded bool
+	// IncludeInvalidated is the archive spelling of IncludeSuperseded: it
+	// keeps records ended by an approved supersede or an explicit
+	// invalidation. Either flag opens the archive.
+	IncludeInvalidated bool
 }
 
 // Record is one record of any kind; exactly one pointer is set.
@@ -305,7 +309,7 @@ func (a *App) ListRecords(ctx context.Context, opts ListRecordsOptions) ([]Recor
 	if limit <= 0 {
 		limit = 50
 	}
-	filter := domain.ValidityFilter{AsOf: opts.AsOf, IncludeSuperseded: opts.IncludeSuperseded}
+	filter := archiveFilter(opts.AsOf, opts.IncludeSuperseded || opts.IncludeInvalidated)
 	now := a.now()
 	var out []RecordSummary
 	for _, record := range records {
@@ -408,15 +412,25 @@ func (a *App) recordEditor() (ports.RecordEditor, error) {
 }
 
 // SetDecisionStatus changes a decision's status (proposed, accepted,
-// rejected, superseded).
+// rejected, superseded). Accepting or rejecting a decision also settles the
+// supersede case that names it as the successor: acceptance ends the
+// predecessor at the approved tuple, rejection refuses the case and leaves the
+// predecessor untouched.
 func (a *App) SetDecisionStatus(ctx context.Context, projectID, id string, status domain.DecisionStatus) (domain.Decision, error) {
-	return a.updateDecision(ctx, projectID, id, func(decision *domain.Decision) error {
+	decision, err := a.updateDecision(ctx, projectID, id, func(decision *domain.Decision) error {
 		if !status.Valid() {
 			return domain.NewValidationError("status", fmt.Sprintf("unknown decision status %q", status))
 		}
 		decision.Status = status
 		return nil
 	})
+	if err != nil {
+		return domain.Decision{}, err
+	}
+	if err := a.settleSupersedeCases(ctx, decision.ProjectID, decision.ID, status); err != nil {
+		return decision, err
+	}
+	return decision, nil
 }
 
 // SetRecordPinned sets or clears the pinned flag of one record of any kind.

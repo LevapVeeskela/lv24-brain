@@ -148,6 +148,9 @@ type ContextRecord struct {
 	Detail    string    `json:"detail"`
 	CreatedAt time.Time `json:"created_at,omitzero"`
 	Score     float64   `json:"score"`
+	// PathSignal is the additive changed-file bonus, zero unless ranking.paths
+	// is on and the record's paths overlap the checkout.
+	PathSignal float64 `json:"path_signal,omitempty"`
 }
 
 // ContextExcerpt is one granted raw-zone excerpt. Untrusted is always true:

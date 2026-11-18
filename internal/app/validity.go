@@ -11,6 +11,21 @@ func validityFilter(asOf time.Time, includeSuperseded bool) domain.ValidityFilte
 	return domain.ValidityFilter{AsOf: asOf, IncludeSuperseded: includeSuperseded}
 }
 
+// archiveFilter is the filter behind `--archive` / include_invalidated: an
+// archive query keeps records whose validity ended. An explicit as-of instant
+// still selects one point in time, so the archive never rewrites history into
+// "current".
+func archiveFilter(asOf time.Time, includeInvalidated bool) domain.ValidityFilter {
+	return domain.ValidityFilter{AsOf: asOf, IncludeSuperseded: includeInvalidated}
+}
+
+// invalidated reports whether a validity was ended, by an approved supersede or
+// by an explicit invalidation. The reason and instant live in the lifecycle
+// journal; the record itself keeps its text.
+func invalidated(validity domain.Validity) bool {
+	return !validity.ValidTo.IsZero()
+}
+
 // filterNotes keeps the notes the filter allows at now.
 func filterNotes(notes []domain.Note, filter domain.ValidityFilter, now time.Time) []domain.Note {
 	out := make([]domain.Note, 0, len(notes))

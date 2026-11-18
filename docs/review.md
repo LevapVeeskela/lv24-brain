@@ -34,16 +34,16 @@ Severity is the only ordering a caller should branch on:
 | Severity | Meaning | Examples |
 |---|---|---|
 | `error` | Context may be **wrong**. | `quarantined`, `decision-contradicted`, `review-overdue` (oldest overdue by 30+ days) |
-| `warn` | Context may be **stale**. | `state-expired`, `next-behind-handoff`, `decision-code-changed`, `near-duplicate` |
+| `warn` | Context may be **stale**. | `state-expired`, `next-behind-handoff`, `decision-code-changed`, `near-duplicate`, `suspected-contradiction` |
 | `info` | Curation hint, nothing is broken. | `next-maybe-done`, `question-answered`, `broken-link`, `supersession-gap` |
 
 Finding kinds: `quarantined`, `state-quarantined`, `state-expired`,
 `state-behind-commits`, `next-behind-handoff`, `next-maybe-done`,
-`question-answered`, `decision-contradicted`, `decision-code-changed`,
-`broken-link`, `near-duplicate`, `supersession-gap`, `stale-superseded`,
-`proposal-stale`, `proposal-orphan`, `proposal-contradicted`,
-`review-overdue`, `pending-relations`, `merge-conflict`,
-`registry-conflict`.
+`question-answered`, `decision-contradicted`, `suspected-contradiction`,
+`decision-code-changed`, `broken-link`, `near-duplicate`, `supersession-gap`,
+`stale-superseded`, `proposal-stale`, `proposal-orphan`,
+`proposal-contradicted`, `review-overdue`, `pending-relations`,
+`merge-conflict`, `registry-conflict`.
 
 `merge-conflict` and `registry-conflict` (both `warn`) are read straight
 from the conflict artifacts the merge drivers commit: `projects/<id>/state-conflicts/`,
@@ -68,6 +68,123 @@ Text output of `brain review`:
 
 The same fields travel in `brain review --json` and through the MCP tool
 `brain_review`, so an agent can branch on `severity` instead of matching text.
+
+## Suspected contradictions
+
+`suspected-contradiction` is a report-only `warn`: two current records of one
+project read as if they disagree about the same subject. It never edits,
+supersedes or merges anything, and `brain review --fix` does not apply it.
+
+The check compares the project's current decisions and notes, newest 200. It
+skips stubs, rejected decisions, records whose validity ended, and any pair
+already linked by `supersedes`/`superseded_by`: a declared replacement is a
+decision, not a suspicion. Records of different projects never pair.
+
+A pair is compared only when it repeats at least **40 %** of the shorter
+record's stemmed words and at least two words. That overlap gate is what keeps a
+shared "not" or "deprecated" in unrelated text from becoming a finding.
+
+| Reason | Fires when | Extra gate |
+|---|---|---|
+| `temporal` | the newer record marks the older claim as overridden and the older does not: `no longer`, `instead`, `replace*`, `deprecated`, `obsolete`, `sunset`, `phased out`, `больше не`, `вместо`, `замен*`, `устарел`, `неактуал*` | 60 % overlap |
+| `negation` | exactly one side negates (`not`, `no`, `never`, `cannot`, `не`, `нет`, `без`, contractions); both negating is agreement | 50 % overlap |
+| `antonym` | the records use opposite sides of a closed pair: enable/disable, allow/deny, increase/decrease, keep/remove, before/after | base gate; same negation polarity |
+| `numeric` | the same recognized unit carries different values, for example `90 days` against `180 days` or `14d` against `30d` | base gate |
+
+The heuristics run in that order, so one pair yields at most one finding with
+the most specific reason. The message carries the reason and both ids and
+titles, the evidence is `<older-id> <-> <newer-id>`, and the next action is to
+open both records and accept or reject one.
+
+False negatives are expected: the check needs shared vocabulary, a numeric
+change needs a recognized unit, and only the newest 200 records are compared.
+Treat the finding as a prompt to read the pair, not as proof. The acceptance
+fixture is eight true pairs (negation, antonym, numeric and temporal, including
+Russian wording) and eight near-miss pairs that stay unflagged.
+
+## Supersede cases
+
+`brain record supersede <old-id> --by <new-id>` opens a **proposed** case in
+local and git modes. The successor's `supersedes` link is written at once, but
+the predecessor is left untouched: it stays current, listed and searchable until
+a review accepts the case. Review it with
+`brain record supersede-review <old-id> --accept|--reject|--rollback`
+(`--reason` is required for reject, `--expected-hash` refuses a stale rollback).
+
+```text
+## Supersede cases (1 proposed)
+- [proposed] decision-...-one → decision-...-two: the second shard is read-only
+```
+
+A case carries both ends, the reason, its status (`proposed`, `accepted`,
+`rejected`, `rolled_back`), a revision that orders the case timeline, the
+proposal and decision times, the predecessor's previous validity tuple, the
+tuple an approval wrote, and the state hash a rollback checks.
+
+| Action | Allowed when | Effect |
+|---|---|---|
+| accept | `proposed` | ends the predecessor: writes `valid_to` and `superseded_by`, marks a decision `superseded`, records the previous and applied tuples and the state hash |
+| reject | `proposed` | writes nothing to the predecessor; stores the refusal reason on the case |
+| rollback | `accepted` | restores the exact previous `valid_from`, `valid_to`, `superseded_by` tuple and, for a decision, its previous status; clears the successor's `supersedes` claim when it names this predecessor |
+
+A rejection requires a written reason. An acceptance or rollback note is
+optional and defaults to `approved` or `rolled back`. Every case reason and note
+is one line of at most 240 characters; a newline or an empty rejection reason is
+a validation error. A rejected or rolled-back case can be proposed again with a
+new revision. A second successor cannot claim the same predecessor while a case
+is still proposed, and a record whose validity already ended cannot be
+superseded.
+
+Rollback is guarded by `SupersedeStateHash`: identity, kind, status, the
+`valid_from`, `valid_to`, `superseded_by` and `supersedes` fields, `updated_at`
+and the normalized text. The approval stores the hash; a rollback compares it
+(or the caller's `expected_hash`) with the record as it is now. A stale hash (a
+mismatch) is a revision conflict (`domain.ErrConflict`, rendered as
+`409 conflict` by HTTP surfaces) and nothing is written. A rollback also refuses
+when the record is no longer superseded by that successor, or when the case is
+not `accepted`.
+
+Accept and reject are also reachable through the successor decision:
+`brain record status <successor> accepted|rejected`, or MCP
+`brain_judge(action=accept|reject, id=<successor>)`, settles every proposed case
+that names it. That path records the fixed note `successor decision accepted` or
+`successor decision rejected`. The case itself opens through
+`brain record supersede` or MCP
+`brain_judge(action=supersede, id=<old-id>, to=<new-id>)`. The direct
+accept/reject/rollback review action is the engine's `ReviewSupersede`; the CLI
+has no separate `--review` flag in 0.27.1. Stores without an activity journal,
+including server mode, have no case queue and apply the link immediately.
+
+### Invalidated records and the archive
+
+An explicit invalidation ends a record without naming a successor. It writes
+only `valid_to` and records an `invalidate` event with the reason and the end
+instant; the text, path and id stay. Default search, context and listings hide
+the record. The archive selector keeps it: the list API names the filter
+`include_invalidated`; the CLI spells it `--include-superseded` or `--all-time`.
+A separate `--archive` flag is not wired in 0.27.1, and MCP search and context
+have no archive switch.
+
+The engine's archive read returns `kind`, `id`, `invalidated_at`, `reason` and
+`superseded_by` (empty for an explicit invalidation). A rejected case never
+reaches the archive, and a rollback removes its entry. `brain review --due`
+skips invalidated records like superseded ones; the archive is history, not a
+review queue.
+
+### Case limits
+
+- The case is in the activity journal, not in the Markdown record. A machine
+  without the proposing user's journal line sees the successor's `supersedes`
+  claim but no case. Until a sync brings the line, only the proposing machine
+  can review the case. Journal files sync with the data repository and
+  union-merge, so another machine can review it after that sync; treat the
+  proposing machine as the reviewer of record.
+- `--supersedes` on a new note or decision is still immediate. It ends the old
+  record in the same write, opens no case and cannot be rejected or rolled back
+  through review.
+- Rejection does not clear the successor's `supersedes` frontmatter. There is no
+  CLI flag to remove that claim in 0.27.1; write and accept a new case, or repair
+  the records outside the CLI.
 
 ## Review dates
 
@@ -117,9 +234,10 @@ Rules:
   the source so the difference is visible.
 - A repair write (`superseded_by` set) is history and gets no review date.
 - Review dates do not expire anything and do not touch `valid_to`. Superseding
-  is still the only way to retire a claim (`brain record supersede`).
-- `brain review --due` skips records that are superseded, rejected or
-  quarantined; quarantined records are in the quarantine queue instead.
+  (via a review case or a `--supersedes` write) and explicit invalidation are the
+  only ways to retire a claim (`brain record supersede`).
+- `brain review --due` skips records that are superseded, invalidated, rejected
+  or quarantined; quarantined records are in the quarantine queue instead.
 
 ### Due workflow
 

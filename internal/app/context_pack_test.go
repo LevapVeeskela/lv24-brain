@@ -4,6 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -313,5 +316,293 @@ func TestBootstrapPackedBudget(t *testing.T) {
 		if !strings.Contains(result.Summary, want) {
 			t.Fatalf("summary lacks %q:\n%s", want, result.Summary)
 		}
+	}
+}
+
+// --- RET-5: path/branch relevance ------------------------------------------
+
+// initPathRepo creates a throwaway checkout on a feature branch with one
+// commit. The index is never written by the tests: they only add untracked
+// files, which is what `git ls-files --others` reports.
+func initPathRepo(t *testing.T) string {
+	t.Helper()
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git is not installed")
+	}
+	dir := t.TempDir()
+	run := func(args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
+		cmd.Env = append(os.Environ(),
+			"GIT_AUTHOR_DATE=2026-11-01T00:00:00Z", "GIT_COMMITTER_DATE=2026-11-01T00:00:00Z")
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	run("init")
+	run("config", "user.email", "brain-test@example.test")
+	run("config", "user.name", "Brain Test")
+	run("checkout", "-b", "feat/context-ranker")
+	writeRepoFile(t, dir, "README.md", "init\n")
+	run("add", "README.md")
+	run("commit", "-m", "init")
+	return dir
+}
+
+func writeRepoFile(t *testing.T, dir, rel, content string) {
+	t.Helper()
+	path := filepath.Join(dir, filepath.FromSlash(rel))
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func newPathFixture(t *testing.T, repo string) contextFixture {
+	t.Helper()
+	f := newContextFixture(t, true)
+	paths := []string{repo}
+	if _, err := f.app.SaveProject(context.Background(), app.ProjectInput{ID: "p", Paths: &paths}); err != nil {
+		t.Fatal(err)
+	}
+	return f
+}
+
+func (f contextFixture) decisionWithPaths(t *testing.T, title, contextText string, paths []string) string {
+	t.Helper()
+	f.advance(time.Minute)
+	result, err := f.app.Decision(context.Background(), app.DecisionInput{
+		ProjectID: "p", Title: title, Context: contextText, Paths: paths, CreateProject: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return result.Decision.ID
+}
+
+func recordIndex(records []app.ContextRecord, id string) int {
+	for i, record := range records {
+		if record.ID == id {
+			return i
+		}
+	}
+	return -1
+}
+
+// TestContextPathSignalImprovesTenQueryPositions is the RET-5 acceptance
+// fixture: ten queries whose expected record touches a changed file moves in
+// front of its no-path competitor with ranking.paths on. With the switch off
+// the same ten rankings are byte-identical to a run without the feature.
+func TestContextPathSignalImprovesTenQueryPositions(t *testing.T) {
+	// Arrange
+	ctx := context.Background()
+	repo := initPathRepo(t)
+	f := newPathFixture(t, repo)
+	const queries = 10
+	tokens := make([]string, queries)
+	expected := make([]string, queries)
+	competitors := make([]string, queries)
+	for i := 0; i < queries; i++ {
+		tokens[i] = fmt.Sprintf("pathsignal%02d", i)
+		competitors[i] = f.decision(t, "Competitor "+tokens[i], tokens[i]+" shared text")
+		expected[i] = f.decisionWithPaths(t,
+			"Expected "+tokens[i], tokens[i]+" shared text",
+			[]string{fmt.Sprintf("src/changed%02d.go", i)})
+		writeRepoFile(t, repo, fmt.Sprintf("src/changed%02d.go", i), "package src\n")
+	}
+	// Fillers match every query once, so each query has the same 15 hits and
+	// the expected/competitor pair is adjacent at the top.
+	fillerBody := strings.Join(tokens, " ")
+	for i := 0; i < 13; i++ {
+		f.decision(t, fmt.Sprintf("Filler %02d", i), fillerBody)
+	}
+	offScores := make([][]float64, queries)
+	offIDs := make([][]string, queries)
+	offSummaries := make([]string, queries)
+
+	// Act: the switch off keeps the default order and never runs the signal.
+	t.Setenv(app.RankingPathsEnv, "")
+	for i := 0; i < queries; i++ {
+		result, err := f.app.Context(ctx, app.ContextOptions{
+			ProjectID: "p", Query: tokens[i], TokenBudget: domain.MaxContextBudgetTokens,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		competitorAt, expectedAt := recordIndex(result.Records, competitors[i]), recordIndex(result.Records, expected[i])
+		if competitorAt < 0 || expectedAt < 0 || competitorAt >= expectedAt {
+			t.Fatalf("off order %v: competitor at %d, expected at %d", ids(result.Records), competitorAt, expectedAt)
+		}
+		if result.Records[expectedAt].PathSignal != 0 || result.Pack.PathSignal {
+			t.Fatalf("off query %s carried a path signal", tokens[i])
+		}
+		if strings.Contains(result.Pack.ExplainText(), "paths:") {
+			t.Fatalf("off explain carried a paths line:\n%s", result.Pack.ExplainText())
+		}
+		offIDs[i] = ids(result.Records)
+		offScores[i] = scores(result.Records)
+		offSummaries[i] = result.Summary
+	}
+
+	// Act: the switch on moves the expected record in front of the competitor.
+	t.Setenv(app.RankingPathsEnv, "1")
+	for i := 0; i < queries; i++ {
+		result, err := f.app.Context(ctx, app.ContextOptions{
+			ProjectID: "p", Query: tokens[i], TokenBudget: domain.MaxContextBudgetTokens,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		competitorAt, expectedAt := recordIndex(result.Records, competitors[i]), recordIndex(result.Records, expected[i])
+		if expectedAt < 0 || competitorAt < 0 || expectedAt >= competitorAt {
+			t.Fatalf("on order %v: expected at %d, competitor at %d", ids(result.Records), expectedAt, competitorAt)
+		}
+		bonus := result.Records[expectedAt].PathSignal
+		if bonus != app.ContextPathSignalCap {
+			t.Fatalf("exact file bonus = %.3f, want %.3f", bonus, app.ContextPathSignalCap)
+		}
+		if result.Records[competitorAt].PathSignal != 0 {
+			t.Fatalf("competitor without paths earned %.3f", result.Records[competitorAt].PathSignal)
+		}
+		for _, record := range result.Records {
+			if record.PathSignal > app.ContextPathSignalCap {
+				t.Fatalf("%s bonus = %.3f, over the cap %.3f", record.ID, record.PathSignal, app.ContextPathSignalCap)
+			}
+		}
+		if !result.Pack.PathSignal || result.Pack.PathChangedFiles < queries {
+			t.Fatalf("pack path report = %+v", result.Pack)
+		}
+		explain := result.Pack.ExplainText()
+		if !strings.Contains(explain, "paths: on") || !strings.Contains(explain, expected[i]+" +0.050") {
+			t.Fatalf("explain lacks the path contribution:\n%s", explain)
+		}
+	}
+
+	// Assert: turning the switch off again reproduces the default answer. One
+	// query is enough here; the ten-query comparison above already ran the
+	// whole fixture with the switch on.
+	t.Setenv(app.RankingPathsEnv, "")
+	result, err := f.app.Context(ctx, app.ContextOptions{
+		ProjectID: "p", Query: tokens[0], TokenBudget: domain.MaxContextBudgetTokens,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := ids(result.Records); !reflect.DeepEqual(got, offIDs[0]) {
+		t.Fatalf("off/on/off order %v, want %v", got, offIDs[0])
+	}
+	if got := scores(result.Records); !reflect.DeepEqual(got, offScores[0]) {
+		t.Fatalf("off/on/off scores %v, want %v", got, offScores[0])
+	}
+	if result.Summary != offSummaries[0] {
+		t.Fatalf("off/on/off summary changed:\n%s\n%s", offSummaries[0], result.Summary)
+	}
+}
+
+func scores(records []app.ContextRecord) []float64 {
+	out := make([]float64, 0, len(records))
+	for _, record := range records {
+		out = append(out, record.Score)
+	}
+	return out
+}
+
+// TestContextPathSignalTiersAndCap checks the strength order exact file >
+// directory prefix > branch-name token and that every tier stays under the cap.
+func TestContextPathSignalTiersAndCap(t *testing.T) {
+	// Arrange
+	ctx := context.Background()
+	repo := initPathRepo(t)
+	f := newPathFixture(t, repo)
+	writeRepoFile(t, repo, "internal/app/changed.go", "package app\n")
+	query := "tiersignal"
+	exact := f.decisionWithPaths(t, "Exact tiersignal", query, []string{"internal/app/changed.go"})
+	dir := f.decisionWithPaths(t, "Dir tiersignal", query, []string{"internal/app"})
+	branch := f.decisionWithPaths(t, "Branch tiersignal", query, []string{"src/context_feature.go"})
+
+	// Act
+	t.Setenv(app.RankingPathsEnv, "1")
+	result, err := f.app.Context(ctx, app.ContextOptions{
+		ProjectID: "p", Query: query, TokenBudget: domain.MaxContextBudgetTokens,
+	})
+
+	// Assert
+	if err != nil {
+		t.Fatal(err)
+	}
+	byID := map[string]app.ContextRecord{}
+	for _, record := range result.Records {
+		byID[record.ID] = record
+		if record.PathSignal > app.ContextPathSignalCap {
+			t.Fatalf("%s bonus = %.3f, over the cap %.3f", record.ID, record.PathSignal, app.ContextPathSignalCap)
+		}
+	}
+	if got := byID[exact].PathSignal; got != app.ContextPathSignalCap {
+		t.Fatalf("exact bonus = %.3f, want %.3f", got, app.ContextPathSignalCap)
+	}
+	if got, want := byID[dir].PathSignal, 0.03; got != want {
+		t.Fatalf("dir bonus = %.3f, want %.3f", got, want)
+	}
+	if got, want := byID[branch].PathSignal, 0.013; got != want {
+		t.Fatalf("branch bonus = %.3f, want %.3f", got, want)
+	}
+	if byID[exact].PathSignal <= byID[dir].PathSignal || byID[dir].PathSignal <= byID[branch].PathSignal {
+		t.Fatalf("tier order wrong: exact=%.3f dir=%.3f branch=%.3f",
+			byID[exact].PathSignal, byID[dir].PathSignal, byID[branch].PathSignal)
+	}
+	for id, want := range map[string]string{exact: "exact ", dir: "dir ", branch: "branch "} {
+		if !strings.HasPrefix(byID[id].PathSignalMatch, want) {
+			t.Fatalf("%s match = %q, want %q prefix", id, byID[id].PathSignalMatch, want)
+		}
+	}
+}
+
+// TestContextPathSignalDegradesSilently keeps the read-only promise: a
+// checkout that is not a repository, or a machine without git, ranks exactly
+// as the flagless engine and reports no skipped section.
+func TestContextPathSignalDegradesSilently(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		isolateGit bool
+	}{
+		{"not a repository", false},
+		{"git missing", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// Arrange
+			ctx := context.Background()
+			f := newContextFixture(t, true)
+			dir := t.TempDir()
+			paths := []string{dir}
+			if _, err := f.app.SaveProject(ctx, app.ProjectInput{ID: "p", Paths: &paths}); err != nil {
+				t.Fatal(err)
+			}
+			id := f.decisionWithPaths(t, "Degraded pathsignal", "pathsignal degraded text", []string{"src/degrade.go"})
+			t.Setenv(app.RankingPathsEnv, "1")
+			if tc.isolateGit {
+				t.Setenv("PATH", "")
+			}
+
+			// Act
+			result, err := f.app.Context(ctx, app.ContextOptions{
+				ProjectID: "p", Query: "pathsignal", TokenBudget: domain.MaxContextBudgetTokens,
+			})
+
+			// Assert
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(result.Records) != 1 || result.Records[0].ID != id {
+				t.Fatalf("records = %v, want %s", ids(result.Records), id)
+			}
+			if result.Records[0].PathSignal != 0 || result.Pack.PathSignal {
+				t.Fatalf("a checkout without git still earned a signal: %+v", result.Records[0])
+			}
+			if len(result.Skipped) != 0 || strings.Contains(result.Pack.ExplainText(), "paths:") {
+				t.Fatalf("degraded signal was reported: skipped=%v explain=%s", result.Skipped, result.Pack.ExplainText())
+			}
+		})
 	}
 }

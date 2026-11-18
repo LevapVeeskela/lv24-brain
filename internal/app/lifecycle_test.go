@@ -39,12 +39,23 @@ func TestRecordLifecycle(t *testing.T) {
 		t.Fatalf("accept = %+v, %v", accepted, err)
 	}
 	superseded, err := a.Supersede(ctx, "p", old.Decision.ID, replacement.Decision.ID)
-	if err != nil || superseded.Old.Status != string(domain.DecisionSuperseded) ||
-		superseded.Old.SupersededBy != replacement.Decision.ID || superseded.New.Supersedes != old.Decision.ID {
+	if err != nil || !superseded.Changed || superseded.Case == nil || superseded.Case.Status != app.SupersedeProposed {
 		t.Fatalf("supersede = %+v, %v", superseded, err)
 	}
+	// LIFE-1: the predecessor stays current until the case is approved.
+	pending, err := a.GetRecord(ctx, "p", old.Decision.ID)
+	if err != nil || pending.Decision == nil || pending.Decision.Status != domain.DecisionProposed ||
+		pending.Validity().SupersededBy != "" || !pending.Validity().ValidTo.IsZero() {
+		t.Fatalf("pending predecessor = %+v, %v", pending, err)
+	}
+	if _, err := a.ReviewSupersede(ctx, app.SupersedeReviewInput{
+		ProjectID: "p", OldID: old.Decision.ID, Action: app.SupersedeAccept, Reason: "owner approved",
+	}); err != nil {
+		t.Fatal(err)
+	}
 	reread, err := a.GetRecord(ctx, "p", old.Decision.ID)
-	if err != nil || reread.Decision == nil || reread.Decision.Status != domain.DecisionSuperseded {
+	if err != nil || reread.Decision == nil || reread.Decision.Status != domain.DecisionSuperseded ||
+		reread.Validity().SupersededBy != replacement.Decision.ID {
 		t.Fatalf("reread = %+v, %v", reread, err)
 	}
 	// A reversed link would close a supersede cycle.
@@ -79,7 +90,8 @@ func TestRecordLifecycle(t *testing.T) {
 	for _, entry := range entries {
 		events[entry.Event]++
 	}
-	if events[app.JournalStatus] != 3 || events[app.JournalTrash] != 1 || events[app.JournalRestore] != 1 {
+	if events[app.JournalStatus] != 3 || events[app.JournalTrash] != 1 || events[app.JournalRestore] != 1 ||
+		events[app.JournalSupersedeProposed] != 1 || events[app.JournalSupersedeAccepted] != 1 {
 		t.Fatalf("journal events = %v", events)
 	}
 }
