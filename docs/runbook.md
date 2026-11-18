@@ -948,7 +948,10 @@ runs the checkout's `scripts/brain-graphs.bat`
 (`C:\0project\lv24-brain\scripts\brain-graphs.bat`), which applies
 `brain update --yes` first, then runs graphs, connectors, `brain sync --push`
 and `brain agents sync`; the 30-minute "Company Brain Update" task runs
-`scripts/brain-update.bat` (signed update, then `brain sync --push`). On macOS
+`scripts/brain-update.bat` (signed update, then `brain sync --push`). The graph
+task starts the batch file through `%LOCALAPPDATA%\lv24-brain\brain-graphs.vbs`
+with `wscript.exe //B //Nologo`, so no console window appears; recreate the task
+with that action (not the `.bat` directly) if it is ever registered again. On macOS
 the LaunchAgent `by.lv24.brain-daily` (`~/Library/LaunchAgents/`, script
 `~/.local/bin/brain-daily.sh`, log `~/Library/Logs/lv24-brain-daily.log`) runs
 `brain sync --push` and `brain agents sync` daily at 09:30 or on wake after a
