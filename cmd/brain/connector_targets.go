@@ -101,7 +101,10 @@ func planLocalConnectors(ctx context.Context, cfg config.BrainConfig, name, proj
 }
 
 // connectorRunTimeout bounds one local connector run.
-const connectorRunTimeout = 5 * time.Minute
+// connectorRunTimeout bounds one background connector run. GitHub and GitLab
+// read and re-index thousands of items after a raw-zone rewrite, so five
+// minutes was too tight; the scheduled task runs each connection in turn.
+const connectorRunTimeout = 15 * time.Minute
 
 // MailSelector filters mail.json accounts.
 type MailSelector func(bootstrap.MailAccount) bool

@@ -126,9 +126,13 @@ func NewSource(conn domain.Connection, credentials ports.CredentialProvider, cli
 		return nil, err
 	}
 	if client == nil {
-		// A moved project answers with a redirect on the same GitLab host.
-		client = &http.Client{Timeout: 30 * time.Second, CheckRedirect: connectors.SameHostRedirect(baseURL)}
+		client = &http.Client{Timeout: 30 * time.Second}
 	}
+	// A moved project answers with a redirect on the same GitLab host; follow
+	// it there only, never leaking the token to another host.
+	cloned := *client
+	cloned.CheckRedirect = connectors.SameHostRedirect(baseURL)
+	client = &cloned
 	return &Source{
 		connection:  conn,
 		baseURL:     baseURL,

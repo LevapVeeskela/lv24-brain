@@ -96,6 +96,14 @@ func NewSource(conn domain.Connection, credentials ports.CredentialProvider, cli
 	if now == nil {
 		now = time.Now
 	}
+	if client == nil {
+		client = &http.Client{Timeout: 30 * time.Second}
+	}
+	// A renamed repository answers 301 on the same host; follow it there and
+	// nowhere else, so the token cannot leave the configured base URL.
+	cloned := *client
+	cloned.CheckRedirect = connectors.SameHostRedirect(parsed.String())
+	client = &cloned
 	return &Source{
 		connection:  conn,
 		baseURL:     strings.TrimRight(parsed.String(), "/"),

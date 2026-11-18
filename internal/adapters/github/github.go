@@ -126,10 +126,13 @@ func New(cfg Config) (*Connector, error) {
 	}
 	client := cfg.HTTPClient
 	if client == nil {
-		// A renamed repository answers with 301 on api.github.com; follow it
-		// on the same host only, never leaking the token elsewhere.
-		client = &http.Client{Timeout: 30 * time.Second, CheckRedirect: connectors.SameHostRedirect(baseURL)}
+		client = &http.Client{Timeout: 30 * time.Second}
 	}
+	// A renamed repository answers with 301 on api.github.com; follow it on the
+	// same host only, never leaking the token elsewhere.
+	cloned := *client
+	cloned.CheckRedirect = connectors.SameHostRedirect(baseURL)
+	client = &cloned
 
 	return &Connector{
 		baseURL:   baseURL,
