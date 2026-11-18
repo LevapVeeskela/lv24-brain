@@ -141,6 +141,6 @@ func onboardNextActions(cfg config.BrainConfig) []string {
 	return []string{
 		"brain sync --push --config " + configPath,
 		"brain sync --watch --push --interval=5m --config " + configPath,
-		"Windows: create a scheduled task that runs `brain sync --push` every 5 minutes",
+		"Windows: schedule `brain-task.exe <command>` (GUI-subsystem launcher) instead of a .bat directly, e.g. `brain-task.exe C:\\path\\to\\brain.exe sync --push`; a bare .bat or console program opens a cmd window in the interactive session",
 	}
 }

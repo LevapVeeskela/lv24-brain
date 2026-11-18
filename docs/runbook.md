@@ -504,6 +504,25 @@ A clean three-machine test (`TestThreeMachinesWriteConcurrently`) runs three
 clones with two concurrent sessions each, then verifies every note, all state
 fields and the registry entry survive the merge.
 
+### Windows scheduled tasks run hidden
+
+Task Scheduler starts an interactive task in the user's console, so a `.bat` or
+a console program such as `brain.exe` opens a cmd window on every interval. Run
+the job through `brain-task.exe`, the GUI-subsystem launcher in `bin/`:
+
+```powershell
+$action = New-ScheduledTaskAction -Execute 'C:\0project\lv24-brain\bin\brain-task.exe' `
+  -Argument 'C:\0project\lv24-brain\scripts\brain-update.bat'
+Set-ScheduledTask -TaskName 'Company Brain Update' -Action $action
+```
+
+The launcher runs the command (batch files go through `cmd /d /c`) with
+`CREATE_NO_WINDOW`, waits for it and returns its exit code, so
+`LastTaskResult` still reports failures. Build it with
+`go build -ldflags "-H windowsgui" -o bin/brain-task.exe ./cmd/braintask`.
+The task's `Hidden` setting is cosmetic and does not suppress the window on its
+own. The same launcher works for other CLIs scheduled on the machine.
+
 ### Legacy PII dump zones
 
 `mail/`, root `github/` and `gitlab/`, `merges/` and orphan
