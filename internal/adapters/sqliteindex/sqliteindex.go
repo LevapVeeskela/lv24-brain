@@ -215,6 +215,9 @@ func (i *Index) prepareSchemaOnce(ctx context.Context) error {
 		if err := applySchema(ctx, conn); err != nil {
 			return err
 		}
+		if err := writeSchemaMeta(ctx, conn); err != nil {
+			return err
+		}
 		if _, err := conn.ExecContext(ctx, "COMMIT"); err != nil {
 			return fmt.Errorf("sqliteindex: commit schema transaction: %w", err)
 		}
@@ -227,6 +230,9 @@ func (i *Index) prepareSchemaOnce(ctx context.Context) error {
 		}
 	}
 	if err := applySchema(ctx, conn); err != nil {
+		return err
+	}
+	if err := writeSchemaMeta(ctx, conn); err != nil {
 		return err
 	}
 	if _, err := conn.ExecContext(ctx, fmt.Sprintf("PRAGMA user_version = %d", schemaVersion)); err != nil {
@@ -259,6 +265,78 @@ func applySchema(ctx context.Context, db schemaExecer) error {
 	return nil
 }
 
+// Index metadata keys stored in the meta table.
+const (
+	metaSchemaVersion = "schema_version"
+	metaGeneration    = "index_generation"
+	metaIndexedFrom   = "indexed_from"
+)
+
+// writeSchemaMeta records the schema version the open index runs. It runs in
+// the schema transaction after the table exists, so Meta can always name the
+// version without a special case.
+func writeSchemaMeta(ctx context.Context, db schemaExecer) error {
+	if _, err := db.ExecContext(ctx, upsertMetaSQL, metaSchemaVersion, strconv.Itoa(schemaVersion)); err != nil {
+		return fmt.Errorf("sqliteindex: record schema version: %w", err)
+	}
+	return nil
+}
+
+// Meta returns the index metadata of the last completed reindex:
+// index_generation, indexed_from and schema_version. An index that was never
+// reindexed returns only schema_version.
+func (i *Index) Meta(ctx context.Context) (map[string]string, error) {
+	rows, err := i.db.QueryContext(ctx, `SELECT key, value FROM meta`)
+	if err != nil {
+		return nil, fmt.Errorf("sqliteindex: read meta: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	meta := map[string]string{}
+	for rows.Next() {
+		var key, value string
+		if err := rows.Scan(&key, &value); err != nil {
+			return nil, fmt.Errorf("sqliteindex: read meta: %w", err)
+		}
+		meta[key] = value
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("sqliteindex: read meta: %w", err)
+	}
+	return meta, nil
+}
+
+// SetMeta upserts index metadata, for example index_generation and
+// indexed_from after a successful reindex. Keys are written in one transaction,
+// so a reader never sees a generation from one run next to a HEAD from another.
+func (i *Index) SetMeta(ctx context.Context, values map[string]string) error {
+	if len(values) == 0 {
+		return nil
+	}
+	keys := make([]string, 0, len(values))
+	for key := range values {
+		if err := domain.ValidateRequired("index.meta.key", key); err != nil {
+			return err
+		}
+		keys = append(keys, key)
+	}
+	return retryOnBusy(ctx, busyTimeout, func() error {
+		tx, err := i.db.BeginTx(ctx, nil)
+		if err != nil {
+			return fmt.Errorf("sqliteindex: begin meta write: %w", err)
+		}
+		defer func() { _ = tx.Rollback() }()
+		for _, key := range keys {
+			if _, err := tx.ExecContext(ctx, upsertMetaSQL, key, values[key]); err != nil {
+				return fmt.Errorf("sqliteindex: write meta %q: %w", key, err)
+			}
+		}
+		if err := tx.Commit(); err != nil {
+			return fmt.Errorf("sqliteindex: commit meta write: %w", err)
+		}
+		return nil
+	})
+}
+
 // boolToInt converts a boolean to its SQLite integer form.
 func boolToInt(value bool) int {
 	if value {
@@ -272,12 +350,33 @@ func (i *Index) Close() error {
 	return i.db.Close()
 }
 
+// projectionColumns are the derived, machine-independent columns of one
+// document. They are computed by the use-case layer because they describe the
+// record, not the storage: content_hash collapses duplicates across clones and
+// stub marks a low-signal record the retrieval hides by default.
+type projectionColumns struct {
+	contentHash string
+	stub        bool
+}
+
 // Upsert inserts or replaces one indexed document and its derived relation
-// rows. Both happen in one transaction, so a reader never sees a document with
-// a stale relation set. Another process writing the same index can make the
-// transaction lose the lock, so the whole unit is retried while the database is
-// busy.
+// rows. The derived projection columns are left empty; callers that project a
+// record (the reindex and the write paths) use UpsertProjection instead.
 func (i *Index) Upsert(ctx context.Context, doc ports.Document) error {
+	return i.upsert(ctx, doc, projectionColumns{})
+}
+
+// UpsertProjection is Upsert with the derived projection columns. The hash and
+// the stub flag are computed once by the projection layer and stored verbatim,
+// so two machines indexing the same record derive the same values.
+func (i *Index) UpsertProjection(ctx context.Context, doc ports.Document, contentHash string, stub bool) error {
+	if err := validateContentHash(contentHash); err != nil {
+		return err
+	}
+	return i.upsert(ctx, doc, projectionColumns{contentHash: contentHash, stub: stub})
+}
+
+func (i *Index) upsert(ctx context.Context, doc ports.Document, projection projectionColumns) error {
 	if err := validateDocument(doc); err != nil {
 		return err
 	}
@@ -285,7 +384,7 @@ func (i *Index) Upsert(ctx context.Context, doc ports.Document) error {
 		return err
 	}
 	return retryOnBusy(ctx, busyTimeout, func() error {
-		return i.upsertOnce(ctx, doc)
+		return i.upsertOnce(ctx, doc, projection)
 	})
 }
 
@@ -297,6 +396,29 @@ func (i *Index) Upsert(ctx context.Context, doc ports.Document) error {
 // writes are idempotent upserts, so a retry is safe. Callers with a large
 // corpus chunk the slice to bound the transaction and its WAL growth.
 func (i *Index) UpsertBatch(ctx context.Context, docs []ports.Document) error {
+	return i.upsertBatch(ctx, docs, nil)
+}
+
+// UpsertProjectionBatch is UpsertBatch with the derived projection columns,
+// one entry per document. It is the reindex path: the projection layer already
+// computed the hash and stub, and the batch stores them in the same
+// transaction as the documents.
+func (i *Index) UpsertProjectionBatch(ctx context.Context, docs []ports.Document, contentHashes []string, stubs []bool) error {
+	if len(contentHashes) != len(docs) || len(stubs) != len(docs) {
+		return domain.NewValidationError("index.document.projection",
+			fmt.Sprintf("projection has %d hashes and %d stubs for %d documents", len(contentHashes), len(stubs), len(docs)))
+	}
+	projections := make([]projectionColumns, len(docs))
+	for idx := range docs {
+		if err := validateContentHash(contentHashes[idx]); err != nil {
+			return err
+		}
+		projections[idx] = projectionColumns{contentHash: contentHashes[idx], stub: stubs[idx]}
+	}
+	return i.upsertBatch(ctx, docs, projections)
+}
+
+func (i *Index) upsertBatch(ctx context.Context, docs []ports.Document, projections []projectionColumns) error {
 	if len(docs) == 0 {
 		return nil
 	}
@@ -309,7 +431,7 @@ func (i *Index) UpsertBatch(ctx context.Context, docs []ports.Document) error {
 		}
 	}
 	return retryOnBusy(ctx, busyTimeout, func() error {
-		return i.upsertBatchOnce(ctx, docs)
+		return i.upsertBatchOnce(ctx, docs, projections)
 	})
 }
 
@@ -381,13 +503,13 @@ func (i *Index) checkpointOnce(ctx context.Context) (int, error) {
 }
 
 // upsertOnce performs one upsert transaction.
-func (i *Index) upsertOnce(ctx context.Context, doc ports.Document) error {
+func (i *Index) upsertOnce(ctx context.Context, doc ports.Document, projection projectionColumns) error {
 	tx, err := i.db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("sqliteindex: begin upsert %q: %w", doc.ID, err)
 	}
 	defer func() { _ = tx.Rollback() }()
-	if err := writeDocument(ctx, txWriter{tx: tx}, doc); err != nil {
+	if err := writeDocument(ctx, txWriter{tx: tx}, doc, projection); err != nil {
 		return err
 	}
 	if err := tx.Commit(); err != nil {
@@ -399,7 +521,7 @@ func (i *Index) upsertOnce(ctx context.Context, doc ports.Document) error {
 // upsertBatchOnce performs one batch transaction. The statements are prepared
 // once for the transaction, so a batch compiles its SQL a fixed number of times
 // instead of three times per document.
-func (i *Index) upsertBatchOnce(ctx context.Context, docs []ports.Document) error {
+func (i *Index) upsertBatchOnce(ctx context.Context, docs []ports.Document, projections []projectionColumns) error {
 	tx, err := i.db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("sqliteindex: begin batch of %d documents: %w", len(docs), err)
@@ -409,8 +531,8 @@ func (i *Index) upsertBatchOnce(ctx context.Context, docs []ports.Document) erro
 	if err != nil {
 		return err
 	}
-	for _, doc := range docs {
-		if err := writeDocument(ctx, writer, doc); err != nil {
+	for idx, doc := range docs {
+		if err := writeDocument(ctx, writer, doc, projectionAt(projections, idx)); err != nil {
 			return err
 		}
 	}
@@ -420,17 +542,26 @@ func (i *Index) upsertBatchOnce(ctx context.Context, docs []ports.Document) erro
 	return nil
 }
 
+// projectionAt returns the projection of one batch document. A plain
+// UpsertBatch has none, which leaves the derived columns empty.
+func projectionAt(projections []projectionColumns, idx int) projectionColumns {
+	if idx < 0 || idx >= len(projections) {
+		return projectionColumns{}
+	}
+	return projections[idx]
+}
+
 // docWriter writes one document and its derived relation rows. Both the
 // per-document transaction and the batch use it, so the two paths cannot drift.
 type docWriter interface {
-	upsertDocument(ctx context.Context, doc ports.Document) error
+	upsertDocument(ctx context.Context, doc ports.Document, projection projectionColumns) error
 	clearRelations(ctx context.Context, id string) error
 	addRelation(ctx context.Context, doc ports.Document, relation ports.RelationLink) error
 }
 
 // writeDocument replaces one document and its relation projection.
-func writeDocument(ctx context.Context, writer docWriter, doc ports.Document) error {
-	if err := writer.upsertDocument(ctx, doc); err != nil {
+func writeDocument(ctx context.Context, writer docWriter, doc ports.Document, projection projectionColumns) error {
+	if err := writer.upsertDocument(ctx, doc, projection); err != nil {
 		return err
 	}
 	if err := writer.clearRelations(ctx, doc.ID); err != nil {
@@ -447,8 +578,8 @@ func writeDocument(ctx context.Context, writer docWriter, doc ports.Document) er
 // txWriter runs the statements unprepared, for the single-document path.
 type txWriter struct{ tx *sql.Tx }
 
-func (w txWriter) upsertDocument(ctx context.Context, doc ports.Document) error {
-	if _, err := w.tx.ExecContext(ctx, upsertSQL, documentArgs(doc)...); err != nil {
+func (w txWriter) upsertDocument(ctx context.Context, doc ports.Document, projection projectionColumns) error {
+	if _, err := w.tx.ExecContext(ctx, upsertSQL, documentArgs(doc, projection)...); err != nil {
 		return fmt.Errorf("sqliteindex: upsert %q: %w", doc.ID, err)
 	}
 	return nil
@@ -495,8 +626,8 @@ func newStmtWriter(ctx context.Context, tx *sql.Tx) (stmtWriter, error) {
 	return writer, nil
 }
 
-func (w stmtWriter) upsertDocument(ctx context.Context, doc ports.Document) error {
-	if _, err := w.upsert.ExecContext(ctx, documentArgs(doc)...); err != nil {
+func (w stmtWriter) upsertDocument(ctx context.Context, doc ports.Document, projection projectionColumns) error {
+	if _, err := w.upsert.ExecContext(ctx, documentArgs(doc, projection)...); err != nil {
 		return fmt.Errorf("sqliteindex: upsert %q: %w", doc.ID, err)
 	}
 	return nil
@@ -517,7 +648,7 @@ func (w stmtWriter) addRelation(ctx context.Context, doc ports.Document, relatio
 }
 
 // documentArgs binds one document to upsertSQL.
-func documentArgs(doc ports.Document) []any {
+func documentArgs(doc ports.Document, projection projectionColumns) []any {
 	return []any{
 		doc.ID,
 		doc.ProjectID,
@@ -542,7 +673,20 @@ func documentArgs(doc ports.Document) []any {
 		// ranking can tell "not projected" from a known trust level.
 		doc.Origin,
 		doc.Trust,
+		// The derived columns come from the projection layer; a plain Upsert
+		// leaves them empty so an adapter-only write is visibly unprojected.
+		projection.contentHash,
+		boolToInt(projection.stub),
 	}
+}
+
+// validateContentHash rejects a projected document without a hash: an empty
+// value would make duplicate collapsing silently skip the record.
+func validateContentHash(contentHash string) error {
+	if err := domain.ValidateRequired("index.document.contentHash", contentHash); err != nil {
+		return err
+	}
+	return nil
 }
 
 // relationArgs binds one relation row to upsertRelationSQL.
@@ -725,17 +869,19 @@ func (i *Index) runSearch(ctx context.Context, query ports.Query, match string) 
 			topicKey     string
 			occurrences  int
 			pinnedFlag   int
+			contentHash  string
 			updatedAt    int64
 		)
 		if err := rows.Scan(&hit.ID, &hit.ProjectID, &hit.Kind, &hit.Title, &snippet, &body, &score,
 			&contrib[0], &contrib[1], &contrib[2], &contrib[3], &contrib[4],
 			&validFrom, &validTo, &supersededBy, &status, &confidence,
-			&subtype, &scope, &topicKey, &occurrences, &pinnedFlag, &updatedAt); err != nil {
+			&subtype, &scope, &topicKey, &occurrences, &pinnedFlag, &contentHash, &updatedAt); err != nil {
 			return nil, fmt.Errorf("sqliteindex: scan hit: %w", err)
 		}
 		hit.ID = recordID(hit.ProjectID, hit.ID)
 		hit.Snippet = snippet.String
 		hit.Body = body.String
+		hit.ContentHash = contentHash
 		hit.Score = score
 		hit.Subtype = subtype
 		hit.Scope = scope
@@ -799,6 +945,11 @@ func buildSearchStatement(query ports.Query, match string) (string, []any) {
 	if clause, kindArgs := kindCondition("d.kind", "NOT IN", query.ExcludeKinds); clause != "" {
 		builder.WriteString(" AND " + clause)
 		args = append(args, kindArgs...)
+	}
+	if !query.IncludeStubs {
+		// IDX-4: a stub stays in the index and in counts; retrieval hides it
+		// unless the caller explicitly asks for it.
+		builder.WriteString(" AND d.stub = 0")
 	}
 	if subtype := strings.TrimSpace(query.Subtype); subtype != "" {
 		builder.WriteString(" AND d.subtype = ?")

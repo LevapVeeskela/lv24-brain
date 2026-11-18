@@ -568,6 +568,16 @@ func runOpen(args []string, stdout, stderr io.Writer) int {
 	if err != nil {
 		return reportError(stderr, "open", err)
 	}
+	if target.Path == "" {
+		// The single-project convenience of resolveTarget carries no checkout;
+		// name the one this machine uses so a wrong directory is visible.
+		if resolved, resolveErr := useCase.App.ResolveSelector(ctx, target.Project.ID); resolveErr == nil {
+			target = resolved
+		}
+	}
+	knowledge := func() (app.ProjectKnowledge, error) {
+		return useCase.App.Knowledge(ctx, target.Project.ID)
+	}
 	if *brief {
 		result, err := useCase.App.Open(ctx, app.OpenOptions{ProjectID: target.Project.ID})
 		if err != nil {
@@ -579,6 +589,11 @@ func runOpen(args []string, stdout, stderr io.Writer) int {
 				State:   toJSONState(result.State),
 			})
 		}
+		reported, err := knowledge()
+		if err != nil {
+			return reportError(stderr, "open", err)
+		}
+		printKnowledge(ctx, stdout, useCase.App, cfg, target, reported)
 		printOpenResult(stdout, result)
 		return 0
 	}
@@ -619,9 +634,105 @@ func runOpen(args []string, stdout, stderr io.Writer) int {
 			Summary: result.Summary,
 		})
 	}
+	reported, err := knowledge()
+	if err != nil {
+		return reportError(stderr, "open", err)
+	}
+	printKnowledge(ctx, stdout, useCase.App, cfg, target, reported)
 	printSummary(stdout, result.Summary)
 	printGitAndGraphs(ctx, stdout, target)
 	return 0
+}
+
+// printKnowledge reports the resolved project, its checkout, the knowledge
+// tier and the index state before the context itself: a wrong checkout or a
+// project with nothing in it must be visible without reading the summary.
+func printKnowledge(ctx context.Context, w io.Writer, a *app.App, cfg config.BrainConfig, resolved app.Resolved, knowledge app.ProjectKnowledge) {
+	fmt.Fprintf(w, "project_id: %s\n", knowledge.ProjectID)
+	fmt.Fprintf(w, "path: %s\n", valueOr(resolved.Path, "(not registered on this machine)"))
+	fmt.Fprintf(w, "tier: %s\n", knowledge.Tier)
+	indexStatus, indexErr := a.IndexStatus(ctx)
+	fmt.Fprintf(w, "index: %s\n", indexLine(indexStatus, indexErr, cfg.Mode))
+	if warning := checkoutWarning(resolved); warning != "" {
+		fmt.Fprint(w, warning)
+	}
+	fmt.Fprintln(w)
+}
+
+// checkoutWarning names the working directory and the registered checkouts
+// when the command runs outside the resolved checkout: that is the most common
+// way to read the wrong project's context.
+func checkoutWarning(resolved app.Resolved) string {
+	wd, err := os.Getwd()
+	if err != nil {
+		return ""
+	}
+	if resolved.Path == "" {
+		return fmt.Sprintf("cwd: %s (no registered checkout on this machine)\nregistered_paths: %s\n", wd, registeredPaths(resolved.Project))
+	}
+	if pathWithinDir(wd, resolved.Path) {
+		return ""
+	}
+	return fmt.Sprintf("cwd: %s (not inside the resolved checkout)\nregistered_paths: %s\n", wd, registeredPaths(resolved.Project))
+}
+
+// registeredPaths renders the project's checkouts that exist on this machine,
+// for the wrong-directory message. Paths registered on another machine are
+// left out: they explain nothing about this run and would leak an unrelated
+// filesystem layout into `brain open`.
+func registeredPaths(project domain.Project) string {
+	var existing []string
+	for _, path := range app.LocalPaths(project.Paths) {
+		if info, err := os.Stat(path); err == nil && info.IsDir() {
+			existing = append(existing, filepath.Clean(path))
+		}
+	}
+	if len(existing) == 0 {
+		return "(none on this machine)"
+	}
+	return strings.Join(existing, ", ")
+}
+
+// pathWithinDir reports whether child is parent or lies under it, with the
+// case-insensitive comparison Windows and macOS need.
+func pathWithinDir(child, parent string) bool {
+	childAbs, childErr := filepath.Abs(child)
+	parentAbs, parentErr := filepath.Abs(parent)
+	if childErr != nil || parentErr != nil {
+		return false
+	}
+	if strings.EqualFold(childAbs, parentAbs) {
+		return true
+	}
+	relative, err := filepath.Rel(parentAbs, childAbs)
+	if err != nil || relative == ".." || filepath.IsAbs(relative) {
+		return false
+	}
+	return !strings.HasPrefix(relative, ".."+string(filepath.Separator))
+}
+
+// indexLine renders the local index state for open and status. Server mode has
+// no local index, so it is reported as unavailable instead of complete.
+func indexLine(status app.IndexStatus, err error, mode string) string {
+	if err != nil {
+		if errors.Is(err, domain.ErrUnsupported) && mode == config.ModeServer {
+			return "n/a (server mode)"
+		}
+		return "n/a"
+	}
+	if status.Stale {
+		if status.IndexedFrom == "" {
+			if status.Head == "" {
+				return "stale (never indexed)"
+			}
+			return "stale (never indexed; HEAD " + status.Head + ")"
+		}
+		return fmt.Sprintf("stale at %s (HEAD %s)", status.IndexedFrom, valueOr(status.Head, "unknown"))
+	}
+	if status.IndexedFrom == "" {
+		return "complete (no git marker)"
+	}
+	return "complete at " + status.IndexedFrom
 }
 
 func printOpenResult(w io.Writer, result app.OpenResult) {
@@ -1112,12 +1223,97 @@ func withoutQuarantined[T interface{ Quarantined() bool }](values []T) []T {
 	return out
 }
 
+// similarLimit is the number of near-duplicate records a write reports.
+const similarLimit = 3
+
+// similarSearchLimit asks the index for extra rows so excluding the record
+// just written still leaves a full page of candidates.
+const similarSearchLimit = 10
+
+// similarRecord is one existing record close to the one just written.
+type similarRecord struct {
+	ID    string
+	Kind  string
+	Title string
+	Score float64
+}
+
+// similarQuery builds the search text for a write: its title plus any tags it
+// carries. The body is deliberately left out, so a long note does not turn
+// into an OR query.
+func similarQuery(title string, tags []string) string {
+	parts := make([]string, 0, len(tags)+1)
+	if title = strings.TrimSpace(title); title != "" {
+		parts = append(parts, title)
+	}
+	for _, tag := range tags {
+		if tag = strings.TrimSpace(tag); tag != "" {
+			parts = append(parts, tag)
+		}
+	}
+	return strings.Join(parts, " ")
+}
+
+// similarRecords finds up to similarLimit records of the same project that
+// look like the record just written. The write already succeeded, so a search
+// failure only costs the hint: the caller reports it and exits zero.
+func similarRecords(application *app.App, projectID, query, newID string) ([]similarRecord, error) {
+	query = strings.TrimSpace(query)
+	if query == "" {
+		return nil, nil
+	}
+	hits, err := application.SearchWith(context.Background(), app.SearchOptions{
+		Text:      query,
+		ProjectID: projectID,
+		Limit:     similarSearchLimit,
+	})
+	if err != nil {
+		return nil, err
+	}
+	similar := make([]similarRecord, 0, similarLimit)
+	for _, hit := range hits {
+		if len(similar) == similarLimit {
+			break
+		}
+		if hit.ID == newID || hit.ProjectID != projectID || hit.Score <= 0 {
+			continue
+		}
+		similar = append(similar, similarRecord{
+			ID: hit.ID, Kind: hit.Kind, Title: hit.Title, Score: hit.Score,
+		})
+	}
+	return similar, nil
+}
+
+// printSimilar writes the --similar block after the record id. The hint names
+// the exact flag but never supersedes anything: the caller decides.
+func printSimilar(stdout io.Writer, kind string, similar []similarRecord) {
+	for _, hit := range similar {
+		fmt.Fprintf(stdout, "similar: %s %.3f %s\n", hit.ID, hit.Score, hit.Title)
+	}
+	if len(similar) > 0 && similar[0].Kind == kind {
+		fmt.Fprintf(stdout, "hint: pass --supersedes %s if this replaces %s\n", similar[0].ID, similar[0].ID)
+	}
+}
+
+// reportSimilar runs the post-write similarity pass for --similar. Only the
+// hint can fail, and it is logged to stderr without changing the exit code.
+func reportSimilar(stdout, stderr io.Writer, command string, application *app.App, projectID, kind, query, newID string) {
+	similar, err := similarRecords(application, projectID, query, newID)
+	if err != nil {
+		fmt.Fprintf(stderr, "brain %s: similar records unavailable: %v\n", command, err)
+		return
+	}
+	printSimilar(stdout, kind, similar)
+}
+
 func runNote(args []string, stdout, stderr io.Writer) int {
 	fs := newFlagSet("note", stderr)
 	project := fs.String("project", "", "project id")
 	title := fs.String("title", "", "note title")
 	body := fs.String("body", "", "note body in Markdown")
 	tags := fs.String("tags", "", "comma-separated tags")
+	similar := fs.Bool("similar", false, "after the write, list up to 3 similar existing records and a supersedes hint")
 	supersedes := fs.String("supersedes", "", "id of the note this one replaces; the old note is marked superseded")
 	supersededBy := fs.String("superseded-by", "", "id of the note that already replaced this one (repair)")
 	confidence := fs.Float64("confidence", 0, "author confidence between 0 and 1")
@@ -1178,6 +1374,10 @@ func runNote(args []string, stdout, stderr io.Writer) int {
 		return reportError(stderr, "note", err)
 	}
 	fmt.Fprintf(stdout, "note %s%s\n", result.Note.ID, unchangedSuffix(result.Already))
+	if *similar {
+		reportSimilar(stdout, stderr, "note", useCase.App, result.Note.ProjectID, "note",
+			similarQuery(result.Note.Title, result.Note.Tags), result.Note.ID)
+	}
 	return 0
 }
 
@@ -1200,6 +1400,7 @@ func runDecision(args []string, stdout, stderr io.Writer) int {
 	create := fs.Bool("create", false, "register --project first if it does not exist yet")
 	allowProtected := fs.Bool("allow-protected", false, "write even though limits.protected_projects or limits.protected_globs protect the project or path")
 	allowDuplicate := fs.Bool("allow-duplicate", false, "write even though an existing decision holds the same normalized text")
+	similar := fs.Bool("similar", false, "after the write, list up to 3 similar existing records and a supersedes hint")
 	var relationFlags repeatedFlag
 	fs.Var(&relationFlags, "relation", "declare a relation as <target>:<relation>[:<reason>] (repeatable)")
 	cfgPath := configFlag(fs)
@@ -1252,6 +1453,10 @@ func runDecision(args []string, stdout, stderr io.Writer) int {
 		return reportError(stderr, "decision", err)
 	}
 	fmt.Fprintf(stdout, "decision %s%s\n", result.Decision.ID, unchangedSuffix(result.Already))
+	if *similar {
+		reportSimilar(stdout, stderr, "decision", useCase.App, result.Decision.ProjectID, "decision",
+			similarQuery(result.Decision.Title, nil), result.Decision.ID)
+	}
 	return 0
 }
 
@@ -1271,6 +1476,7 @@ func runAttempt(args []string, stdout, stderr io.Writer) int {
 	create := fs.Bool("create", false, "register --project first if it does not exist yet")
 	allowProtected := fs.Bool("allow-protected", false, "write even though limits.protected_projects or limits.protected_globs protect the project or path")
 	allowDuplicate := fs.Bool("allow-duplicate", false, "write even though an existing attempt holds the same normalized text")
+	similar := fs.Bool("similar", false, "after the write, list up to 3 similar existing records and a supersedes hint")
 	var relationFlags repeatedFlag
 	fs.Var(&relationFlags, "relation", "declare a relation as <target>:<relation>[:<reason>] (repeatable)")
 	cfgPath := configFlag(fs)
@@ -1320,6 +1526,10 @@ func runAttempt(args []string, stdout, stderr io.Writer) int {
 		return reportError(stderr, "attempt", err)
 	}
 	fmt.Fprintf(stdout, "attempt %s%s\n", result.Attempt.ID, unchangedSuffix(result.Already))
+	if *similar {
+		reportSimilar(stdout, stderr, "attempt", useCase.App, result.Attempt.ProjectID, "attempt",
+			similarQuery(result.Attempt.Title, nil), result.Attempt.ID)
+	}
 	return 0
 }
 
@@ -1414,8 +1624,9 @@ func runStatus(args []string, stdout, stderr io.Writer) int {
 	if err != nil {
 		return reportError(stderr, "status", err)
 	}
+	ctx := context.Background()
 	useCase := app.New(cfg, app.Dependencies{})
-	status, err := useCase.Status(context.Background())
+	status, err := useCase.Status(ctx)
 	if err != nil {
 		return reportError(stderr, "status", err)
 	}
@@ -1437,7 +1648,53 @@ func runStatus(args []string, stdout, stderr io.Writer) int {
 	fmt.Fprintf(stdout, "schema_version: %d\n", status.SchemaVersion)
 	fmt.Fprintf(stdout, "engine_version: %s\n", status.EngineVersion)
 	fmt.Fprintf(stdout, "update_channel: %s\n", status.UpdateChannel)
+	printStatusKnowledge(ctx, stdout, cfg)
 	return 0
+}
+
+// printStatusKnowledge appends the resolved project, its checkout and the
+// knowledge tier to the configuration status. It never fails the command: an
+// unregistered directory is the ABSENT case and is reported as such.
+func printStatusKnowledge(ctx context.Context, w io.Writer, cfg config.BrainConfig) {
+	wd, _ := os.Getwd()
+	if cfg.Mode == config.ModeServer {
+		// Status is a diagnostic: never let an unreachable server hang it.
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, 5*time.Second)
+		defer cancel()
+	}
+	runtime, err := buildRuntime(cfg)
+	if err != nil {
+		fmt.Fprintf(w, "project_id: (not registered)\npath: %s\ntier: %s\nindex: n/a\n", wd, app.TierAbsent)
+		return
+	}
+	defer func() { _ = runtime.Close() }()
+	target, resolveErr := runtime.App.ResolveSelector(ctx, wd)
+	if resolveErr != nil {
+		// Keep the single-project convenience of `brain open` (one registered
+		// project, run from anywhere), but still report the mismatch.
+		if projects, listErr := runtime.App.ListProjects(ctx); listErr == nil && len(projects) == 1 {
+			if resolved, err := runtime.App.ResolveSelector(ctx, projects[0].ID); err == nil {
+				target, resolveErr = resolved, nil
+			}
+		}
+	}
+	if resolveErr != nil {
+		indexStatus, indexErr := runtime.App.IndexStatus(ctx)
+		fmt.Fprintf(w, "project_id: (not registered)\npath: %s\ntier: %s\n", wd, app.TierAbsent)
+		fmt.Fprintf(w, "index: %s\n", indexLine(indexStatus, indexErr, cfg.Mode))
+		fmt.Fprintf(w, "project_error: %v\n", resolveErr)
+		return
+	}
+	knowledge, err := runtime.App.Knowledge(ctx, target.Project.ID)
+	if err != nil {
+		indexStatus, indexErr := runtime.App.IndexStatus(ctx)
+		fmt.Fprintf(w, "project_id: %s\npath: %s\n", target.Project.ID, valueOr(target.Path, "(not registered on this machine)"))
+		fmt.Fprintf(w, "tier: unknown (%v)\n", err)
+		fmt.Fprintf(w, "index: %s\n", indexLine(indexStatus, indexErr, cfg.Mode))
+		return
+	}
+	printKnowledge(ctx, w, runtime.App, cfg, target, knowledge)
 }
 
 func runReview(args []string, stdout, stderr io.Writer) int {
@@ -1811,12 +2068,17 @@ func runIndex(args []string, stdout, stderr io.Writer) int {
 	return 0
 }
 
+// searchOptionsHook lets a test observe the options runSearch builds; it is nil
+// in production.
+var searchOptionsHook func(app.SearchOptions)
+
 func runSearch(args []string, stdout, stderr io.Writer) int {
 	fs := newFlagSet("search", stderr)
 	project := fs.String("project", "", "project id, alias or checkout path; unknown values are an error")
 	limit := fs.Int("limit", app.DefaultSearchLimit, "maximum results on this page")
 	kinds := fs.String("kind", "", "comma-separated kinds to keep: note, decision, attempt, handoff, dump, item (raw-zone external items; excluded by default)")
 	dumps := fs.Bool("dumps", false, "include connector dumps (mail, GitHub/GitLab issues and PRs)")
+	includeStubs := fs.Bool("include-stubs", false, "include low-signal stub records (generated titles, \"nothing new\" bodies) that search hides by default")
 	since := fs.String("since", "", "only documents updated since: duration (24h, 7d), date (2026-11-01) or RFC3339 time")
 	matchMode := fs.String("match-mode", "", "how query terms combine: all (every term, the default) or any (any term)")
 	minScore := fs.Float64("min-score", 0, "drop hits with a composite relevance below this value (0..1)")
@@ -1923,19 +2185,20 @@ func runSearch(args []string, stdout, stderr io.Writer) int {
 	}
 	filter := searchFilterFingerprint(query, projectID, strings.ToLower(strings.TrimSpace(*matchMode)),
 		fmt.Sprint(*minScore), fmt.Sprint(*dumps), *kinds, *since, asOf.Format(time.RFC3339Nano), fmt.Sprint(includeSuperseded),
-		strings.TrimSpace(*subtype), strings.TrimSpace(*scope), strings.TrimSpace(*topic))
+		strings.TrimSpace(*subtype), strings.TrimSpace(*scope), strings.TrimSpace(*topic), fmt.Sprint(*includeStubs))
 	offset, err := decodeSearchCursor(*cursor, filter)
 	if err != nil {
 		fmt.Fprintf(stderr, "brain search: --cursor: %v\n", err)
 		return 2
 	}
 	requested := searchFetchLimit(offset, size)
-	report, err := runtime.App.SearchWithReport(context.Background(), app.SearchOptions{
+	options := app.SearchOptions{
 		Text:              query,
 		ProjectID:         projectID,
 		Limit:             requested,
 		Kinds:             splitList(*kinds),
 		IncludeDumps:      *dumps,
+		IncludeStubs:      *includeStubs,
 		Since:             sinceTime,
 		AsOf:              asOf,
 		IncludeSuperseded: includeSuperseded,
@@ -1947,7 +2210,11 @@ func runSearch(args []string, stdout, stderr io.Writer) int {
 		Subtype:           *subtype,
 		Scope:             *scope,
 		TopicKey:          *topic,
-	})
+	}
+	if searchOptionsHook != nil {
+		searchOptionsHook(options)
+	}
+	report, err := runtime.App.SearchWithReport(context.Background(), options)
 	if err != nil {
 		return reportError(stderr, "search", err)
 	}
@@ -1964,10 +2231,12 @@ func runSearch(args []string, stdout, stderr io.Writer) int {
 			HasMore:    page.HasMore,
 			NextCursor: page.NextCursor,
 			Hits:       toJSONHits(pageHits),
+			Support:    toJSONSupport(report.Support),
+			Excluded:   toJSONExcluded(report.Excluded),
 		})
 	}
 	if report.Relaxed {
-		fmt.Fprintf(stderr, "brain search: strict match found nothing; results are relaxed (any term)\n")
+		fmt.Fprintf(stderr, "brain search: strict match returned fewer than 5 results; the page is relaxed (any term)\n")
 	}
 	for _, hit := range pageHits {
 		fmt.Fprintf(stdout, "%s/%s/%s\n  %s\n", hit.Kind, hit.ProjectID, hit.Title, hit.Snippet)
@@ -1983,6 +2252,23 @@ func runSearch(args []string, stdout, stderr io.Writer) int {
 		// caller how to continue and the command still exits 0, so a script can
 		// page through results without treating pagination as an error.
 		fmt.Fprintf(stderr, "brain search: more results; pass --cursor %q for page %d\n", page.NextCursor, page.Page+1)
+	}
+	if report.Support.Tier == app.SupportNone {
+		fmt.Fprintf(stderr, "brain search: no supported matches — %s\n", report.Support.Reason)
+	} else if report.Support.Tier == app.SupportRelated && len(pageHits) > 0 {
+		fmt.Fprintf(stderr, "brain search: related only — %s\n", report.Support.Reason)
+	}
+	if len(report.Excluded) > 0 {
+		counts := map[string]int{}
+		for _, hit := range report.Excluded {
+			counts[hit.Reason]++
+		}
+		parts := make([]string, 0, len(counts))
+		for reason, count := range counts {
+			parts = append(parts, fmt.Sprintf("%s %d", reason, count))
+		}
+		sort.Strings(parts)
+		fmt.Fprintf(stderr, "brain search: excluded %d (%s)\n", len(report.Excluded), strings.Join(parts, ", "))
 	}
 	return 0
 }

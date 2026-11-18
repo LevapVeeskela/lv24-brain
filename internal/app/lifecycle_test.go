@@ -83,3 +83,41 @@ func TestRecordLifecycle(t *testing.T) {
 		t.Fatalf("journal events = %v", events)
 	}
 }
+
+// The tier is the honest answer to "is there anything here?": an unregistered
+// id is ABSENT, a registered project without state or records is EMPTY, and
+// any record or state content makes it POPULATED.
+func TestStatusKnowledgeTiers(t *testing.T) {
+	ctx := context.Background()
+	a, _ := newJournalApp(t)
+
+	absent, err := a.Knowledge(ctx, "unknown-project")
+	if err != nil || absent.Tier != app.TierAbsent || absent.Records() != 0 {
+		t.Fatalf("absent = %+v, %v", absent, err)
+	}
+
+	if _, err := a.SaveProject(ctx, app.ProjectInput{ID: "empty"}); err != nil {
+		t.Fatal(err)
+	}
+	empty, err := a.Knowledge(ctx, "empty")
+	if err != nil || empty.Tier != app.TierEmpty || empty.HasState || empty.Records() != 0 {
+		t.Fatalf("empty = %+v, %v", empty, err)
+	}
+
+	goal := "ship 0.27"
+	if _, err := a.SetState(ctx, app.StateInput{ProjectID: "empty", Goal: &goal}); err != nil {
+		t.Fatal(err)
+	}
+	stateOnly, err := a.Knowledge(ctx, "empty")
+	if err != nil || stateOnly.Tier != app.TierPopulated || !stateOnly.HasState {
+		t.Fatalf("state-only project = %+v, %v", stateOnly, err)
+	}
+
+	if _, err := a.Note(ctx, app.NoteInput{ProjectID: "written", Title: "Real note", Body: "index and retrieval", CreateProject: true}); err != nil {
+		t.Fatal(err)
+	}
+	populated, err := a.Knowledge(ctx, "written")
+	if err != nil || populated.Tier != app.TierPopulated || populated.Notes != 1 || populated.Records() != 1 {
+		t.Fatalf("populated = %+v, %v", populated, err)
+	}
+}

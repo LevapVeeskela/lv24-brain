@@ -2,15 +2,19 @@ package app
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/levapveeskela/lv24-brain/internal/config"
 	"github.com/levapveeskela/lv24-brain/internal/domain"
+	"github.com/levapveeskela/lv24-brain/internal/gitinfo"
 	"github.com/levapveeskela/lv24-brain/internal/ports"
 )
 
@@ -59,6 +63,9 @@ func (a *App) Reindex(ctx context.Context, opts IndexOptions) (IndexResult, erro
 
 	result := IndexResult{Rebuild: opts.Rebuild}
 	seen := map[string]struct{}{}
+	// digest accumulates the projection of every written document, so the
+	// generation names the exact content the index holds, not just its size.
+	digest := make([]string, 0, 1024)
 	// A reindex writes every document, so the writes go in chunks: one
 	// transaction per document made a corpus rebuild pay a commit and a WAL
 	// checkpoint per record instead of per few hundred records.
@@ -72,6 +79,8 @@ func (a *App) Reindex(ctx context.Context, opts IndexOptions) (IndexResult, erro
 			return nil
 		}
 		seen[doc.ID] = struct{}{}
+		projection := projectDocument(doc)
+		digest = append(digest, doc.ID+"="+projection.ContentHash+"="+strconv.FormatInt(doc.UpdatedAt.UnixNano(), 10))
 		return batch.add(doc)
 	}
 	projects, err := a.deps.Store.ListProjects(ctx)
@@ -169,8 +178,148 @@ func (a *App) Reindex(ctx context.Context, opts IndexOptions) (IndexResult, erro
 			return result, fmt.Errorf("compact the search index: %w", err)
 		}
 	}
+	if err := a.recordIndexGeneration(ctx, digest); err != nil {
+		return result, err
+	}
 	a.clearIndexDirty()
 	return result, nil
+}
+
+// Index metadata keys shared with sqliteindex. They are literals here because
+// the use case layer does not import an adapter.
+const (
+	indexMetaGeneration    = "index_generation"
+	indexMetaIndexedFrom   = "indexed_from"
+	indexMetaSchemaVersion = "schema_version"
+)
+
+// gitDirtySuffix marks an indexed_from value taken while the data directory had
+// uncommitted changes. It is part of the comparison: a commit without a
+// reindex must report the index as stale even when HEAD itself did not move.
+const gitDirtySuffix = "+dirty"
+
+// indexMetaReader is the optional index capability that exposes the metadata
+// written by the last completed reindex.
+type indexMetaReader interface {
+	Meta(ctx context.Context) (map[string]string, error)
+}
+
+// indexMetaWriter is the optional index capability that stores index metadata.
+type indexMetaWriter interface {
+	SetMeta(ctx context.Context, values map[string]string) error
+}
+
+// recordIndexGeneration stores the content digest of a completed reindex and
+// the git state it was built from. An adapter without the meta capability
+// keeps the reindex working; only the status cannot report freshness.
+func (a *App) recordIndexGeneration(ctx context.Context, digest []string) error {
+	writer, ok := a.deps.Index.(indexMetaWriter)
+	if !ok {
+		return nil
+	}
+	head, dirty := a.dataDirGitMarker(ctx)
+	if err := writer.SetMeta(ctx, map[string]string{
+		indexMetaGeneration:  projectionGeneration(digest),
+		indexMetaIndexedFrom: gitMarker(head, dirty),
+	}); err != nil {
+		return fmt.Errorf("record the index generation: %w", err)
+	}
+	return nil
+}
+
+// projectionGeneration is the order-independent digest of the indexed
+// documents. The same corpus produces the same value on every machine, so a
+// generation mismatch means the content differs, not the run.
+func projectionGeneration(entries []string) string {
+	sorted := append([]string(nil), entries...)
+	sort.Strings(sorted)
+	hasher := sha256.New()
+	for _, entry := range sorted {
+		_, _ = hasher.Write([]byte(entry))
+		_, _ = hasher.Write([]byte{'\n'})
+	}
+	return hex.EncodeToString(hasher.Sum(nil))[:16]
+}
+
+// IndexStatus reports whether the search index still describes the data
+// directory. The check is read-only: it compares the indexed_from marker with
+// the current git HEAD and dirty flag, and never reindexes.
+type IndexStatus struct {
+	// Stale is set when the index was built from another HEAD (or dirty
+	// state), when it has no generation, or when a schema upgrade emptied it.
+	Stale bool
+	// IndexedFrom is the marker recorded by the last completed reindex:
+	// a short HEAD sha, with a "+dirty" suffix when the tree was dirty.
+	IndexedFrom string
+	// Head and Dirty describe the data directory right now.
+	Head  string
+	Dirty bool
+	// Generation is the content digest of the indexed corpus.
+	Generation string
+	// SchemaVersion is the index schema version the database was opened with.
+	SchemaVersion string
+}
+
+// IndexStatus compares the index metadata with the current git state of the
+// data directory. It returns an error when no local index is available; a
+// non-git data directory has no HEAD to compare, so the marker is only equal
+// when both sides are empty.
+func (a *App) IndexStatus(ctx context.Context) (IndexStatus, error) {
+	if a.cfg.Mode == config.ModeServer {
+		return IndexStatus{}, fmt.Errorf("%w: index is local-only in server mode", domain.ErrUnsupported)
+	}
+	if a.deps.Index == nil {
+		return IndexStatus{}, fmt.Errorf("%w: local search index is not available", domain.ErrUnsupported)
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	var status IndexStatus
+	if reader, ok := a.deps.Index.(indexMetaReader); ok {
+		meta, err := reader.Meta(ctx)
+		if err != nil {
+			return IndexStatus{}, err
+		}
+		status.IndexedFrom = meta[indexMetaIndexedFrom]
+		status.Generation = meta[indexMetaGeneration]
+		status.SchemaVersion = meta[indexMetaSchemaVersion]
+	}
+	head, dirty := a.dataDirGitMarker(ctx)
+	status.Head = head
+	status.Dirty = dirty
+	// A schema rebuild drops the meta table, so a missing generation is the
+	// "index was recreated empty" signal; no adapter flag is needed and a
+	// completed reindex clears it by writing the generation.
+	status.Stale = status.Generation == "" || status.IndexedFrom != gitMarker(head, dirty)
+	return status, nil
+}
+
+// dataDirGitMarker reads the data directory's short HEAD and dirty flag with
+// the read-only git helper. A directory that is not a repository (or a missing
+// git binary) yields empty values.
+func (a *App) dataDirGitMarker(ctx context.Context) (string, bool) {
+	dir := strings.TrimSpace(a.cfg.DataDir)
+	if dir == "" {
+		return "", false
+	}
+	summary := gitinfo.Read(ctx, dir)
+	if !summary.IsRepo {
+		return "", false
+	}
+	return summary.Head, summary.Dirty > 0
+}
+
+// gitMarker encodes a repository state as the indexed_from value. The empty
+// string means "no repository here".
+func gitMarker(head string, dirty bool) string {
+	head = strings.TrimSpace(head)
+	if head == "" {
+		return ""
+	}
+	if dirty {
+		return head + gitDirtySuffix
+	}
+	return head
 }
 
 // indexBatchSize bounds one reindex transaction: a few hundred documents
@@ -232,6 +381,13 @@ func (b *indexWriteBatch) flush() error {
 
 // write persists one chunk in one transaction when the index supports batches.
 func (b *indexWriteBatch) write(chunk []ports.Document) error {
+	if writer, ok := b.batcher.(projectionBatchWriter); ok {
+		contentHashes, stubs := projectionColumns(chunk)
+		if err := writer.UpsertProjectionBatch(b.ctx, chunk, contentHashes, stubs); err != nil {
+			return fmt.Errorf("index %d documents: %w", len(chunk), err)
+		}
+		return nil
+	}
 	if b.batcher != nil {
 		if err := b.batcher.UpsertBatch(b.ctx, chunk); err != nil {
 			return fmt.Errorf("index %d documents: %w", len(chunk), err)
@@ -239,7 +395,7 @@ func (b *indexWriteBatch) write(chunk []ports.Document) error {
 		return nil
 	}
 	for _, doc := range chunk {
-		if err := b.index.Upsert(b.ctx, doc); err != nil {
+		if err := upsertProjected(b.ctx, b.index, doc); err != nil {
 			return err
 		}
 	}
@@ -280,7 +436,7 @@ func (a *App) IndexDumps(ctx context.Context) (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	upsert := func(doc ports.Document) error { return a.deps.Index.Upsert(ctx, doc) }
+	upsert := func(doc ports.Document) error { return a.upsertProjected(ctx, doc) }
 	count, _, err := a.indexDumps(ctx, projects, upsert)
 	if err != nil {
 		a.markIndexDirty()
@@ -407,7 +563,7 @@ func (a *App) indexItemKeys(ctx context.Context, zone ItemZone, connectionID str
 		item, err := zone.ItemByKey(ctx, key)
 		switch {
 		case err == nil && !item.Deleted:
-			if err := a.deps.Index.Upsert(ctx, itemDocument(item)); err != nil {
+			if err := a.upsertProjected(ctx, itemDocument(item)); err != nil {
 				return result, fmt.Errorf("index item %s: %w", key, err)
 			}
 			result.Indexed++
@@ -428,7 +584,7 @@ func (a *App) reindexConnection(ctx context.Context, zone ItemZone, connectionID
 	seen := map[string]struct{}{}
 	count, err := indexConnectionItems(ctx, zone.ItemZone(), connectionID, func(doc ports.Document) error {
 		seen[doc.ID] = struct{}{}
-		return a.deps.Index.Upsert(ctx, doc)
+		return a.upsertProjected(ctx, doc)
 	})
 	result.Indexed = count
 	if err != nil {

@@ -388,6 +388,32 @@ type reviewInputs struct {
 	checkout  string               // local checkout, "" when this machine has none
 }
 
+// The isStub* helpers adapt a record to IsStubRecord. Review and duplicate
+// detection read the text a person would read: a note title and body, a
+// decision title and context, an attempt title and its narrative, a handoff
+// summary and next action. Generated label+id records and "nothing happened"
+// records then produce no findings while staying in lists, counts and search
+// results that do not filter stubs.
+func isStubNote(note domain.Note) bool {
+	return IsStubRecord(ports.RecordNote, note.Title, note.Body)
+}
+
+func isStubDecision(decision domain.Decision) bool {
+	return IsStubRecord(ports.RecordDecision, decision.Title, decision.Context)
+}
+
+func isStubAttempt(attempt domain.Attempt) bool {
+	return IsStubRecord(ports.RecordAttempt, attempt.Title,
+		joinText(attempt.Hypothesis, attempt.Result, attempt.Reason))
+}
+
+// isStubHandoff checks both free-text fields: handoffs carry no title, so the
+// summary is the text and a placeholder next action carries nothing either.
+func isStubHandoff(handoff domain.Handoff) bool {
+	return IsStubRecord(ports.RecordHandoff, "", handoff.Summary) ||
+		IsStubRecord(ports.RecordHandoff, "", handoff.NextAction)
+}
+
 // Findings runs the review heuristics: deterministic token-overlap checks, no
 // model calls. They flag candidates; a person or agent confirms them.
 func (a *App) Findings(ctx context.Context, projectID string) ([]Finding, error) {
@@ -666,11 +692,11 @@ func answerFor(question string, in reviewInputs) (string, bool) {
 func decisionFindings(in reviewInputs) []Finding {
 	var findings []Finding
 	for _, decision := range in.decisions {
-		if decision.Status == domain.DecisionRejected || decision.Status == domain.DecisionSuperseded {
+		if decision.Status == domain.DecisionRejected || decision.Status == domain.DecisionSuperseded || isStubDecision(decision) {
 			continue
 		}
 		for _, attempt := range in.attempts {
-			if !attemptRecordsFailure(attempt) || !attempt.CreatedAt.After(decision.CreatedAt) || !similar(decision.Title, attempt.Title+" "+attempt.Hypothesis) {
+			if isStubAttempt(attempt) || !attemptRecordsFailure(attempt) || !attempt.CreatedAt.After(decision.CreatedAt) || !similar(decision.Title, attempt.Title+" "+attempt.Hypothesis) {
 				continue
 			}
 			findings = append(findings, newFinding(FindingDecisionContradicted,

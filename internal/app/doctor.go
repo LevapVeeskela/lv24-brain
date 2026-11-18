@@ -6,9 +6,11 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -45,6 +47,7 @@ func (a *App) Doctor(ctx context.Context, opts DoctorOptions) (DoctorReport, err
 	checks = append(checks, a.doctorLocks(ctx))
 	checks = append(checks, a.doctorSchema())
 	checks = append(checks, a.doctorIndex(ctx))
+	checks = append(checks, a.doctorIndexGeneration(ctx))
 	checks = append(checks, a.doctorRecords(ctx))
 	checks = append(checks, a.doctorRecordLimits(ctx))
 	checks = append(checks, a.doctorJournal(ctx))
@@ -475,6 +478,76 @@ func (a *App) doctorIndex(ctx context.Context) DoctorCheck {
 		return DoctorCheck{Name: "index", Status: doctorWarn, Message: "the index may miss records (a write or sync could not update it); run brain index"}
 	}
 	return DoctorCheck{Name: "index", Status: doctorOK, Message: "SQLite FTS5 is usable"}
+}
+
+// doctorIndexGeneration reports an index that lags the data directory. It is
+// report-only: one commit without a reindex is normal (the next write or sync
+// catches up), so only a larger gap or a dirty tree warns, and the remedy is
+// always the explicit `brain index`.
+func (a *App) doctorIndexGeneration(ctx context.Context) DoctorCheck {
+	const name = "index-generation"
+	if a.cfg.Mode == config.ModeServer {
+		return DoctorCheck{Name: name, Status: doctorOK, Message: "the index is local-only in server mode"}
+	}
+	status, err := a.IndexStatus(ctx)
+	if err != nil {
+		return DoctorCheck{Name: name, Status: doctorOK, Message: "no local index to compare"}
+	}
+	if !status.Stale {
+		head := status.Head
+		if head == "" {
+			head = "(no git marker)"
+		}
+		return DoctorCheck{Name: name, Status: doctorOK, Message: "index matches HEAD " + head}
+	}
+	if status.Generation == "" {
+		return DoctorCheck{Name: name, Status: doctorWarn, Message: "the index has no generation yet (never indexed or just rebuilt); run brain index"}
+	}
+	if status.IndexedFrom == "" {
+		return DoctorCheck{Name: name, Status: doctorWarn, Message: "the index has no indexed_from marker; run brain index"}
+	}
+	behind, comparable := indexCommitDistance(ctx, a.cfg.DataDir, status.IndexedFrom)
+	if !comparable {
+		return DoctorCheck{
+			Name:    name,
+			Status:  doctorWarn,
+			Message: fmt.Sprintf("the index was built from %s, which this clone cannot compare with HEAD %s; run brain index", status.IndexedFrom, valueOr(status.Head, "(unknown)")),
+		}
+	}
+	if status.Dirty || behind > 1 {
+		state := fmt.Sprintf("%d commits behind", behind)
+		if status.Dirty {
+			state += ", data directory dirty"
+		}
+		return DoctorCheck{
+			Name:    name,
+			Status:  doctorWarn,
+			Message: fmt.Sprintf("the index is stale at %s (HEAD %s, %s); run brain index", status.IndexedFrom, valueOr(status.Head, "(unknown)"), state),
+		}
+	}
+	return DoctorCheck{Name: name, Status: doctorOK, Message: "the index is one commit behind HEAD; the next write or brain index catches up"}
+}
+
+// indexCommitDistance counts the commits between an indexed_from marker and
+// HEAD, capped at two: the check only needs to know whether the gap is more
+// than one commit, so it never walks the whole history.
+func indexCommitDistance(ctx context.Context, dir, marker string) (int, bool) {
+	dir = strings.TrimSpace(dir)
+	marker = strings.TrimSpace(strings.TrimSuffix(strings.TrimSpace(marker), gitDirtySuffix))
+	if dir == "" || marker == "" {
+		return 0, false
+	}
+	runCtx, cancel := context.WithTimeout(ctx, gitinfo.Timeout)
+	defer cancel()
+	out, err := exec.CommandContext(runCtx, "git", "-C", dir, "rev-list", "--count", "--max-count=2", marker+"..HEAD").Output()
+	if err != nil {
+		return 0, false
+	}
+	distance, err := strconv.Atoi(strings.TrimSpace(string(out)))
+	if err != nil {
+		return 0, false
+	}
+	return distance, true
 }
 
 func (a *App) doctorServer(ctx context.Context) DoctorCheck {

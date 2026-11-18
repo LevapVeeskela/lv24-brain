@@ -92,6 +92,9 @@ func nearDuplicateFindings(in reviewInputs) []Finding {
 func noteDupRecords(notes []domain.Note) []dupRecord {
 	records := make([]dupRecord, 0, len(notes))
 	for _, note := range notes {
+		if isStubNote(note) {
+			continue
+		}
 		record := newDupRecord(note.ID, note.CreatedAt, note.Title, note.Body, false)
 		record.display = note.Title
 		records = append(records, record)
@@ -105,6 +108,9 @@ func decisionDupRecords(decisions []domain.Decision) []dupRecord {
 		if decision.Status != "" && decision.Status != domain.DecisionProposed && decision.Status != domain.DecisionAccepted {
 			continue
 		}
+		if isStubDecision(decision) {
+			continue
+		}
 		body := strings.Join([]string{decision.Context, strings.Join(decision.Alternatives, " "), strings.Join(decision.Consequences, " ")}, " ")
 		record := newDupRecord(decision.ID, decision.CreatedAt, decision.Title, body, false)
 		record.display = decision.Title
@@ -116,6 +122,9 @@ func decisionDupRecords(decisions []domain.Decision) []dupRecord {
 func attemptDupRecords(attempts []domain.Attempt) []dupRecord {
 	records := make([]dupRecord, 0, len(attempts))
 	for _, attempt := range attempts {
+		if isStubAttempt(attempt) {
+			continue
+		}
 		body := strings.Join([]string{attempt.Hypothesis, attempt.Result, attempt.Reason}, " ")
 		record := newDupRecord(attempt.ID, attempt.CreatedAt, attempt.Title, body, false)
 		record.display = attempt.Title
@@ -126,10 +135,14 @@ func attemptDupRecords(attempts []domain.Attempt) []dupRecord {
 
 // handoffDupRecords compares manual handoffs on summary and next action, and
 // automatic ones on the summary alone (their next action is a copy of the
-// state's, identical across sessions).
+// state's, identical across sessions). Stub handoffs are skipped: "nothing new"
+// repeats are routine, not duplicates worth reviewing.
 func handoffDupRecords(handoffs []domain.Handoff) []dupRecord {
 	records := make([]dupRecord, 0, len(handoffs))
 	for _, handoff := range handoffs {
+		if isStubHandoff(handoff) {
+			continue
+		}
 		summary := strings.TrimSpace(handoff.Summary)
 		var record dupRecord
 		if strings.HasPrefix(summary, duplicateAutoPrefix) {

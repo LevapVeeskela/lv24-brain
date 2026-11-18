@@ -5,7 +5,7 @@ Status: release candidate on `main`.
 0.26 completes the items 0.25 deferred. Search ranks a normalized relevance
 instead of raw BM25, the context packer spends a proportional budget, `--since`
 compares text changes, and connector accounts move out of the synced catalogue.
-The data schema stays 1; the local search index moves to version 8 and rebuilds
+The data schema stays 1; the local search index moves to version 9 and rebuilds
 itself once.
 
 ## Ranking v2

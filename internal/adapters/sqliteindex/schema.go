@@ -24,14 +24,25 @@ var schemaStatements = []string{
 		occurrences INTEGER NOT NULL DEFAULT 1,
 		pinned INTEGER NOT NULL DEFAULT 0,
 		origin TEXT NOT NULL DEFAULT '',
-		trust TEXT NOT NULL DEFAULT ''
+		trust TEXT NOT NULL DEFAULT '',
+		content_hash TEXT NOT NULL DEFAULT '',
+		stub INTEGER NOT NULL DEFAULT 0
 	)`,
 	`CREATE INDEX IF NOT EXISTS documents_project_idx ON documents(project_id)`,
+	`CREATE INDEX IF NOT EXISTS documents_content_hash_idx ON documents(project_id, content_hash)`,
 	`CREATE INDEX IF NOT EXISTS documents_valid_idx ON documents(kind, valid_to)`,
 	`CREATE INDEX IF NOT EXISTS documents_superseded_idx ON documents(superseded_by)`,
 	`CREATE INDEX IF NOT EXISTS documents_subtype_idx ON documents(project_id, subtype)`,
 	`CREATE INDEX IF NOT EXISTS documents_scope_idx ON documents(project_id, scope)`,
 	`CREATE INDEX IF NOT EXISTS documents_topic_idx ON documents(project_id, kind, topic_key)`,
+	// meta stores index metadata written together with a completed reindex:
+	// index_generation (content digest), indexed_from (git HEAD plus dirty
+	// flag) and schema_version. It is derived data and is dropped with the
+	// tables, so a schema rebuild cannot keep stale provenance.
+	`CREATE TABLE IF NOT EXISTS meta (
+		key TEXT PRIMARY KEY,
+		value TEXT NOT NULL DEFAULT ''
+	)`,
 	// relations is the derived projection of the typed relation frontmatter.
 	// source_id is the project-scoped document key ("<project>/<record>") so a
 	// source can be joined to its document; the relation target stays a record
@@ -72,8 +83,8 @@ var schemaStatements = []string{
 	END`,
 }
 
-const upsertSQL = `INSERT INTO documents (id, project_id, kind, title, body, updated_at, content_updated_at, valid_from, valid_to, superseded_by, supersedes, status, confidence, subtype, scope, topic_key, occurrences, pinned, origin, trust)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+const upsertSQL = `INSERT INTO documents (id, project_id, kind, title, body, updated_at, content_updated_at, valid_from, valid_to, superseded_by, supersedes, status, confidence, subtype, scope, topic_key, occurrences, pinned, origin, trust, content_hash, stub)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(id) DO UPDATE SET
 	project_id = excluded.project_id,
 	kind = excluded.kind,
@@ -93,7 +104,12 @@ ON CONFLICT(id) DO UPDATE SET
 	occurrences = excluded.occurrences,
 	pinned = excluded.pinned,
 	origin = excluded.origin,
-	trust = excluded.trust`
+	trust = excluded.trust,
+	content_hash = excluded.content_hash,
+	stub = excluded.stub`
+
+const upsertMetaSQL = `INSERT INTO meta (key, value) VALUES (?, ?)
+ON CONFLICT(key) DO UPDATE SET value = excluded.value`
 
 const deleteSQL = `DELETE FROM documents WHERE id = ?`
 
@@ -125,7 +141,11 @@ ON CONFLICT(source_id, target_id, relation) DO UPDATE SET
 // Version 9 projects the record provenance (origin, trust) so the ranking trust
 // term scores the record instead of staying neutral; rows written before it
 // keep empty values and rank as unknown trust.
-const schemaVersion = 9
+// Version 10 adds the derived projection columns content_hash (normalized
+// kind+title+body, used to collapse duplicates across clones) and stub (a
+// low-signal record the retrieval hides by default), plus the meta table that
+// records index_generation, indexed_from and schema_version.
+const schemaVersion = 10
 
 // dropStatements remove everything schemaStatements creates. Triggers go
 // first because they reference the tables.
@@ -136,4 +156,5 @@ var dropStatements = []string{
 	`DROP TABLE IF EXISTS relations`,
 	`DROP TABLE IF EXISTS documents_fts`,
 	`DROP TABLE IF EXISTS documents`,
+	`DROP TABLE IF EXISTS meta`,
 }

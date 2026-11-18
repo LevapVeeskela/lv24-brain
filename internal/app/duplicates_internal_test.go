@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/levapveeskela/lv24-brain/internal/domain"
+	"github.com/levapveeskela/lv24-brain/internal/ports"
 )
 
 var dupBase = time.Date(2026, 11, 1, 9, 0, 0, 0, time.UTC)
@@ -371,5 +372,74 @@ func TestDupSimilarityRequiresBodyOverlap(t *testing.T) {
 	// Assert
 	if ok {
 		t.Fatal("same title with different bodies reported as a duplicate")
+	}
+}
+
+// TestDuplicatesIgnoreStubRecords pins IDX-4 at the duplicate layer: routine
+// label+id notes and "nothing new" handoffs never enter duplicate detection, so
+// they form no clusters and no findings, while a real copied pair is still
+// reported. The five identical handoffs alone produced 4 near-duplicate
+// findings and one exact cluster before the stub filter.
+func TestDuplicatesIgnoreStubRecords(t *testing.T) {
+	// Arrange
+	body := "session ended with every check passing on the desktop machine after the docs site build and the installer smoke test finished cleanly"
+	var notes []domain.Note
+	var handoffs []domain.Handoff
+	for i := 0; i < 5; i++ {
+		notes = append(notes, domain.Note{
+			ID:        fmt.Sprintf("note-%02d", i),
+			Title:     fmt.Sprintf("note-2026-11-18-session-01j2x3aaaaaaaaaaaaaaaa%02d", i),
+			Body:      body,
+			CreatedAt: dupAt(i),
+		})
+		handoffs = append(handoffs, domain.Handoff{
+			ID: fmt.Sprintf("handoff-%02d", i), Summary: "nothing new", CreatedAt: dupAt(i),
+		})
+	}
+	// The fixture is genuinely noisy: the notes are label+id stubs, the
+	// handoffs are "nothing new" stubs, and the raw handoffs compare as exact
+	// duplicates before the review view skips them.
+	if !isStubNote(notes[0]) || !isStubHandoff(handoffs[0]) {
+		t.Fatal("fixture records are not stubs")
+	}
+	rawA := newDupRecord(handoffs[0].ID, handoffs[0].CreatedAt, "", handoffs[0].Summary, false)
+	rawB := newDupRecord(handoffs[1].ID, handoffs[1].CreatedAt, "", handoffs[1].Summary, false)
+	if _, ok := dupSimilarity(rawA, rawB); !ok {
+		t.Fatal("fixture handoffs are not duplicates before the stub filter")
+	}
+	if got := len(noteDupRecords(notes)); got != 0 {
+		t.Fatalf("stub notes entered duplicate detection: %d", got)
+	}
+	if got := len(handoffDupRecords(handoffs)); got != 0 {
+		t.Fatalf("stub handoffs entered duplicate detection: %d", got)
+	}
+	rawHandoffs := make([]dupRecord, 0, len(handoffs))
+	for _, handoff := range handoffs {
+		rawHandoffs = append(rawHandoffs, newDupRecord(handoff.ID, handoff.CreatedAt, "", handoff.Summary, false))
+	}
+	if got := len(duplicatesOfKind(ports.RecordHandoff, rawHandoffs)); got != 4 {
+		t.Fatalf("stub handoffs would produce %d findings, want 4", got)
+	}
+	in := reviewInputs{notes: notes, handoffs: handoffs}
+
+	// Act
+	findings := nearDuplicateFindings(in)
+	clusters := duplicatesOfProject("p", in)
+
+	// Assert
+	if len(findings) != 0 || len(clusters) != 0 {
+		t.Fatalf("stub findings = %d %+v, clusters = %d %+v; want none", len(findings), findings, len(clusters), clusters)
+	}
+
+	// A real copied pair is still reported as one finding and one cluster.
+	realBody := "the search index is rebuilt on every sync and the old index is removed after a successful build"
+	in.notes = append(in.notes,
+		domain.Note{ID: "note-real-a", Title: "Search index rebuild", Body: realBody, CreatedAt: dupAt(20)},
+		domain.Note{ID: "note-real-b", Title: "Search index rebuild", Body: strings.ReplaceAll(realBody, "successful build", "successful rebuild"), CreatedAt: dupAt(21)},
+	)
+	findings = nearDuplicateFindings(in)
+	clusters = duplicatesOfProject("p", in)
+	if len(findings) != 1 || len(clusters) != 1 || !strings.Contains(findings[0].Message, "note-real-a and note-real-b") {
+		t.Fatalf("real findings = %d %+v, clusters = %d %+v; want the real pair only", len(findings), findings, len(clusters), clusters)
 	}
 }

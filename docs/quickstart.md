@@ -34,9 +34,11 @@ It prints the project state, review findings, the latest handoff, the records
 that best match the task (decisions rank above attempts and notes, newer above
 older, an explicit pin above both) and failed attempts to avoid repeating,
 bounded by `--budget` (tokens; default 6000, maximum 32000). A layer that left
-records out ends with `- вЂ¦ N more dropped`, so a short answer is never mistaken
-for a complete one. Agents call the same thing through the MCP tool
-`brain_context`.
+records out ends with `- … N more dropped (over-budget, lower-rank)`, and the
+query layer adds `- … N lower-ranked omitted`; JSON also carries `excluded[]`,
+`excluded_total` and `near_misses[]`, so a short answer is never mistaken for a
+complete one.
+Agents call the same thing through the MCP tool `brain_context`.
 
 `--raw` is off by default. It appends at most five granted raw excerpts when the
 curated context is thin and only in local/git mode; without a matching grant in
@@ -209,6 +211,21 @@ Ranking v2 normalizes lexical relevance per query and weights the signals
 strict all-terms pass that finds fewer than five hits is merged with an
 any-term pass, and the strict hits always stay on top. `--explain` prints the
 contribution of each signal, and the contributions add up to the score.
+
+A page also carries a support verdict. `supported` means a hit contains every
+rare query term (at most 20 % of the project's documents) and at least half of
+the remaining subject terms; `related` means the page is nearby but does not
+answer the query; `none` returns an empty hit list and the reason, with the
+matched records moved to `excluded[]` as `lower-rank`. `--match-mode all` runs
+only the strict pass unless `--relaxed` is also given. Duplicate content is
+collapsed to the oldest copy (the other copy is listed as `duplicate`), and
+low-signal stub records are hidden unless `--include-stubs` is passed:
+
+```sh
+brain search "deploy rollback" --json          # support.tier, hits[].tier, excluded[]
+brain search "deploy rollback" --include-stubs # keep "nothing new" session stubs
+brain search "deploy rollback" --match-mode all --relaxed
+```
 
 `brain search` prints one block per hit:
 
@@ -924,29 +941,30 @@ also accepts `--config <path>`.
 
 | Command | Flags and defaults |
 |---|---|
-| `brain open [path\|id]` | `--project <id\|alias>`; `--budget <tokens>` (default 6000, maximum 32000) caps the summary; `--brief` prints only the project and state fields (no git or graph sections); `--as-of <time\|date>`, `--include-superseded`/`--all-time` select validity |
+| `brain open [path\|id]` | `--project <id\|alias>`; `--budget <tokens>` (default 6000, maximum 32000) caps the summary; `--brief` prints only the project and state fields (no git or graph sections); `--as-of <time\|date>`, `--include-superseded`/`--all-time` select validity. Text output starts with `project_id`, `path`, `tier` (`EMPTY`/`POPULATED`) and `index`; outside the resolved checkout it adds `cwd:` and `registered_paths:`. |
+| `brain status` | `--json` (configuration fields only). Text output adds the same `project_id`/`path`/`tier`/`index` block and the wrong-checkout lines; a directory with no resolvable project is reported as `tier: ABSENT`, not an error. |
 | `brain bootstrap [path\|id]` | `--project <id\|alias>`; `--budget <runes>` (default 4000); `--as-of`, `--include-superseded`/`--all-time` |
-| `brain note [text]` | `--project`, `--title`, `--body`, `--tags a,b`, `--supersedes <id>`, `--superseded-by <id>`, `--confidence 0..1`. Positional text becomes the body and the title is its first line (at most 80 characters). Do not combine positional text with `--body`. |
-| `brain decision [title]` | `--project`, `--title`, `--status proposed\|accepted\|rejected\|superseded` (default `proposed`), `--context <text>`, `--alternatives <a,b>`, `--consequences <a,b>`, `--evidence <a,b>`, `--supersedes <id>`, `--superseded-by <id>`, `--confidence 0..1`. The three list flags are comma-separated. |
-| `brain attempt [title]` | `--project`, `--title`, `--hypothesis <text>` (what was expected), `--result <text>` (what happened), `--reason <text>` (why it failed), `--supersedes <id>`, `--superseded-by <id>`, `--confidence 0..1` |
+| `brain note [text]` | `--project`, `--title`, `--body`, `--tags a,b`, `--supersedes <id>`, `--superseded-by <id>`, `--confidence 0..1`, `--similar` (print up to 3 similar existing records and a supersedes hint). Positional text becomes the body and the title is its first line (at most 80 characters). Do not combine positional text with `--body`. |
+| `brain decision [title]` | `--project`, `--title`, `--status proposed\|accepted\|rejected\|superseded` (default `proposed`), `--context <text>`, `--alternatives <a,b>`, `--consequences <a,b>`, `--evidence <a,b>`, `--supersedes <id>`, `--superseded-by <id>`, `--confidence 0..1`, `--similar`. The three list flags are comma-separated. |
+| `brain attempt [title]` | `--project`, `--title`, `--hypothesis <text>` (what was expected), `--result <text>` (what happened), `--reason <text>` (why it failed), `--supersedes <id>`, `--superseded-by <id>`, `--confidence 0..1`, `--similar` |
 | `brain handoff [summary]` | `--project`, `--summary`, `--next <text>` (next action), `--git-context <text>` (default: read from the project checkout), `--no-git`, `--supersedes <id>`, `--superseded-by <id>`, `--confidence 0..1` |
 | `brain journal` | `--project`, `--user`, `--event <name>` (for example `note`, `decision`, `attempt`, `handoff`, `commit`), `--since <duration>` (for example `24h`), `--limit <n>` (default 20). Local and git mode. |
 | `brain event commit` | `--project <id>`, `--repo <path>` (default `.`), `--quiet` (print nothing on success; used by the hook). Local and git mode. |
-| `brain search <query>` | `--project <id>`, `--limit <n>` (default 20), `--kind <kind>` (`note,decision,attempt,handoff,dump,item`; raw-zone `item` is excluded by default and needs a `context-allow.json` grant), `--dumps` (legacy dumps; also un-excludes server items, grant-gated), `--since <24h\|7d\|2w\|2026-11-01\|RFC3339>` (content change time), `--as-of <time\|date>`, `--include-superseded`/`--all-time`, `--match-mode all\|any`, `--relaxed`, `--min-score 0..1`, `--explain`, `--full`, `--page-size`, `--cursor`. English and Russian word forms match as a prefix; the default all-terms pass falls back to any-term when it finds fewer than five hits and keeps the strict hits on top. |
+| `brain search <query>` | `--project <id>`, `--limit <n>` (default 20), `--kind <kind>` (`note,decision,attempt,handoff,dump,item`; raw-zone `item` is excluded by default and needs a `context-allow.json` grant), `--dumps` (legacy dumps; also un-excludes server items, grant-gated), `--include-stubs` (keep generated-label and "nothing new" records), `--since <24h\|7d\|2w\|2026-11-01\|RFC3339>` (content change time), `--as-of <time\|date>`, `--include-superseded`/`--all-time`, `--match-mode all\|any`, `--relaxed`, `--min-score 0..1`, `--explain`, `--full`, `--page-size`, `--cursor`. English and Russian word forms match as a prefix; the default all-terms pass falls back to any-term when it finds fewer than five hits and keeps the strict hits on top. JSON adds `support` (`tier`, `best`, `threshold`, `reason`), `hits[].tier` and `excluded[]`; duplicate content is collapsed to the oldest copy. |
 | `brain record` | `list` accepts `--kind`, `--since` (content change time), `--status`, `--limit`, `--as-of`, `--include-superseded`/`--all-time`; `show <id>` accepts `--history` and `--as-of`; `edit <id>` accepts `--title`, `--body-file` (`-` for stdin), `--tags`, `--expected-updated-at`, `--allow-duplicate`, `--dry-run`; `supersede <old> --by <new>`, `status`, `review`, `trash`, `restore`, `trash-list` as in the runbook. JSON includes a `validity` object (`valid_from`, `valid_to`, `superseded_by`, `supersedes`, `confidence`) and `contentUpdatedAt`. |
 | `brain links <id>` | `--project <id>`, `--json`; `--broken` lists `[[id]]` references to missing records. Write `[[<id>]]`, `[[<id>\|text]]` or `[[<project>/<id>]]` in record text; `brain record show` lists Links and Backlinks. |
 | `brain review` | `--project <id>`, `--since <7d>`, `--fix`, `--fix-kind <kinds>`, `--json`. Lists pending proposals (at most 20) and findings; `broken-link`, `near-duplicate`, `supersession-gap`, `stale-superseded`, `proposal-stale`, `proposal-orphan`, `proposal-contradicted` are report-only. Proposal findings are local/git only, and `--fix` never touches proposals. |
 | `brain digest` | `--since <90m\|24h\|7d>` (default `24h`; with `--source` the default is `30d`), `--project <id>`, `--json`, `--write` (saves `<data_dir>/digests/YYYY-MM-DD.md`). With `--source <connection>`: `--all`, `--limit <n>` (default 500), `--rule <names>`, `--dry-run` (default; conflicts with `--write`), `--write` (persists proposals). `--source` is local/git only. |
 | `brain promote <id>` | `--project <id>`, `--as decision\|attempt\|note`, `--status proposed\|accepted` (decision only), `--title <text>`, `--dismiss`, `--force` (stale/orphan), `--yes` (local-only source), `--dry-run`, `--json`. Local/git only. |
-| `brain context <task>` | `--project <id>`, `--budget <tokens>` (default 6000, maximum 32000), `--explain` (per-layer table), `--kind decision\|attempt\|note` (repeatable), `--since <24h\|7d\|2w\|date>` (content change time), `--as-of <time\|date>`, `--include-superseded`/`--all-time`, `--json`, `--raw` (off by default; local/git only; appends at most five excerpts allowed by `<data-dir>/context-allow.json` when the curated context is thin). State, review findings, latest handoff, best-matching records and failed attempts for the task; layer caps are budget shares and every layer reports `- вЂ¦ N more dropped`; JSON adds `total_truncated` and `state_as_of`. MCP: `brain_context`. |
+| `brain context <task>` | `--project <id>`, `--budget <tokens>` (default 6000, maximum 32000), `--explain` (per-layer table), `--kind decision\|attempt\|note` (repeatable), `--since <24h\|7d\|2w\|date>` (content change time), `--as-of <time\|date>`, `--include-superseded`/`--all-time`, `--json`, `--raw` (off by default; local/git only; appends at most five excerpts allowed by `<data-dir>/context-allow.json` when the curated context is thin). State, review findings, latest handoff, best-matching records and failed attempts for the task; layer caps are budget shares and every layer reports `- … N more dropped (over-budget, lower-rank)` plus `- … N lower-ranked omitted` for the query layer. JSON adds `total_truncated`, `excluded[]`, `excluded_total`, `near_misses[]` and `state_as_of`. MCP: `brain_context`. |
 | `brain sync` | `--status` (read-only branch, ahead/behind, dirty, unmerged paths, last synced revision), `--json`, `--push` (push after committing), `--autostash` (default on; `--autostash=false` disables the stash around the rebase), `--watch` (run immediately and then every `--interval`, default `5m`, minimum `30s`; retries after a logged conflict/failure). Exit 3 means an unmerged conflict. |
-| `brain doctor` | `--json`, `--fix` (register the git merge drivers and add their `.gitattributes` lines) |
+| `brain doctor` | `--json`, `--fix` (register the git merge drivers and add their `.gitattributes` lines). The `index-generation` check reports the index state and warns only when the data directory is dirty or the index is more than one commit behind. |
 | `brain hooks` | `install [--repo <path>] [--force] [--config <brain.yaml>]`, `uninstall [--repo <path>]`, `status [--repo <path>] [--json]`, `status --agents [--home <dir>] [--json]`. The post-commit hook journals each commit; `--agents` reports installed, trusted and last-run state for Claude Code, Codex and OpenCode. |
 | `brain connection` | `providers`; `add <provider> --id <id> [--account <id>] [--base-url <url>] [--setting k=v]вЂ¦`; `list`; `test <id>` (non-mutating check, redacted cause); `run <id> [--since RFC3339] [--days N] [--limit N]`; `secret set <id> <field>` (value from stdin); `auth <id> [--client-id] [--scopes] [--remove]`; `publish <id> local-only\|shared`; `migrate [--copy-legacy-secrets]`; `migrate-identity [--check\|--apply]`; `remove <id> --yes`. Local/git mode. |
 | `brain onboard` | `--json`, `--config`; runs `doctor --fix`, checks schema/PII/raw-zone/git sync, stamps this machine as the owner of registered checkout paths that exist here (`path_provenance`), prints the platform-specific `brain sync --watch` command. Exit 3 when unresolved conflicts exist. |
 | `brain project` | `list`, `show <id>`, `set <id>` (aliases: `add`) with `--name/--kind/--repo/--branch/--path/--add-path/--alias/--clear-paths/--clear-aliases`, `members`, `adopt [--apply] [--json]`. `adopt` reports which registered paths exist on this machine and, with `--apply`, records this machine as their owner; an owner recorded by another machine is never overwritten. |
 | `brain discover` | `--root <dir>` (required), `--apply` (register new repositories; default is a dry run), `--exclude a,b` |
-| `brain index` | `--rebuild` (delete the local index and rebuild it from Markdown) |
+| `brain index` | `--rebuild` (delete the local index and rebuild it from Markdown). The index state line is printed by `brain open` and `brain status` (`index: complete at <sha>`, `stale at <sha> (HEAD <sha>)`, `stale (never indexed)`); `brain doctor` reports it as `index-generation`. |
 
 Positional text is joined with spaces. Flags may appear before or after it.
 
@@ -981,8 +999,9 @@ by `brain config use` (stored under the OS user config directory).
 |---|---|---|
 | CLI identity | `brain version` | prints version, commit, build date, platform |
 | Local instance | `brain doctor --config <path>` | no `fail:` lines; SQLite FTS5 `ok` |
-| Local index | `brain index --config <path>` | exits `0`, reports non-zero `documents` after records exist |
-| Local search | `brain search "<term>" --config <path>` | exits `0`, prints hit blocks |
+| Local index | `brain index --config <path>` | exits `0`, reports non-zero `documents` after records exist; `brain status` then prints `index: complete at <sha>` |
+| Local search | `brain search "<term>" --json --config <path>` | exits `0`; `support.tier` is `supported` or `related`, and a nonsense query returns `none` with empty `hits` |
+| Knowledge tier | `brain status --config <path>` | prints a `tier:` line; `POPULATED` inside a registered checkout |
 | Git remote | `brain sync --status --config <path>` | exits `0`, prints provider and divergence |
 | Server liveness | `GET /health` | `{"status":"ok"}` |
 | Server readiness | `GET /ready` | `{"status":"ready"}` |
@@ -1015,13 +1034,27 @@ by `brain config use` (stored under the OS user config directory).
   `brain index --rebuild`) against the configured data directory.
 - `index is local-only in server mode` вЂ” `brain index` runs only in local or
   `git` mode; in server mode `brain search` calls `GET /v1/search?q=...`.
+- `index: stale at <sha> (HEAD <sha>)` from `brain open`/`brain status` — the
+  index was built from another commit or the data directory is dirty; run
+  `brain index`. `brain doctor` warns only after more than one commit.
+- `support.tier: none` is not an error: no record contains the rare query terms.
+  Reword the query, or pass `--relaxed` / `--match-mode any` to see the nearby
+  records as `related`.
+- `tier: ABSENT` from `brain status` — the directory could not be resolved to a
+  registered project (no registered checkout and no single-project fallback);
+  `cd` into one or pass `--project`. When a project does resolve but the cwd is
+  outside its checkout, the `cwd:` and `registered_paths:` lines show the
+  mismatch.
+- A record that should match is missing from `hits` — it may be a stub
+  (`nothing new`, generated label) or a duplicate copy; pass `--include-stubs`
+  or read `excluded[]` to see the reason.
 - `sync in server mode: not implemented` вЂ” server mode does not use Git sync;
   reads and writes go through the HTTP API.
+- The first command after an engine upgrade reindexes once (index schema 10);
+  `brain index` makes that visible instead of paying it inside the first command.
 - `connection "вЂ¦" stores its account in the secret store вЂ¦ but the secret is
   missing` вЂ” the catalogue has an identity marker and this machine has no
   secret for it. Run `brain connection secret set <id> account` (the value must
   be the same address the marker fingerprints) or re-apply
   `brain connection migrate-identity --apply` on the machine that holds it.
-- The first search after an engine upgrade reindexes once (index schema 9);
-  `brain index` makes that visible instead of paying it inside the first search.
 

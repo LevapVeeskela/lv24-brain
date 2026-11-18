@@ -35,6 +35,15 @@ type ContextInput struct {
 // TotalTruncated, so the list is a sample and the number is the truth.
 const MaxContextTruncations = 20
 
+// MaxContextExclusions caps the excluded list in a context JSON answer. The
+// full count stays in ExcludedTotal; the MCP tool caps the same list harder at
+// MaxContextTruncations, because a transport answer should stay small.
+const MaxContextExclusions = 50
+
+// MaxContextNearMisses is the size of the near-miss bucket: the records that
+// matched the task but ranked below the budget cut.
+const MaxContextNearMisses = 3
+
 // StateAsOfCurrent is the temporal scope of the project state and the review
 // findings: neither has history, so an as-of request cannot reach them.
 const StateAsOfCurrent = "current"
@@ -63,7 +72,16 @@ type TaskContext struct {
 	// TotalTruncated is the number of dropped records before the list was
 	// capped.
 	TotalTruncated int `json:"total_truncated"`
-	TotalTokens    int `json:"total_tokens"`
+	// Excluded lists at most MaxContextExclusions records the answer left out,
+	// each with the stable reason code. It is the record-level view of
+	// Truncated and is derived from it when a backend does not set it.
+	Excluded []ContextExclusion `json:"excluded"`
+	// ExcludedTotal counts every excluded record before the list was capped.
+	ExcludedTotal int `json:"excluded_total"`
+	// NearMisses are the top records that matched the task but ranked below
+	// the budget cut, at most MaxContextNearMisses.
+	NearMisses  []ContextExclusion `json:"near_misses"`
+	TotalTokens int                `json:"total_tokens"`
 	// Quarantined lists the ids of records excluded from trusted context.
 	Quarantined []string `json:"quarantined"`
 	// QuarantinedCount is len(Quarantined), kept for a cheap budget report.
@@ -102,6 +120,15 @@ type ContextTruncation struct {
 	ID      string `json:"id"`
 	Section string `json:"section"`
 	Reason  string `json:"reason"`
+}
+
+// ContextExclusion is one record the answer left out. Reason is a stable code:
+// over-budget, lower-rank, superseded, stale, quarantined or other-owner.
+type ContextExclusion struct {
+	ID     string  `json:"id"`
+	Kind   string  `json:"kind,omitempty"`
+	Reason string  `json:"reason"`
+	Score  float64 `json:"score,omitempty"`
 }
 
 // ContextHandoff is the newest handoff of the project.
@@ -180,6 +207,9 @@ func (s *Server) contextTool() tool {
 			"sections":          arrayProp("Packed layers with their cap, tokens and records.", objectProp("One layer: name, cap, tokens, records.")),
 			"truncated":         arrayProp("Up to 20 records the budget left out, with why; total_truncated has the full count.", objectProp("One dropped record: id, section, reason.")),
 			"total_truncated":   intProp("Number of dropped records before the list was capped at 20.", 0),
+			"excluded":          arrayProp("Up to 20 records the answer left out, each with a stable reason code; excluded_total has the full count.", objectProp("One excluded record: id, kind, reason, optional score.")),
+			"excluded_total":    intProp("Number of excluded records before the list was capped.", 0),
+			"near_misses":       arrayProp("Up to 3 records that matched the task but ranked below the budget cut.", objectProp("One near miss: id, kind, reason, score.")),
 			"state_as_of":       stringProp("Temporal scope of state and findings: always \"current\"."),
 			"quarantined":       arrayProp("Ids of quarantined records excluded from the context.", stringProp("Record id.")),
 			"quarantined_count": intProp("Number of quarantined records excluded.", 0),
@@ -239,7 +269,20 @@ func (s *Server) taskContext(ctx context.Context, raw json.RawMessage) (toolResu
 	if err != nil {
 		return toolResult{}, err
 	}
-	return toolResult{Text: result.Summary, Structured: result.WithEmptyLists()}, nil
+	return toolResult{Text: result.Summary, Structured: result.WithEmptyLists().withMCPCaps()}, nil
+}
+
+// withMCPCaps keeps the structured answer small: the excluded sample travels
+// at most MaxContextTruncations entries and the near-miss bucket at most
+// MaxContextNearMisses. ExcludedTotal still counts every dropped record.
+func (c TaskContext) withMCPCaps() TaskContext {
+	if len(c.Excluded) > MaxContextTruncations {
+		c.Excluded = c.Excluded[:MaxContextTruncations]
+	}
+	if len(c.NearMisses) > MaxContextNearMisses {
+		c.NearMisses = c.NearMisses[:MaxContextNearMisses]
+	}
+	return c
 }
 
 // WithEmptyLists keeps empty lists as [] rather than null in JSON.
@@ -262,16 +305,41 @@ func (c TaskContext) WithEmptyLists() TaskContext {
 	if c.Truncated == nil {
 		c.Truncated = []ContextTruncation{}
 	}
+	// A backend that predates the exclusion view only carries truncated[];
+	// derive it so the answer still names why every record is absent.
+	if c.Excluded == nil {
+		c.Excluded = exclusionsFromTruncated(c.Truncated)
+	}
+	if c.NearMisses == nil {
+		c.NearMisses = nearMissesFromTruncated(c.Truncated)
+	}
+	if c.Excluded == nil {
+		c.Excluded = []ContextExclusion{}
+	}
+	if c.NearMisses == nil {
+		c.NearMisses = []ContextExclusion{}
+	}
 	// The list is sampled for transport; the total keeps the honest count. The
 	// function stays idempotent because callers may apply it twice.
-	total := c.TotalTruncated
-	if len(c.Truncated) > total {
-		total = len(c.Truncated)
+	total := c.ExcludedTotal
+	if len(c.Excluded) > total {
+		total = len(c.Excluded)
+	}
+	if len(c.Excluded) > MaxContextExclusions {
+		c.Excluded = c.Excluded[:MaxContextExclusions]
+	}
+	c.ExcludedTotal = total
+	if len(c.NearMisses) > MaxContextNearMisses {
+		c.NearMisses = c.NearMisses[:MaxContextNearMisses]
+	}
+	truncatedTotal := c.TotalTruncated
+	if len(c.Truncated) > truncatedTotal {
+		truncatedTotal = len(c.Truncated)
 	}
 	if len(c.Truncated) > MaxContextTruncations {
 		c.Truncated = c.Truncated[:MaxContextTruncations]
 	}
-	c.TotalTruncated = total
+	c.TotalTruncated = truncatedTotal
 	c.StateAsOf = StateAsOfCurrent
 	if c.Quarantined == nil {
 		c.Quarantined = []string{}
@@ -281,6 +349,75 @@ func (c TaskContext) WithEmptyLists() TaskContext {
 	}
 	c.State = c.State.withEmptyLists()
 	return c
+}
+
+// contextReasonCodes are the stable exclusion codes the answer may report.
+var contextReasonCodes = map[string]bool{
+	"over-budget": true, "lower-rank": true, "superseded": true,
+	"stale": true, "quarantined": true, "other-owner": true, "other": true,
+}
+
+// exclusionsFromTruncated derives the record-level exclusion view from the
+// truncation bookkeeping. The reason detail starts with the code, so the
+// sample is honest even when the transport only carries truncated[].
+func exclusionsFromTruncated(truncated []ContextTruncation) []ContextExclusion {
+	seen := make(map[string]bool, len(truncated))
+	out := make([]ContextExclusion, 0, len(truncated))
+	for _, truncation := range truncated {
+		if truncation.ID == "" || truncation.ID == "core" || truncation.ID == "summary" || seen[truncation.ID] {
+			continue
+		}
+		seen[truncation.ID] = true
+		out = append(out, ContextExclusion{
+			ID: truncation.ID, Kind: contextKindFromID(truncation.ID), Reason: contextReasonCode(truncation.Reason),
+		})
+	}
+	return out
+}
+
+// nearMissesFromTruncated keeps the first query-layer drops that only missed
+// the budget cut: those are the records a reader would ask about next.
+func nearMissesFromTruncated(truncated []ContextTruncation) []ContextExclusion {
+	seen := make(map[string]bool, MaxContextNearMisses)
+	out := make([]ContextExclusion, 0, MaxContextNearMisses)
+	for _, truncation := range truncated {
+		if len(out) == MaxContextNearMisses {
+			break
+		}
+		if truncation.Section != "query" || seen[truncation.ID] {
+			continue
+		}
+		reason := contextReasonCode(truncation.Reason)
+		if reason != "over-budget" && reason != "lower-rank" {
+			continue
+		}
+		seen[truncation.ID] = true
+		out = append(out, ContextExclusion{ID: truncation.ID, Kind: contextKindFromID(truncation.ID), Reason: reason})
+	}
+	return out
+}
+
+// contextReasonCode returns the code a truncation reason starts with.
+func contextReasonCode(reason string) string {
+	code, _, _ := strings.Cut(reason, ": ")
+	if contextReasonCodes[code] {
+		return code
+	}
+	if contextReasonCodes[reason] {
+		return reason
+	}
+	return "other"
+}
+
+// contextKindFromID recovers the record kind from the id prefix, which is the
+// stable record id format (<kind>-...).
+func contextKindFromID(id string) string {
+	for _, kind := range []string{"note", "decision", "attempt", "handoff"} {
+		if strings.HasPrefix(id, kind+"-") {
+			return kind
+		}
+	}
+	return ""
 }
 
 func (st State) withEmptyLists() State {

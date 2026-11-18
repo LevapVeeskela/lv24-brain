@@ -153,6 +153,15 @@ type ContextResult struct {
 	PendingProposals *int
 	// Quarantined lists the ids of records excluded from trusted context.
 	Quarantined []string
+	// Excluded lists every record left out of the answer with the stable
+	// reason code. It is the record-level view of Pack.Truncated.
+	Excluded []ContextExclusion
+	// ExcludedTotal counts every excluded record, even when a transport caps
+	// the list.
+	ExcludedTotal int
+	// NearMisses are the top records that matched the task but ranked below
+	// the budget cut, with their scores.
+	NearMisses []ContextExclusion
 	// StateQuarantined reports that the project state is quarantined and was
 	// not injected as trusted text.
 	StateQuarantined bool
@@ -281,7 +290,7 @@ func (a *App) Context(ctx context.Context, opts ContextOptions) (ContextResult, 
 			result.PendingProposals = &count
 		}
 	}
-	pack, packErr := a.packContext(ctx, result, ranking, kinds, tokenBudget, now)
+	pack, packErr := a.packContext(ctx, result, &ranking, kinds, tokenBudget, now)
 	if packErr != nil {
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return ContextResult{}, ctxErr
@@ -289,6 +298,7 @@ func (a *App) Context(ctx context.Context, opts ContextOptions) (ContextResult, 
 		result.Skipped = append(result.Skipped, "linked records: "+packErr.Error())
 	}
 	result.Pack = pack
+	applyContextExclusions(&result)
 	failedIDs := recordIDs(result.FailedAttempts)
 	result.Records, result.FailedAttempts = splitQuerySection(pack, failedIDs)
 	if opts.Raw {
@@ -443,30 +453,78 @@ type contextRanking struct {
 	now               time.Time
 	includeUnreviewed bool
 	filter            domain.ValidityFilter
+	// dropped is the exclusion bookkeeping the filters fill before packing.
+	dropped []ContextTruncation
+	// droppedIDs keeps one reason per record, whichever stage dropped it
+	// first: the filter reasons are more specific than a later budget miss.
+	droppedIDs map[string]bool
+}
+
+// drop records why one record is not part of the answer. The first reason
+// wins, so a record is never listed twice.
+func (r *contextRanking) drop(record ContextRecord, section, code, detail string) {
+	if record.ID == "" {
+		return
+	}
+	if r.droppedIDs == nil {
+		r.droppedIDs = map[string]bool{}
+	}
+	if r.droppedIDs[record.ID] {
+		return
+	}
+	r.droppedIDs[record.ID] = true
+	r.dropped = append(r.dropped, ContextTruncation{
+		ID: record.ID, Kind: record.Kind, Section: section, Code: code,
+		Reason: code + ": " + detail, Score: record.Score,
+	})
+}
+
+// admit reports why the filters keep a record out of the context. An empty
+// code means the record is admitted.
+func (r *contextRanking) admit(record ContextRecord) (code, detail string) {
+	if record.Quarantined && !r.includeUnreviewed {
+		return ContextExcludeQuarantined, "unreviewed write; include_unreviewed would show it"
+	}
+	at := r.filter.Now(r.now)
+	if !r.filter.Allows(record.Validity, record.CreatedAt, r.now) {
+		if record.Validity.EndedAt(at) {
+			detail := "validity ended"
+			if record.Validity.SupersededBy != "" {
+				detail = "replaced by " + record.Validity.SupersededBy
+			}
+			return ContextExcludeSuperseded, detail
+		}
+		return ContextExcludeStale, "not valid at the requested instant"
+	}
+	if !r.since.IsZero() && !withinSince(record.ContentUpdatedAt, record.UpdatedAt, record.CreatedAt, r.since) {
+		return ContextExcludeStale, "content is older than the since window"
+	}
+	return "", ""
 }
 
 // candidates resolves hits to records in search order, dropping unknown
 // records, records older than since, quarantined records the caller did not
-// ask for, ids in exclude and duplicate ids.
-func (r contextRanking) candidates(hits []ports.Hit, exclude map[string]bool) []ContextRecord {
+// ask for, ids in exclude and duplicate ids. Every dropped record is recorded
+// with its reason; an id in exclude is already shown elsewhere, not dropped.
+func (r *contextRanking) candidates(hits []ports.Hit, exclude map[string]bool, layer string) []ContextRecord {
 	seen := map[string]bool{}
 	out := make([]ContextRecord, 0, len(hits))
 	for _, hit := range hits {
-		if seen[hit.ID] || exclude[hit.ID] {
+		if seen[hit.ID] {
 			continue
 		}
 		seen[hit.ID] = true
+		if exclude[hit.ID] {
+			continue
+		}
 		record, ok := r.catalog.lookup(hit)
 		if !ok {
+			r.drop(ContextRecord{ID: hit.ID, Kind: hit.Kind, Title: hit.Title}, layer, ContextExcludeStale,
+				"the index still lists it but the store no longer has it (stale index row)")
 			continue
 		}
-		if record.Quarantined && !r.includeUnreviewed {
-			continue
-		}
-		if !r.filter.Allows(record.Validity, record.CreatedAt, r.now) {
-			continue
-		}
-		if !r.since.IsZero() && !withinSince(record.ContentUpdatedAt, record.UpdatedAt, record.CreatedAt, r.since) {
+		if code, detail := r.admit(record); code != "" {
+			r.drop(record, layer, code, detail)
 			continue
 		}
 		if record.Path == "" {
@@ -479,8 +537,8 @@ func (r contextRanking) candidates(hits []ports.Hit, exclude map[string]bool) []
 
 // rank scores the hits by search rank, recency and kind and keeps the best
 // limit records. Ties fall back to the id, so the order is deterministic.
-func (r contextRanking) rank(hits []ports.Hit, exclude map[string]bool, limit int) []ContextRecord {
-	records := r.candidates(hits, exclude)
+func (r *contextRanking) rank(hits []ports.Hit, exclude map[string]bool, limit int) []ContextRecord {
+	records := r.candidates(hits, exclude, ContextLayerQuery)
 	for i := range records {
 		records[i].Score = contextScore(i, len(records), records[i], r.now)
 	}
@@ -494,8 +552,8 @@ func (r contextRanking) rank(hits []ports.Hit, exclude map[string]bool, limit in
 }
 
 // newestAttempts lists matching attempts not shown yet, newest first.
-func (r contextRanking) newestAttempts(hits []ports.Hit, exclude map[string]bool, limit int) []ContextRecord {
-	records := r.candidates(hits, exclude)
+func (r *contextRanking) newestAttempts(hits []ports.Hit, exclude map[string]bool, limit int) []ContextRecord {
+	records := r.candidates(hits, exclude, ContextLayerQuery)
 	sort.SliceStable(records, func(i, j int) bool {
 		if !records[i].CreatedAt.Equal(records[j].CreatedAt) {
 			return records[i].CreatedAt.After(records[j].CreatedAt)
@@ -534,6 +592,34 @@ func recordIDs(records []ContextRecord) map[string]bool {
 		ids[record.ID] = true
 	}
 	return ids
+}
+
+// applyContextExclusions refreshes the record-level exclusion view of the pack:
+// every dropped record with its reason, minus the ones another layer packed,
+// plus the near misses among the records that missed the query cut.
+func applyContextExclusions(result *ContextResult) {
+	packed := make(map[string]bool, 64)
+	for _, section := range result.Pack.Sections {
+		for _, record := range section.Records {
+			packed[record.ID] = true
+		}
+	}
+	excluded := exclusionsFromTruncations(result.Pack.Truncated)
+	kept := make([]ContextExclusion, 0, len(excluded))
+	near := make([]ContextExclusion, 0, contextNearMissLimit)
+	for _, exclusion := range excluded {
+		if packed[exclusion.ID] {
+			continue
+		}
+		kept = append(kept, exclusion)
+		if exclusion.Section == ContextLayerQuery && contextNearMissReason(exclusion.Reason) {
+			near = append(near, exclusion)
+		}
+	}
+	if len(near) > contextNearMissLimit {
+		near = near[:contextNearMissLimit]
+	}
+	result.Excluded, result.ExcludedTotal, result.NearMisses = kept, len(kept), near
 }
 
 func normalizeContextKinds(values []string) ([]string, error) {
@@ -663,7 +749,7 @@ func renderContext(result ContextResult, revision string, now time.Time) string 
 	writeContextRecords(&out, result.Records, "- none matched the task\n")
 	out.WriteString("\n## Failed attempts matching the task\n")
 	writeContextRecords(&out, result.FailedAttempts, "- none beyond the relevant records\n")
-	writeContextDropped(&out, result.Pack, ContextLayerQuery)
+	writeContextDropped(&out, result.Excluded, ContextLayerQuery)
 	for _, layer := range []struct {
 		name    string
 		heading string
@@ -679,18 +765,17 @@ func renderContext(result ContextResult, revision string, now time.Time) string 
 		}
 		out.WriteString(layer.heading)
 		writeContextRecords(&out, records, "")
-		writeContextDropped(&out, result.Pack, layer.name)
+		writeContextDropped(&out, result.Excluded, layer.name)
 	}
 	writeContextExcerpts(&out, result.RawExcerpts)
 	return out.String()
 }
 
-// writeContextDropped reports how many records of one layer the budget left
-// out, so a reader can tell a short layer from a complete one.
-func writeContextDropped(out *strings.Builder, pack ContextPack, layer string) {
-	if dropped := contextDroppedCount(pack.Truncated, layer); dropped > 0 {
-		fmt.Fprintf(out, "- … %d more dropped\n", dropped)
-	}
+// writeContextDropped reports how many records of one layer did not make it
+// and why, so a reader can tell a short layer from a complete one. The
+// near-miss line follows the query layer.
+func writeContextDropped(out *strings.Builder, excluded []ContextExclusion, layer string) {
+	out.WriteString(contextDroppedText(excluded, layer))
 }
 
 func writeContextFindings(out *strings.Builder, findings []Finding) {

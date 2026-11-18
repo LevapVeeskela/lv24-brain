@@ -132,14 +132,17 @@ func TestSearchRelaxedIsReported(t *testing.T) {
 		opts        app.SearchOptions
 		wantHits    int
 		wantRelaxed bool
+		wantTier    string
 	}{
-		{"default keeps the fallback", app.SearchOptions{Text: "alpha gamma"}, 2, true},
-		{"explicit all is strict", app.SearchOptions{Text: "alpha gamma", MatchMode: "all"}, 0, false},
-		{"all with relaxed falls back", app.SearchOptions{Text: "alpha gamma", MatchMode: "all", Relaxed: true}, 2, true},
-		{"any starts wide", app.SearchOptions{Text: "alpha gamma", MatchMode: "any"}, 2, false},
+		// Gamma does not occur in the corpus: the OR pass finds a page, but
+		// no record is about it, so the honest answer is none.
+		{"default keeps the fallback", app.SearchOptions{Text: "alpha gamma"}, 0, true, app.SupportNone},
+		{"explicit all is strict", app.SearchOptions{Text: "alpha gamma", MatchMode: "all"}, 0, false, app.SupportNone},
+		{"all with relaxed falls back", app.SearchOptions{Text: "alpha gamma", MatchMode: "all", Relaxed: true}, 2, true, app.SupportRelated},
+		{"any starts wide", app.SearchOptions{Text: "alpha gamma", MatchMode: "any"}, 2, false, app.SupportRelated},
 		// A strict pass that finds fewer than SearchFallbackThreshold hits is
 		// widened too: one strict hit is not enough to call the query answered.
-		{"strict hit below the threshold relaxes", app.SearchOptions{Text: "alpha beta"}, 2, true},
+		{"strict hit below the threshold relaxes", app.SearchOptions{Text: "alpha beta"}, 2, true, app.SupportSupported},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -149,7 +152,16 @@ func TestSearchRelaxedIsReported(t *testing.T) {
 				t.Fatalf("search: %v", err)
 			}
 			if len(report.Hits) != tc.wantHits || report.Relaxed != tc.wantRelaxed {
-				t.Fatalf("hits = %d relaxed = %v, want %d/%v", len(report.Hits), report.Relaxed, tc.wantHits, tc.wantRelaxed)
+				t.Fatalf("hits = %d relaxed = %v tier = %q reason = %q excluded = %+v, want %d/%v", len(report.Hits), report.Relaxed, report.Support.Tier, report.Support.Reason, report.Excluded, tc.wantHits, tc.wantRelaxed)
+			}
+			if report.Support.Tier != tc.wantTier {
+				t.Fatalf("support tier = %q, want %q (reason %q)", report.Support.Tier, tc.wantTier, report.Support.Reason)
+			}
+			if tc.wantTier == app.SupportNone && report.Support.Reason == "" {
+				t.Fatalf("none without an explicit reason: %+v", report.Support)
+			}
+			if tc.wantTier == app.SupportNone && tc.wantRelaxed && len(report.Excluded) == 0 {
+				t.Fatalf("none dropped the relaxed hits without listing them: %+v", report)
 			}
 		})
 	}

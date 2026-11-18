@@ -5,11 +5,12 @@
 before and after it. The three commands share one rule: never spend tokens on
 text the model did not ask for.
 
-This page documents search v2 (WB-1.2) and progressive disclosure (WB-1.4).
-Server mode keeps its own Postgres ranking, so it omits `match_reasons` and
-refuses the local ranking controls (`--match-mode`, `--relaxed`, `--min-score`,
-`--explain`, `--full`) instead of silently ignoring them. Previews, pagination,
-`brain get` and `brain timeline` work in both modes.
+This page documents search v2 (WB-1.2), the 0.27 support gate and progressive
+disclosure (WB-1.4). Server mode keeps its own Postgres ranking, so it omits
+`match_reasons`, does not evaluate support, and refuses the local ranking
+controls (`--match-mode`, `--relaxed`, `--min-score`, `--explain`, `--full`)
+instead of silently ignoring them. Previews, pagination, `brain get` and
+`brain timeline` work in both modes.
 
 ## Composite score
 
@@ -74,19 +75,108 @@ strength. An unexplained ranking position can therefore be read off the numbers
 instead of guessed. Reasons and contributions describe the score, they never
 adjust it.
 
+## Support tiers
+
+A ranked page is not automatically an answer. Every search response carries a
+support verdict, and every hit carries its own tier:
+
+| Tier | Meaning |
+| --- | --- |
+| `supported` | at least one hit contains every rare query term and enough of the rest. |
+| `related` | the page overlaps the topic, but no hit answers it. The records stay visible so the caller can see they are nearby. |
+| `none` | nothing answered the query. `hits` is empty and `support.reason` says why; the matched records move to `excluded[]` with reason `lower-rank`. |
+
+The gate is computed from document frequency inside the project. Subject terms
+are the query terms after stop words are removed.
+
+1. A term is **rare** when at most 20 % of the project's documents contain it.
+   The limit is floored at one document, so a term that occurs once is still
+   treated as the term the query is about.
+2. A hit is **supported** when it contains every rare term and at least 50 % of
+   the remaining common terms, rounded up (`commonNeeded = ceil(0.5 * common)`).
+3. A hit from the strict all-terms pass always qualifies: the pass already
+   required every term. An OR-only hit must pass the test on its own.
+4. If any hit passes, the tier is `supported`; passing hits carry `supported`,
+   the others `related`.
+5. If no hit passes, the page is still `related` when the page covers a rare
+   term and at least one hit covers two query terms. One shared word is a
+   coincidence, not overlap.
+6. Below that, the tier is `none`, `hits` is emptied, and every matched record is
+   reported in `excluded[]` as `lower-rank`. The reason names the rule, for
+   example: `no record contains every rare query term (document frequency <=
+   20%) and at least 50% of the remaining subject terms`.
+
+A query with no subject terms after stop words cannot be supported: an empty
+page is `none` (`the query has no searchable subject terms`), and a non-empty
+page is `related` (`the query has no subject terms; the page is a lexical match
+only`).
+
+An explicit `--relaxed`, or `match_mode: any` over MCP, tells the engine the
+caller accepts partial matches. The page is then `related` with the reason
+`partial matching was requested explicitly`, even when a hit matched every
+term: the caller asked for recall, and the tier says the page is nearby rather
+than an answer. The hits stay in `hits`.
+
+The gate never changes the score or the order. It reads the whole record text,
+not the preview, and mirrors the index's prefix and stem matching, so `signed`
+covers `sign` and `releases` covers `release`. When the index cannot report
+document frequency, `support.reason` says support was not evaluated and the
+hits keep no tier. Server mode has its own Postgres ranking and does not
+evaluate support: `hits[].tier` is absent, and `support` is present but empty
+(`tier: ""` with zero `best` and `threshold`).
+
+```json
+{
+  "support": {"tier": "related", "best": 0.66, "threshold": 0.5,
+              "reason": "the page only matched the relaxed pass; no record contains every rare query term"},
+  "hits": [{"id": "note-2026-11-18-cache", "tier": "related"}],
+  "excluded": [{"id": "note-2026-11-17-cache", "reason": "duplicate",
+                "kind": "note", "title": "Cache warmup", "score": 0.71}]
+}
+```
+
+`support.best` is the largest share of query terms any matched record contained;
+`support.threshold` is the 0.5 subject share a supported hit needs. In text mode
+the verdict is on stderr (`brain search: related only — …` or
+`brain search: no supported matches — …`), and withheld records are summarized
+as `brain search: excluded N (duplicate 1, lower-rank 2)`.
+
+## Duplicates and stubs
+
+Two projection rules keep the page honest without touching Markdown.
+
+**Duplicates.** The index stores a `content_hash` of the normalized kind, title
+and body (lowercase, whitespace collapsed). Within a page, search keeps one row
+per hash inside one project: the **oldest** record wins (creation time, then id),
+takes the best rank its group reached, and every other copy is listed once in
+`excluded[]` with reason `duplicate`. The same record written on two machines is
+one answer; the same sentence in two different projects is not a duplicate.
+Nothing is deleted or merged.
+
+**Stubs.** A record is a stub when its title is only a generated label
+(`<kind>-<date>-<slug>-<id>`) or its whole body is `nothing new`,
+`session ended`, `no changes` or `no updates` (case-insensitive, surrounding
+punctuation ignored). Stubs stay in the index and in counts, but search hides
+them by default, so a session-closing line cannot outrank a real record.
+`--include-stubs` brings them back. Over MCP, `brain_search` has no switch and
+always hides them; `brain context` has no override either, and review's
+supersession, contradiction and near-duplicate checks skip stubs. The flag is
+derived, never stored in Markdown, and reverses itself when the file changes.
+
 ## Flags
 
 | Flag | Effect |
 | --- | --- |
-| `--match-mode all` | every term must match (AND); the OR fallback below still runs when the strict pass finds fewer than five hits. |
-| `--match-mode any` | any term may match (OR); no fallback. |
-| `--relaxed` | with `--match-mode all`, retry the same terms joined with OR when the strict pass finds fewer than five hits; the pages are merged and the response reports `relaxed: true`. |
+| `--match-mode all` | every term must match (AND). The OR fallback is **off** unless `--relaxed` is also given. |
+| `--match-mode any` | any term may match (OR); no fallback, and the page is reported as `related`. |
+| `--relaxed` | allow the OR fallback when the strict pass finds fewer than five hits; the pages are merged and the response reports `relaxed: true`. It also marks the page `related` (the caller accepts partial matches). |
+| `--include-stubs` | keep low-signal stub records that search hides by default. |
 | `--min-score <0..1>` | drop hits below the composite score. |
 | `--explain` | add per-signal contributions (JSON `explain`, text `score`/`reasons` lines). |
 | `--full` | return each hit's whole body alongside its preview (JSON `body`). |
 | `--page-size <n>` | hits per page; defaults to `--limit`. |
 | `--cursor <cursor>` | next page of the same query. |
-| `--json` | envelope with `relaxed`, `page`, `page_size`, `has_more`, `next_cursor`, `hits`. |
+| `--json` | envelope with `relaxed`, `page`, `page_size`, `has_more`, `next_cursor`, `hits`, `support`, `excluded`. |
 
 Without `--match-mode`, search runs a strict AND pass first, then the same terms
 joined with OR when the strict pass found fewer than five hits. The two pages are
@@ -94,6 +184,11 @@ merged: strict hits hold the top, OR-only hits follow, duplicates are dropped by
 project and id, and the response reports `relaxed: true` (plus a stderr line in
 text mode) when the OR page added anything. The passes normalize relevance over
 different match sets, so an OR-only score never outranks a strict hit.
+
+`--match-mode all` makes the mode explicit: only the strict pass runs, unless
+`--relaxed` is also given. `--match-mode any` sends one OR pass. In both explicit
+modes the support gate still runs: a strict page can be `supported`, an OR page
+is `related`, and `none` says the corpus does not answer the query.
 
 A cursor is an opaque, query-bound offset. Replaying it on another query is a
 usage error (exit 2). Paging is bounded by the 200-result index window, the same
@@ -185,11 +280,15 @@ would pick, so the fixture can be reviewed without the live corpus.
 - `brain search` text output is unchanged: `kind/project/title` and an indented
   preview; `--explain` and `--full` add lines, they never replace the first two.
 - JSON is additive: `relaxed`, `page`, `page_size`, `has_more`, `next_cursor`,
-  `match_reasons`, `explain`, `body`. `score` changed meaning from the raw BM25
-  rank to the composite score in `[0, 1]`.
+  `match_reasons`, `explain`, `body`; 0.27 adds `support`
+  (`tier`, `best`, `threshold`, `reason`), `hits[].tier` and `excluded[]`
+  (`id`, `kind`, `title`, `score`, `reason`; MCP also carries `project_id`).
+- `score` changed meaning in 0.16 from the raw BM25 rank to the composite score
+  in `[0, 1]`.
 - `brain get` prints the text fields of a record; `brain record show` keeps
   printing every structured field, links and history. Use `get` when tokens
   matter, `record show` when structure matters.
 - An index built before 0.16 is rebuilt automatically on the next search: the
   ranking inputs (decision status, author confidence) are projection data, and
-  Markdown stays the source of truth.
+  Markdown stays the source of truth. The 0.27 index (schema 10) rebuilds once
+  the same way; see `docs/release-0.27.0.md`.

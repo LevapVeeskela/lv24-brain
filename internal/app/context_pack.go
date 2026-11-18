@@ -73,11 +73,55 @@ type ContextSection struct {
 	Text string
 }
 
-// ContextTruncation explains one record or block that did not fit.
-type ContextTruncation struct {
+// Reason codes for records left out of a context answer. They are stable:
+// the JSON excluded[].reason and the Markdown dropped line use them verbatim.
+const (
+	ContextExcludeOverBudget  = "over-budget"
+	ContextExcludeLowerRank   = "lower-rank"
+	ContextExcludeSuperseded  = "superseded"
+	ContextExcludeStale       = "stale"
+	ContextExcludeQuarantined = "quarantined"
+	ContextExcludeOtherOwner  = "other-owner"
+	// ContextExcludeOther is the fallback for a drop with no known code. A
+	// current answer never produces it; it keeps an old truncation honest.
+	ContextExcludeOther = "other"
+	// contextNearMissLimit is the number of below-the-cut records an answer
+	// keeps with their scores. More than three is noise for a reader.
+	contextNearMissLimit = 3
+)
+
+// contextExcludeReasonOrder fixes the order reasons are printed in, so the
+// dropped line is deterministic instead of following a map.
+var contextExcludeReasonOrder = []string{
+	ContextExcludeOverBudget, ContextExcludeLowerRank, ContextExcludeSuperseded,
+	ContextExcludeStale, ContextExcludeQuarantined, ContextExcludeOtherOwner,
+	ContextExcludeOther,
+}
+
+// ContextExclusion is one record left out of the answer, with the stable code
+// that says why. Section names the layer that would have held it.
+type ContextExclusion struct {
 	ID      string
+	Kind    string
 	Section string
 	Reason  string
+	// Score is the ranking score at the moment the record was dropped. It is
+	// zero for a record the filters rejected before ranking.
+	Score float64
+}
+
+// ContextTruncation explains one record or block that did not fit. Reason is
+// the human-readable detail and starts with the code, so a transport that only
+// carries truncated[] can still name why the record is absent.
+type ContextTruncation struct {
+	ID      string
+	Kind    string
+	Section string
+	Reason  string
+	// Code is the stable reason: over-budget, lower-rank, superseded, stale,
+	// quarantined or other-owner. It is empty for the core and summary blocks.
+	Code  string
+	Score float64
 }
 
 // ContextPack is the budget accounting of one context answer.
@@ -87,7 +131,9 @@ type ContextPack struct {
 	// TotalTokens is the sum of every section's tokens.
 	TotalTokens int
 	Sections    []ContextSection
-	Truncated   []ContextTruncation
+	// Truncated is the single drop bookkeeping: filter drops carry the reason
+	// they were rejected for, budget drops over-budget or lower-rank.
+	Truncated []ContextTruncation
 	// Quarantined is the number of ids excluded from trusted context.
 	Quarantined int
 }
@@ -102,13 +148,16 @@ type contextPackInput struct {
 	Attempts    []ContextRecord
 	Query       []ContextRecord
 	Quarantined int
+	// Dropped are the records the filters left out before packing. They join
+	// the truncation bookkeeping so the layers can report them.
+	Dropped []ContextTruncation
 	// QueryAlways renders the query layer even when it packs nothing: `brain
 	// context` prints its headings and "none" lines in every answer, so their
 	// cost must be part of the budget. Bootstrap has no query layer.
 	QueryAlways bool
 	// Linked is called only when the earlier layers left room. It returns the
-	// 1-hop neighbours of the selected records.
-	Linked func(selected []string) ([]ContextRecord, error)
+	// 1-hop neighbours of the selected records and the neighbours it left out.
+	Linked func(selected []string) ([]ContextRecord, []ContextTruncation, error)
 }
 
 // buildContextPack fills the layers in order under one total budget. A record
@@ -119,6 +168,9 @@ type contextPackInput struct {
 // tokens it did not spend.
 func buildContextPack(in contextPackInput) (ContextPack, error) {
 	pack := ContextPack{Budget: in.Budget, Quarantined: in.Quarantined, Sections: []ContextSection{}}
+	// The filters already dropped some records; they belong to the same
+	// bookkeeping as the budget drops, so every layer can report them.
+	pack.Truncated = append(pack.Truncated, in.Dropped...)
 	remaining := in.Budget
 	borrowed := 0
 
@@ -159,25 +211,37 @@ func buildContextPack(in contextPackInput) (ContextPack, error) {
 			allowance = 0
 		}
 		sortContextCandidates(candidates)
-		// The "… N more dropped" line is part of the layer, so its room is
-		// reserved before the first record is packed.
-		marker := contextDroppedMarkerTokens(len(candidates))
+		// The "… N more dropped (reason)" line is part of the layer, so its
+		// room is reserved before the first record is packed. Records the
+		// filters already left out count towards the same line.
+		reserved := contextDroppedMarkerTokens(name, len(candidates)+contextDroppedCount(pack.Truncated, name))
 		section := ContextSection{
 			Name: name, Cap: allowance, Records: []ContextSectionRecord{},
 			Tokens: contextSectionHeaderTokenCost(name),
 		}
+		omitted := false
 		for _, record := range candidates {
 			if record.ID == "" || selected[record.ID] {
 				continue
 			}
 			tokens := contextRecordTokens(record)
-			left := allowance - section.Tokens - marker
+			left := allowance - section.Tokens - reserved
 			if tokens > left {
-				reason := fmt.Sprintf("does not fit the %s layer: needs %d tokens, %d left", name, tokens, left)
-				if left <= 0 {
-					reason = fmt.Sprintf("budget exhausted before the %s layer; needs %d tokens", name, tokens)
+				code := ContextExcludeOverBudget
+				detail := fmt.Sprintf("does not fit the %s layer: needs %d tokens, %d left", name, tokens, left)
+				if omitted {
+					// The first record that missed the cut ran out of room;
+					// every later one is simply ranked below it.
+					code = ContextExcludeLowerRank
+					detail = fmt.Sprintf("ranked below the %s cut: needs %d tokens, %d left", name, tokens, left)
+				} else if left <= 0 {
+					detail = fmt.Sprintf("budget exhausted before the %s layer; needs %d tokens", name, tokens)
 				}
-				pack.Truncated = append(pack.Truncated, ContextTruncation{ID: record.ID, Section: name, Reason: reason})
+				pack.Truncated = append(pack.Truncated, ContextTruncation{
+					ID: record.ID, Kind: record.Kind, Section: name, Code: code,
+					Reason: code + ": " + detail, Score: record.Score,
+				})
+				omitted = true
 				continue
 			}
 			section.Records = append(section.Records, contextSectionRecord(record))
@@ -185,6 +249,7 @@ func buildContextPack(in contextPackInput) (ContextPack, error) {
 			selected[record.ID] = true
 			selectedOrder = append(selectedOrder, record.ID)
 		}
+		marker := contextDroppedText(exclusionsFromTruncations(pack.Truncated), name)
 		if len(section.Records) == 0 {
 			dropped := contextDroppedCount(pack.Truncated, name)
 			switch {
@@ -192,19 +257,15 @@ func buildContextPack(in contextPackInput) (ContextPack, error) {
 				// The query headings and their "none" lines are printed by
 				// every answer, even when nothing matched, so they cost budget.
 				section.Tokens = contextQueryEmptyTokens()
-				if dropped > 0 {
-					section.Tokens += contextDroppedMarkerTokens(dropped)
-				}
 			case dropped == 0:
 				return
 			default:
 				// Nothing fit, but the layer must still report how many
 				// records the budget left out.
-				section.Tokens = contextSectionHeaderTokenCost(name) + contextDroppedMarkerTokens(dropped)
+				section.Tokens = contextSectionHeaderTokenCost(name)
 			}
-		} else if dropped := contextDroppedCount(pack.Truncated, name); dropped > 0 {
-			section.Tokens += contextDroppedMarkerTokens(dropped)
 		}
+		section.Tokens += textbudget.Tokens(marker)
 		pack.Sections = append(pack.Sections, section)
 		remaining -= section.Tokens
 		if remaining < 0 {
@@ -221,10 +282,11 @@ func buildContextPack(in contextPackInput) (ContextPack, error) {
 	// lookup is skipped entirely when there is none, so a tight budget costs
 	// no extra store reads.
 	if remaining > 0 && in.Linked != nil {
-		linked, err := in.Linked(selectedOrder)
+		linked, dropped, err := in.Linked(selectedOrder)
 		if err != nil {
 			return ContextPack{}, err
 		}
+		pack.Truncated = append(pack.Truncated, dropped...)
 		addLayer(ContextLayerLinked, linked, false)
 	}
 
@@ -263,13 +325,101 @@ func contextBorrowLeft(borrowed, share, spent int) int {
 	return borrowed
 }
 
-// contextDroppedMarkerTokens counts the per-layer line that reports the records
-// the budget left out.
-func contextDroppedMarkerTokens(dropped int) int {
-	return textbudget.Tokens(fmt.Sprintf("- … %d more dropped\n", dropped))
+// contextDroppedMarkerTokens reserves room for the per-layer lines that report
+// the records the layer left out. It is the worst case for the count that is
+// known before packing; the exact text is accounted after the layer is filled.
+func contextDroppedMarkerTokens(layer string, dropped int) int {
+	text := fmt.Sprintf("- … %d more dropped (%s)\n", dropped, ContextExcludeOverBudget)
+	if layer == ContextLayerQuery && dropped > 0 {
+		text += fmt.Sprintf("- … %d lower-ranked omitted\n", minInt(dropped, contextNearMissLimit))
+	}
+	return textbudget.Tokens(text)
 }
 
-// contextDroppedCount is how many records of one layer the packer left out.
+// contextDroppedText is the Markdown a layer prints for the records that are
+// not in it: one line with the count and the distinct reasons, plus the
+// near-miss line for the records that matched but ranked below the cut. The
+// packer and the renderer share it, so the budget accounts for what is printed.
+func contextDroppedText(excluded []ContextExclusion, layer string) string {
+	count := 0
+	reasons := make(map[string]bool, len(contextExcludeReasonOrder))
+	near := 0
+	for _, exclusion := range excluded {
+		if exclusion.Section != layer {
+			continue
+		}
+		count++
+		reasons[exclusion.Reason] = true
+		if layer == ContextLayerQuery && contextNearMissReason(exclusion.Reason) {
+			near++
+		}
+	}
+	if count == 0 {
+		return ""
+	}
+	var out strings.Builder
+	fmt.Fprintf(&out, "- … %d more dropped (%s)\n", count, strings.Join(contextOrderedReasons(reasons), ", "))
+	if near > 0 {
+		fmt.Fprintf(&out, "- … %d lower-ranked omitted\n", minInt(near, contextNearMissLimit))
+	}
+	return out.String()
+}
+
+// contextOrderedReasons sorts the distinct reasons of one layer into the fixed
+// vocabulary order, with an unknown code last.
+func contextOrderedReasons(found map[string]bool) []string {
+	out := make([]string, 0, len(found))
+	for _, reason := range contextExcludeReasonOrder {
+		if found[reason] {
+			out = append(out, reason)
+		}
+	}
+	return out
+}
+
+// contextNearMissReason reports whether a drop is a ranked record that simply
+// did not fit, which is what the near-miss bucket keeps.
+func contextNearMissReason(reason string) bool {
+	return reason == ContextExcludeOverBudget || reason == ContextExcludeLowerRank
+}
+
+// exclusionsFromTruncations projects the truncation bookkeeping into the
+// record-level exclusion view. It skips the core and summary blocks and keeps
+// the first reason per id, so one record is never listed twice.
+func exclusionsFromTruncations(truncations []ContextTruncation) []ContextExclusion {
+	seen := make(map[string]bool, len(truncations))
+	out := make([]ContextExclusion, 0, len(truncations))
+	for _, truncation := range truncations {
+		if truncation.ID == "" || truncation.ID == "core" || truncation.ID == "summary" {
+			continue
+		}
+		if seen[truncation.ID] {
+			continue
+		}
+		seen[truncation.ID] = true
+		out = append(out, ContextExclusion{
+			ID: truncation.ID, Kind: truncation.Kind, Section: truncation.Section,
+			Reason: contextExclusionCode(truncation.Code, truncation.Reason), Score: truncation.Score,
+		})
+	}
+	return out
+}
+
+// contextExclusionCode prefers the explicit code and falls back to the prefix
+// of the detail line, so a truncation written before the codes existed still
+// yields a known reason.
+func contextExclusionCode(code, detail string) string {
+	if slices.Contains(contextExcludeReasonOrder, code) {
+		return code
+	}
+	if prefix, _, ok := strings.Cut(detail, ": "); ok && slices.Contains(contextExcludeReasonOrder, prefix) {
+		return prefix
+	}
+	return ContextExcludeOther
+}
+
+// contextDroppedCount is how many records of one layer the answer left out,
+// whether a filter or the budget dropped them.
 func contextDroppedCount(truncations []ContextTruncation, layer string) int {
 	count := 0
 	for _, truncation := range truncations {
@@ -417,7 +567,7 @@ func (a *App) contextTokenBudget(requested int) (int, error) {
 // linked lookup retries without that layer and returns the reason, so a link
 // read problem never costs the curated answer.
 func (a *App) packContext(
-	ctx context.Context, result ContextResult, ranking contextRanking,
+	ctx context.Context, result ContextResult, ranking *contextRanking,
 	kinds []string, tokenBudget int, now time.Time,
 ) (ContextPack, error) {
 	header := renderContextHeader(result, a.revision(ctx))
@@ -435,8 +585,8 @@ func (a *App) packContext(
 	input := contextPackInput{
 		Budget: tokenBudget, Header: header, CoreText: coreText, CoreRecords: coreRecords,
 		Decisions: decisions, Attempts: attempts, Query: query, QueryAlways: true,
-		Quarantined: len(result.Quarantined),
-		Linked: func(selected []string) ([]ContextRecord, error) {
+		Quarantined: len(result.Quarantined), Dropped: slices.Clone(ranking.dropped),
+		Linked: func(selected []string) ([]ContextRecord, []ContextTruncation, error) {
 			return a.contextLinkedCandidates(ctx, ranking, selected, kinds)
 		},
 	}
@@ -454,20 +604,25 @@ func (a *App) packContext(
 
 // background lists the current records of one kind for its curated layer.
 // Decisions keep accepted ones first; attempts are ordered by update time by
-// the packer.
-func (r contextRanking) background(kind string, exclude map[string]bool) []ContextRecord {
-	out := make([]ContextRecord, 0, len(r.catalog.records))
+// the packer. Records are read in id order so the exclusion bookkeeping is
+// deterministic even though the catalog is a map.
+func (r *contextRanking) background(kind string, exclude map[string]bool) []ContextRecord {
+	candidates := make([]ContextRecord, 0, len(r.catalog.records))
 	for _, record := range r.catalog.records {
 		if record.Kind != kind || exclude[record.ID] {
 			continue
 		}
-		if record.Quarantined && !r.includeUnreviewed {
-			continue
-		}
-		if !r.filter.Allows(record.Validity, record.CreatedAt, r.now) {
-			continue
-		}
-		if !r.since.IsZero() && !withinSince(record.ContentUpdatedAt, record.UpdatedAt, record.CreatedAt, r.since) {
+		candidates = append(candidates, record)
+	}
+	sort.Slice(candidates, func(i, j int) bool { return candidates[i].ID < candidates[j].ID })
+	layer := ContextLayerDecisions
+	if kind == ContextKindAttempt {
+		layer = ContextLayerAttempts
+	}
+	out := make([]ContextRecord, 0, len(candidates))
+	for _, record := range candidates {
+		if code, detail := r.admit(record); code != "" {
+			r.drop(record, layer, code, detail)
 			continue
 		}
 		record.Path = contextRecordPath(r.projectID, record.Kind, record.ID)
@@ -479,18 +634,20 @@ func (r contextRanking) background(kind string, exclude map[string]bool) []Conte
 	return out
 }
 
-// contextLinkedCandidates returns the 1-hop neighbours of the selected records.
-// Only references inside the same project resolve: a cross-project link would
-// widen the answer beyond the curated project. The target metadata comes from
-// the catalog already loaded for this call, and the selected records themselves
-// are read in one batch listing: one listing per selected record would make the
-// layer cost N full parses of the project.
+// contextLinkedCandidates returns the 1-hop neighbours of the selected records
+// and the neighbour candidates it left out. Only references inside the same
+// project resolve: a cross-project link would widen the answer beyond the
+// curated project and its owner, so it is reported as other-owner. The target
+// metadata comes from the catalog already loaded for this call, and the
+// selected records themselves are read in one batch listing: one listing per
+// selected record would make the layer cost N full parses of the project.
 func (a *App) contextLinkedCandidates(
-	ctx context.Context, ranking contextRanking, selected []string, kinds []string,
-) ([]ContextRecord, error) {
+	ctx context.Context, ranking *contextRanking, selected []string, kinds []string,
+) ([]ContextRecord, []ContextTruncation, error) {
 	if len(selected) == 0 || len(ranking.catalog.records) == 0 {
-		return nil, nil
+		return nil, nil, nil
 	}
+	start := len(ranking.dropped)
 	allowed := make(map[string]bool, len(kinds))
 	for _, kind := range kinds {
 		allowed[kind] = true
@@ -502,9 +659,9 @@ func (a *App) contextLinkedCandidates(
 	sources, err := a.RecordsByIDs(ctx, ranking.projectID, selected)
 	if err != nil {
 		if ctxErr := ctx.Err(); ctxErr != nil {
-			return nil, ctxErr
+			return nil, nil, ctxErr
 		}
-		return nil, err
+		return nil, nil, err
 	}
 	references := map[string]int{}
 	for _, id := range selected {
@@ -515,31 +672,37 @@ func (a *App) contextLinkedCandidates(
 			continue
 		}
 		for _, raw := range recordRawLinks(record) {
-			if raw.projectID != ranking.projectID || chosen[raw.link.ID] {
+			if raw.projectID != ranking.projectID {
+				ranking.drop(ContextRecord{ID: raw.link.ID}, ContextLayerLinked, ContextExcludeOtherOwner,
+					"the link points into another project, whose records this answer does not own")
+				continue
+			}
+			if chosen[raw.link.ID] {
 				continue
 			}
 			references[raw.link.ID]++
 		}
 	}
-	out := make([]ContextRecord, 0, len(references))
-	for id, count := range references {
+	ids := make([]string, 0, len(references))
+	for id := range references {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	out := make([]ContextRecord, 0, len(ids))
+	for _, id := range ids {
+		count := references[id]
 		record, ok := ranking.catalog.records[id]
 		if !ok || !allowed[record.Kind] {
 			continue
 		}
-		if record.Quarantined && !ranking.includeUnreviewed {
-			continue
-		}
-		if !ranking.filter.Allows(record.Validity, record.CreatedAt, ranking.now) {
-			continue
-		}
-		if !ranking.since.IsZero() && !withinSince(record.ContentUpdatedAt, record.UpdatedAt, record.CreatedAt, ranking.since) {
+		if code, detail := ranking.admit(record); code != "" {
+			ranking.drop(record, ContextLayerLinked, code, detail)
 			continue
 		}
 		record.Score = float64(count)
 		out = append(out, record)
 	}
-	return out, nil
+	return out, slices.Clone(ranking.dropped[start:]), nil
 }
 
 // contextRecordFromRecord converts a loaded record to the context shape.
@@ -624,6 +787,7 @@ func fitContextPack(result *ContextResult, revision string, now time.Time, faile
 	budget := result.Pack.Budget
 	limit := fitAttempts(result.Pack) + 1
 	for attempt := 0; attempt < limit; attempt++ {
+		applyContextExclusions(result)
 		summary := renderContext(*result, revision, now)
 		if budget <= 0 || textbudget.Tokens(summary) <= budget {
 			return summary
@@ -631,6 +795,7 @@ func fitContextPack(result *ContextResult, revision string, now time.Time, faile
 		if !dropLowestPriorityRecord(&result.Pack) {
 			// Even the fixed header does not fit; shorten the text itself so a
 			// tiny budget is still honoured.
+			applyContextExclusions(result)
 			cut, truncated := textbudget.Truncate(summary, budget)
 			if truncated {
 				result.Pack.Truncated = append(result.Pack.Truncated, ContextTruncation{
@@ -643,6 +808,7 @@ func fitContextPack(result *ContextResult, revision string, now time.Time, faile
 		}
 		result.Records, result.FailedAttempts = splitQuerySection(result.Pack, failed)
 	}
+	applyContextExclusions(result)
 	return renderContext(*result, revision, now)
 }
 
@@ -673,8 +839,9 @@ func dropLowestPriorityRecord(pack *ContextPack) bool {
 				pack.TotalTokens = 0
 			}
 			pack.Truncated = append(pack.Truncated, ContextTruncation{
-				ID: last.ID, Section: name,
-				Reason: "dropped after rendering: the answer would have exceeded the token budget",
+				ID: last.ID, Kind: last.Kind, Section: name, Code: ContextExcludeOverBudget,
+				Reason: ContextExcludeOverBudget + ": dropped after rendering: the answer would have exceeded the token budget",
+				Score:  last.Score,
 			})
 			return true
 		}

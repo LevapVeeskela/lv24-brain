@@ -81,7 +81,7 @@ func TestSearchStrictPageAboveThresholdDoesNotRelax(t *testing.T) {
 	fixture := newSearchFixture(t)
 	for index := 0; index < app.SearchFallbackThreshold+1; index++ {
 		fixture.note(t, fmt.Sprintf("note-2026-11-01-both-%d", index), "Quartz ledger",
-			"quartz ledger entry", searchClock.Add(-time.Duration(index+1)*time.Hour))
+			fmt.Sprintf("quartz ledger entry %d", index), searchClock.Add(-time.Duration(index+1)*time.Hour))
 	}
 	fixture.note(t, "note-2026-11-01-quartz", "Quartz note", "quartz entry", searchClock.Add(-24*time.Hour))
 	fixture.reindex(t)
@@ -151,15 +151,17 @@ func noteWithProvenance(t *testing.T, fixture *searchFixture, id, title, body st
 }
 
 // Provenance travels from the frontmatter through the reindex into the
-// ranking: two notes with the same text and timestamp, one verified and one
-// inferred, rank in that order because the trust term separates them.
+// ranking: two notes with the same subject and timestamp, one verified and one
+// inferred, rank in that order because the trust term separates them. Their
+// text differs by one word so content-hash duplicate collapsing keeps both.
 func TestSearchProjectsProvenanceTrust(t *testing.T) {
 	fixture := newSearchFixture(t)
 	at := searchClock.Add(-time.Hour)
-	text := "provenance ranking probe"
-	noteWithProvenance(t, fixture, "note-2026-11-01-verified", "Provenance probe", text, at,
+	noteWithProvenance(t, fixture, "note-2026-11-01-verified", "Provenance probe verified",
+		"provenance ranking probe verified", at,
 		domain.Provenance{Origin: domain.OriginHuman, Trust: domain.TrustVerified})
-	noteWithProvenance(t, fixture, "note-2026-11-01-inferred", "Provenance probe", text, at,
+	noteWithProvenance(t, fixture, "note-2026-11-01-inferred", "Provenance probe inferred",
+		"provenance ranking probe inferred", at,
 		domain.Provenance{Origin: domain.OriginAgent, Reviewed: true, Trust: domain.TrustInferred})
 	fixture.reindex(t)
 

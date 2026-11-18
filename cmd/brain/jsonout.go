@@ -231,6 +231,8 @@ type jsonHit struct {
 	ValidFrom    *string      `json:"valid_from"`
 	ValidTo      *string      `json:"valid_to"`
 	SupersededBy string       `json:"superseded_by,omitempty"`
+	// Tier is the support tier of this hit: supported or related.
+	Tier string `json:"tier,omitempty"`
 	// Body is the full record text; it is set only with --full.
 	Body string `json:"body,omitempty"`
 }
@@ -253,16 +255,35 @@ type jsonExplain struct {
 }
 
 // jsonSearch is `brain search --json`. Relaxed reports that the strict term
-// match found nothing and the terms were retried joined with OR; the page
+// match returned fewer than five hits and the page was widened with OR; the page
 // fields follow the MCP pagination contract.
 type jsonSearch struct {
-	Query      string    `json:"query"`
-	Relaxed    bool      `json:"relaxed"`
-	Page       int       `json:"page"`
-	PageSize   int       `json:"page_size"`
-	HasMore    bool      `json:"has_more"`
-	NextCursor string    `json:"next_cursor,omitempty"`
-	Hits       []jsonHit `json:"hits"`
+	Query      string         `json:"query"`
+	Relaxed    bool           `json:"relaxed"`
+	Page       int            `json:"page"`
+	PageSize   int            `json:"page_size"`
+	HasMore    bool           `json:"has_more"`
+	NextCursor string         `json:"next_cursor,omitempty"`
+	Hits       []jsonHit      `json:"hits"`
+	Support    jsonSupport    `json:"support"`
+	Excluded   []jsonExcluded `json:"excluded"`
+}
+
+// jsonSupport says whether the page answers the query and why.
+type jsonSupport struct {
+	Tier      string  `json:"tier"`
+	Best      float64 `json:"best"`
+	Threshold float64 `json:"threshold"`
+	Reason    string  `json:"reason,omitempty"`
+}
+
+// jsonExcluded is one record the search withheld, with the reason.
+type jsonExcluded struct {
+	ID     string  `json:"id"`
+	Kind   string  `json:"kind"`
+	Title  string  `json:"title,omitempty"`
+	Score  float64 `json:"score"`
+	Reason string  `json:"reason"`
 }
 
 func toJSONHits(hits []ports.Hit) []jsonHit {
@@ -280,6 +301,7 @@ func toJSONHits(hits []ports.Hit) []jsonHit {
 			TopicKey:     hit.TopicKey,
 			Occurrences:  hit.Occurrences,
 			MatchReasons: hit.MatchReasons,
+			Tier:         hit.Tier,
 			Explain:      toJSONExplain(hit),
 			ValidFrom:    jsonTime(hit.ValidFrom),
 			ValidTo:      jsonTime(hit.ValidTo),
@@ -640,4 +662,18 @@ func gitAndGraphsFor(ctx context.Context, resolved app.Resolved) (gitinfo.Summar
 		roots = []string{resolved.Path}
 	}
 	return summary, gitinfo.FindGraphs(roots)
+}
+
+// toJSONSupport maps the support verdict to the CLI JSON shape.
+func toJSONSupport(support app.Support) jsonSupport {
+	return jsonSupport{Tier: support.Tier, Best: support.Best, Threshold: support.Threshold, Reason: support.Reason}
+}
+
+// toJSONExcluded maps withheld records to the CLI JSON shape.
+func toJSONExcluded(excluded []app.ExcludedHit) []jsonExcluded {
+	out := make([]jsonExcluded, 0, len(excluded))
+	for _, hit := range excluded {
+		out = append(out, jsonExcluded{ID: hit.ID, Kind: hit.Kind, Title: hit.Title, Score: hit.Score, Reason: hit.Reason})
+	}
+	return out
 }

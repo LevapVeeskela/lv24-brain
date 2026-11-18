@@ -634,6 +634,103 @@ func containsString(values []string, target string) bool {
 	return false
 }
 
+// KnowledgeTier classifies what a project actually contains, so an agent can
+// tell "nothing is known here" from "the project is known but still empty".
+type KnowledgeTier string
+
+const (
+	// TierAbsent means the id is not registered here: there are no records and
+	// no state to report.
+	TierAbsent KnowledgeTier = "ABSENT"
+	// TierEmpty means the project is registered but has no records, no state
+	// content and no handoff.
+	TierEmpty KnowledgeTier = "EMPTY"
+	// TierPopulated means at least one record, the state or a handoff exists.
+	TierPopulated KnowledgeTier = "POPULATED"
+)
+
+// ProjectKnowledge reports what is stored for one project. The counts are the
+// evidence behind the tier; the tier is never inferred from the search index,
+// which may be stale or missing.
+type ProjectKnowledge struct {
+	ProjectID string
+	Tier      KnowledgeTier
+	Notes     int
+	Decisions int
+	Attempts  int
+	Handoffs  int
+	// HasState reports state content (a goal, a next action or a list), not
+	// just the state file a newly registered project gets.
+	HasState bool
+}
+
+// Records returns the number of live records of every kind.
+func (k ProjectKnowledge) Records() int {
+	return k.Notes + k.Decisions + k.Attempts + k.Handoffs
+}
+
+// Knowledge reports the tier of a project. An id that is not registered is
+// ABSENT, not an error: `brain status` must be able to say that nothing is
+// known for a directory without failing.
+func (a *App) Knowledge(ctx context.Context, projectID string) (ProjectKnowledge, error) {
+	if err := a.requireStore(); err != nil {
+		return ProjectKnowledge{}, err
+	}
+	id := strings.TrimSpace(projectID)
+	if id == "" {
+		return ProjectKnowledge{}, domain.NewValidationError("project", "project id is required")
+	}
+	project, ok, err := a.LookupProject(ctx, id)
+	if err != nil {
+		return ProjectKnowledge{}, err
+	}
+	if !ok {
+		return ProjectKnowledge{ProjectID: id, Tier: TierAbsent}, nil
+	}
+	notes, err := a.listNotes(ctx, project.ID)
+	if err != nil {
+		return ProjectKnowledge{}, err
+	}
+	decisions, err := a.listDecisions(ctx, project.ID)
+	if err != nil {
+		return ProjectKnowledge{}, err
+	}
+	attempts, err := a.listAttempts(ctx, project.ID)
+	if err != nil {
+		return ProjectKnowledge{}, err
+	}
+	handoffs, err := a.listHandoffs(ctx, project.ID)
+	if err != nil {
+		return ProjectKnowledge{}, err
+	}
+	state, err := a.loadState(ctx, project.ID)
+	if err != nil {
+		return ProjectKnowledge{}, err
+	}
+	knowledge := ProjectKnowledge{
+		ProjectID: project.ID,
+		Notes:     len(notes),
+		Decisions: len(decisions),
+		Attempts:  len(attempts),
+		Handoffs:  len(handoffs),
+		HasState:  stateHasContent(state),
+	}
+	if knowledge.Records() > 0 || knowledge.HasState {
+		knowledge.Tier = TierPopulated
+	} else {
+		knowledge.Tier = TierEmpty
+	}
+	return knowledge, nil
+}
+
+// stateHasContent reports whether the state carries a working picture, as
+// opposed to the empty state file a newly registered project gets.
+func stateHasContent(state domain.State) bool {
+	return strings.TrimSpace(state.Goal) != "" ||
+		strings.TrimSpace(state.NextAction) != "" ||
+		len(state.Active) > 0 || len(state.Blocked) > 0 || len(state.OpenQuestions) > 0
+}
+
 // isRecordWriteEvent reports the creation events that retries may repeat.
 func isRecordWriteEvent(event string) bool {
 	return event == JournalNote || event == JournalDecision || event == JournalAttempt || event == JournalHandoff

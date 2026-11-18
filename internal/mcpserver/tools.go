@@ -74,6 +74,53 @@ type Hit struct {
 	// MatchReasons names the ranking signals that fired: bm25, recency,
 	// importance, pin, link. A backend without a ranked index returns none.
 	MatchReasons []string `json:"match_reasons,omitempty"`
+	// Tier is the retrieval support tier of the hit: supported when the hit
+	// answers the query, related when it is only lexically nearby. Empty when
+	// the backend does not evaluate support.
+	Tier string `json:"tier,omitempty"`
+}
+
+// Support tiers of a search response.
+const (
+	SupportSupported = "supported"
+	SupportRelated   = "related"
+	SupportNone      = "none"
+)
+
+// Support says whether a search page answers the query. Reason is set when the
+// page could not answer it.
+type Support struct {
+	Tier      string  `json:"tier"`
+	Best      float64 `json:"best"`
+	Threshold float64 `json:"threshold"`
+	Reason    string  `json:"reason,omitempty"`
+}
+
+// ExcludedHit is one record a search withheld, with the reason: duplicate,
+// lower-rank, stale, superseded, quarantined, stub, over-budget or other-owner.
+type ExcludedHit struct {
+	ID        string  `json:"id"`
+	ProjectID string  `json:"project_id"`
+	Kind      string  `json:"kind"`
+	Title     string  `json:"title"`
+	Score     float64 `json:"score"`
+	Reason    string  `json:"reason"`
+}
+
+// SearchReport is the full outcome of a search: the page, the support verdict
+// and the records the search withheld.
+type SearchReport struct {
+	Hits     []Hit
+	Support  Support
+	Excluded []ExcludedHit
+}
+
+// SearchReporter is implemented by a backend that can say whether a page is an
+// answer and why records were withheld. A backend without it keeps the flat
+// []Hit contract; the response then carries an empty support block rather than
+// a guessed tier.
+type SearchReporter interface {
+	SearchReport(ctx context.Context, in SearchInput) (SearchReport, error)
 }
 
 // SearchInput is one brain_search request after argument validation.
@@ -514,7 +561,8 @@ func (s *Server) searchTool() tool {
 		Name:        "brain_search",
 		Annotations: readOnlyAnnotations("Search the brain"),
 		Description: "Full-text search over notes, decisions, attempts and handoffs. Searches every project unless project is given. Connector dumps (mail, GitHub/GitLab issues and PRs) are excluded unless include_dumps is true or kinds contains \"dump\". Raw-zone external items are excluded unless kinds contains \"item\". " +
-			"Hits carry an id, the kind, the title, a preview of at most " + fmt.Sprint(textbudget.PreviewRunes) + " characters and the ranking score; bodies are never returned by default. Read one with expand_ids, or set compact=false to expand the whole page.",
+			"Hits carry an id, the kind, the title, a preview of at most " + fmt.Sprint(textbudget.PreviewRunes) + " characters and the ranking score; bodies are never returned by default. Read one with expand_ids, or set compact=false to expand the whole page. " +
+			"The response also reports support {tier, best, threshold, reason}: supported when a hit answers the query, related when the page is only nearby, none when nothing answered it (hits is then empty and reason says why). Withheld records are listed in excluded with a reason.",
 		InputSchema: objectSchema([]string{"query"}, map[string]any{
 			"query":           stringProp("Words to search for."),
 			"project":         project,
@@ -541,7 +589,23 @@ func (s *Server) searchTool() tool {
 				"snippet":       stringProp("Matching preview, at most " + fmt.Sprint(textbudget.PreviewRunes) + " characters."),
 				"score":         numberProp("Composite relevance in [0, 1]."),
 				"match_reasons": stringArrayProp("Ranking signals that fired: bm25, recency, importance, pin, link."),
+				"tier":          stringProp("Retrieval support tier: supported when the hit answers the query, related when it is only lexically nearby. Absent when the backend does not evaluate support."),
 			}, "id", "project_id", "kind", "title", "snippet")),
+			"support": outputObject(map[string]any{
+				"tier":      stringProp("supported, related or none. none means no record answered the query; hits is empty and reason says why."),
+				"best":      numberProp("Largest share of the query terms any matched record contained, in [0, 1]."),
+				"threshold": numberProp("Share of the common subject terms a supported hit must contain."),
+				"reason":    stringProp("Why the page is not an answer; empty when it is."),
+			}, "tier", "best", "threshold"),
+			"excluded": arrayProp("Records the search withheld, each with a reason: duplicate, lower-rank, stale, superseded, quarantined, stub, over-budget or other-owner.",
+				outputObject(map[string]any{
+					"id":         stringProp("Record id."),
+					"project_id": stringProp("Project that owns the record."),
+					"kind":       stringProp("Record kind."),
+					"title":      stringProp("Record title."),
+					"score":      numberProp("Composite relevance in [0, 1]."),
+					"reason":     stringProp("Why the record is not in hits."),
+				}, "id", "project_id", "kind", "title", "reason")),
 			"compact":  boolProp("Whether bodies were withheld from the hits."),
 			"expanded": arrayProp("Records returned in full, when expand, expand_ids or compact=false asked for them.", objectProp("One expanded record: its detail fields plus truncated and tokens.")),
 		}), "hits", "page", "page_size", "has_more"),
@@ -614,7 +678,7 @@ func (s *Server) search(ctx context.Context, raw json.RawMessage) (toolResult, e
 		return toolResult{}, err
 	}
 	requested := fetchLimit(offset, size, limits)
-	hits, err := s.backend.Search(ctx, SearchInput{
+	input := SearchInput{
 		Query:        query,
 		ProjectID:    projectID,
 		Limit:        requested,
@@ -623,9 +687,25 @@ func (s *Server) search(ctx context.Context, raw json.RawMessage) (toolResult, e
 		Kinds:        args.Kinds,
 		IncludeDumps: args.IncludeDumps,
 		Since:        since,
-	})
-	if err != nil {
-		return toolResult{}, err
+	}
+	hits := []Hit{}
+	support := Support{}
+	excluded := []ExcludedHit{}
+	if reporter, ok := s.backend.(SearchReporter); ok {
+		report, reportErr := reporter.SearchReport(ctx, input)
+		if reportErr != nil {
+			return toolResult{}, reportErr
+		}
+		hits, support, excluded = report.Hits, report.Support, report.Excluded
+	} else {
+		var searchErr error
+		hits, searchErr = s.backend.Search(ctx, input)
+		if searchErr != nil {
+			return toolResult{}, searchErr
+		}
+	}
+	if excluded == nil {
+		excluded = []ExcludedHit{}
 	}
 	pageHits, page := paginate(hits, offset, size, requested, "brain_search", filter)
 	if pageHits == nil {
@@ -647,14 +727,27 @@ func (s *Server) search(ctx context.Context, raw json.RawMessage) (toolResult, e
 	}
 	var text strings.Builder
 	if len(pageHits) == 0 {
-		text.WriteString("no matches")
+		switch {
+		case support.Tier == SupportNone && support.Reason != "":
+			fmt.Fprintf(&text, "no supported matches: %s", support.Reason)
+		case len(excluded) > 0:
+			fmt.Fprintf(&text, "no matches on this page (%d excluded)", len(excluded))
+		default:
+			text.WriteString("no matches")
+		}
 	}
 	for _, hit := range pageHits {
 		fmt.Fprintf(&text, "- [%s] %s (%s, %s)", hit.Kind, hit.Title, hit.ID, hit.ProjectID)
+		if hit.Tier != "" {
+			fmt.Fprintf(&text, " [%s]", hit.Tier)
+		}
 		if hit.Snippet != "" {
 			fmt.Fprintf(&text, ": %s", hit.Snippet)
 		}
 		text.WriteString("\n")
+	}
+	if len(excluded) > 0 {
+		fmt.Fprintf(&text, "\nexcluded %d: %s\n", len(excluded), excludedSummary(excluded))
 	}
 	if footer := pageFooter(page); footer != "" {
 		text.WriteString(footer)
@@ -670,8 +763,82 @@ func (s *Server) search(ctx context.Context, raw json.RawMessage) (toolResult, e
 			Page
 			Compact  bool          `json:"compact"`
 			Expanded []ExpandedHit `json:"expanded"`
-		}{Hits: pageHits, Page: page, Compact: compact, Expanded: expanded},
+			Support  Support       `json:"support"`
+			Excluded []ExcludedHit `json:"excluded"`
+		}{Hits: pageHits, Page: page, Compact: compact, Expanded: expanded, Support: support, Excluded: excluded},
 	}, nil
+}
+
+// excludedSummary counts the withheld records per reason, in first-seen order.
+func excludedSummary(excluded []ExcludedHit) string {
+	counts := make(map[string]int, len(excluded))
+	order := make([]string, 0, len(excluded))
+	for _, item := range excluded {
+		if counts[item.Reason] == 0 {
+			order = append(order, item.Reason)
+		}
+		counts[item.Reason]++
+	}
+	parts := make([]string, 0, len(order))
+	for _, reason := range order {
+		parts = append(parts, fmt.Sprintf("%s %d", reason, counts[reason]))
+	}
+	return strings.Join(parts, ", ")
+}
+
+// SimilarHit is one existing record close to the record a write just created.
+// It is advice only: the write never changes because of it.
+type SimilarHit struct {
+	ID    string  `json:"id"`
+	Title string  `json:"title"`
+	Score float64 `json:"score"`
+	Kind  string  `json:"kind"`
+}
+
+// similarLimit is the number of similar records a write reports.
+const similarLimit = 3
+
+// similarSearchLimit asks for extra rows so excluding the new record still
+// leaves a full list.
+const similarSearchLimit = 10
+
+// similarRecords finds up to similarLimit existing records of the same project
+// that look like the record just written. The write already succeeded, so a
+// search failure is not an error: the response carries an empty list.
+func (s *Server) similarRecords(ctx context.Context, projectID, title, newID string) []SimilarHit {
+	query := strings.TrimSpace(title)
+	if query == "" || newID == "" {
+		return []SimilarHit{}
+	}
+	hits, err := s.backend.Search(ctx, SearchInput{
+		Query:     query,
+		ProjectID: projectID,
+		Limit:     similarSearchLimit,
+	})
+	if err != nil {
+		return []SimilarHit{}
+	}
+	similar := make([]SimilarHit, 0, similarLimit)
+	for _, hit := range hits {
+		if len(similar) == similarLimit {
+			break
+		}
+		if hit.ID == newID || hit.ProjectID != projectID || hit.Score <= 0 {
+			continue
+		}
+		similar = append(similar, SimilarHit{ID: hit.ID, Title: hit.Title, Score: hit.Score, Kind: hit.Kind})
+	}
+	return similar
+}
+
+// similarItemSchema is the output shape of one similar record.
+func similarItemSchema() map[string]any {
+	return outputObject(map[string]any{
+		"id":    stringProp("Record id."),
+		"title": stringProp("Record title."),
+		"score": numberProp("Search relevance in [0, 1]."),
+		"kind":  stringProp("Record kind: note, decision or attempt."),
+	}, "id", "title", "score", "kind")
 }
 
 func (s *Server) noteTool() tool {
@@ -697,6 +864,8 @@ func (s *Server) noteTool() tool {
 			"project_id": stringProp("Project that owns the record."),
 			"topic_key":  stringProp("Topic key the write landed under."),
 			"replaced":   boolProp("True when topic_key updated an existing record in place."),
+			"similar": arrayProp("Up to three existing records close to the new one. Advice only; the write is unchanged.",
+				similarItemSchema()),
 		}),
 		ReadActions: []string{"suggest_topic"},
 		run:         s.note,
@@ -737,7 +906,7 @@ func (s *Server) note(ctx context.Context, raw json.RawMessage) (toolResult, err
 		key := domain.Slugify(text)
 		return toolResult{
 			Text:       "topic_key: " + key,
-			Structured: noteResult{Action: action, TopicKey: key},
+			Structured: noteResult{Action: action, TopicKey: key, Similar: []SimilarHit{}},
 		}, nil
 	case "record":
 	default:
@@ -762,22 +931,28 @@ func (s *Server) note(ctx context.Context, raw json.RawMessage) (toolResult, err
 	if err != nil {
 		return toolResult{}, err
 	}
+	title := strings.TrimSpace(args.Title)
+	if title == "" {
+		title = firstLine(args.Text)
+	}
 	return toolResult{
 		Text: fmt.Sprintf("note %s recorded in project %s", rec.ID, rec.ProjectID),
 		Structured: noteResult{
 			Action: action, ID: rec.ID, ProjectID: rec.ProjectID,
 			TopicKey: rec.TopicKey, Replaced: rec.Replaced,
+			Similar: s.similarRecords(ctx, rec.ProjectID, title, rec.ID),
 		},
 	}, nil
 }
 
 // noteResult is the structured output of brain_note.
 type noteResult struct {
-	Action    string `json:"action"`
-	ID        string `json:"id,omitempty"`
-	ProjectID string `json:"project_id,omitempty"`
-	TopicKey  string `json:"topic_key,omitempty"`
-	Replaced  bool   `json:"replaced,omitempty"`
+	Action    string       `json:"action"`
+	ID        string       `json:"id,omitempty"`
+	ProjectID string       `json:"project_id,omitempty"`
+	TopicKey  string       `json:"topic_key,omitempty"`
+	Replaced  bool         `json:"replaced,omitempty"`
+	Similar   []SimilarHit `json:"similar"`
 }
 
 func (s *Server) decisionTool() tool {
@@ -838,7 +1013,7 @@ func (s *Server) decision(ctx context.Context, raw json.RawMessage) (toolResult,
 	if err != nil {
 		return toolResult{}, err
 	}
-	return recordResult("decision", rec), nil
+	return recordResult("decision", rec, s.similarRecords(ctx, rec.ProjectID, title, rec.ID)), nil
 }
 
 func (s *Server) attemptTool() tool {
@@ -888,7 +1063,7 @@ func (s *Server) attempt(ctx context.Context, raw json.RawMessage) (toolResult, 
 	if err != nil {
 		return toolResult{}, err
 	}
-	return recordResult("attempt", rec), nil
+	return recordResult("attempt", rec, s.similarRecords(ctx, rec.ProjectID, title, rec.ID)), nil
 }
 
 func (s *Server) handoffTool() tool {
@@ -1209,13 +1384,17 @@ type toolDetail struct {
 	ReadActions []string `json:"read_actions,omitempty"`
 }
 
-func recordResult(kind string, rec Record) toolResult {
+func recordResult(kind string, rec Record, similar []SimilarHit) toolResult {
+	if similar == nil {
+		similar = []SimilarHit{}
+	}
 	return toolResult{
 		Text: fmt.Sprintf("%s %s recorded in project %s", kind, rec.ID, rec.ProjectID),
 		Structured: struct {
-			ID        string `json:"id"`
-			ProjectID string `json:"project_id"`
-		}{ID: rec.ID, ProjectID: rec.ProjectID},
+			ID        string       `json:"id"`
+			ProjectID string       `json:"project_id"`
+			Similar   []SimilarHit `json:"similar"`
+		}{ID: rec.ID, ProjectID: rec.ProjectID, Similar: similar},
 	}
 }
 
@@ -1345,6 +1524,8 @@ func recordOutputSchema() map[string]any {
 	return outputObject(map[string]any{
 		"id":         stringProp("New record id."),
 		"project_id": stringProp("Project that owns the record."),
+		"similar": arrayProp("Up to three existing records close to the new one. Advice only; the write is unchanged.",
+			similarItemSchema()),
 	}, "id", "project_id")
 }
 

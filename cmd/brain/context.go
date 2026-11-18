@@ -136,6 +136,9 @@ func toMCPContext(result app.ContextResult, explain bool) mcpserver.TaskContext 
 		FailedAttempts:   mapAll(result.FailedAttempts, toMCPContextRecord),
 		Sections:         mapAll(result.Pack.Sections, toMCPContextSection),
 		Truncated:        mapAll(result.Pack.Truncated, toMCPContextTruncation),
+		Excluded:         mapAll(result.Excluded, toMCPContextExclusion),
+		ExcludedTotal:    result.ExcludedTotal,
+		NearMisses:       mapAll(result.NearMisses, toMCPContextExclusion),
 		QuarantinedCount: len(result.Quarantined),
 		StateQuarantined: result.StateQuarantined,
 		Findings: mapAll(result.Findings, func(finding app.Finding) mcpserver.ReviewFinding {
@@ -187,6 +190,12 @@ func toMCPContextTruncation(truncation app.ContextTruncation) mcpserver.ContextT
 func toMCPContextHandoff(handoff domain.Handoff) *mcpserver.ContextHandoff {
 	return &mcpserver.ContextHandoff{
 		ID: handoff.ID, Summary: handoff.Summary, NextAction: handoff.NextAction, CreatedAt: handoff.CreatedAt,
+	}
+}
+
+func toMCPContextExclusion(exclusion app.ContextExclusion) mcpserver.ContextExclusion {
+	return mcpserver.ContextExclusion{
+		ID: exclusion.ID, Kind: exclusion.Kind, Reason: exclusion.Reason, Score: exclusion.Score,
 	}
 }
 

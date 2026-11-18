@@ -47,6 +47,9 @@ func supersessionGapFindings(in reviewInputs) []Finding {
 func noteSupersedeRecords(notes []domain.Note) []supersedeCheckRecord {
 	records := make([]supersedeCheckRecord, 0, len(notes))
 	for _, note := range notes {
+		if isStubNote(note) {
+			continue
+		}
 		records = append(records, supersedeCheckRecord{id: note.ID, title: note.Title, kind: ports.RecordNote,
 			created: note.CreatedAt, validity: note.Validity})
 	}
@@ -56,6 +59,9 @@ func noteSupersedeRecords(notes []domain.Note) []supersedeCheckRecord {
 func decisionSupersedeRecords(decisions []domain.Decision) []supersedeCheckRecord {
 	records := make([]supersedeCheckRecord, 0, len(decisions))
 	for _, decision := range decisions {
+		if isStubDecision(decision) {
+			continue
+		}
 		records = append(records, supersedeCheckRecord{id: decision.ID, title: decision.Title, kind: ports.RecordDecision,
 			created: decision.CreatedAt, validity: decision.Validity})
 	}
@@ -65,6 +71,9 @@ func decisionSupersedeRecords(decisions []domain.Decision) []supersedeCheckRecor
 func attemptSupersedeRecords(attempts []domain.Attempt) []supersedeCheckRecord {
 	records := make([]supersedeCheckRecord, 0, len(attempts))
 	for _, attempt := range attempts {
+		if isStubAttempt(attempt) {
+			continue
+		}
 		records = append(records, supersedeCheckRecord{id: attempt.ID, title: attempt.Title, kind: ports.RecordAttempt,
 			created: attempt.CreatedAt, validity: attempt.Validity})
 	}
@@ -74,6 +83,9 @@ func attemptSupersedeRecords(attempts []domain.Attempt) []supersedeCheckRecord {
 func handoffSupersedeRecords(handoffs []domain.Handoff) []supersedeCheckRecord {
 	records := make([]supersedeCheckRecord, 0, len(handoffs))
 	for _, handoff := range handoffs {
+		if isStubHandoff(handoff) {
+			continue
+		}
 		records = append(records, supersedeCheckRecord{id: handoff.ID, title: SummarizeLine(handoff.Summary, 120), kind: ports.RecordHandoff,
 			created: handoff.CreatedAt, validity: handoff.Validity})
 	}

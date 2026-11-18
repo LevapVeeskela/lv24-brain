@@ -1766,3 +1766,148 @@ func TestProjectClearServerModeSendsEmptyArrays(t *testing.T) {
 		t.Fatalf("project set output does not show cleared lists:\n%s", stdout)
 	}
 }
+
+// A registered project with no state and no records is EMPTY; a directory that
+// is not a registered checkout is ABSENT. Status must say which, and name the
+// checkout it resolved, instead of implying the emptiness is content.
+func TestStatusReportsKnowledgeTierAndCheckout(t *testing.T) {
+	t.Setenv("BRAIN_CONFIG", "")
+	root := t.TempDir()
+	dataDir := filepath.Join(root, "brain")
+	cfgPath := filepath.Join(dataDir, "brain.yaml")
+	if code, _, stderr := runForTest(t, "init", "--mode", "local", "--data-dir", dataDir); code != 0 {
+		t.Fatalf("init: %s", stderr)
+	}
+	checkout := filepath.Join(root, "checkout")
+	if err := os.MkdirAll(checkout, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if code, _, stderr := runForTest(t, "project", "set", "demo", "--path", checkout, "--config", cfgPath); code != 0 {
+		t.Fatalf("project set: %s", stderr)
+	}
+
+	t.Chdir(checkout)
+	code, stdout, stderr := runForTest(t, "status", "--config", cfgPath)
+	if code != 0 {
+		t.Fatalf("status exited %d: %s", code, stderr)
+	}
+	for _, want := range []string{"project_id: demo", "path: " + checkout, "tier: EMPTY"} {
+		if !strings.Contains(stdout, want) {
+			t.Fatalf("status output lacks %q:\n%s", want, stdout)
+		}
+	}
+
+	createNoteForTest(t, cfgPath, "Status note", "status needle")
+	_, populated, _ := runForTest(t, "status", "--config", cfgPath)
+	if !strings.Contains(populated, "tier: POPULATED") {
+		t.Fatalf("status after a note does not report POPULATED:\n%s", populated)
+	}
+
+	// From an unrelated directory the single project still resolves, but the
+	// mismatch and the registered checkouts are named.
+	elsewhere := filepath.Join(root, "elsewhere")
+	if err := os.MkdirAll(elsewhere, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(elsewhere)
+	_, wrongCwd, _ := runForTest(t, "status", "--config", cfgPath)
+	for _, want := range []string{"cwd: " + elsewhere, "not inside the resolved checkout", "registered_paths: " + checkout} {
+		if !strings.Contains(wrongCwd, want) {
+			t.Fatalf("wrong-cwd status lacks %q:\n%s", want, wrongCwd)
+		}
+	}
+}
+
+// An unregistered directory is ABSENT, not an empty project and not an error:
+// status names the path that was resolved and keeps the index line.
+func TestStatusReportsAbsentDirectory(t *testing.T) {
+	t.Setenv("BRAIN_CONFIG", "")
+	root := t.TempDir()
+	dataDir := filepath.Join(root, "brain")
+	cfgPath := filepath.Join(dataDir, "brain.yaml")
+	if code, _, stderr := runForTest(t, "init", "--mode", "local", "--data-dir", dataDir); code != 0 {
+		t.Fatalf("init: %s", stderr)
+	}
+	unregistered := filepath.Join(root, "unregistered")
+	if err := os.MkdirAll(unregistered, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(unregistered)
+	code, stdout, stderr := runForTest(t, "status", "--config", cfgPath)
+	if code != 0 {
+		t.Fatalf("status exited %d: %s", code, stderr)
+	}
+	for _, want := range []string{"project_id: (not registered)", "path: " + unregistered, "tier: ABSENT"} {
+		if !strings.Contains(stdout, want) {
+			t.Fatalf("absent status lacks %q:\n%s", want, stdout)
+		}
+	}
+}
+
+// Open resolves the only registered project from any directory, but it must
+// show the checkout it used and say the working directory is not it.
+func TestOpenNamesRegisteredPathsForWrongCheckout(t *testing.T) {
+	cfgPath, _, checkout := codexFixture(t)
+	elsewhere := t.TempDir()
+	t.Chdir(elsewhere)
+
+	code, stdout, stderr := runForTest(t, "open", "--brief", "--config", cfgPath)
+	if code != 0 {
+		t.Fatalf("open exited %d: %s", code, stderr)
+	}
+	for _, want := range []string{
+		"project_id: demo", "path: " + checkout, "tier: POPULATED",
+		"cwd: " + elsewhere, "not inside the resolved checkout", "registered_paths: " + checkout,
+	} {
+		if !strings.Contains(stdout, want) {
+			t.Fatalf("open output lacks %q:\n%s", want, stdout)
+		}
+	}
+}
+
+// The index line is the same in open and status: complete names the indexed
+// sha, stale names both shas, and server mode has no local index.
+func TestIndexLineFormats(t *testing.T) {
+	fresh := app.IndexStatus{IndexedFrom: "abc1234", Head: "abc1234"}
+	if got := indexLine(fresh, nil, config.ModeGit); got != "complete at abc1234" {
+		t.Fatalf("fresh index line = %q", got)
+	}
+	stale := app.IndexStatus{Stale: true, IndexedFrom: "abc1234", Head: "def5678"}
+	if got := indexLine(stale, nil, config.ModeGit); got != "stale at abc1234 (HEAD def5678)" {
+		t.Fatalf("stale index line = %q", got)
+	}
+	if got := indexLine(app.IndexStatus{}, domain.ErrUnsupported, config.ModeServer); got != "n/a (server mode)" {
+		t.Fatalf("server index line = %q", got)
+	}
+	if got := indexLine(app.IndexStatus{Stale: true, Head: "def5678"}, nil, config.ModeGit); !strings.Contains(got, "never indexed") {
+		t.Fatalf("never-indexed line = %q", got)
+	}
+	if got := indexLine(app.IndexStatus{Stale: true}, nil, config.ModeLocal); got != "stale (never indexed)" {
+		t.Fatalf("headless never-indexed line = %q", got)
+	}
+}
+
+// --include-stubs must reach the application options, and leaving it out must
+// keep the default (stubs hidden).
+func TestSearchIncludeStubsReachesOptions(t *testing.T) {
+	cfgPath, _, _ := codexFixture(t)
+	previous := searchOptionsHook
+	t.Cleanup(func() { searchOptionsHook = previous })
+	var captured []app.SearchOptions
+	searchOptionsHook = func(options app.SearchOptions) { captured = append(captured, options) }
+
+	if code, _, stderr := runForTest(t, "search", "Seed", "--config", cfgPath, "--include-stubs"); code != 0 {
+		t.Fatalf("search --include-stubs exited %d: %s", code, stderr)
+	}
+	if len(captured) != 1 || !captured[0].IncludeStubs {
+		t.Fatalf("options with --include-stubs = %+v", captured)
+	}
+
+	captured = nil
+	if code, _, stderr := runForTest(t, "search", "Seed", "--config", cfgPath); code != 0 {
+		t.Fatalf("search exited %d: %s", code, stderr)
+	}
+	if len(captured) != 1 || captured[0].IncludeStubs {
+		t.Fatalf("default options = %+v, want IncludeStubs false", captured)
+	}
+}

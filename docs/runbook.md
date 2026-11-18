@@ -47,6 +47,19 @@ A write to an unknown project fails unless `--create` is passed (for example
 flag a typo or unregistered alias never starts a new project. `brain project set`
 makes the metadata of a registered project explicit.
 
+Before the summary, `brain open` and `brain status` print `project_id`, `path`,
+`tier` and `index` for a resolved project. `brain status` reports
+`tier: ABSENT` when no project can be resolved for the directory (no registered
+checkout and no single-project fallback), and still exits 0.
+`tier` is `EMPTY` (registered, no records/state content/handoff) or `POPULATED`
+(at least one of them), computed from stored records rather than the index.
+`index` is `complete at <sha>`, `stale at <sha> (HEAD <sha>)` or
+`stale (never indexed)`.
+When the working directory is outside the resolved checkout, both commands also
+print `cwd:` and `registered_paths:` so a wrong directory cannot silently show
+another project's context. `brain status --json` keeps its configuration shape
+and does not include these lines.
+
 ### Task context
 
 ```sh
@@ -62,13 +75,26 @@ budget (`core` 25 %, `query` 35 %, `decisions` 20 %, `attempts` 12 %, `linked`
 8 %) and are fungible: a thin layer lends its unused share to the next one.
 There is no fixed record count, so a larger budget returns more records rather
 than more padding. Every layer that left records out ends with
-`- … N more dropped`; `--explain` prints `layer: used/cap tokens, N records` and
-`total: used/budget tokens, D dropped`. `--project` selects another project,
-`--kind` keeps one or more of `decision`, `attempt`, `note`, `--since` accepts a
-window (`24h`, `7d`, `2w`) or a date and compares the record's **content** change
-time, and `--json` prints the same result as an object. The MCP tool
-`brain_context` exposes the curated view and accepts the same `raw` boolean; it
-stays curated-only without it.
+`- … N more dropped (over-budget, lower-rank)`, and the query layer adds
+`- … N lower-ranked omitted` for its near misses. `--explain` prints
+`layer: used/cap tokens, N records` and `total: used/budget tokens, D dropped`.
+`--project` selects another project, `--kind` keeps one or more of `decision`,
+`attempt`, `note`, `--since` accepts a window (`24h`, `7d`, `2w`) or a date and
+compares the record's **content** change time, and `--json` prints the same
+result as an object. The MCP tool `brain_context` exposes the curated view and
+accepts the same `raw` boolean; it stays curated-only without it.
+
+Every record the answer left out is named in `excluded[]` up to the transport
+cap: `--json` and `brain_context` carry `excluded[]` (`id`, `kind`, `reason`,
+`score`) and `excluded_total`, with one stable code per record: `over-budget`,
+`lower-rank`, `superseded`, `stale`, `quarantined`, `other-owner` (a
+cross-project `[[...]]` neighbour) or the `other` fallback. `excluded[]` is
+capped at 50 entries in the transport answer; `excluded_total` keeps the full
+count. `near_misses[]` keeps at most three query-layer records that only missed
+the cut, best first, with their positive score; the text answer prints their
+count, not their ids. Stub records
+(generated titles, "nothing new" bodies) never reach the packer, so they cannot
+consume budget.
 
 `--raw` is off by default. It adds at most five excerpts from stored raw items
 and only when the curated context is thin (fewer than five records, failed
@@ -338,13 +364,33 @@ brain journal --repair --dry-run   # records of the last 30 days without a journ
   0.20, `pin` 0.15, `importance` 0.05 and provenance `trust` 0.05. The score is
   the weighted sum in `[0, 1]`, so `--min-score` filters the same number the
   output shows and `--explain` contributions add up to it.
+- Every page carries a support verdict: `supported` when a hit contains every
+  rare query term (document frequency ≤ 20 % of the project, floor one) and at
+  least half of the remaining subject terms, `related` when the page only
+  overlaps the topic, `none` when nothing answers it. `none` empties `hits` and
+  lists the matched records in `excluded[]` as `lower-rank` with the reason;
+  a `related` page stays visible. `--match-mode all` runs only the strict pass
+  unless `--relaxed` is given; an explicit `--relaxed` or `--match-mode any`
+  reports the page as `related` ("partial matching was requested explicitly").
+  Server mode has no support gate.
+- Duplicate content collapses to one row within a page: the index hashes
+  normalized kind/title/body, the oldest record keeps the slot and every other
+  copy is listed once as `duplicate`. Stub records (generated label titles, whole-body
+  "nothing new"/"session ended"/"no changes"/"no updates") stay in the index and
+  in counts but are hidden from search and context; `brain search
+  --include-stubs` shows them. MCP `brain_search` always hides them.
 - `--since` compares `content_updated_at`, the last title/body/tag change.
   Review, snooze, validity, supersede and merge bookkeeping rewrite the file
   without moving the content time, so a metadata pass no longer re-reports the
   corpus. Records written before the field existed fall back to `updated_at`.
-- The local index schema is 8. A schema mismatch recreates the index and sets
-  the dirty marker, and the next search reindexes once from Markdown; an
-  explicit `brain index` does the same work up front.
+- The local index schema is 10. It adds `content_hash`, `stub` and a `meta`
+  table holding `index_generation`, `indexed_from` and `schema_version`. A
+  schema mismatch recreates the index and sets the reindex flag, and the next
+  command reindexes once from Markdown; an explicit `brain index` does the same
+  work up front. `brain open`/`brain status` report `index: complete at <sha>`
+  or `index: stale at <sha> (HEAD <sha>)`; `brain doctor` reports the
+  `index-generation` check and warns only when the data directory is dirty or
+  the index is more than one commit behind. A one-commit lag is normal.
 - Server mode also supports `brain record list|show|status|supersede|review`,
   `catchup`, `review` and `journal --repair` reads; trash and restore are
   local/git only, and `record review --review-after/--clear-review-after` and
@@ -1337,10 +1383,48 @@ brain update --rollback                 # restore brain(.exe).previous
 - Before ordinary commands the CLI performs a notify-only daily check. Set
   `BRAIN_NO_UPDATE=1` to disable it.
 
+### Upgrade to 0.27
+
+Engine 0.27.0 keeps data schema 1 and the Markdown format unchanged; the local
+index moves to schema 10 and rebuilds itself once. It adds the support gate
+(`supported`/`related`/`none`), content-hash duplicate collapse, stub filtering,
+context `excluded[]`/`near_misses[]`, the index freshness line and the
+`index-generation` doctor check. Server mode is unchanged and has no support
+gate.
+
+```sh
+brain update --yes
+brain doctor
+brain index
+brain open .
+brain search "release" --json
+```
+
+1. Mixed versions are safe: Markdown is unchanged, so a pre-0.27 binary can
+   keep writing. That machine keeps its old index and does not collapse
+   duplicates or hide stubs until it is upgraded and reindexed; update it when
+   you want the same retrieval there. An older binary that opens a schema-10
+   index recreates it at its own version, so alternating versions on one machine
+   reindexes each time.
+2. `brain index` makes the one-time schema-10 rebuild explicit; otherwise the
+   first command pays it. `brain doctor` should then report `index-generation`
+   as ok. A one-commit lag is normal and does not warn.
+3. In a registered checkout, `brain open` and `brain status` should print
+   `tier: POPULATED` and `index: complete at <sha>`. `tier: ABSENT` (not
+   registered) or a `cwd:`/`registered_paths:` block means this is not the
+   checkout you meant; `index: stale at` means the index was not rebuilt after a
+   commit or sync.
+4. Optional checks: an absent-topic query should return `support.tier: none`
+   with empty `hits` and `lower-rank` entries in `excluded[]`;
+   `brain search --include-stubs` should bring back session stubs;
+   `brain note --similar` should print up to three similar records.
+
+No data migration and no new environment variable are required.
+
 ### Upgrade to 0.26
 
 The data schema stays 1 and records stay readable in both directions. The local
-search index moves to version 8 and rebuilds itself once.
+search index moves to version 9 and rebuilds itself once.
 
 1. **Update every machine first.** `brain update --yes` or rebuild and replace
    the binary; confirm `brain --version` on each. Do not apply the identity

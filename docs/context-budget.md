@@ -33,11 +33,14 @@ fit, so a large budget returns every matching record.
 ## Truncation policy
 
 - A record that does not fit the remaining room in its layer is skipped whole
-  and listed in `truncated[]` as `{id, section, reason}`.
+  and listed in `truncated[]` as `{id, section, reason}` and in `excluded[]` as
+  `{id, kind, reason, score}`.
 - The Markdown summary ends every layer that left records out with
-  `- … N more dropped`, so a reader can tell a short layer from a complete one.
-  A layer that packed nothing still prints its heading and that line when the
-  budget dropped its candidates.
+  `- … N more dropped (over-budget, lower-rank)`: the count and the distinct
+  reason codes, in a fixed order. A layer that packed nothing still prints its
+  heading and that line when the budget dropped its candidates.
+- The query layer also prints `- … N lower-ranked omitted` when it kept near
+  misses (see below). The text answer reports their count, not their ids.
 - Because candidates are ordered best first, the tail of a layer is what gets
   dropped: lowest score first, then oldest update, then id. A very large
   high-score record can be skipped while smaller lower-score records still fit;
@@ -53,6 +56,54 @@ fit, so a large budget returns every matching record.
 - Raw-zone excerpts (`--raw`) are outside this accounting: they are opt-in,
   grant-gated and untrusted, and are added only when the curated context is
   thin.
+
+## Exclusions and near misses
+
+Every record that did not make the answer carries a stable reason code. The
+same code appears in JSON `excluded[].reason` and in the Markdown dropped line,
+so a reader can tell a filtered record from a budget cut.
+
+| Code | Meaning |
+|---|---|
+| `over-budget` | the record did not fit the room its layer had left. |
+| `lower-rank` | the record matched but ranked below a record that fit. |
+| `superseded` | a newer record replaced it; `--include-superseded` keeps it. |
+| `stale` | outside the `--since` window. |
+| `quarantined` | untrusted provenance; `--include-unreviewed` keeps it. |
+| `other-owner` | a `[[...]]` neighbour that resolves outside the curated project; only same-project links are followed. |
+| `other` | fallback for a truncation written before the codes existed. |
+
+`brain context --json` and `brain_context` return two record-level lists beside
+`truncated[]`:
+
+```json
+{
+  "excluded": [
+    {"id": "decision-2026-11-02-cache", "kind": "decision",
+     "reason": "superseded"},
+    {"id": "note-2026-11-10-cache", "kind": "note",
+     "reason": "lower-rank", "score": 0.62}
+  ],
+  "excluded_total": 12,
+  "near_misses": [
+    {"id": "note-2026-11-10-cache", "kind": "note",
+     "reason": "lower-rank", "score": 0.62}
+  ]
+}
+```
+
+- `excluded[]` is the record-level view of `truncated[]`: one entry per record,
+  with the layer's code and the score at the moment it was dropped. A record
+  rejected before ranking has no score (zero).
+- `excluded_total` is the honest count before the transport caps the list at 50
+  entries. `total_truncated` still counts truncations, including block-level
+  ones (`core`, `summary`).
+- `near_misses[]` keeps at most three records from the query layer that only
+  missed the cut (`over-budget` or `lower-rank`), best first, with their
+  positive score. It is the list a reader would ask about next; more than three
+  is noise.
+- `truncated[]` keeps its own cap of 20 entries and its raw detail strings, so
+  an older client still reads the same field.
 
 ## Ordering
 
@@ -108,7 +159,8 @@ brain context "add retry to sync push" --json
 - `--json` returns `budget`, `total_tokens`, `sections[]`
   (`name`, `cap`, `tokens`, `records[]` with `id`, `kind`, `title`, `path`,
   `tokens`, `score`), `truncated[]` (at most 20 entries), `total_truncated`,
-  `state_as_of`, and `quarantined_count`.
+  `excluded[]` (at most 50 entries), `excluded_total`, `near_misses[]` (at most
+  3), `state_as_of`, and `quarantined_count`.
 - `--include-unreviewed`, `--as-of`, `--include-superseded`, `--kind`,
   `--since` and `--raw` keep their meaning. Quarantined and superseded records
   are filtered before packing, so a filtered hit cannot consume budget.
@@ -130,9 +182,11 @@ The value is validated: negative and above 32 000 are configuration errors.
 
 `brain_context` takes `budget` (default 6 000, max 32 000) and `explain`
 (boolean). Its structured result carries the same `sections`, `truncated`,
-`total_truncated`, `state_as_of`, `total_tokens` and `quarantined_count` fields
-as `--json`; `truncated[]` is capped at 20 entries while `total_truncated` keeps
-the full count. A bad budget is a validation refusal, not a silent clamp.
+`total_truncated`, `excluded`, `excluded_total`, `near_misses`, `state_as_of`,
+`total_tokens` and `quarantined_count` fields as `--json`; `truncated[]` is
+capped at 20 entries, `excluded[]` at 50 and `near_misses[]` at 3, while
+`total_truncated` and `excluded_total` keep the full counts. A bad budget is a
+validation refusal, not a silent clamp.
 
 ## Tuning
 
@@ -142,7 +196,7 @@ the full count. A bad budget is a validation refusal, not a silent clamp.
 | More task-specific hits | raise the total: every layer's cap is a share of it, so all caps grow together |
 | Less background noise | pass `--kind decision` (or `note`/`attempt`) to skip the other background layers |
 | A larger curated baseline | raise `context.budget`; 12 000–16 000 is a comfortable ceiling for one task |
-| Debugging a drop | run `--explain` and read `truncated[]`; the reason names the layer and token shortfall |
+| Debugging a drop | run `--explain` and read `excluded[]` / `near_misses[]`; the code says whether a filter or the budget dropped it |
 
 Because the caps are shares, raising the total raises every cap with it. A layer
 that does not spend its share does not waste the tokens: the unused part is

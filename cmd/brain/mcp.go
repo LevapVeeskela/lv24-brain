@@ -493,12 +493,12 @@ func (b mcpBackend) Bootstrap(ctx context.Context, projectID string, budget int,
 	return result.Summary, nil
 }
 
-func (b mcpBackend) Search(ctx context.Context, in mcpserver.SearchInput) ([]mcpserver.Hit, error) {
+func (b mcpBackend) searchOptions(in mcpserver.SearchInput) (app.SearchOptions, error) {
 	since, err := domain.ParseSince(in.Since, time.Now())
 	if err != nil {
-		return nil, err
+		return app.SearchOptions{}, err
 	}
-	hits, err := b.app.SearchWith(ctx, app.SearchOptions{
+	return app.SearchOptions{
 		Text:         in.Query,
 		ProjectID:    in.ProjectID,
 		Limit:        in.Limit,
@@ -507,7 +507,15 @@ func (b mcpBackend) Search(ctx context.Context, in mcpserver.SearchInput) ([]mcp
 		Scope:        in.Scope,
 		IncludeDumps: in.IncludeDumps,
 		Since:        since,
-	})
+	}, nil
+}
+
+func (b mcpBackend) Search(ctx context.Context, in mcpserver.SearchInput) ([]mcpserver.Hit, error) {
+	options, err := b.searchOptions(in)
+	if err != nil {
+		return nil, err
+	}
+	hits, err := b.app.SearchWith(ctx, options)
 	if err != nil {
 		return nil, err
 	}
@@ -520,10 +528,46 @@ func (b mcpBackend) Search(ctx context.Context, in mcpserver.SearchInput) ([]mcp
 			Title:        hit.Title,
 			Snippet:      hit.Snippet,
 			Score:        hit.Score,
+			Tier:         hit.Tier,
 			MatchReasons: hit.MatchReasons,
 		})
 	}
 	return out, nil
+}
+
+// SearchReport implements mcpserver.SearchReporter so the MCP answer carries
+// the support verdict and the records the search withheld.
+func (b mcpBackend) SearchReport(ctx context.Context, in mcpserver.SearchInput) (mcpserver.SearchReport, error) {
+	options, err := b.searchOptions(in)
+	if err != nil {
+		return mcpserver.SearchReport{}, err
+	}
+	report, err := b.app.SearchWithReport(ctx, options)
+	if err != nil {
+		return mcpserver.SearchReport{}, err
+	}
+	hits := make([]mcpserver.Hit, 0, len(report.Hits))
+	for _, hit := range report.Hits {
+		hits = append(hits, mcpserver.Hit{
+			ID: hit.ID, ProjectID: hit.ProjectID, Kind: hit.Kind, Title: hit.Title,
+			Snippet: hit.Snippet, Score: hit.Score, Tier: hit.Tier, MatchReasons: hit.MatchReasons,
+		})
+	}
+	excluded := make([]mcpserver.ExcludedHit, 0, len(report.Excluded))
+	for _, hit := range report.Excluded {
+		excluded = append(excluded, mcpserver.ExcludedHit{
+			ID: hit.ID, ProjectID: hit.ProjectID, Kind: hit.Kind, Title: hit.Title,
+			Score: hit.Score, Reason: hit.Reason,
+		})
+	}
+	return mcpserver.SearchReport{
+		Hits: hits,
+		Support: mcpserver.Support{
+			Tier: report.Support.Tier, Best: report.Support.Best,
+			Threshold: report.Support.Threshold, Reason: report.Support.Reason,
+		},
+		Excluded: excluded,
+	}, nil
 }
 
 func (b mcpBackend) Note(ctx context.Context, in mcpserver.NoteInput) (mcpserver.Record, error) {

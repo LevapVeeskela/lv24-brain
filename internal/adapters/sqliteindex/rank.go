@@ -1,6 +1,8 @@
 package sqliteindex
 
 import (
+	"context"
+	"fmt"
 	"strconv"
 	"strings"
 	"time"
@@ -190,6 +192,7 @@ func rankedSelectPrefix(includeBody bool) string {
 	builder.WriteString("\t\t\td.status AS status, d.confidence AS confidence,\n")
 	builder.WriteString("\t\t\td.subtype AS subtype, d.scope AS scope, d.topic_key AS topic_key, d.occurrences AS occurrences,\n")
 	builder.WriteString("\t\t\td.pinned AS pinned,\n")
+	builder.WriteString("\t\t\td.content_hash AS content_hash,\n")
 	builder.WriteString("\t\t\td.updated_at AS updated_at\n")
 	builder.WriteString("\t\tFROM documents_fts\n")
 	builder.WriteString("\t\tJOIN documents d ON d.rowid = documents_fts.rowid\n")
@@ -233,7 +236,7 @@ func rankedSelectSuffix() string {
 	)
 	SELECT id, project_id, kind, title, snippet, body, score,
 		c_bm25, c_recency, c_importance, c_pin, c_link,
-		valid_from, valid_to, superseded_by, status, confidence, subtype, scope, topic_key, occurrences, pinned, updated_at
+		valid_from, valid_to, superseded_by, status, confidence, subtype, scope, topic_key, occurrences, pinned, content_hash, updated_at
 	FROM ranked_contrib
 	WHERE score >= ?
 	ORDER BY score DESC, bm DESC, updated_at DESC, id ASC
@@ -245,6 +248,53 @@ func rankedSelectSuffix() string {
 // passed here; query values are always bound as parameters.
 func floatLiteral(value float64) string {
 	return strconv.FormatFloat(value, 'f', -1, 64)
+}
+
+// TermFrequencies reports the document frequency of each query term over the
+// project index and the number of documents in it. The retrieval support gate
+// uses it to separate a rare, discriminative term from a common one: a term
+// that appears in more than a fifth of the project cannot be required in every
+// supported hit.
+//
+// The frequency uses the same FTS expression as search (quoted, prefix and
+// word-form stem), so a count is the number of documents search can return for
+// that term. An empty projectID counts the whole index. Stubs are counted:
+// they stay in the index and in counts, only retrieval hides them.
+func (i *Index) TermFrequencies(ctx context.Context, projectID string, terms []string) (map[string]int, int, error) {
+	frequencies := make(map[string]int, len(terms))
+	projectID = strings.TrimSpace(projectID)
+	totalQuery := `SELECT COUNT(*) FROM documents`
+	var totalArgs []any
+	if projectID != "" {
+		totalQuery += ` WHERE project_id = ?`
+		totalArgs = append(totalArgs, projectID)
+	}
+	var total int
+	if err := i.db.QueryRowContext(ctx, totalQuery, totalArgs...).Scan(&total); err != nil {
+		return nil, 0, fmt.Errorf("sqliteindex: count documents: %w", err)
+	}
+	dfQuery := `SELECT COUNT(*) FROM documents_fts
+		JOIN documents d ON d.rowid = documents_fts.rowid
+		WHERE documents_fts MATCH ?`
+	if projectID != "" {
+		dfQuery += ` AND d.project_id = ?`
+	}
+	for _, term := range terms {
+		match, ok := matchExpression(term, joinAll)
+		if !ok {
+			continue
+		}
+		args := []any{match}
+		if projectID != "" {
+			args = append(args, projectID)
+		}
+		var count int
+		if err := i.db.QueryRowContext(ctx, dfQuery, args...).Scan(&count); err != nil {
+			return nil, 0, fmt.Errorf("sqliteindex: count %q: %w", term, err)
+		}
+		frequencies[term] = count
+	}
+	return frequencies, total, nil
 }
 
 // importanceOf returns the kind importance a ranked hit received.

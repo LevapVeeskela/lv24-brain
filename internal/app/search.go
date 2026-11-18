@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"fmt"
+	"math"
 	"sort"
 	"strings"
 	"time"
@@ -11,6 +12,7 @@ import (
 	"github.com/levapveeskela/lv24-brain/internal/config"
 	"github.com/levapveeskela/lv24-brain/internal/domain"
 	"github.com/levapveeskela/lv24-brain/internal/ports"
+	"github.com/levapveeskela/lv24-brain/internal/searchnorm"
 	"github.com/levapveeskela/lv24-brain/internal/textbudget"
 )
 
@@ -54,6 +56,15 @@ type Searcher interface {
 	Search(ctx context.Context, query ports.Query) ([]ports.Hit, error)
 }
 
+// termFrequencyIndex is implemented by a local index that can report how many
+// documents of a project contain a query term. The support gate uses it to
+// separate the rare, discriminative terms a supported hit must contain from the
+// common ones it only has to partly contain. An index without it leaves the
+// page untouched: support is never guessed.
+type termFrequencyIndex interface {
+	TermFrequencies(ctx context.Context, projectID string, terms []string) (map[string]int, int, error)
+}
+
 // KindDump is the index kind of connector dumps (mail, GitHub, GitLab).
 const KindDump = "dump"
 
@@ -69,6 +80,11 @@ type SearchOptions struct {
 	// IncludeDumps adds connector dumps and raw-zone items (kind "item") to
 	// an unfiltered search.
 	IncludeDumps bool
+	// IncludeStubs keeps low-signal stub records (a title that is only the
+	// record header, or a body that says nothing changed) that search hides
+	// by default. Stubs stay in listings and counts; this flag only widens
+	// retrieval.
+	IncludeStubs bool
 	// Since keeps only documents updated at or after this time; zero keeps
 	// everything.
 	Since time.Time
@@ -107,11 +123,79 @@ type SearchOptions struct {
 type SearchReport struct {
 	Hits []ports.Hit
 	// Relaxed reports that the strict pass found fewer than
-	// SearchFallbackThreshold hits and the terms were retried joined with OR.
+	// SearchFallbackThreshold hits and the page was widened with an OR pass.
 	Relaxed bool
 	// Notice explains a withheld raw-zone result, empty when nothing was
 	// withheld.
 	Notice string
+	// Support says whether the page answers the query or is only lexically
+	// nearby. Tier is one of the Support* constants.
+	Support Support
+	// Excluded lists the records the response withheld and why. A reason is
+	// one of the Excluded* constants.
+	Excluded []ExcludedHit
+}
+
+// Support tiers of a search response.
+const (
+	// SupportSupported means the page answers the query: every hit (or the
+	// first of them) contains the rare query terms and enough of the rest.
+	SupportSupported = "supported"
+	// SupportRelated means the hits only matched the relaxed pass; they are
+	// nearby, not an answer.
+	SupportRelated = "related"
+	// SupportNone means nothing answered the query. The hit list is empty and
+	// Reason says why; the relaxed matches, if any, are in Excluded with the
+	// lower-rank reason.
+	SupportNone = "none"
+)
+
+// Reasons a record is not in Hits. Every withheld record carries one.
+const (
+	// ExcludedDuplicate is a record whose content hash already appeared in
+	// the same project: the same record written on another machine.
+	ExcludedDuplicate = "duplicate"
+	// ExcludedLowerRank is a relaxed match withheld because the response had
+	// no supported hit; it is nearby, not an answer.
+	ExcludedLowerRank = "lower-rank"
+)
+
+const (
+	// supportRareShare is the document-frequency share below which a query
+	// term counts as rare: a record that answers the query contains it.
+	supportRareShare = 0.20
+	// supportSubjectShare is the share of the common subject terms a
+	// supported hit must contain.
+	supportSubjectShare = 0.50
+	// supportRelatedMinTerms is the number of distinct query terms a page must
+	// overlap to stay visible as related when no hit is supported. One shared
+	// word is a coincidence; two subject terms plus one rare term is topical
+	// overlap.
+	supportRelatedMinTerms = 2
+	// supportPrefixRunes is the shortest term matched as a prefix when a hit
+	// is checked for a term, mirroring the index's prefix rule.
+	supportPrefixRunes = 4
+)
+
+// Support is why a search response is, or is not, an answer. Best is the
+// largest share of the query terms any matched record contained, Threshold is
+// the subject-term share a supported hit needs, and Reason is set only when the
+// page could not answer the query.
+type Support struct {
+	Tier      string
+	Best      float64
+	Threshold float64
+	Reason    string
+}
+
+// ExcludedHit is one record a search withheld, with the reason.
+type ExcludedHit struct {
+	ID        string
+	ProjectID string
+	Kind      string
+	Title     string
+	Score     float64
+	Reason    string
 }
 
 // Search queries curated records (no dumps); see SearchWith.
@@ -203,7 +287,14 @@ func (a *App) search(ctx context.Context, opts SearchOptions, rawKinds []string,
 		AsOf: opts.AsOf, IncludeSuperseded: opts.IncludeSuperseded,
 		MinScore: opts.MinScore, Explain: opts.Explain, IncludeBody: opts.Full,
 		Subtype: strings.TrimSpace(opts.Subtype), Scope: strings.TrimSpace(opts.Scope),
-		TopicKey: strings.TrimSpace(opts.TopicKey),
+		TopicKey: strings.TrimSpace(opts.TopicKey), IncludeStubs: opts.IncludeStubs,
+	}
+	if local {
+		// The support gate reads the whole text to tell which query terms a
+		// hit really contains; a snippet is a window, not the record. The
+		// body is dropped before the response leaves the use case unless the
+		// caller asked for it.
+		query.IncludeBody = true
 	}
 	for _, kind := range opts.Kinds {
 		if kind = strings.TrimSpace(kind); kind != "" {
@@ -238,6 +329,7 @@ func (a *App) search(ctx context.Context, opts SearchOptions, rawKinds []string,
 		return SearchReport{}, err
 	}
 	report := SearchReport{}
+	strict := hits
 	if relaxed && searchTermCount(text) > 1 && len(hits) < SearchFallbackThreshold {
 		relaxedQuery := query
 		relaxedQuery.MatchMode = ports.MatchModeAny
@@ -250,10 +342,30 @@ func (a *App) search(ctx context.Context, opts SearchOptions, rawKinds []string,
 			report.Relaxed = true
 		}
 	}
+	// The same record written on two machines is one answer, not two: the
+	// first occurrence by creation time keeps the slot and the copies are
+	// reported once, with the duplicate reason.
+	hits, duplicates := collapseDuplicateHits(hits)
+	report.Excluded = append(report.Excluded, duplicates...)
+	if local {
+		var withheld []ExcludedHit
+		// Only an AND pass is a strict pass. Under MatchModeAny the first
+		// page is the OR page, so nothing may be promoted to supported just
+		// because it matched.
+		var strictSet map[string]bool
+		if query.MatchMode == ports.MatchModeAll {
+			strictSet = hitKeys(strict)
+		}
+		report.Support, hits, withheld = a.supportGate(ctx, opts, hits, strictSet)
+		report.Excluded = append(report.Excluded, withheld...)
+	}
 	// The preview stays a preview: --full adds the body next to it instead of
 	// turning the snippet into one.
 	for index := range hits {
 		hits[index].Snippet = textbudget.Preview(hits[index].Snippet, PreviewRunes)
+		if !opts.Full {
+			hits[index].Body = ""
+		}
 	}
 	if !raw {
 		// A curated search must never return raw text even if the store
@@ -296,6 +408,8 @@ func validateSearchScore(opts SearchOptions) error {
 // flag.
 func localOnlySearchOption(opts SearchOptions) string {
 	switch {
+	case opts.IncludeStubs:
+		return "including stub records"
 	case opts.MatchMode != "":
 		return "match mode"
 	case opts.Relaxed:
@@ -393,4 +507,353 @@ func searchTermCount(text string) int {
 		}
 	}
 	return count
+}
+
+// hitKey identifies a hit inside one response.
+func hitKey(hit ports.Hit) string {
+	return hit.ProjectID + "\x00" + hit.ID
+}
+
+// hitKeys is the key set of a page, used to remember which hits came from the
+// strict pass.
+func hitKeys(hits []ports.Hit) map[string]bool {
+	keys := make(map[string]bool, len(hits))
+	for _, hit := range hits {
+		keys[hitKey(hit)] = true
+	}
+	return keys
+}
+
+// collapseDuplicateHits keeps one row per non-empty content hash. The oldest
+// record of a group is the canonical one: the same record written twice on one
+// machine or once on two clones is one answer. The canonical row takes the best
+// rank its group reached, and the other copies are returned with the duplicate
+// reason instead of silently disappearing.
+//
+// Project scope is part of the key: the indexed hash covers kind and content,
+// so the same sentence can legitimately appear in two projects.
+func collapseDuplicateHits(hits []ports.Hit) ([]ports.Hit, []ExcludedHit) {
+	if len(hits) < 2 {
+		return hits, nil
+	}
+	type group struct {
+		first     int
+		canonical int
+	}
+	groups := make(map[string]*group, len(hits))
+	keys := make([]string, len(hits))
+	for index := range hits {
+		hash := strings.TrimSpace(hits[index].ContentHash)
+		if hash == "" {
+			continue
+		}
+		key := hits[index].ProjectID + "\x00" + hash
+		keys[index] = key
+		existing, seen := groups[key]
+		if !seen {
+			groups[key] = &group{first: index, canonical: index}
+			continue
+		}
+		if olderHit(hits[index], hits[existing.canonical]) {
+			existing.canonical = index
+		}
+	}
+	kept := make([]ports.Hit, 0, len(hits))
+	var excluded []ExcludedHit
+	for index := range hits {
+		group, grouped := groups[keys[index]]
+		switch {
+		case keys[index] == "" || !grouped:
+			kept = append(kept, hits[index])
+		case index == group.first:
+			kept = append(kept, hits[group.canonical])
+			if group.canonical != group.first {
+				// The best-ranked copy is not the canonical one: it gives its
+				// slot to the oldest row and is reported as the duplicate.
+				excluded = append(excluded, excludedHit(hits[group.first], ExcludedDuplicate))
+			}
+		case index == group.canonical:
+			// Emitted at the first (best-ranked) position of its group.
+		default:
+			excluded = append(excluded, excludedHit(hits[index], ExcludedDuplicate))
+		}
+	}
+	return kept, excluded
+}
+
+// olderHit reports whether left was created before right. The index projects
+// record validity from the creation instant; a document without validity falls
+// back to its ULID id, which is time ordered across machines.
+func olderHit(left, right ports.Hit) bool {
+	if !left.ValidFrom.IsZero() && !right.ValidFrom.IsZero() && !left.ValidFrom.Equal(right.ValidFrom) {
+		return left.ValidFrom.Before(right.ValidFrom)
+	}
+	return left.ID < right.ID
+}
+
+// excludedHit copies the visible fields of a withheld hit.
+func excludedHit(hit ports.Hit, reason string) ExcludedHit {
+	return ExcludedHit{
+		ID: hit.ID, ProjectID: hit.ProjectID, Kind: hit.Kind,
+		Title: hit.Title, Score: hit.Score, Reason: reason,
+	}
+}
+
+// supportGate classifies a matched page as an answer, as nearby text or as
+// nothing.
+//
+// A hit is supported when it contains every rare query term (a term whose
+// document frequency is at most a fifth of the project) and at least half of
+// the remaining subject terms. A strict-pass hit always qualifies: the strict
+// pass already required every term. A hit that only matched the relaxed pass
+// and fails the test is related. A page with no supported hit stays visible as
+// related while its best record covers at least one rare query term and two
+// subject terms; a page below that is not nearby text either. In that case the
+// hits are returned as excluded with the lower-rank reason and the reason says
+// what the query lacked, so a caller can never mistake relaxed noise for a
+// result.
+//
+// strict is the key set of the strict pass; nil or empty means the page came
+// from a single OR pass (MatchModeAny).
+func (a *App) supportGate(ctx context.Context, opts SearchOptions, hits []ports.Hit, strict map[string]bool) (Support, []ports.Hit, []ExcludedHit) {
+	support := Support{Threshold: supportSubjectShare}
+	// An explicit --relaxed or --match-mode any is the caller asking for
+	// partial matches; keep them visible as related instead of hiding them.
+	if opts.Relaxed || opts.MatchMode == ports.MatchModeAny {
+		support.Tier = SupportRelated
+		support.Reason = "partial matching was requested explicitly"
+		for index := range hits {
+			hits[index].Tier = SupportRelated
+		}
+		return support, hits, nil
+	}
+	terms := supportTerms(opts.Text)
+	if len(terms) == 0 {
+		if len(hits) == 0 {
+			support.Tier = SupportNone
+			support.Reason = "the query has no searchable subject terms"
+			return support, hits, nil
+		}
+		for index := range hits {
+			hits[index].Tier = SupportRelated
+		}
+		support.Tier = SupportRelated
+		support.Reason = "the query has no subject terms; the page is a lexical match only"
+		return support, hits, nil
+	}
+	index, ok := a.deps.Index.(termFrequencyIndex)
+	if !ok {
+		support.Reason = "the index cannot report document frequency; support was not evaluated"
+		return support, hits, nil
+	}
+	frequencies, total, err := index.TermFrequencies(ctx, strings.TrimSpace(opts.ProjectID), terms)
+	if err != nil || total == 0 {
+		support.Reason = "the index could not report document frequency; support was not evaluated"
+		return support, hits, nil
+	}
+	// At least one document makes a term rare: a term that occurs once in a
+	// five-document project is still the term the query is about. Without the
+	// floor a small corpus would call every term common and accept a partial
+	// match as an answer.
+	rareLimit := int(math.Floor(supportRareShare * float64(total)))
+	if rareLimit < 1 {
+		rareLimit = 1
+	}
+	rare := make([]string, 0, len(terms))
+	common := make([]string, 0, len(terms))
+	for _, term := range terms {
+		if frequencies[term] <= rareLimit {
+			rare = append(rare, term)
+			continue
+		}
+		common = append(common, term)
+	}
+	commonNeeded := int(math.Ceil(supportSubjectShare * float64(len(common))))
+	best := 0.0
+	bestRare := 0
+	bestCovered := 0
+	supported := 0
+	passes := make([]bool, len(hits))
+	for index := range hits {
+		tokens := newHitTokens(hits[index].Title + "\n" + hits[index].Body)
+		covered, rareCovered, commonCovered := 0, 0, 0
+		for _, term := range rare {
+			if tokens.covers(term) {
+				covered++
+				rareCovered++
+			}
+		}
+		for _, term := range common {
+			if tokens.covers(term) {
+				covered++
+				commonCovered++
+			}
+		}
+		ratio := float64(covered) / float64(len(terms))
+		passes[index] = rareCovered == len(rare) && commonCovered >= commonNeeded
+		if strict[hitKey(hits[index])] {
+			passes[index] = true
+			ratio = 1
+		}
+		if passes[index] {
+			supported++
+		}
+		if ratio > best {
+			best = ratio
+		}
+		if rareCovered > bestRare {
+			bestRare = rareCovered
+		}
+		if covered > bestCovered {
+			bestCovered = covered
+		}
+	}
+	support.Best = best
+	if supported > 0 {
+		support.Tier = SupportSupported
+		for index := range hits {
+			if passes[index] {
+				hits[index].Tier = SupportSupported
+				continue
+			}
+			hits[index].Tier = SupportRelated
+		}
+		return support, hits, nil
+	}
+	// A page that overlaps the topic but does not answer it stays visible as
+	// related: a caller can see that the records are nearby. A page with no
+	// rare term at all is not nearby text either - that is the absent-topic
+	// case, and it must not be presented as an answer.
+	if len(hits) > 0 && bestRare > 0 && bestCovered >= supportRelatedMinTerms {
+		support.Tier = SupportRelated
+		support.Reason = "the page only matched the relaxed pass; no record contains every rare query term"
+		for index := range hits {
+			hits[index].Tier = SupportRelated
+		}
+		return support, hits, nil
+	}
+	if len(hits) == 0 {
+		support.Tier = SupportNone
+		support.Reason = "no record matches the query terms"
+		return support, hits, nil
+	}
+	support.Tier = SupportNone
+	support.Reason = fmt.Sprintf(
+		"no record contains every rare query term (document frequency <= %d%%) and at least %d%% of the remaining subject terms",
+		int(math.Round(supportRareShare*100)), int(math.Round(supportSubjectShare*100)))
+	excluded := make([]ExcludedHit, 0, len(hits))
+	for index := range hits {
+		excluded = append(excluded, excludedHit(hits[index], ExcludedLowerRank))
+	}
+	return support, []ports.Hit{}, excluded
+}
+
+// supportStopWords are the question and function words the support gate never
+// requires a hit to contain. internal/app/findings.go holds the domain
+// vocabulary stopwords; this set adds the question frame, which a topical
+// decision answers without repeating.
+var supportStopWords = map[string]bool{
+	"about": true, "after": true, "all": true, "also": true, "an": true,
+	"and": true, "any": true, "are": true, "as": true, "at": true,
+	"be": true, "been": true, "before": true, "being": true, "between": true,
+	"both": true, "but": true, "by": true, "can": true, "could": true,
+	"did": true, "do": true, "does": true, "down": true, "each": true,
+	"every": true, "for": true, "from": true, "had": true, "has": true,
+	"have": true, "how": true, "if": true, "in": true, "instead": true, "into": true,
+	"is": true, "it": true, "its": true, "just": true, "may": true,
+	"might": true, "more": true, "most": true, "must": true, "no": true,
+	"not": true, "of": true, "off": true, "on": true, "one": true, "only": true,
+	"or": true, "other": true, "our": true, "out": true, "over": true,
+	"own": true, "per": true, "same": true, "should": true, "so": true,
+	"some": true, "than": true, "that": true, "the": true, "their": true,
+	"them": true, "then": true, "there": true, "these": true, "they": true,
+	"this": true, "those": true, "to": true, "too": true, "under": true,
+	"up": true, "very": true, "via": true, "was": true, "we": true,
+	"were": true, "what": true, "when": true, "where": true, "which": true,
+	"who": true, "whom": true, "whose": true, "why": true, "will": true,
+	"with": true, "without": true, "would": true, "you": true, "your": true,
+}
+
+// supportTerms returns the distinct subject terms of a query, in query order.
+// The gate never requires a function word: a natural-language question is
+// answered by a record that does not repeat "how" or "the".
+func supportTerms(text string) []string {
+	seen := make(map[string]struct{}, 8)
+	terms := make([]string, 0, 8)
+	for _, token := range lowerTokens(text) {
+		if len(token) < 2 || stopWords[token] || supportStopWords[token] {
+			continue
+		}
+		if _, ok := seen[token]; ok {
+			continue
+		}
+		seen[token] = struct{}{}
+		terms = append(terms, token)
+	}
+	return terms
+}
+
+// lowerTokens splits text into lowercase letter and digit runs.
+func lowerTokens(text string) []string {
+	tokens := make([]string, 0, 16)
+	var current strings.Builder
+	flush := func() {
+		if current.Len() == 0 {
+			return
+		}
+		tokens = append(tokens, current.String())
+		current.Reset()
+	}
+	for _, r := range text {
+		if unicode.IsLetter(r) || unicode.IsDigit(r) {
+			current.WriteRune(unicode.ToLower(r))
+			continue
+		}
+		flush()
+	}
+	flush()
+	return tokens
+}
+
+// hitTokens is the lowercase token set of one document.
+type hitTokens map[string]struct{}
+
+// newHitTokens builds the token set a support check reads.
+func newHitTokens(text string) hitTokens {
+	tokens := make(hitTokens, 16)
+	for _, token := range lowerTokens(text) {
+		tokens[token] = struct{}{}
+	}
+	return tokens
+}
+
+// covers reports whether the document contains term. It mirrors the index's
+// match rule: exact, prefix for long terms, and the word-form stem, so "signed"
+// is covered by "sign" and "releases" by "release".
+func (tokens hitTokens) covers(term string) bool {
+	if _, ok := tokens[term]; ok {
+		return true
+	}
+	if len(term) < supportPrefixRunes {
+		return false
+	}
+	stem, hasStem := searchnorm.Stem(term)
+	for token := range tokens {
+		if strings.HasPrefix(token, term) {
+			return true
+		}
+		if len(token) >= supportPrefixRunes && strings.HasPrefix(term, token) {
+			return true
+		}
+		if !hasStem {
+			continue
+		}
+		if len(stem) >= supportPrefixRunes && strings.HasPrefix(token, stem) {
+			return true
+		}
+		if len(token) >= supportPrefixRunes && strings.HasPrefix(stem, token) {
+			return true
+		}
+	}
+	return false
 }

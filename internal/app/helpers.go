@@ -2,6 +2,8 @@ package app
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"strconv"
@@ -207,11 +209,90 @@ func (a *App) upsertIndex(ctx context.Context, doc ports.Document) error {
 	if a.deps.Index == nil {
 		return nil
 	}
-	if err := a.deps.Index.Upsert(ctx, doc); err != nil {
+	if err := a.upsertProjected(ctx, doc); err != nil {
 		a.markIndexDirty()
 		return err
 	}
 	return nil
+}
+
+// recordProjection is the derived, machine-independent representation of one
+// record, stored next to the document by the index.
+type recordProjection struct {
+	// ContentHash is the sha256 of the normalized kind, title and body. The
+	// record id, project and timestamps are not part of it: the same text
+	// indexed on two clones hashes the same, which is what duplicate
+	// collapsing compares.
+	ContentHash string
+	// Stub marks a low-signal record: an auto-generated label+id title or a
+	// body that only says nothing happened. The flag is derived, never stored
+	// in Markdown, so it is reversible.
+	Stub bool
+}
+
+// projectDocument derives the index projection of one document. Title and body
+// already exclude the record id and date markers the format keeps in
+// frontmatter, so no extra stripping is needed here.
+func projectDocument(doc ports.Document) recordProjection {
+	return recordProjection{
+		ContentHash: contentHash(doc.Kind, doc.Title, doc.Body),
+		Stub:        IsStubRecord(doc.Kind, doc.Title, doc.Body),
+	}
+}
+
+// contentHash normalizes each part to lowercase with collapsed whitespace and
+// hashes "kind\ntitle\nbody". Separators are kept between the parts so a
+// boundary shift cannot produce the same digest for different text.
+func contentHash(kind, title, body string) string {
+	normalized := strings.Join([]string{
+		normalizeProjectionText(kind),
+		normalizeProjectionText(title),
+		normalizeProjectionText(body),
+	}, "\n")
+	sum := sha256.Sum256([]byte(normalized))
+	return hex.EncodeToString(sum[:])
+}
+
+func normalizeProjectionText(value string) string {
+	return strings.Join(strings.Fields(strings.ToLower(value)), " ")
+}
+
+// projectionWriter is the optional index capability that stores the derived
+// projection columns. An index without it still upserts, but duplicate
+// collapsing and stub filtering then see empty values.
+type projectionWriter interface {
+	UpsertProjection(ctx context.Context, doc ports.Document, contentHash string, stub bool) error
+}
+
+// projectionBatchWriter is projectionWriter for a whole reindex chunk.
+type projectionBatchWriter interface {
+	UpsertProjectionBatch(ctx context.Context, docs []ports.Document, contentHashes []string, stubs []bool) error
+}
+
+// upsertProjected writes one document with its derived projection.
+func (a *App) upsertProjected(ctx context.Context, doc ports.Document) error {
+	return upsertProjected(ctx, a.deps.Index, doc)
+}
+
+func upsertProjected(ctx context.Context, index ports.Index, doc ports.Document) error {
+	projection := projectDocument(doc)
+	if writer, ok := index.(projectionWriter); ok {
+		return writer.UpsertProjection(ctx, doc, projection.ContentHash, projection.Stub)
+	}
+	return index.Upsert(ctx, doc)
+}
+
+// projectionColumns derives the hash and stub slices of one batch in document
+// order, which is the shape UpsertProjectionBatch expects.
+func projectionColumns(docs []ports.Document) ([]string, []bool) {
+	hashes := make([]string, len(docs))
+	stubs := make([]bool, len(docs))
+	for idx, doc := range docs {
+		projection := projectDocument(doc)
+		hashes[idx] = projection.ContentHash
+		stubs[idx] = projection.Stub
+	}
+	return hashes, stubs
 }
 
 // provenanceColumns projects a record's provenance into the two index columns

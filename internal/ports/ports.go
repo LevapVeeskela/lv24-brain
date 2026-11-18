@@ -175,6 +175,10 @@ type Query struct {
 	// IncludeSuperseded keeps documents whose validity ended. An AsOf instant
 	// selects the point in time and takes precedence.
 	IncludeSuperseded bool
+	// IncludeStubs keeps low-signal stub records that search hides by
+	// default. Stubs stay in listings and counts, so this flag only widens
+	// retrieval.
+	IncludeStubs bool
 	// Now is the instant a default query evaluates "current" at. Zero means
 	// the adapter clock. Ranking recency is measured from the same instant.
 	Now time.Time
@@ -244,6 +248,16 @@ type Hit struct {
 	// Body is the full document text; it is set only when the query asked
 	// for it (Query.IncludeBody).
 	Body string
+	// ContentHash is the indexed content hash of the record (normalized
+	// kind, title and body). It is empty for a document projected without
+	// one; search uses it to collapse the same record written on two
+	// machines.
+	ContentHash string
+	// Tier is the retrieval support tier of the hit: supported when the hit
+	// contains the rare query terms, related when it only matched the
+	// relaxed pass. It is set by the search use case, empty when support was
+	// not evaluated (a server-side search).
+	Tier string
 	// MatchReasons names the ranking signals that fired, in the order bm25,
 	// recency, importance, pin, link.
 	MatchReasons []string
