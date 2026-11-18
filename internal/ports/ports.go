@@ -84,6 +84,10 @@ type Document struct {
 	Title     string
 	Body      string
 	UpdatedAt time.Time
+	// ContentUpdatedAt is the last title or body change, the instant a
+	// --since window compares. Zero means UpdatedAt, matching records written
+	// before the field existed.
+	ContentUpdatedAt time.Time
 	// ValidFrom is the instant the record became true. Zero means UpdatedAt,
 	// matching records written before validity existed.
 	ValidFrom time.Time
@@ -102,6 +106,13 @@ type Document struct {
 	// Pinned is an explicit pin set by the owner; it feeds the pin ranking
 	// signal and context preference.
 	Pinned bool
+	// Origin and Trust are the record provenance projected into the index:
+	// human/agent/connector/import and verified/stated/inferred. An empty
+	// value means the document has no curated provenance (a state, dump or
+	// item, or a record written before provenance existed); the ranking reads
+	// it as unknown trust, never as a weak claim.
+	Origin string
+	Trust  string
 	// Subtype, Scope and TopicKey are the engram-compatible classification of
 	// the record and are empty for records written before it existed.
 	Subtype  string
@@ -153,8 +164,10 @@ type Query struct {
 	Kinds []string
 	// ExcludeKinds drops these kinds (applied after Kinds).
 	ExcludeKinds []string
-	// Since keeps only documents updated at or after this time; the zero
-	// time keeps every document.
+	// Since keeps only documents whose content changed at or after this time;
+	// the zero time keeps every document. Metadata-only writes (review,
+	// snooze, validity, merge bookkeeping) do not move the content time, so a
+	// window does not re-report the corpus after a review pass.
 	Since time.Time
 	// AsOf keeps documents valid at that instant: valid_from <= as_of and
 	// (valid_to is empty or valid_to > as_of). Zero means "now".
@@ -183,8 +196,9 @@ type Query struct {
 	TopicKey string
 }
 
-// AllowsSince reports whether a document updated at updatedAt passes the
-// Since filter. Adapters without SQL use it; SQL adapters apply the same rule.
+// AllowsSince reports whether a document whose content changed at updatedAt
+// passes the Since filter. Adapters without SQL use it; SQL adapters apply the
+// same rule.
 func (q Query) AllowsSince(updatedAt time.Time) bool {
 	return q.Since.IsZero() || !updatedAt.Before(q.Since)
 }

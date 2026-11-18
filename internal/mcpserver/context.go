@@ -30,6 +30,15 @@ type ContextInput struct {
 	IncludeUnreviewed bool
 }
 
+// MaxContextTruncations caps the truncated list in one MCP answer. A tight
+// budget on a large project can drop hundreds of records; the total stays in
+// TotalTruncated, so the list is a sample and the number is the truth.
+const MaxContextTruncations = 20
+
+// StateAsOfCurrent is the temporal scope of the project state and the review
+// findings: neither has history, so an as-of request cannot reach them.
+const StateAsOfCurrent = "current"
+
 // TaskContext is the context of a project for one task. The CLI prints the
 // same shape for `brain context --json`.
 type TaskContext struct {
@@ -47,13 +56,21 @@ type TaskContext struct {
 	RawExcerpts    []ContextExcerpt `json:"raw_excerpts"`
 	// Sections is the layered pack: what each layer spent and which records
 	// fit. Truncated explains every record that did not.
-	Sections    []ContextSection    `json:"sections"`
-	Truncated   []ContextTruncation `json:"truncated"`
-	TotalTokens int                 `json:"total_tokens"`
+	Sections []ContextSection `json:"sections"`
+	// Truncated lists at most MaxContextTruncations dropped records, each with
+	// its section and reason.
+	Truncated []ContextTruncation `json:"truncated"`
+	// TotalTruncated is the number of dropped records before the list was
+	// capped.
+	TotalTruncated int `json:"total_truncated"`
+	TotalTokens    int `json:"total_tokens"`
 	// Quarantined lists the ids of records excluded from trusted context.
 	Quarantined []string `json:"quarantined"`
 	// QuarantinedCount is len(Quarantined), kept for a cheap budget report.
 	QuarantinedCount int `json:"quarantined_count"`
+	// StateAsOf is "current": state and findings always describe the current
+	// data, even when the records were selected at an as-of instant.
+	StateAsOf string `json:"state_as_of"`
 	// StateQuarantined reports that the project state is quarantined.
 	StateQuarantined bool     `json:"state_quarantined"`
 	Skipped          []string `json:"skipped"`
@@ -161,7 +178,9 @@ func (s *Server) contextTool() tool {
 			"findings":          arrayProp("Review findings that still apply.", objectProp("One finding with kind, message and fix.")),
 			"raw_excerpts":      arrayProp("Granted raw-zone excerpts; their text is external and untrusted.", objectProp("One excerpt with connection, item, citation and body.")),
 			"sections":          arrayProp("Packed layers with their cap, tokens and records.", objectProp("One layer: name, cap, tokens, records.")),
-			"truncated":         arrayProp("Records the budget left out, with why.", objectProp("One dropped record: id, section, reason.")),
+			"truncated":         arrayProp("Up to 20 records the budget left out, with why; total_truncated has the full count.", objectProp("One dropped record: id, section, reason.")),
+			"total_truncated":   intProp("Number of dropped records before the list was capped at 20.", 0),
+			"state_as_of":       stringProp("Temporal scope of state and findings: always \"current\"."),
 			"quarantined":       arrayProp("Ids of quarantined records excluded from the context.", stringProp("Record id.")),
 			"quarantined_count": intProp("Number of quarantined records excluded.", 0),
 			"skipped":           arrayProp("Reasons content was left out.", stringProp("Reason.")),
@@ -243,6 +262,17 @@ func (c TaskContext) WithEmptyLists() TaskContext {
 	if c.Truncated == nil {
 		c.Truncated = []ContextTruncation{}
 	}
+	// The list is sampled for transport; the total keeps the honest count. The
+	// function stays idempotent because callers may apply it twice.
+	total := c.TotalTruncated
+	if len(c.Truncated) > total {
+		total = len(c.Truncated)
+	}
+	if len(c.Truncated) > MaxContextTruncations {
+		c.Truncated = c.Truncated[:MaxContextTruncations]
+	}
+	c.TotalTruncated = total
+	c.StateAsOf = StateAsOfCurrent
 	if c.Quarantined == nil {
 		c.Quarantined = []string{}
 	}

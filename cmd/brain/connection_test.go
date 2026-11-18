@@ -65,6 +65,7 @@ func TestConnectionAddListRemove(t *testing.T) {
 			t.Run(mode+"/json="+map[bool]string{false: "false", true: "true"}[asJSON], func(t *testing.T) {
 				// Arrange: no git repository or index is needed for the catalogue.
 				cfg, dataDir := connectionConfig(t, mode)
+				connectionSecrets(t, newCLISecretStore())
 				runConn := func(args ...string) string {
 					t.Helper()
 					args = append([]string{"connection"}, args...)
@@ -247,6 +248,7 @@ func TestConnectionProviders(t *testing.T) {
 
 func TestConnectionProviderDefaultsAndSafeOutput(t *testing.T) {
 	cfg, dataDir := connectionConfig(t, config.ModeLocal)
+	connectionSecrets(t, newCLISecretStore())
 	cases := []struct {
 		provider, id string
 		settings     []string
@@ -812,4 +814,231 @@ func TestConnectionTestReportsSanitizedOutcome(t *testing.T) {
 		return
 	}
 	t.Fatalf("connection gh missing from list: %s", out)
+}
+
+type countingCLISecrets struct {
+	*cliSecretStore
+	sets int
+}
+
+func (s *countingCLISecrets) Set(ctx context.Context, key, value string) error {
+	s.sets++
+	return s.cliSecretStore.Set(ctx, key, value)
+}
+
+func readConnectionCatalogue(t *testing.T, dataDir string) string {
+	t.Helper()
+	raw, err := os.ReadFile(filepath.Join(dataDir, "connectors", "connections.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(raw)
+}
+
+func TestConnectionAddProtectsAccountIdentity(t *testing.T) {
+	cfg, dataDir := connectionConfig(t, config.ModeLocal)
+	secrets := newCLISecretStore()
+	connectionSecrets(t, secrets)
+
+	code, _, errOut := runForTest(t, "connection", "add", "imap", "--id", "mail",
+		"--account", "reader@example.test", "--base-url", "imaps://imap.example.test:993",
+		"--setting", "username=reader", "--config", cfg)
+	if code != 0 {
+		t.Fatal(errOut)
+	}
+	catalogue := readConnectionCatalogue(t, dataDir)
+	if strings.Contains(catalogue, "reader@example.test") || !strings.Contains(catalogue, "$keychain") {
+		t.Fatalf("catalogue = %s", catalogue)
+	}
+	if got, err := secrets.Get(context.Background(), "conn/mail/account"); err != nil || got != "reader@example.test" {
+		t.Fatalf("secret = %q %v", got, err)
+	}
+
+	code, out, errOut := runForTest(t, "connection", "list", "--json", "--config", cfg)
+	if code != 0 {
+		t.Fatal(errOut)
+	}
+	views := connectionJSON[[]connectionView](t, out)
+	if len(views) != 1 || views[0].Account != "reader@example.test" {
+		t.Fatalf("list = %+v", views)
+	}
+}
+
+func TestConnectionMigrateIdentityCheckAndApply(t *testing.T) {
+	cfg, dataDir := connectionConfig(t, config.ModeLocal)
+	store, err := fsstore.NewConnectionStore(dataDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	if err := store.Create(ctx, domain.Connection{
+		ID: "mail", Provider: "imap", Account: "reader@example.test",
+		BaseURL:  "imaps://imap.example.test:993",
+		Settings: map[string]string{"username": "reader@example.test", "folders": "INBOX"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	secrets := &countingCLISecrets{cliSecretStore: newCLISecretStore()}
+	connectionSecrets(t, secrets)
+	statuses := func(report app.IdentityMigrationReport) map[string]string {
+		out := map[string]string{}
+		for _, entry := range report.Entries {
+			out[entry.Field] = entry.Status
+		}
+		return out
+	}
+
+	code, out, errOut := runForTest(t, "connection", "migrate-identity", "--json", "--config", cfg)
+	if code != 0 {
+		t.Fatal(errOut)
+	}
+	report := connectionJSON[app.IdentityMigrationReport](t, out)
+	if report.Applied || len(report.Entries) != 2 || statuses(report)["account"] != app.IdentityStatusWouldMove || statuses(report)["username"] != app.IdentityStatusWouldMove || secrets.sets != 0 {
+		t.Fatalf("dry run = %+v sets=%d", report, secrets.sets)
+	}
+	if strings.Contains(readConnectionCatalogue(t, dataDir), "$keychain") {
+		t.Fatal("dry run rewrote the catalogue")
+	}
+
+	code, out, errOut = runForTest(t, "connection", "migrate-identity", "--apply", "--json", "--config", cfg)
+	if code != 0 {
+		t.Fatal(errOut)
+	}
+	report = connectionJSON[app.IdentityMigrationReport](t, out)
+	if !report.Applied || len(report.Entries) != 2 || statuses(report)["account"] != app.IdentityStatusMoved || statuses(report)["username"] != app.IdentityStatusMoved || secrets.sets != 2 {
+		t.Fatalf("apply = %+v sets=%d", report, secrets.sets)
+	}
+	for _, field := range []string{"account", "username"} {
+		if got, err := secrets.Get(ctx, "conn/mail/"+field); err != nil || got != "reader@example.test" {
+			t.Fatalf("%s secret = %q %v", field, got, err)
+		}
+	}
+	catalogue := readConnectionCatalogue(t, dataDir)
+	if strings.Contains(catalogue, "reader@example.test") || !strings.Contains(catalogue, "$keychain") || !strings.Contains(catalogue, "username") {
+		t.Fatalf("catalogue = %s", catalogue)
+	}
+
+	code, out, errOut = runForTest(t, "connection", "migrate-identity", "--apply", "--json", "--config", cfg)
+	if code != 0 {
+		t.Fatal(errOut)
+	}
+	report = connectionJSON[app.IdentityMigrationReport](t, out)
+	if statuses(report)["account"] != app.IdentityStatusMigrated || statuses(report)["username"] != app.IdentityStatusMigrated || secrets.sets != 2 {
+		t.Fatalf("second apply = %+v sets=%d", report, secrets.sets)
+	}
+}
+
+func TestConnectionIdentityMissingSecret(t *testing.T) {
+	cfg, _ := connectionConfig(t, config.ModeLocal)
+	secrets := newCLISecretStore()
+	previousConnections := buildConnections
+	buildConnections = func(cfg config.BrainConfig, opts bootstrap.Options) (*bootstrap.ConnectionRuntime, error) {
+		opts.Secrets = secrets
+		return bootstrap.BuildConnections(cfg, opts)
+	}
+	previousIngestion := buildIngestion
+	buildIngestion = func(cfg config.BrainConfig, opts bootstrap.Options) (*bootstrap.IngestionRuntime, error) {
+		opts.Secrets = secrets
+		return bootstrap.BuildIngestion(cfg, opts)
+	}
+	t.Cleanup(func() { buildConnections, buildIngestion = previousConnections, previousIngestion })
+
+	code, _, errOut := runForTest(t, "connection", "add", "imap", "--id", "mail",
+		"--account", "reader@example.test", "--base-url", "imaps://imap.example.test:993",
+		"--setting", "username=reader", "--config", cfg)
+	if code != 0 {
+		t.Fatal(errOut)
+	}
+	ctx := context.Background()
+	if err := secrets.Delete(ctx, "conn/mail/account"); err != nil {
+		t.Fatal(err)
+	}
+
+	// A broken marker must not make the catalogue unreadable.
+	code, out, errOut := runForTest(t, "connection", "list", "--config", cfg)
+	if code != 0 || !strings.Contains(out, "<keychain>") || !strings.Contains(errOut, "conn/mail/account") {
+		t.Fatalf("list = %d %s %s", code, out, errOut)
+	}
+
+	// Using the account (connection test) fails with one clear, repairable error.
+	code, out, errOut = runForTest(t, "connection", "test", "mail", "--config", cfg)
+	if code != 1 || !strings.Contains(errOut, "credential_missing") || !strings.Contains(errOut, "secret set mail account") {
+		t.Fatalf("test = %d %s %s", code, out, errOut)
+	}
+
+	// A different value cannot silently change the connection identity.
+	code, _, errOut = runWithInputForTest(t, "other@example.test\n", "connection", "secret", "set", "mail", "account", "--config", cfg)
+	if code != 2 || !strings.Contains(errOut, "does not match") {
+		t.Fatalf("mismatched repair = %d %s", code, errOut)
+	}
+	code, out, errOut = runWithInputForTest(t, "reader@example.test\n", "connection", "secret", "set", "mail", "account", "--config", cfg)
+	if code != 0 || !strings.Contains(out, "conn/mail/account") {
+		t.Fatalf("repair = %d %s %s", code, out, errOut)
+	}
+	code, out, errOut = runForTest(t, "connection", "list", "--json", "--config", cfg)
+	if code != 0 {
+		t.Fatal(errOut)
+	}
+	views := connectionJSON[[]connectionView](t, out)
+	if len(views) != 1 || views[0].Account != "reader@example.test" {
+		t.Fatalf("repaired list = %+v", views)
+	}
+}
+
+func connectionSecretsForIngestion(t *testing.T, store ports.SecretStore) {
+	t.Helper()
+	connectionSecrets(t, store)
+	previous := buildIngestion
+	buildIngestion = func(cfg config.BrainConfig, opts bootstrap.Options) (*bootstrap.IngestionRuntime, error) {
+		opts.Secrets = store
+		return bootstrap.BuildIngestion(cfg, opts)
+	}
+	t.Cleanup(func() { buildIngestion = previous })
+}
+
+func TestConnectionAddProtectsUsernameSetting(t *testing.T) {
+	cfg, dataDir := connectionConfig(t, config.ModeLocal)
+	secrets := newCLISecretStore()
+	connectionSecretsForIngestion(t, secrets)
+
+	code, _, errOut := runForTest(t, "connection", "add", "imap", "--id", "mail",
+		"--base-url", "imaps://imap.example.test:993",
+		"--setting", "username=reader@example.test", "--config", cfg)
+	if code != 0 {
+		t.Fatal(errOut)
+	}
+	catalogue := readConnectionCatalogue(t, dataDir)
+	if strings.Contains(catalogue, "reader@example.test") || !strings.Contains(catalogue, "$keychain") || !strings.Contains(catalogue, "username") {
+		t.Fatalf("catalogue = %s", catalogue)
+	}
+	ctx := context.Background()
+	if got, err := secrets.Get(ctx, "conn/mail/username"); err != nil || got != "reader@example.test" {
+		t.Fatalf("secret = %q %v", got, err)
+	}
+
+	code, out, errOut := runForTest(t, "connection", "list", "--json", "--config", cfg)
+	if code != 0 || strings.Contains(out, "reader@example.test") {
+		t.Fatalf("list = %d %s %s", code, out, errOut)
+	}
+
+	if err := secrets.Delete(ctx, "conn/mail/username"); err != nil {
+		t.Fatal(err)
+	}
+	code, out, errOut = runForTest(t, "connection", "list", "--config", cfg)
+	if code != 0 || strings.Contains(out, "reader@example.test") {
+		t.Fatalf("list without a secret = %d %s %s", code, out, errOut)
+	}
+	code, out, errOut = runForTest(t, "connection", "test", "mail", "--config", cfg)
+	if code != 1 || !strings.Contains(errOut, "credential_missing") || !strings.Contains(errOut, "secret set mail username") {
+		t.Fatalf("test = %d %s %s", code, out, errOut)
+	}
+
+	code, _, errOut = runWithInputForTest(t, "other@example.test\n", "connection", "secret", "set", "mail", "username", "--config", cfg)
+	if code != 2 || !strings.Contains(errOut, "does not match") {
+		t.Fatalf("mismatched repair = %d %s", code, errOut)
+	}
+	code, out, errOut = runWithInputForTest(t, "reader@example.test\n", "connection", "secret", "set", "mail", "username", "--config", cfg)
+	if code != 0 || !strings.Contains(out, "conn/mail/username") {
+		t.Fatalf("repair = %d %s %s", code, out, errOut)
+	}
 }

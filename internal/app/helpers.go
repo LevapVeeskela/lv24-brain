@@ -214,18 +214,31 @@ func (a *App) upsertIndex(ctx context.Context, doc ports.Document) error {
 	return nil
 }
 
+// provenanceColumns projects a record's provenance into the two index columns
+// the ranking reads. The empty values of a record written before provenance
+// existed are filled with their documented defaults (human, verified), so the
+// projection states what a reader acts on; an unknown trust level is folded to
+// inferred by EffectiveTrust, never to verified.
+func provenanceColumns(provenance domain.Provenance) (origin, trust string) {
+	return string(provenance.Origin.Effective()), string(provenance.EffectiveTrust())
+}
+
 func noteDocument(note domain.Note) ports.Document {
 	body := note.Body
 	if len(note.Tags) > 0 {
 		body = joinText(body, strings.Join(note.Tags, " "))
 	}
+	origin, trust := provenanceColumns(note.Provenance)
 	return ports.Document{
-		ID:        indexKey(note.ProjectID, note.ID),
-		ProjectID: note.ProjectID,
-		Kind:      "note",
-		Title:     fallbackTitle(note.Title, note.Body),
-		Body:      body,
-		UpdatedAt: updatedOrCreated(note.UpdatedAt, note.CreatedAt),
+		ID:               indexKey(note.ProjectID, note.ID),
+		ProjectID:        note.ProjectID,
+		Kind:             "note",
+		Title:            fallbackTitle(note.Title, note.Body),
+		Body:             body,
+		Origin:           origin,
+		Trust:            trust,
+		UpdatedAt:        updatedOrCreated(note.UpdatedAt, note.CreatedAt),
+		ContentUpdatedAt: contentUpdatedOr(note.ContentUpdatedAt, updatedOrCreated(note.UpdatedAt, note.CreatedAt)),
 		// ValidFrom defaults to the creation time so an as-of query has an
 		// anchor even for records written before validity existed.
 		ValidFrom:    note.Validity.EffectiveFrom(note.CreatedAt),
@@ -243,6 +256,7 @@ func noteDocument(note domain.Note) ports.Document {
 }
 
 func decisionDocument(decision domain.Decision) ports.Document {
+	origin, trust := provenanceColumns(decision.Provenance)
 	return ports.Document{
 		ID:        indexKey(decision.ProjectID, decision.ID),
 		ProjectID: decision.ProjectID,
@@ -254,63 +268,74 @@ func decisionDocument(decision domain.Decision) ports.Document {
 			strings.Join(decision.Consequences, "\n"),
 			strings.Join(decision.Evidence, "\n"),
 		),
-		UpdatedAt:    updatedOrCreated(decision.UpdatedAt, decision.CreatedAt),
-		ValidFrom:    decision.Validity.EffectiveFrom(decision.CreatedAt),
-		ValidTo:      decision.Validity.ValidTo,
-		SupersededBy: decision.Validity.SupersededBy,
-		Supersedes:   decision.Validity.Supersedes,
-		Status:       string(decision.Status),
-		Confidence:   decision.Validity.Confidence,
-		Pinned:       decision.Pinned,
-		Subtype:      decision.Subtype,
-		Scope:        string(decision.Scope),
-		TopicKey:     decision.TopicKey,
-		Occurrences:  decision.Taxonomy.NormalizedOccurrences(),
-		Relations:    relationLinks(decision.Relations),
+		Origin:           origin,
+		Trust:            trust,
+		UpdatedAt:        updatedOrCreated(decision.UpdatedAt, decision.CreatedAt),
+		ContentUpdatedAt: contentUpdatedOr(decision.ContentUpdatedAt, updatedOrCreated(decision.UpdatedAt, decision.CreatedAt)),
+		ValidFrom:        decision.Validity.EffectiveFrom(decision.CreatedAt),
+		ValidTo:          decision.Validity.ValidTo,
+		SupersededBy:     decision.Validity.SupersededBy,
+		Supersedes:       decision.Validity.Supersedes,
+		Status:           string(decision.Status),
+		Confidence:       decision.Validity.Confidence,
+		Pinned:           decision.Pinned,
+		Subtype:          decision.Subtype,
+		Scope:            string(decision.Scope),
+		TopicKey:         decision.TopicKey,
+		Occurrences:      decision.Taxonomy.NormalizedOccurrences(),
+		Relations:        relationLinks(decision.Relations),
 	}
 }
 
 func attemptDocument(attempt domain.Attempt) ports.Document {
+	origin, trust := provenanceColumns(attempt.Provenance)
 	return ports.Document{
-		ID:           indexKey(attempt.ProjectID, attempt.ID),
-		ProjectID:    attempt.ProjectID,
-		Kind:         "attempt",
-		Title:        attempt.Title,
-		Body:         joinText(attempt.Hypothesis, attempt.Result, attempt.Reason),
-		UpdatedAt:    updatedOrCreated(attempt.UpdatedAt, attempt.CreatedAt),
-		ValidFrom:    attempt.Validity.EffectiveFrom(attempt.CreatedAt),
-		ValidTo:      attempt.Validity.ValidTo,
-		SupersededBy: attempt.Validity.SupersededBy,
-		Supersedes:   attempt.Validity.Supersedes,
-		Confidence:   attempt.Validity.Confidence,
-		Pinned:       attempt.Pinned,
-		Subtype:      attempt.Subtype,
-		Scope:        string(attempt.Scope),
-		TopicKey:     attempt.TopicKey,
-		Occurrences:  attempt.Taxonomy.NormalizedOccurrences(),
-		Relations:    relationLinks(attempt.Relations),
+		ID:               indexKey(attempt.ProjectID, attempt.ID),
+		ProjectID:        attempt.ProjectID,
+		Kind:             "attempt",
+		Title:            attempt.Title,
+		Body:             joinText(attempt.Hypothesis, attempt.Result, attempt.Reason),
+		Origin:           origin,
+		Trust:            trust,
+		UpdatedAt:        updatedOrCreated(attempt.UpdatedAt, attempt.CreatedAt),
+		ContentUpdatedAt: contentUpdatedOr(attempt.ContentUpdatedAt, updatedOrCreated(attempt.UpdatedAt, attempt.CreatedAt)),
+		ValidFrom:        attempt.Validity.EffectiveFrom(attempt.CreatedAt),
+		ValidTo:          attempt.Validity.ValidTo,
+		SupersededBy:     attempt.Validity.SupersededBy,
+		Supersedes:       attempt.Validity.Supersedes,
+		Confidence:       attempt.Validity.Confidence,
+		Pinned:           attempt.Pinned,
+		Subtype:          attempt.Subtype,
+		Scope:            string(attempt.Scope),
+		TopicKey:         attempt.TopicKey,
+		Occurrences:      attempt.Taxonomy.NormalizedOccurrences(),
+		Relations:        relationLinks(attempt.Relations),
 	}
 }
 
 func handoffDocument(handoff domain.Handoff) ports.Document {
+	origin, trust := provenanceColumns(handoff.Provenance)
 	return ports.Document{
-		ID:           indexKey(handoff.ProjectID, handoff.ID),
-		ProjectID:    handoff.ProjectID,
-		Kind:         "handoff",
-		Title:        handoffTitle(handoff),
-		Body:         joinText(handoff.Summary, handoff.GitContext, handoff.NextAction),
-		UpdatedAt:    updatedOrCreated(handoff.UpdatedAt, handoff.CreatedAt),
-		ValidFrom:    handoff.Validity.EffectiveFrom(handoff.CreatedAt),
-		ValidTo:      handoff.Validity.ValidTo,
-		SupersededBy: handoff.Validity.SupersededBy,
-		Supersedes:   handoff.Validity.Supersedes,
-		Confidence:   handoff.Validity.Confidence,
-		Pinned:       handoff.Pinned,
-		Subtype:      handoff.Subtype,
-		Scope:        string(handoff.Scope),
-		TopicKey:     handoff.TopicKey,
-		Occurrences:  handoff.Taxonomy.NormalizedOccurrences(),
-		Relations:    relationLinks(handoff.Relations),
+		ID:               indexKey(handoff.ProjectID, handoff.ID),
+		ProjectID:        handoff.ProjectID,
+		Kind:             "handoff",
+		Title:            handoffTitle(handoff),
+		Body:             joinText(handoff.Summary, handoff.GitContext, handoff.NextAction),
+		Origin:           origin,
+		Trust:            trust,
+		UpdatedAt:        updatedOrCreated(handoff.UpdatedAt, handoff.CreatedAt),
+		ContentUpdatedAt: contentUpdatedOr(handoff.ContentUpdatedAt, updatedOrCreated(handoff.UpdatedAt, handoff.CreatedAt)),
+		ValidFrom:        handoff.Validity.EffectiveFrom(handoff.CreatedAt),
+		ValidTo:          handoff.Validity.ValidTo,
+		SupersededBy:     handoff.Validity.SupersededBy,
+		Supersedes:       handoff.Validity.Supersedes,
+		Confidence:       handoff.Validity.Confidence,
+		Pinned:           handoff.Pinned,
+		Subtype:          handoff.Subtype,
+		Scope:            string(handoff.Scope),
+		TopicKey:         handoff.TopicKey,
+		Occurrences:      handoff.Taxonomy.NormalizedOccurrences(),
+		Relations:        relationLinks(handoff.Relations),
 	}
 }
 
@@ -326,6 +351,17 @@ func updatedOrCreated(updated, created time.Time) time.Time {
 		return updated
 	}
 	return created
+}
+
+// contentUpdatedOr resolves the content edit time of an indexed record: the
+// explicit content time, else the record revision. A record written before
+// content_updated_at existed changed its text when it was last written, and
+// reporting it once too often is safer than hiding it.
+func contentUpdatedOr(contentUpdatedAt, updatedAt time.Time) time.Time {
+	if !contentUpdatedAt.IsZero() {
+		return contentUpdatedAt
+	}
+	return updatedAt
 }
 
 func fallbackTitle(title, body string) string {

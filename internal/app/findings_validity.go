@@ -98,7 +98,7 @@ func supersessionGaps(kind string, records []supersedeCheckRecord) []Finding {
 				records[older].validity.SupersededBy == records[newer].id {
 				continue
 			}
-			if !similarWith(records[older].title, records[newer].title, minSharedTokens) {
+			if !titleLineage(records[older].title, records[newer].title) {
 				continue
 			}
 			findings = append(findings, newFinding(FindingSupersessionGap,
@@ -147,4 +147,127 @@ func staleSupersededFindings(in reviewInputs, now time.Time) []Finding {
 	check(attemptSupersedeRecords(in.attempts))
 	check(handoffSupersedeRecords(in.handoffs))
 	return findings
+}
+
+// titleLineageCoverage is how much of the shorter title's significant words the
+// other title must repeat before both are treated as one topic. It is high on
+// purpose: a replacement restates its subject, it does not just share the
+// generic phrasing of "keep ... stable for ...".
+const titleLineageCoverage = 0.9
+
+// titleBoilerplate words say a record is a release or an announcement, not what
+// it is about. They are dropped before two titles are compared, so "Release
+// notes 0.6.0" and "0.6.0 shipped" can meet while different versions stay apart.
+// The keys are tokenSet stems, not plain words.
+var titleBoilerplate = map[string]bool{
+	"releas": true, "notes": true, "note": true, "changel": true,
+	"versio": true, "shippe": true, "publis": true, "announ": true,
+	"draft": true, "final": true, "news": true,
+}
+
+// titleLineage reports whether two titles name one topic, which is what makes a
+// newer record a plausible replacement. Different release versions are a series
+// of records, not one record replacing another, so they never count.
+func titleLineage(older, newer string) bool {
+	olderVersions, newerVersions := titleVersions(older), titleVersions(newer)
+	if strings.Join(olderVersions, " ") != strings.Join(newerVersions, " ") {
+		return false
+	}
+	olderKey, newerKey := titleLineageKey(older), titleLineageKey(newer)
+	if len(olderKey) == 0 || len(newerKey) == 0 {
+		// Only release words are left: the shared version above is the topic.
+		return len(olderKey) == 0 && len(newerKey) == 0 && len(olderVersions) > 0
+	}
+	shared := sharedTokenCount(olderKey, newerKey)
+	smaller := min(len(olderKey), len(newerKey))
+	if shared < minSharedTokens {
+		return false
+	}
+	if shared == len(olderKey) && shared == len(newerKey) {
+		return true
+	}
+	return float64(shared)/float64(smaller) >= titleLineageCoverage
+}
+
+// titleLineageKey is the sorted set of significant title tokens with the
+// release boilerplate removed.
+func titleLineageKey(title string) []string {
+	tokens := tokenSet(title)
+	key := make([]string, 0, len(tokens))
+	for token := range tokens {
+		if !titleBoilerplate[token] {
+			key = append(key, token)
+		}
+	}
+	sort.Strings(key)
+	return key
+}
+
+// sharedTokenCount counts tokens of left that also appear in right.
+func sharedTokenCount(left, right []string) int {
+	set := make(map[string]struct{}, len(right))
+	for _, token := range right {
+		set[token] = struct{}{}
+	}
+	shared := 0
+	for _, token := range left {
+		if _, ok := set[token]; ok {
+			shared++
+		}
+	}
+	return shared
+}
+
+// attemptFailureWords are the words an attempt result uses to record that the
+// approach failed. Review never assumes failure: a failure is reported only
+// when the attempt says so.
+var attemptFailureWords = map[string]bool{
+	"fail": true, "failed": true, "fails": true, "failure": true, "failures": true,
+	"broke": true, "broken": true, "breaks": true,
+	"crash": true, "crashed": true, "crashes": true,
+	"errored":    true,
+	"regression": true, "regressed": true, "reverted": true,
+	"abandoned": true, "rejected": true, "unusable": true, "ineffective": true,
+	"timeout": true, "deadlock": true,
+}
+
+// attemptFailurePhrases are the multi-word ways a result records a failure.
+// They are matched against the normalized text, where punctuation is a space.
+var attemptFailurePhrases = []string{
+	"did not work", "does not work", "didn t work", "doesn t work",
+	"not working", "no effect", "did not help", "does not help",
+	"timed out", "не сработал", "не работа", "не помог",
+}
+
+// attemptFailurePrefixes cover inflected Russian forms of the failure words.
+var attemptFailurePrefixes = []string{"ошиб", "провал", "сломал", "неудач", "регресс"}
+
+// attemptRecordsFailure reports whether an attempt explicitly records a failed
+// result. An empty result falls back to the reason, which says why an approach
+// was kept or abandoned.
+func attemptRecordsFailure(attempt domain.Attempt) bool {
+	text := attempt.Result
+	if strings.TrimSpace(text) == "" {
+		text = attempt.Reason
+	}
+	normalized := normalizeDupText(text)
+	if normalized == "" {
+		return false
+	}
+	for _, phrase := range attemptFailurePhrases {
+		if strings.Contains(normalized, phrase) {
+			return true
+		}
+	}
+	for _, word := range strings.Fields(normalized) {
+		if attemptFailureWords[word] {
+			return true
+		}
+		for _, prefix := range attemptFailurePrefixes {
+			if strings.HasPrefix(word, prefix) {
+				return true
+			}
+		}
+	}
+	return false
 }

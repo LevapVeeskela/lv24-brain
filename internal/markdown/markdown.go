@@ -21,7 +21,7 @@ const delimiter = "---"
 
 // legacyTimestamp accepts the space-separated timestamps written by the
 // original Company Brain PowerShell implementation.
-var legacyTimestamp = regexp.MustCompile(`(?m)^(\s*(?:updated_at|created_at|fresh_until):\s*)(\d{4}-\d{2}-\d{2})[ T](\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})?)`)
+var legacyTimestamp = regexp.MustCompile(`(?m)^(\s*(?:updated_at|content_updated_at|created_at|fresh_until):\s*)(\d{4}-\d{2}-\d{2})[ T](\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})?)`)
 
 // Errors returned when a document does not start with a well-formed
 // frontmatter block.
@@ -34,11 +34,20 @@ var (
 
 // Frontmatter is the metadata every brain Markdown document carries.
 type Frontmatter struct {
-	ProjectID     string    `yaml:"project_id"`
-	Kind          string    `yaml:"kind"`
-	UpdatedAt     time.Time `yaml:"updated_at"`
-	SchemaVersion int       `yaml:"schema_version"`
-	Permalink     string    `yaml:"permalink,omitempty"`
+	ProjectID string `yaml:"project_id"`
+	Kind      string `yaml:"kind"`
+	// UpdatedAt is the revision of the file: every write moves it, including
+	// review, snooze and validity bookkeeping.
+	UpdatedAt time.Time `yaml:"updated_at"`
+	// ContentUpdatedAt is the last time the title or body changed. Metadata
+	// writes keep it, so a `--since` window reports text changes instead of
+	// re-reporting the corpus after a review or a redaction pass. It is nil
+	// for files written before the field existed; readers fall back to
+	// UpdatedAt. It is a pointer so a metadata-only rewrite of a legacy file
+	// omits the key instead of inventing a zero timestamp.
+	ContentUpdatedAt *time.Time `yaml:"content_updated_at,omitempty"`
+	SchemaVersion    int        `yaml:"schema_version"`
+	Permalink        string     `yaml:"permalink,omitempty"`
 }
 
 // Parse splits a document into its YAML frontmatter and Markdown body. When

@@ -102,6 +102,220 @@ func (m ConnectionMigrator) MigrateLegacyConnectors(ctx context.Context) (Connec
 	return report, nil
 }
 
+// IdentityMigration statuses. A dry run only reports; apply writes the secret
+// first, verifies the read-back, then rewrites the catalogue.
+const (
+	IdentityStatusWouldMove  = "would-move"
+	IdentityStatusMoved      = "moved"
+	IdentityStatusMigrated   = "already-migrated"
+	IdentityStatusMissing    = "missing-secret"
+	IdentityStatusUnreadable = "unreadable-secret"
+	IdentityStatusMismatched = "mismatched-secret"
+)
+
+// IdentityMigrationEntry is one connection account considered by the opt-in
+// identity migration. Key is the credential-store name, never a value.
+type IdentityMigrationEntry struct {
+	ConnectionID string `json:"connectionId"`
+	Field        string `json:"field"`
+	Key          string `json:"key"`
+	Status       string `json:"status"`
+}
+
+// IdentityMigrationReport is the dry-run or apply result. Entries always
+// covers every connection with a stored account.
+type IdentityMigrationReport struct {
+	Applied bool                     `json:"applied"`
+	Entries []IdentityMigrationEntry `json:"entries"`
+}
+
+// HasProblems reports markers that need an operator: a missing, unreadable or
+// mismatched secret. Pending raw accounts are not a problem, only work.
+func (r IdentityMigrationReport) HasProblems() bool {
+	for _, entry := range r.Entries {
+		switch entry.Status {
+		case IdentityStatusMissing, IdentityStatusUnreadable, IdentityStatusMismatched:
+			return true
+		}
+	}
+	return false
+}
+
+// ConnectionIdentityMigrator moves raw identity values (the account and the
+// provider's declared identity settings) into the secret store and replaces
+// them with markers in the catalogue. Migration is opt-in: a dry run performs
+// reads only, and a raw value remains a valid fallback forever.
+type ConnectionIdentityMigrator struct {
+	Connections ports.ConnectionStore
+	Credentials ports.CredentialStore
+}
+
+// Migrate reports raw identity values and, when apply is true, moves each one.
+// Every secret is written and read back before the catalogue row is rewritten,
+// so a failed step never leaves a marker without a secret. Re-running is
+// idempotent, and entries are reported per field.
+func (m ConnectionIdentityMigrator) Migrate(ctx context.Context, apply bool) (IdentityMigrationReport, error) {
+	report := IdentityMigrationReport{Applied: apply, Entries: []IdentityMigrationEntry{}}
+	if err := ctx.Err(); err != nil {
+		return report, err
+	}
+	if m.Connections == nil {
+		return report, domain.NewValidationError("identityMigration.connections", "is required")
+	}
+	if apply && m.Credentials == nil {
+		return report, domain.NewValidationError("identityMigration.credentials", "are required to store connection identity values")
+	}
+	connections, err := m.Connections.List(ctx)
+	if err != nil {
+		return report, err
+	}
+	for _, connection := range connections {
+		fields := connectorbuild.IdentityFields(connection)
+		if len(fields) == 0 {
+			continue
+		}
+		indexes := make(map[string]int, len(fields))
+		raw := make(map[string]string, len(fields))
+		for _, field := range fields {
+			key, err := domain.CredentialKey(connection.ID, field)
+			if err != nil {
+				return report, err
+			}
+			entry := IdentityMigrationEntry{ConnectionID: connection.ID, Field: field, Key: key}
+			if marker, ok := connectorbuild.IdentityMarkerFor(connection, field); ok {
+				entry.Status = m.markerStatus(ctx, connection, field, marker)
+			} else {
+				entry.Status = IdentityStatusWouldMove
+				raw[field] = identityValue(connection, field)
+			}
+			indexes[field] = len(report.Entries)
+			report.Entries = append(report.Entries, entry)
+		}
+		if !apply || len(raw) == 0 {
+			continue
+		}
+		protected, err := connectorbuild.ProtectIdentity(ctx, connection, m.Credentials)
+		if err != nil {
+			return report, err
+		}
+		if err := m.persist(ctx, connection, protected, raw); err != nil {
+			return report, err
+		}
+		for field := range raw {
+			report.Entries[indexes[field]].Status = IdentityStatusMoved
+		}
+	}
+	return report, nil
+}
+
+// persist writes a protected connection. The account is part of
+// Connection.Identity(), and the store refuses to change an identity through
+// Update or Patch, so a row whose account moved is replaced: check the current
+// values, delete, create, and restore the previous row if the create fails.
+// Settings are mutable, so a settings-only migration uses Patch.
+func (m ConnectionIdentityMigrator) persist(ctx context.Context, before, after domain.Connection, raw map[string]string) error {
+	if after.Account != before.Account {
+		return m.replaceAccount(ctx, before, after, raw)
+	}
+	_, err := m.Connections.Patch(ctx, before.ID, func(current *domain.Connection) error {
+		if err := unchangedIdentityValues(*current, raw); err != nil {
+			return err
+		}
+		if current.Settings == nil {
+			current.Settings = map[string]string{}
+		}
+		for field := range raw {
+			current.Settings[field] = after.Settings[field]
+		}
+		return nil
+	})
+	return err
+}
+
+func (m ConnectionIdentityMigrator) replaceAccount(ctx context.Context, before, after domain.Connection, raw map[string]string) error {
+	if after.ID != before.ID {
+		return domain.NewValidationError("identityMigration.id", "must not change")
+	}
+	current, err := m.Connections.Get(ctx, before.ID)
+	if err != nil {
+		return err
+	}
+	if err := unchangedIdentityValues(current, raw); err != nil {
+		return err
+	}
+	if err := after.Validate(); err != nil {
+		return err
+	}
+	if err := m.Connections.Delete(ctx, before.ID); err != nil {
+		return err
+	}
+	if err := m.Connections.Create(ctx, after); err != nil {
+		if restoreErr := m.Connections.Create(ctx, before); restoreErr != nil {
+			return fmt.Errorf("identity migration: rewriting connection %q failed and the previous entry could not be restored", before.ID)
+		}
+		return err
+	}
+	return nil
+}
+
+// unchangedIdentityValues guards a rewrite against a concurrent edit: every
+// value observed by the dry run must still be stored.
+func unchangedIdentityValues(current domain.Connection, raw map[string]string) error {
+	for field, value := range raw {
+		if identityValue(current, field) != value {
+			return fmt.Errorf("%w: connection %q field %q changed during identity migration", domain.ErrConflict, current.ID, field)
+		}
+	}
+	return nil
+}
+
+func (m ConnectionIdentityMigrator) markerStatus(ctx context.Context, connection domain.Connection, field string, marker connectorbuild.IdentityMarker) string {
+	if m.Credentials == nil {
+		return IdentityStatusUnreadable
+	}
+	value, err := m.Credentials.Get(ctx, connection.ID, field)
+	switch {
+	case errors.Is(err, domain.ErrNotFound):
+		return IdentityStatusMissing
+	case err != nil:
+		return IdentityStatusUnreadable
+	case strings.TrimSpace(value) == "":
+		return IdentityStatusMissing
+	case !marker.Matches(value):
+		return IdentityStatusMismatched
+	default:
+		return IdentityStatusMigrated
+	}
+}
+
+func identityValue(connection domain.Connection, field string) string {
+	if field == connectorbuild.AccountField {
+		return connection.Account
+	}
+	return connection.Settings[field]
+}
+
+// FindConnectionByIdentity returns the connection that already owns candidate's
+// provider, endpoint and account. Raw legacy accounts and migrated markers
+// compare as the same identity, so a create or a legacy import cannot introduce
+// a duplicate mailbox across the opt-in migration boundary.
+func FindConnectionByIdentity(ctx context.Context, store ports.ConnectionStore, candidate domain.Connection) (domain.Connection, bool, error) {
+	if store == nil {
+		return domain.Connection{}, false, domain.NewValidationError("connections.store", "is required")
+	}
+	connections, err := store.List(ctx)
+	if err != nil {
+		return domain.Connection{}, false, err
+	}
+	want := connectorbuild.IdentityKey(candidate)
+	for _, existing := range connections {
+		if connectorbuild.IdentityKey(existing) == want {
+			return existing, true, nil
+		}
+	}
+	return domain.Connection{}, false, nil
+}
+
 func mergeLegacyConnections(seeds []LegacyConnection) ([]LegacyConnection, error) {
 	registry := connectorbuild.Builtin()
 	groups := map[string]LegacyConnection{}
@@ -199,7 +413,7 @@ func (m ConnectionMigrator) createLegacyConnection(ctx context.Context, conn dom
 		}
 		ids := map[string]bool{}
 		for _, existing := range connections {
-			if existing.Identity() == conn.Identity() {
+			if connectorbuild.IdentityKey(existing) == connectorbuild.IdentityKey(conn) {
 				return existing, false, nil
 			}
 			ids[existing.ID] = true

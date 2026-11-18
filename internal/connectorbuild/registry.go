@@ -123,6 +123,13 @@ func (r *Registry) Build(conn domain.Connection, deps Deps) (ports.Source, error
 	if err := entry.Descriptor.ValidateConnection(conn); err != nil {
 		return nil, err
 	}
+	// A declared identity setting is resolved when the connector is built, not
+	// when the catalogue is listed: only a run or check reads the mailbox.
+	if len(IdentitySettingKeys(conn.Provider)) > 0 {
+		if conn, err = ResolveIdentitySettings(context.Background(), conn, deps.Credentials); err != nil {
+			return nil, err
+		}
+	}
 	source, err := entry.Factory(conn, deps)
 	if err != nil {
 		return nil, err

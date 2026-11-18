@@ -11,6 +11,7 @@ var schemaStatements = []string{
 		title TEXT NOT NULL,
 		body TEXT NOT NULL,
 		updated_at INTEGER NOT NULL,
+		content_updated_at INTEGER NOT NULL DEFAULT 0,
 		valid_from INTEGER NOT NULL DEFAULT 0,
 		valid_to INTEGER,
 		superseded_by TEXT,
@@ -21,7 +22,9 @@ var schemaStatements = []string{
 		scope TEXT NOT NULL DEFAULT 'project',
 		topic_key TEXT NOT NULL DEFAULT '',
 		occurrences INTEGER NOT NULL DEFAULT 1,
-		pinned INTEGER NOT NULL DEFAULT 0
+		pinned INTEGER NOT NULL DEFAULT 0,
+		origin TEXT NOT NULL DEFAULT '',
+		trust TEXT NOT NULL DEFAULT ''
 	)`,
 	`CREATE INDEX IF NOT EXISTS documents_project_idx ON documents(project_id)`,
 	`CREATE INDEX IF NOT EXISTS documents_valid_idx ON documents(kind, valid_to)`,
@@ -69,14 +72,15 @@ var schemaStatements = []string{
 	END`,
 }
 
-const upsertSQL = `INSERT INTO documents (id, project_id, kind, title, body, updated_at, valid_from, valid_to, superseded_by, supersedes, status, confidence, subtype, scope, topic_key, occurrences, pinned)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+const upsertSQL = `INSERT INTO documents (id, project_id, kind, title, body, updated_at, content_updated_at, valid_from, valid_to, superseded_by, supersedes, status, confidence, subtype, scope, topic_key, occurrences, pinned, origin, trust)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(id) DO UPDATE SET
 	project_id = excluded.project_id,
 	kind = excluded.kind,
 	title = excluded.title,
 	body = excluded.body,
 	updated_at = excluded.updated_at,
+	content_updated_at = excluded.content_updated_at,
 	valid_from = excluded.valid_from,
 	valid_to = excluded.valid_to,
 	superseded_by = excluded.superseded_by,
@@ -87,7 +91,9 @@ ON CONFLICT(id) DO UPDATE SET
 	scope = excluded.scope,
 	topic_key = excluded.topic_key,
 	occurrences = excluded.occurrences,
-	pinned = excluded.pinned`
+	pinned = excluded.pinned,
+	origin = excluded.origin,
+	trust = excluded.trust`
 
 const deleteSQL = `DELETE FROM documents WHERE id = ?`
 
@@ -114,7 +120,12 @@ ON CONFLICT(source_id, target_id, relation) DO UPDATE SET
 // Version 6 adds the engram-compatible classification (subtype, scope,
 // topic_key, occurrences) and its filters.
 // Version 7 adds the pinned flag used by the pin ranking signal.
-const schemaVersion = 7
+// Version 8 adds content_updated_at, the last text change: --since compares it
+// so a review, snooze or validity write does not re-report the whole corpus.
+// Version 9 projects the record provenance (origin, trust) so the ranking trust
+// term scores the record instead of staying neutral; rows written before it
+// keep empty values and rank as unknown trust.
+const schemaVersion = 9
 
 // dropStatements remove everything schemaStatements creates. Triggers go
 // first because they reference the tables.

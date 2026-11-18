@@ -57,11 +57,18 @@ brain context "retry budget" --raw
 
 `brain context` prints project state, review findings, the latest handoff, the
 records that best match the task and failed attempts to avoid, bounded by
-`--budget` (default 4000 runes). `--project` selects another project, `--kind`
-keeps one or more of `decision`, `attempt`, `note`, and `--since` accepts a
-window (`24h`, `7d`, `2w`) or a date. `--json` prints the same result as an
-object. The MCP tool `brain_context` exposes the curated view and accepts the
-same `raw` boolean; it stays curated-only without it.
+`--budget` (tokens; default 6000, maximum 32000). Layer caps are shares of that
+budget (`core` 25 %, `query` 35 %, `decisions` 20 %, `attempts` 12 %, `linked`
+8 %) and are fungible: a thin layer lends its unused share to the next one.
+There is no fixed record count, so a larger budget returns more records rather
+than more padding. Every layer that left records out ends with
+`- … N more dropped`; `--explain` prints `layer: used/cap tokens, N records` and
+`total: used/budget tokens, D dropped`. `--project` selects another project,
+`--kind` keeps one or more of `decision`, `attempt`, `note`, `--since` accepts a
+window (`24h`, `7d`, `2w`) or a date and compares the record's **content** change
+time, and `--json` prints the same result as an object. The MCP tool
+`brain_context` exposes the curated view and accepts the same `raw` boolean; it
+stays curated-only without it.
 
 `--raw` is off by default. It adds at most five excerpts from stored raw items
 and only when the curated context is thin (fewer than five records, failed
@@ -170,7 +177,11 @@ history:
   `brain record list` show current records only by default.
 - `--as-of <RFC3339|2026-03-01>` answers "what was current then": a record is
   returned when `valid_from <= t` and `valid_to` is empty or later than `t`.
-  A bare date means midnight UTC.
+  A bare date means midnight UTC. The latest handoff is selected at the same
+  instant. State and review findings have no history: `brain context` prints
+  `state_as_of: current (state and review findings describe the current data)`
+  and `--json` returns `state_as_of: "current"`, so a past-instant answer never
+  pretends the state was historical.
 - `--include-superseded` (alias `--all-time`) lists ended records too. On
   `brain record show` the record is always printed (you named it) and `--as-of`
   reports `valid_at: yes|no`.
@@ -316,12 +327,28 @@ brain journal --repair --dry-run   # records of the last 30 days without a journ
   an unfiltered search excludes them, and `kind=item`/`kind=dump` from a
   viewer or member is refused with 403 and audited.
 - Local search (FTS5) matches each query term of 4 or more characters by
-  prefix, so `warm` finds `warmup`; shorter terms match exactly. It
-  first requires all terms; when that finds nothing, it falls back to records
-  that match any term.
-- Server mode also supports `brain record list|show|status|supersede`,
+  prefix, so `warm` finds `warmup`; shorter terms match exactly. It first
+  requires all terms; when that finds fewer than five hits, it retries with any
+  term and **merges** the pages: strict hits stay on top, OR-only hits follow,
+  and `relaxed: true` reports that the fallback added something. The two passes
+  normalize relevance over different match sets, so an OR-only hit never
+  outranks a record that matched every term.
+- Ranking v2 normalizes lexical relevance per query (min-max over the matched
+  set, top-anchored for one or two matches) and weights `bm25` 0.55, `recency`
+  0.20, `pin` 0.15, `importance` 0.05 and provenance `trust` 0.05. The score is
+  the weighted sum in `[0, 1]`, so `--min-score` filters the same number the
+  output shows and `--explain` contributions add up to it.
+- `--since` compares `content_updated_at`, the last title/body/tag change.
+  Review, snooze, validity, supersede and merge bookkeeping rewrite the file
+  without moving the content time, so a metadata pass no longer re-reports the
+  corpus. Records written before the field existed fall back to `updated_at`.
+- The local index schema is 8. A schema mismatch recreates the index and sets
+  the dirty marker, and the next search reindexes once from Markdown; an
+  explicit `brain index` does the same work up front.
+- Server mode also supports `brain record list|show|status|supersede|review`,
   `catchup`, `review` and `journal --repair` reads; trash and restore are
-  local/git only.
+  local/git only, and `record review --review-after/--clear-review-after` and
+  `state review` stay local/git (server state has no provenance columns).
 - Writes made through the CLI update the local index, and `brain sync`
   reindexes after pulling records from another machine. Markdown changed by
   hand needs `brain index` (or `brain index --rebuild` to rebuild it from
@@ -609,6 +636,7 @@ committed.
 ```sh
 brain hooks install --repo <path-to-project-checkout> --config ~/brain-data/brain.yaml
 brain hooks status --repo <path-to-project-checkout>
+brain hooks status --agents --json
 brain hooks uninstall --repo <path-to-project-checkout>
 ```
 
@@ -617,6 +645,12 @@ brain hooks uninstall --repo <path-to-project-checkout>
   `--config`, it falls back to `$BRAIN_CONFIG`, and if that is unset the path
   is omitted.
 - `status` and `uninstall` accept `--repo <path>`.
+- `status --agents [--home <dir>] [--json]` reports the coding-agent hooks
+  instead of the git hook: installed, trusted, last run and last error per host
+  (`claude`, `codex`, `opencode`). It reads the same files the local API
+  `GET /v1/hooks` returns to Desktop, and it never edits an agent config. Codex
+  trust drift is reported with the re-approval instruction
+  (`/hooks` in Codex).
 - The hook runs `brain event commit --quiet --repo <top-level>`.
 - A post-commit hook that was not written by lv24-brain is not overwritten
   unless `--force` is given. With `--force` it is moved to a numbered
@@ -710,6 +744,73 @@ brain discover --root <workspace> --apply   # register the new ones
 - `brain discover` scans only the immediate children of `--root` (a `.git`
   directory or file, or `main/.git`), never modifies existing projects, and
   reports id conflicts instead of registering them.
+
+### Connection checks
+
+`brain connection test <id> [--json]` runs the provider's non-mutating check
+(the same `Source.Check` a run uses) and exits non-zero on failure with a
+redacted cause. `brain connection list` prints the newest run of each
+connection — time, status and a redacted failure reason — so a connector that
+stopped working is visible without opening logs.
+
+### Identity migration (0.26)
+
+The account label and the connector-declared identity settings (the IMAP
+`username`) are personal data. 0.26 keeps the value in the secret store under
+`conn/<id>/account` and `conn/<id>/username`, and leaves a marker in
+`connectors/connections.json`:
+
+```json
+{"$keychain": "account", "fingerprint": "<16 hex>"}
+```
+
+Reading the value is lazy: a run or an explicit check resolves it when it needs
+the identity, and `connection list` resolves it only to display the account. A
+locked or missing keychain never fails the command; it prints `<keychain>` plus
+one warning.
+
+**Update every machine to 0.26 before applying the migration.** A pre-0.26
+binary reads the marker as a literal account string, so its identity
+comparison and `connection add` would be wrong; a second machine still on 0.25
+could also import the legacy account back as a duplicate. The dry run is the
+default and writes nothing; migrate in this order:
+
+```sh
+brain --version                                   # every machine: 0.26.0
+brain connection migrate-identity --check
+brain connection migrate-identity --apply
+brain sync --push
+```
+
+`--json` returns the same report in either mode.
+
+Statuses: `would-move`, `moved`, `already-migrated`, `missing-secret`,
+`unreadable-secret`, `mismatched-secret`. Apply writes each secret, reads it
+back, and only then rewrites the catalogue; a failed step never leaves a marker
+without a secret, and re-running is idempotent. A raw legacy value stays a valid
+fallback forever. Repair a missing secret with
+`brain connection secret set <id> account` — the value must match the stored
+fingerprint, because changing the account is a migration, not a secret set. A
+marker whose secret is missing or unreadable fails the run with the key name and
+the repair command, and `connection list` reports the same problem as a warning.
+
+### Scrubbing raw-zone e-mail addresses
+
+GitHub and GitLab items now hash e-mail addresses at ingest, like mail. Data
+written before that, and legacy dumps, still carry raw addresses. The scrub
+script rewrites only matched bytes to the same `[email:<12 hex>]` placeholder,
+recomputes the item content hash, and is idempotent:
+
+```sh
+python scripts/scrub-raw-pii.py <data-dir>                  # dry run, per-zone counts
+python scripts/scrub-raw-pii.py <data-dir> --include runs,items,dumps --apply
+go run scripts/scrub-raw-pii-hash-check.go <data-dir>       # verify every item hash
+```
+
+It covers `connectors/<id>/items`, `connectors/runs` and the legacy `mail/`,
+`github/` and `gitlab/` dumps. A file whose item frontmatter does not parse is
+left untouched and reported in `unparsed`. Run it before `brain sync --push` so
+the scrub is one commit, and keep a backup of the data directory.
 
 ## 3a2. MCP server for coding agents
 
@@ -1214,6 +1315,27 @@ brain update --rollback                 # restore brain(.exe).previous
 - Before ordinary commands the CLI performs a notify-only daily check. Set
   `BRAIN_NO_UPDATE=1` to disable it.
 
+### Upgrade to 0.26
+
+The data schema stays 1 and records stay readable in both directions. The local
+search index moves to version 8 and rebuilds itself once.
+
+1. **Update every machine first.** `brain update --yes` or rebuild and replace
+   the binary; confirm `brain --version` on each. Do not apply the identity
+   migration until every machine reports 0.26.0: a pre-0.26 binary does not
+   understand the keychain marker stored in `connectors/connections.json`.
+2. `brain doctor`. Fix what it names; `brain connection list` warns about an
+   identity marker whose secret is missing or unreadable.
+3. `brain index` (or accept the one automatic reindex inside the first search).
+4. `brain connection migrate-identity --check`, then `--apply`, then
+   `brain sync --push` so the markers reach the other clones.
+5. Optional, if raw zones predate e-mail hashing: dry-run
+   `python scripts/scrub-raw-pii.py <data-dir>`, then `--apply` and
+   `go run scripts/scrub-raw-pii-hash-check.go <data-dir>`.
+
+`brain context` budgets are tokens in this release (default 6000, maximum
+32000), not runes; a config that sets `context.budget` is honoured unchanged.
+
 ### Upgrade to 0.16 / 0.17 (engine 0.15 and newer)
 
 A short checklist; the reasons are in [release-0.16.md](release-0.16.md) and
@@ -1300,10 +1422,10 @@ break installed binaries:
 
 ## 6. Database migrations and the upgrade gate
 
-- Server schema version: **9** (`SchemaVersion` in
+- Server schema version: **10** (`SchemaVersion` in
   `internal/adapters/postgres/postgres.go`). Migrations are embedded from
   `internal/adapters/postgres/migrations/`, from `0001_init.sql` to
-  `0009_connector_items.sql`.
+  `0010_record_provenance.sql`.
 - On startup the server applies embedded migrations to an empty database.
 - For an existing schema with pending migrations, the server refuses to start
   unless `BRAIN_DATABASE_BACKUP_CONFIRMED=1` is set. The message names the

@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"fmt"
+	"math"
 	"slices"
 	"sort"
 	"strings"
@@ -22,15 +23,25 @@ const (
 	ContextLayerLinked    = "linked"
 )
 
-// Per-layer token caps. A layer also respects the room the earlier layers left
-// in the total budget, so the sum never exceeds it.
-const (
-	contextCoreCapTokens     = 1200
-	contextDecisionCapTokens = 1500
-	contextAttemptCapTokens  = 1000
-	contextQueryCapTokens    = 1500
-	contextLinkedCapTokens   = 800
-)
+// Per-layer shares of the total token budget. The cap of a layer is
+// proportional to the budget instead of a fixed number, so a 500-token answer
+// and a 32000-token answer both spend their tokens where they matter. The
+// shares sum to one; a layer may borrow the part of an earlier share that was
+// left unused, which is what makes the caps fungible.
+//
+// Packing order is the priority: the query layer, the records that match the
+// task, comes first after the core; the curated background and the 1-hop
+// neighbours follow.
+var contextLayerOrder = []struct {
+	name  string
+	share float64
+}{
+	{ContextLayerCore, 0.25},
+	{ContextLayerQuery, 0.35},
+	{ContextLayerDecisions, 0.20},
+	{ContextLayerAttempts, 0.12},
+	{ContextLayerLinked, 0.08},
+}
 
 // ContextSectionRecord is one record inside a packed layer. The fields are the
 // metadata an agent needs to decide whether to expand the record; Detail is
@@ -91,46 +102,42 @@ type contextPackInput struct {
 	Attempts    []ContextRecord
 	Query       []ContextRecord
 	Quarantined int
+	// QueryAlways renders the query layer even when it packs nothing: `brain
+	// context` prints its headings and "none" lines in every answer, so their
+	// cost must be part of the budget. Bootstrap has no query layer.
+	QueryAlways bool
 	// Linked is called only when the earlier layers left room. It returns the
 	// 1-hop neighbours of the selected records.
 	Linked func(selected []string) ([]ContextRecord, error)
 }
 
-// contextLayerOrder lists the layers in packing order with their caps.
-var contextLayerOrder = []struct {
-	name string
-	cap  int
-}{
-	{ContextLayerCore, contextCoreCapTokens},
-	{ContextLayerDecisions, contextDecisionCapTokens},
-	{ContextLayerAttempts, contextAttemptCapTokens},
-	{ContextLayerQuery, contextQueryCapTokens},
-	{ContextLayerLinked, contextLinkedCapTokens},
-}
-
 // buildContextPack fills the layers in order under one total budget. A record
 // is never split: a record that does not fit is skipped and listed in
 // Truncated. The core layer is always present; only its prose is truncated,
-// with a marker, when it alone exceeds its cap.
+// with a marker, when it alone exceeds its cap. Every other layer may borrow
+// the share an earlier layer left unused, so a thin core does not waste the
+// tokens it did not spend.
 func buildContextPack(in contextPackInput) (ContextPack, error) {
 	pack := ContextPack{Budget: in.Budget, Quarantined: in.Quarantined, Sections: []ContextSection{}}
 	remaining := in.Budget
+	borrowed := 0
 
 	// Core: state, latest handoff and findings. The header (project identity
-	// and mode) counts against the core cap too, so the rendered answer stays
+	// and mode) counts against the core share too, so the rendered answer stays
 	// inside the total budget.
-	core := ContextSection{Name: ContextLayerCore, Cap: contextCoreCapTokens}
+	coreAllowance := minInt(contextLayerCap(ContextLayerCore, in.Budget), in.Budget)
+	core := ContextSection{Name: ContextLayerCore, Cap: coreAllowance}
 	headerTokens := textbudget.Tokens(in.Header)
-	coreCap := minInt(contextCoreCapTokens, in.Budget)
-	bodyBudget := coreCap - headerTokens
-	if bodyBudget < 0 {
-		bodyBudget = 0
+	bodyBudget := coreAllowance - headerTokens
+	coreText := ""
+	truncated := in.CoreText != ""
+	if bodyBudget > 0 {
+		coreText, truncated = textbudget.Truncate(in.CoreText, bodyBudget)
 	}
-	coreText, truncated := textbudget.Truncate(in.CoreText, bodyBudget)
 	if truncated {
 		pack.Truncated = append(pack.Truncated, ContextTruncation{
 			ID: "core", Section: ContextLayerCore,
-			Reason: fmt.Sprintf("core needs more than %d tokens; prose truncated with a marker", coreCap),
+			Reason: fmt.Sprintf("core needs more than %d tokens; prose truncated with a marker", coreAllowance),
 		})
 	}
 	core.Text = coreText
@@ -138,20 +145,25 @@ func buildContextPack(in contextPackInput) (ContextPack, error) {
 	core.Tokens = headerTokens + textbudget.Tokens(coreText)
 	pack.Sections = append(pack.Sections, core)
 	remaining -= core.Tokens
+	borrowed = contextBorrowLeft(borrowed, coreAllowance, core.Tokens)
 	if remaining < 0 {
 		remaining = 0
 	}
 
 	selected := make(map[string]bool, 32)
 	selectedOrder := make([]string, 0, 32)
-	addLayer := func(name string, cap int, candidates []ContextRecord) {
-		if len(candidates) == 0 {
-			return
+	addLayer := func(name string, candidates []ContextRecord, always bool) {
+		share := contextLayerCap(name, in.Budget)
+		allowance := minInt(share+borrowed, remaining)
+		if allowance < 0 {
+			allowance = 0
 		}
 		sortContextCandidates(candidates)
-		effective := minInt(cap, remaining)
+		// The "… N more dropped" line is part of the layer, so its room is
+		// reserved before the first record is packed.
+		marker := contextDroppedMarkerTokens(len(candidates))
 		section := ContextSection{
-			Name: name, Cap: cap, Records: []ContextSectionRecord{},
+			Name: name, Cap: allowance, Records: []ContextSectionRecord{},
 			Tokens: contextSectionHeaderTokenCost(name),
 		}
 		for _, record := range candidates {
@@ -159,7 +171,7 @@ func buildContextPack(in contextPackInput) (ContextPack, error) {
 				continue
 			}
 			tokens := contextRecordTokens(record)
-			left := effective - section.Tokens
+			left := allowance - section.Tokens - marker
 			if tokens > left {
 				reason := fmt.Sprintf("does not fit the %s layer: needs %d tokens, %d left", name, tokens, left)
 				if left <= 0 {
@@ -174,18 +186,36 @@ func buildContextPack(in contextPackInput) (ContextPack, error) {
 			selectedOrder = append(selectedOrder, record.ID)
 		}
 		if len(section.Records) == 0 {
-			return
+			dropped := contextDroppedCount(pack.Truncated, name)
+			switch {
+			case always:
+				// The query headings and their "none" lines are printed by
+				// every answer, even when nothing matched, so they cost budget.
+				section.Tokens = contextQueryEmptyTokens()
+				if dropped > 0 {
+					section.Tokens += contextDroppedMarkerTokens(dropped)
+				}
+			case dropped == 0:
+				return
+			default:
+				// Nothing fit, but the layer must still report how many
+				// records the budget left out.
+				section.Tokens = contextSectionHeaderTokenCost(name) + contextDroppedMarkerTokens(dropped)
+			}
+		} else if dropped := contextDroppedCount(pack.Truncated, name); dropped > 0 {
+			section.Tokens += contextDroppedMarkerTokens(dropped)
 		}
 		pack.Sections = append(pack.Sections, section)
 		remaining -= section.Tokens
 		if remaining < 0 {
 			remaining = 0
 		}
+		borrowed = contextBorrowLeft(borrowed, share, section.Tokens)
 	}
 
-	addLayer(ContextLayerDecisions, contextDecisionCapTokens, in.Decisions)
-	addLayer(ContextLayerAttempts, contextAttemptCapTokens, in.Attempts)
-	addLayer(ContextLayerQuery, contextQueryCapTokens, in.Query)
+	addLayer(ContextLayerQuery, in.Query, in.QueryAlways)
+	addLayer(ContextLayerDecisions, in.Decisions, false)
+	addLayer(ContextLayerAttempts, in.Attempts, false)
 
 	// The linked layer exists only when the earlier layers left room. Its
 	// lookup is skipped entirely when there is none, so a tight budget costs
@@ -195,13 +225,66 @@ func buildContextPack(in contextPackInput) (ContextPack, error) {
 		if err != nil {
 			return ContextPack{}, err
 		}
-		addLayer(ContextLayerLinked, contextLinkedCapTokens, linked)
+		addLayer(ContextLayerLinked, linked, false)
 	}
 
 	for _, section := range pack.Sections {
 		pack.TotalTokens += section.Tokens
 	}
 	return pack, nil
+}
+
+// contextLayerCap is the proportional cap of one layer.
+func contextLayerCap(name string, budget int) int {
+	for _, layer := range contextLayerOrder {
+		if layer.name != name {
+			continue
+		}
+		capTokens := int(math.Round(layer.share * float64(budget)))
+		if capTokens < 1 {
+			capTokens = 1
+		}
+		return capTokens
+	}
+	return budget
+}
+
+// contextBorrowLeft tracks the budget earlier layers left unused. A layer that
+// spends less than its share adds to the pool the later layers may borrow; a
+// layer that spends more pays it back, never below zero.
+func contextBorrowLeft(borrowed, share, spent int) int {
+	if spent < share {
+		return borrowed + (share - spent)
+	}
+	borrowed -= spent - share
+	if borrowed < 0 {
+		return 0
+	}
+	return borrowed
+}
+
+// contextDroppedMarkerTokens counts the per-layer line that reports the records
+// the budget left out.
+func contextDroppedMarkerTokens(dropped int) int {
+	return textbudget.Tokens(fmt.Sprintf("- … %d more dropped\n", dropped))
+}
+
+// contextDroppedCount is how many records of one layer the packer left out.
+func contextDroppedCount(truncations []ContextTruncation, layer string) int {
+	count := 0
+	for _, truncation := range truncations {
+		if truncation.Section == layer && truncation.ID != "core" && truncation.ID != "summary" {
+			count++
+		}
+	}
+	return count
+}
+
+// contextQueryEmptyTokens counts the headings and the two "none" lines the
+// query layer prints when nothing matched.
+func contextQueryEmptyTokens() int {
+	return textbudget.Tokens("\n## Relevant records\n- none matched the task\n" +
+		"\n## Failed attempts matching the task\n- none beyond the relevant records\n")
 }
 
 // contextSectionHeaderTokenCost counts the Markdown heading(s) a layer adds.
@@ -287,10 +370,12 @@ func (p ContextPack) ExplainLines() []string {
 	for _, layer := range contextLayerOrder {
 		section, ok := contextSection(p, layer.name)
 		tokens, records := 0, 0
+		capTokens := contextLayerCap(layer.name, p.Budget)
 		if ok {
 			tokens, records = section.Tokens, len(section.Records)
+			capTokens = section.Cap
 		}
-		lines = append(lines, fmt.Sprintf("%s: %d/%d tokens, %d records", layer.name, tokens, layer.cap, records))
+		lines = append(lines, fmt.Sprintf("%s: %d/%d tokens, %d records", layer.name, tokens, capTokens, records))
 	}
 	lines = append(lines, fmt.Sprintf("total: %d/%d tokens, %d dropped", p.TotalTokens, p.Budget, len(p.Truncated)))
 	return lines
@@ -349,7 +434,7 @@ func (a *App) packContext(
 	}
 	input := contextPackInput{
 		Budget: tokenBudget, Header: header, CoreText: coreText, CoreRecords: coreRecords,
-		Decisions: decisions, Attempts: attempts, Query: query,
+		Decisions: decisions, Attempts: attempts, Query: query, QueryAlways: true,
 		Quarantined: len(result.Quarantined),
 		Linked: func(selected []string) ([]ContextRecord, error) {
 			return a.contextLinkedCandidates(ctx, ranking, selected, kinds)
@@ -382,7 +467,7 @@ func (r contextRanking) background(kind string, exclude map[string]bool) []Conte
 		if !r.filter.Allows(record.Validity, record.CreatedAt, r.now) {
 			continue
 		}
-		if !r.since.IsZero() && !record.CreatedAt.IsZero() && record.CreatedAt.Before(r.since) {
+		if !r.since.IsZero() && !withinSince(record.ContentUpdatedAt, record.UpdatedAt, record.CreatedAt, r.since) {
 			continue
 		}
 		record.Path = contextRecordPath(r.projectID, record.Kind, record.ID)
@@ -448,7 +533,7 @@ func (a *App) contextLinkedCandidates(
 		if !ranking.filter.Allows(record.Validity, record.CreatedAt, ranking.now) {
 			continue
 		}
-		if !ranking.since.IsZero() && !record.CreatedAt.IsZero() && record.CreatedAt.Before(ranking.since) {
+		if !ranking.since.IsZero() && !withinSince(record.ContentUpdatedAt, record.UpdatedAt, record.CreatedAt, ranking.since) {
 			continue
 		}
 		record.Score = float64(count)
@@ -462,7 +547,7 @@ func contextRecordFromRecord(record Record) ContextRecord {
 	summary := record.Summary()
 	out := ContextRecord{
 		ID: summary.ID, Kind: summary.Kind, Title: summary.Title, Status: summary.Status,
-		CreatedAt: summary.CreatedAt, UpdatedAt: summary.UpdatedAt,
+		CreatedAt: summary.CreatedAt, UpdatedAt: summary.UpdatedAt, ContentUpdatedAt: summary.ContentUpdatedAt,
 		Validity: record.Validity(), Quarantined: recordQuarantined(record),
 		Pinned: record.Pinned(),
 	}
@@ -516,9 +601,10 @@ func decisionContextScore(status string, pinned bool) float64 {
 // splitQuerySection splits the packed query layer back into ranked records and
 // failed attempts, so the compatibility fields keep their meaning.
 func splitQuerySection(pack ContextPack, failed map[string]bool) ([]ContextRecord, []ContextRecord) {
-	records := make([]ContextRecord, 0, 8)
-	attempts := make([]ContextRecord, 0, maxListedItems)
-	for _, record := range sectionRecords(pack, ContextLayerQuery) {
+	packed := sectionRecords(pack, ContextLayerQuery)
+	records := make([]ContextRecord, 0, len(packed))
+	attempts := make([]ContextRecord, 0, len(packed))
+	for _, record := range packed {
 		if failed[record.ID] {
 			attempts = append(attempts, record)
 			continue
@@ -526,4 +612,72 @@ func splitQuerySection(pack ContextPack, failed map[string]bool) ([]ContextRecor
 		records = append(records, record)
 	}
 	return records, attempts
+}
+
+// fitContextPack renders the packed answer and drops records until the rendered
+// text fits the token budget. The packer is conservative, but only the rendered
+// text is authoritative: a dropped-record line, an empty-section placeholder or
+// a rounding step can still push the estimate over. Dropping the lowest
+// priority packed record keeps "never exceed the budget" true without lying
+// about the sections.
+func fitContextPack(result *ContextResult, revision string, now time.Time, failed map[string]bool) string {
+	budget := result.Pack.Budget
+	limit := fitAttempts(result.Pack) + 1
+	for attempt := 0; attempt < limit; attempt++ {
+		summary := renderContext(*result, revision, now)
+		if budget <= 0 || textbudget.Tokens(summary) <= budget {
+			return summary
+		}
+		if !dropLowestPriorityRecord(&result.Pack) {
+			// Even the fixed header does not fit; shorten the text itself so a
+			// tiny budget is still honoured.
+			cut, truncated := textbudget.Truncate(summary, budget)
+			if truncated {
+				result.Pack.Truncated = append(result.Pack.Truncated, ContextTruncation{
+					ID: "summary", Section: ContextLayerCore,
+					Reason: "the fixed header alone exceeds the budget; the answer was cut",
+				})
+				result.Pack.TotalTokens = textbudget.Tokens(cut)
+			}
+			return cut
+		}
+		result.Records, result.FailedAttempts = splitQuerySection(result.Pack, failed)
+	}
+	return renderContext(*result, revision, now)
+}
+
+// fitAttempts bounds the fitting loop by the number of packed records: each
+// step drops exactly one.
+func fitAttempts(pack ContextPack) int {
+	total := 0
+	for _, section := range pack.Sections {
+		total += len(section.Records)
+	}
+	return total
+}
+
+// dropLowestPriorityRecord removes the last record of the least important
+// packed layer and records why. It reports false when nothing is left to drop.
+func dropLowestPriorityRecord(pack *ContextPack) bool {
+	for _, name := range []string{ContextLayerLinked, ContextLayerAttempts, ContextLayerDecisions, ContextLayerQuery} {
+		for index := range pack.Sections {
+			section := &pack.Sections[index]
+			if section.Name != name || len(section.Records) == 0 {
+				continue
+			}
+			last := section.Records[len(section.Records)-1]
+			section.Records = section.Records[:len(section.Records)-1]
+			section.Tokens -= last.Tokens
+			pack.TotalTokens -= last.Tokens
+			if pack.TotalTokens < 0 {
+				pack.TotalTokens = 0
+			}
+			pack.Truncated = append(pack.Truncated, ContextTruncation{
+				ID: last.ID, Section: name,
+				Reason: "dropped after rendering: the answer would have exceeded the token budget",
+			})
+			return true
+		}
+	}
+	return false
 }

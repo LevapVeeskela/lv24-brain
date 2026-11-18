@@ -13,33 +13,42 @@ refuses the local ranking controls (`--match-mode`, `--relaxed`, `--min-score`,
 
 ## Composite score
 
-Every hit gets a weighted sum over five signals, and the reported score maps
-that sum into `[0, 1)`:
+Every signal is normalized to `[0, 1]` and weighted, so the score is a plain
+weighted sum in `[0, 1]`:
 
-```
-total = 0.55 * bm25
+```text
+score = 0.55 * bm25_norm
       + 0.20 * recency
-      + 0.15 * importance(kind)
-      + 0.05 * pin
-      + 0.05 * link
-
-score = total / (total + 1)
+      + 0.15 * pin
+      + 0.05 * importance(kind)
+      + 0.05 * trust
 ```
 
-The map is strictly increasing, so it never changes the order: it only makes
-`--min-score` comparable across queries (`score 0.5` is `total = 1`, `0.75` is
-`total = 3`).
+The weights are shares: a signal's contribution is exactly its share of the
+score, and `--min-score` compares the number the caller sees. There is no
+`total / (total + 1)` remap any more.
 
 | Signal | Weight | Definition |
 | --- | --- | --- |
-| `bm25` | 0.55 | FTS5 BM25 with field weights `title=3.0`, `body=1.0`, sign flipped and floored at 0. Unbounded above: a strong lexical match can own most of the score. |
+| `bm25_norm` | 0.55 | FTS5 BM25 with field weights `title=3.0`, `body=1.0`, sign flipped and clamped at 0, then normalized **per query**: min-max over the matched set with three or more matches, top-anchored with one or two, `1.0` for a flat set. |
 | `recency` | 0.20 | `0.5 ^ (age_days / 30)`. A record 30 days old scores half of one written now; a future timestamp counts as now. |
-| `importance` | 0.15 | `decision=1.0`, `attempt=0.8`, `handoff=0.7`, `note=0.5`, anything else (`state`, `dump`, `item`) `=0.3`. |
-| `pin` | 0.05 | `max(pinned, accepted decision, author confidence)`: an explicitly pinned record or an accepted decision scores 1.0; otherwise the record's `confidence` in `[0, 1]`; otherwise 0. |
-| `link` | 0.05 | 1.0 when the record's text references another record with `[[id]]`, else 0. This is the link-graph signal search owns; 1-hop expansion of a result set belongs to the context packer. |
+| `pin` | 0.15 | `max(pinned, accepted decision, author confidence)`: an explicitly pinned record or an accepted decision scores 1.0; otherwise the record's `confidence` in `[0, 1]`; otherwise 0. |
+| `importance` | 0.05 | `decision=1.0`, `attempt=0.8`, `handoff=0.7`, `note=0.5`, anything else (`state`, `dump`, `item`) `=0.3`. |
+| `trust` | 0.05 | Provenance trust: verified 1.0, stated 0.6, inferred 0.3, additive and never a filter. The index projection stores `origin`/`trust` (schema 9), so the term reorders records; an older index row without provenance scores neutral (1.0). |
 
-Ties are broken by `updated_at DESC`, then `id ASC`. The order is total and
+Relevance used to be measured on the raw BM25 scale, which is negative, corpus
+dependent and unbounded. Normalizing per query fixes that: a change to the corpus
+no longer changes what the 0.55 weight means, and a strong match still outranks a
+merely fresh one. Min-max can only scale the matched set, so a single match is
+never penalized for being alone.
+
+Ties in the strict pass break on lexical strength (`bm`), then `updated_at DESC`,
+then `id ASC`. A page merged from the strict and OR passes orders each group by
+score then id, so strict hits stay above OR-only hits. The order is total and
 deterministic, which is what makes paging safe.
+
+The `[[id]]` link bonus is retired: its 0.05 share moved to trust. The `c_link`
+column stays in the API shape as `0.0` and never adds a `match_reasons` entry.
 
 The weights live in one place in the index adapter (`rank.go`) as named
 constants. There is no configuration surface yet: a weight is changed in code,
@@ -57,12 +66,11 @@ Each hit carries `match_reasons`: only the signals that fired.
 | `recency` | the record is younger than one half-life (30 days). |
 | `importance` | the kind's importance is `>= 0.7` (decision, attempt). |
 | `pin` | the record is explicitly pinned, an accepted decision, or has a stated confidence. |
-| `link` | the record references another record with `[[id]]`. |
 
 `--explain` additionally returns the weighted contribution of every signal.
-Contributions are the same terms divided by `total + 1`, so they add up to the
-score exactly; each contribution's share of the score is the signal's share of
-`total`. An unexplained ranking position can therefore be read off the numbers
+Contributions are the weighted terms themselves, so they add up to the score
+exactly; each contribution's share of the score is the signal's weight times its
+strength. An unexplained ranking position can therefore be read off the numbers
 instead of guessed. Reasons and contributions describe the score, they never
 adjust it.
 
@@ -70,9 +78,9 @@ adjust it.
 
 | Flag | Effect |
 | --- | --- |
-| `--match-mode all` | every term must match (AND); no automatic widening. |
-| `--match-mode any` | any term may match (OR). |
-| `--relaxed` | with `--match-mode all`, retry the same terms joined with OR when the strict pass finds nothing; the response then reports `relaxed: true`. |
+| `--match-mode all` | every term must match (AND); the OR fallback below still runs when the strict pass finds fewer than five hits. |
+| `--match-mode any` | any term may match (OR); no fallback. |
+| `--relaxed` | with `--match-mode all`, retry the same terms joined with OR when the strict pass finds fewer than five hits; the pages are merged and the response reports `relaxed: true`. |
 | `--min-score <0..1>` | drop hits below the composite score. |
 | `--explain` | add per-signal contributions (JSON `explain`, text `score`/`reasons` lines). |
 | `--full` | return each hit's whole body alongside its preview (JSON `body`). |
@@ -80,10 +88,12 @@ adjust it.
 | `--cursor <cursor>` | next page of the same query. |
 | `--json` | envelope with `relaxed`, `page`, `page_size`, `has_more`, `next_cursor`, `hits`. |
 
-Without `--match-mode`, search keeps its historical behaviour: a strict AND pass
-first, then the same terms joined with OR when the strict pass is empty. The
-fallback is now reported (`relaxed: true`, plus a stderr line in text mode)
-instead of being invisible.
+Without `--match-mode`, search runs a strict AND pass first, then the same terms
+joined with OR when the strict pass found fewer than five hits. The two pages are
+merged: strict hits hold the top, OR-only hits follow, duplicates are dropped by
+project and id, and the response reports `relaxed: true` (plus a stderr line in
+text mode) when the OR page added anything. The passes normalize relevance over
+different match sets, so an OR-only score never outranks a strict hit.
 
 A cursor is an opaque, query-bound offset. Replaying it on another query is a
 usage error (exit 2). Paging is bounded by the 200-result index window, the same
@@ -135,10 +145,38 @@ with a hint, because that is a context-packing decision, not a search decision.
 | `brain get --max-tokens` | 600 tokens | `0` = unlimited |
 | MCP expanded record | 400 tokens | `1..4000` |
 
-Tokens are estimated at four characters per token. The estimate is
-deterministic and dependency-free; it is a limit to respect, not a billing
-figure. `brain eval` reports `tokens_per_answer` for the retrieval answer, so a
-change to previews or expansion shows up as a tokens delta next to recall.
+Tokens are estimated from the script of each rune: Latin text packs about four
+characters per token, Cyrillic, Greek, CJK and the other dense scripts about
+two. The estimate is deterministic and dependency-free; it is a limit to
+respect, not a billing figure. `brain eval` reports `tokens_per_answer` for the
+retrieval answer, so a change to previews or expansion shows up as a tokens
+delta next to recall.
+
+`--since` keeps documents whose **content** changed in the window. The
+frontmatter carries `content_updated_at`, which moves only on a title or body
+change: a review, a snooze, a validity change or a merge bookkeeping write
+rewrites the file without making the record recent. `brain search`,
+`brain context` and `brain record list` share the rule, so one window returns
+the same records on every surface.
+
+## Real-corpus retrieval gate
+
+The authored fixtures in `eval/fixtures` are deterministic and small. A second
+gate scores 30 hand-written queries against a live data directory through the
+same search use case as `brain search`:
+
+```sh
+BRAIN_DATA_DIR=/path/to/lv24-brain-data go test -tags realcorpus ./eval \
+    -run TestRealQueries -count=1
+```
+
+The Markdown store is read-only and the index is built in a temporary
+directory, so the data directory is never modified. The test prints top-1,
+top-5, MRR and the queries that missed the top hit (add `-v`, because `go test`
+hides passing-test output), and fails only when top-5 drops below 0.80. The
+labels live in `eval/realqueries.json`; each query names one record a human
+would pick, so the fixture can be reviewed without the live corpus.
+`docs/eval.md` covers the authored fixtures and `brain eval`.
 
 ## Compatibility
 

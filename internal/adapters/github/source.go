@@ -37,6 +37,9 @@ func Descriptor() domain.SourceDescriptor {
 		Provider: Name, DisplayName: "GitHub",
 		Capabilities:   domain.Capabilities{Backfill: true, Incremental: true, AuthModes: []domain.AuthMode{domain.AuthToken, domain.AuthOAuthDevice}},
 		DefaultPublish: domain.PublishShared,
+		// Commit authors and issue bodies routinely carry personal e-mail
+		// addresses; a shared zone hashes them instead of publishing them.
+		PersonalData: true,
 		ConfigFields: []domain.ConfigField{
 			{Key: "repos", Label: "Repositories", Required: true, Help: "Comma or newline separated owner/repository names."},
 			{Key: "token", Label: "Personal access token", Required: true, Secret: true},

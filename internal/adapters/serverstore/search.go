@@ -25,8 +25,11 @@ const (
 // plain words additionally match their word-form stem as a prefix (see
 // buildTSQuery), and query.Since drops older items.
 // Ranking and LIMIT happen in SQL before snippets are built, so the result is
-// the true top N. When the query has no lexemes (only punctuation), it falls
-// back to a case-insensitive substring match. All input is parameterized.
+// the true top N. Records whose provenance is explicitly quarantined are
+// dropped before ranking; a pre-provenance row (empty origin, reviewed=false)
+// is a human write and stays. When the query has no lexemes (only punctuation),
+// it falls back to a case-insensitive substring match. All input is
+// parameterized.
 func (s *Store) Search(ctx context.Context, query ports.Query) ([]ports.Hit, error) {
 	return s.SearchScoped(ctx, query, httpapi.ProjectScope{})
 }
@@ -149,33 +152,40 @@ const searchFirstTSParam = 10
 // The CTEs are: query (the tsquery), items (union of the searchable tables),
 // matched (filters plus rank), page (ranked top N). Snippets are built only
 // for the N rows in page, with ts_headline, bounded to MaxWords.
+//
+// Quarantined records (an unreviewed agent/connector/import write, or an origin
+// this engine does not know) are dropped before ranking and LIMIT, like local
+// search. The rule mirrors domain.Provenance.Quarantined: an empty origin is a
+// pre-provenance human write and stays visible even when reviewed is false.
 const searchSQL = `
 WITH query AS (
     SELECT {{tsquery}} AS tsq, $3::text AS pattern
 ), items AS (
     SELECT id, project_id, 'note'::text AS kind, title,
-           coalesce(body, '') AS content, updated_at, search_tsv AS tsv
+           coalesce(body, '') AS content, updated_at, search_tsv AS tsv,
+           origin, reviewed
     FROM notes
     UNION ALL
     SELECT id, project_id, 'decision'::text, title,
            coalesce(decision_context, '') || ' ' || brain_search_join(alternatives) || ' ' ||
            brain_search_join(consequences) || ' ' || brain_search_join(evidence),
-           updated_at, search_tsv
+           updated_at, search_tsv, origin, reviewed
     FROM decisions
     UNION ALL
     SELECT id, project_id, 'attempt'::text, title,
            coalesce(hypothesis, '') || ' ' || coalesce(result, '') || ' ' || coalesce(reason, ''),
-           updated_at, search_tsv
+           updated_at, search_tsv, origin, reviewed
     FROM attempts
     UNION ALL
     SELECT id, project_id, 'handoff'::text, summary,
            coalesce(git_context, '') || ' ' || coalesce(next_action, ''),
-           created_at, search_tsv
+           created_at, search_tsv, origin, reviewed
     FROM handoffs
     UNION ALL
     SELECT 'item:' || ci.item_key, ci.project_id, 'item'::text, ci.title,
            ci.body || ' ' || ci.url || ' ' || ci.author || ' ' || brain_search_join(ci.labels),
-           coalesce(ci.updated_at, ci.observed_at, ci.stored_at), ci.search_tsv
+           coalesce(ci.updated_at, ci.observed_at, ci.stored_at), ci.search_tsv,
+           ''::text, true
     FROM connector_items ci
     WHERE $9::boolean AND NOT ci.deleted AND ci.project_id <> ''
       AND EXISTS (SELECT 1 FROM projects p WHERE p.id = ci.project_id)
@@ -191,6 +201,13 @@ WITH query AS (
       AND ($7::text[] IS NULL OR items.project_id = ANY($7::text[]))
       AND ($8::text[] IS NULL OR NOT (items.project_id = ANY($8::text[])))
       AND ($2::timestamptz IS NULL OR items.updated_at >= $2::timestamptz)
+      AND NOT (
+            items.origin <> ''
+        AND (
+                items.origin NOT IN ('human', 'agent', 'connector', 'import')
+             OR (items.origin <> 'human' AND NOT items.reviewed)
+        )
+      )
       AND (
             (numnode(query.tsq) > 0 AND items.tsv @@ query.tsq)
          OR (numnode(query.tsq) = 0 AND (items.title || ' ' || items.content) ILIKE query.pattern ESCAPE '!')

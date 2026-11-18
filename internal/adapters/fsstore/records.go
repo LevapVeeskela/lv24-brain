@@ -425,10 +425,11 @@ func noteFileWithEntryContent(raw []byte, note domain.Note, date string, created
 		body = fmt.Sprintf("# Notes — %s\n\n", date)
 		frontmatter = noteFileFrontmatter{
 			Frontmatter: markdown.Frontmatter{
-				ProjectID:     note.ProjectID,
-				Kind:          "note",
-				UpdatedAt:     updatedAt,
-				SchemaVersion: SchemaVersion,
+				ProjectID:        note.ProjectID,
+				Kind:             "note",
+				UpdatedAt:        updatedAt,
+				ContentUpdatedAt: contentTimePtr(updatedAt),
+				SchemaVersion:    SchemaVersion,
 			},
 			Date: date,
 		}
@@ -472,6 +473,7 @@ func noteFileWithEntryContent(raw []byte, note domain.Note, date string, created
 	frontmatter.ProjectID = note.ProjectID
 	frontmatter.Kind = "note"
 	frontmatter.UpdatedAt = updatedAt
+	frontmatter.ContentUpdatedAt = contentTimePtr(updatedAt)
 	frontmatter.SchemaVersion = SchemaVersion
 	frontmatter.Date = date
 	rendered, err := markdown.Render(frontmatter, body)
@@ -519,11 +521,12 @@ func (s *Store) AppendDecision(ctx context.Context, decision domain.Decision) (d
 			}
 			frontmatter := decisionFrontmatter{
 				Frontmatter: markdown.Frontmatter{
-					ProjectID:     decision.ProjectID,
-					Kind:          "decision",
-					UpdatedAt:     updatedAt,
-					SchemaVersion: SchemaVersion,
-					Permalink:     decision.Permalink,
+					ProjectID:        decision.ProjectID,
+					Kind:             "decision",
+					UpdatedAt:        updatedAt,
+					ContentUpdatedAt: contentTimePtr(updatedAt),
+					SchemaVersion:    SchemaVersion,
+					Permalink:        decision.Permalink,
 				},
 				provenanceFrontmatter: provenanceToFrontmatter(decision.Provenance),
 				validityFrontmatter:   validityToFrontmatter(decision.Validity, createdAt),
@@ -586,11 +589,12 @@ func (s *Store) AppendAttempt(ctx context.Context, attempt domain.Attempt) (doma
 			}
 			frontmatter := attemptFrontmatter{
 				Frontmatter: markdown.Frontmatter{
-					ProjectID:     attempt.ProjectID,
-					Kind:          "attempt",
-					UpdatedAt:     updatedAt,
-					SchemaVersion: SchemaVersion,
-					Permalink:     attempt.Permalink,
+					ProjectID:        attempt.ProjectID,
+					Kind:             "attempt",
+					UpdatedAt:        updatedAt,
+					ContentUpdatedAt: contentTimePtr(updatedAt),
+					SchemaVersion:    SchemaVersion,
+					Permalink:        attempt.Permalink,
 				},
 				provenanceFrontmatter: provenanceToFrontmatter(attempt.Provenance),
 				validityFrontmatter:   validityToFrontmatter(attempt.Validity, createdAt),
@@ -652,11 +656,12 @@ func (s *Store) AppendHandoff(ctx context.Context, handoff domain.Handoff) (doma
 			}
 			frontmatter := handoffFrontmatter{
 				Frontmatter: markdown.Frontmatter{
-					ProjectID:     handoff.ProjectID,
-					Kind:          "handoff",
-					UpdatedAt:     handoffUpdatedAt,
-					SchemaVersion: SchemaVersion,
-					Permalink:     handoff.Permalink,
+					ProjectID:        handoff.ProjectID,
+					Kind:             "handoff",
+					UpdatedAt:        handoffUpdatedAt,
+					ContentUpdatedAt: contentTimePtr(handoffUpdatedAt),
+					SchemaVersion:    SchemaVersion,
+					Permalink:        handoff.Permalink,
 				},
 				provenanceFrontmatter: provenanceToFrontmatter(handoff.Provenance),
 				validityFrontmatter:   validityToFrontmatter(handoff.Validity, createdAt),

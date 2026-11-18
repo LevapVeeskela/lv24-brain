@@ -83,13 +83,18 @@ func (s *Store) UpdateDecision(ctx context.Context, decision domain.Decision) er
 		// unknown section would duplicate it and split the body on the next
 		// read.
 		currentBody, _ := splitHistorySection(oldBody)
+		contentAt := current.ContentUpdatedAt
+		if decisionTextChanged(current, decision) {
+			contentAt = s.nowUTC()
+		}
 		frontmatter := decisionFrontmatter{
 			Frontmatter: markdown.Frontmatter{
-				ProjectID:     current.ProjectID,
-				Kind:          "decision",
-				UpdatedAt:     s.nowUTC(),
-				SchemaVersion: SchemaVersion,
-				Permalink:     decision.Permalink,
+				ProjectID:        current.ProjectID,
+				Kind:             "decision",
+				UpdatedAt:        s.nowUTC(),
+				ContentUpdatedAt: contentTimePtr(contentAt),
+				SchemaVersion:    SchemaVersion,
+				Permalink:        decision.Permalink,
 			},
 			// Provenance is immutable: an edit must not drop the source or the
 			// review state.

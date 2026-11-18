@@ -1382,6 +1382,294 @@
         }
       }
     },
+    "/v1/merge/plan": {
+      "post": {
+        "description": "Plans a two-phase merge without writing. The plan reports the records, the conflicts that would refuse an apply, the changed flag and an opaque plan_id for /v1/merge/apply. The apply re-verifies the plan fingerprint and refuses a stale plan with 409 merge_stale.",
+        "requestBody": {
+          "$ref": "#/components/requestBodies/JSON"
+        },
+        "responses": {
+          "200": {
+            "description": "Merge plan",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MergePlan"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error"
+          },
+          "413": {
+            "$ref": "#/components/responses/Error"
+          },
+          "415": {
+            "$ref": "#/components/responses/Error"
+          },
+          "500": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/v1/merge/apply": {
+      "post": {
+        "description": "Applies a plan_id from /v1/merge/plan. Nothing is written when the records changed after the plan was shown: the response is 409 with error.code merge_stale and the client plans again. On success plan_id becomes the token for /v1/merge/rollback.",
+        "requestBody": {
+          "$ref": "#/components/requestBodies/JSON"
+        },
+        "responses": {
+          "200": {
+            "description": "Merge applied (or nothing left to change)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MergeResult"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error"
+          },
+          "413": {
+            "$ref": "#/components/responses/Error"
+          },
+          "415": {
+            "$ref": "#/components/responses/Error"
+          },
+          "500": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/v1/merge/rollback": {
+      "post": {
+        "description": "Restores an applied merge byte for byte and rebuilds the index. plan_id is the token returned by /v1/merge/apply (or the manifest path it reported). A file changed after the merge returns 409 merge_stale and is not overwritten.",
+        "requestBody": {
+          "$ref": "#/components/requestBodies/JSON"
+        },
+        "responses": {
+          "200": {
+            "description": "Rollback result",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MergeRollbackResult"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error"
+          },
+          "413": {
+            "$ref": "#/components/responses/Error"
+          },
+          "415": {
+            "$ref": "#/components/responses/Error"
+          },
+          "500": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/v1/digest": {
+      "post": {
+        "description": "Builds the morning digest (proposed decisions, open questions, blocked items, findings and activity) for one project or every project this API serves. Dry by default; write=true also saves digests/YYYY-MM-DD.md under the data directory and reports written_to.",
+        "requestBody": {
+          "$ref": "#/components/requestBodies/JSON"
+        },
+        "responses": {
+          "200": {
+            "description": "Digest report",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Digest"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "413": {
+            "$ref": "#/components/responses/Error"
+          },
+          "415": {
+            "$ref": "#/components/responses/Error"
+          },
+          "500": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/v1/projects/adopt": {
+      "post": {
+        "description": "Records this machine as the owner of registered checkout paths that exist locally and have no recorded owner. Dry by default; apply=true writes the path provenance. Refused while the API is limited to a project allowlist, because adoption spans every project.",
+        "requestBody": {
+          "$ref": "#/components/requestBodies/JSON"
+        },
+        "responses": {
+          "200": {
+            "description": "Adoption report",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdoptReport"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "413": {
+            "$ref": "#/components/responses/Error"
+          },
+          "415": {
+            "$ref": "#/components/responses/Error"
+          },
+          "500": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/v1/projects/{id}/paths": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/ID"
+        }
+      ],
+      "post": {
+        "description": "Registers one absolute checkout path on a project and stamps its machine owner. Re-adding a registered path is a no-op.",
+        "requestBody": {
+          "$ref": "#/components/requestBodies/JSON"
+        },
+        "responses": {
+          "200": {
+            "description": "Project after the write",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Project"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error"
+          },
+          "413": {
+            "$ref": "#/components/responses/Error"
+          },
+          "415": {
+            "$ref": "#/components/responses/Error"
+          },
+          "500": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/v1/journal": {
+      "get": {
+        "description": "Reads the newest activity journal lines. limit is bounded; has_more proves another line exists beyond the page.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/ProjectOptional"
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 200,
+              "default": 50
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Journal page",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JournalPage"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "500": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/v1/hooks": {
+      "get": {
+        "description": "Reports the installed, trusted and last-run state of the brain agent hooks for Claude Code, Codex and OpenCode.",
+        "responses": {
+          "200": {
+            "description": "One status per agent host",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/HookStatus"
+                  }
+                }
+              }
+            }
+          },
+          "500": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
     "/v1/settings": {
       "get": {
         "responses": {
@@ -3251,6 +3539,488 @@
             "additionalProperties": {
               "type": "string"
             }
+          }
+        }
+      },
+      "MergeRecord": {
+        "type": "object",
+        "required": [
+          "id"
+        ],
+        "properties": {
+          "kind": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          },
+          "state": {
+            "type": "string",
+            "enum": [
+              "live",
+              "tombstone"
+            ]
+          }
+        }
+      },
+      "MergeLink": {
+        "type": "object",
+        "properties": {
+          "source_kind": {
+            "type": "string"
+          },
+          "source_id": {
+            "type": "string"
+          },
+          "field": {
+            "type": "string"
+          },
+          "ref": {
+            "type": "string"
+          },
+          "old_id": {
+            "type": "string"
+          },
+          "new_id": {
+            "type": "string"
+          }
+        }
+      },
+      "MergePlan": {
+        "type": "object",
+        "required": [
+          "plan_id",
+          "project",
+          "survivor",
+          "duplicates",
+          "conflicts",
+          "fingerprint",
+          "changed"
+        ],
+        "properties": {
+          "plan_id": {
+            "type": "string",
+            "description": "Opaque token for /v1/merge/apply."
+          },
+          "project": {
+            "type": "string"
+          },
+          "kind": {
+            "type": "string"
+          },
+          "survivor": {
+            "$ref": "#/components/schemas/MergeRecord"
+          },
+          "duplicates": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/MergeRecord"
+            }
+          },
+          "already_merged": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/MergeRecord"
+            }
+          },
+          "links": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/MergeLink"
+            }
+          },
+          "merged_from": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "conflicts": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "fingerprint": {
+            "type": "string"
+          },
+          "changed": {
+            "type": "boolean"
+          }
+        }
+      },
+      "MergeFile": {
+        "type": "object",
+        "required": [
+          "path",
+          "change"
+        ],
+        "properties": {
+          "path": {
+            "type": "string"
+          },
+          "change": {
+            "type": "string",
+            "enum": [
+              "survivor",
+              "tombstone",
+              "link",
+              "relation",
+              "move"
+            ]
+          }
+        }
+      },
+      "MergeResult": {
+        "type": "object",
+        "required": [
+          "plan_id",
+          "project",
+          "applied",
+          "files"
+        ],
+        "properties": {
+          "plan_id": {
+            "type": "string",
+            "description": "The token for /v1/merge/rollback once a manifest exists."
+          },
+          "project": {
+            "type": "string"
+          },
+          "applied": {
+            "type": "boolean"
+          },
+          "manifest": {
+            "type": "string"
+          },
+          "files": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/MergeFile"
+            }
+          }
+        }
+      },
+      "MergeRollbackResult": {
+        "type": "object",
+        "required": [
+          "plan_id",
+          "manifest",
+          "files",
+          "already_rolled_back",
+          "reindexed"
+        ],
+        "properties": {
+          "plan_id": {
+            "type": "string"
+          },
+          "manifest": {
+            "type": "string"
+          },
+          "files": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/MergeFile"
+            }
+          },
+          "conflicts": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "already_rolled_back": {
+            "type": "boolean"
+          },
+          "reindexed": {
+            "type": "boolean"
+          }
+        }
+      },
+      "DigestDecision": {
+        "type": "object",
+        "required": [
+          "id",
+          "title"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          }
+        }
+      },
+      "DigestHandoff": {
+        "type": "object",
+        "required": [
+          "id",
+          "summary",
+          "created_at"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "summary": {
+            "type": "string"
+          },
+          "next_action": {
+            "type": "string"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "DigestProject": {
+        "type": "object",
+        "required": [
+          "project",
+          "changes",
+          "notes",
+          "decisions",
+          "attempts",
+          "handoffs",
+          "commits",
+          "proposed_decisions",
+          "open_questions",
+          "blocked"
+        ],
+        "properties": {
+          "project": {
+            "$ref": "#/components/schemas/Project"
+          },
+          "changes": {
+            "type": "integer"
+          },
+          "notes": {
+            "type": "integer"
+          },
+          "decisions": {
+            "type": "integer"
+          },
+          "attempts": {
+            "type": "integer"
+          },
+          "handoffs": {
+            "type": "integer"
+          },
+          "commits": {
+            "type": "integer"
+          },
+          "latest_handoff": {
+            "$ref": "#/components/schemas/DigestHandoff"
+          },
+          "proposed_decisions": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/DigestDecision"
+            }
+          },
+          "open_questions": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "blocked": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "findings": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "integer"
+            }
+          }
+        }
+      },
+      "Digest": {
+        "type": "object",
+        "required": [
+          "generated_at",
+          "since",
+          "dry_run",
+          "projects"
+        ],
+        "properties": {
+          "generated_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "since": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "dry_run": {
+            "type": "boolean"
+          },
+          "written_to": {
+            "type": "string",
+            "description": "Data-directory-relative file written when write=true."
+          },
+          "projects": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/DigestProject"
+            }
+          }
+        }
+      },
+      "PathOwnership": {
+        "type": "object",
+        "required": [
+          "path",
+          "state"
+        ],
+        "properties": {
+          "path": {
+            "type": "string"
+          },
+          "machine": {
+            "type": "string"
+          },
+          "state": {
+            "type": "string",
+            "enum": [
+              "owned",
+              "stamped",
+              "missing"
+            ]
+          }
+        }
+      },
+      "ProjectOwnership": {
+        "type": "object",
+        "required": [
+          "project_id",
+          "paths"
+        ],
+        "properties": {
+          "project_id": {
+            "type": "string"
+          },
+          "paths": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PathOwnership"
+            }
+          }
+        }
+      },
+      "AdoptReport": {
+        "type": "object",
+        "required": [
+          "machine",
+          "applied",
+          "stamped",
+          "owned",
+          "missing",
+          "projects"
+        ],
+        "properties": {
+          "machine": {
+            "type": "string"
+          },
+          "applied": {
+            "type": "boolean"
+          },
+          "stamped": {
+            "type": "integer"
+          },
+          "owned": {
+            "type": "integer"
+          },
+          "missing": {
+            "type": "integer"
+          },
+          "projects": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ProjectOwnership"
+            }
+          }
+        }
+      },
+      "JournalPage": {
+        "type": "object",
+        "required": [
+          "items",
+          "limit",
+          "has_more"
+        ],
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/JournalEntry"
+            }
+          },
+          "limit": {
+            "type": "integer"
+          },
+          "has_more": {
+            "type": "boolean"
+          }
+        }
+      },
+      "HookStatus": {
+        "type": "object",
+        "required": [
+          "host",
+          "path",
+          "installed",
+          "detail",
+          "trusted",
+          "last_run"
+        ],
+        "properties": {
+          "host": {
+            "type": "string"
+          },
+          "path": {
+            "type": "string"
+          },
+          "installed": {
+            "type": "boolean"
+          },
+          "detail": {
+            "type": "string"
+          },
+          "trusted": {
+            "type": "boolean",
+            "nullable": true
+          },
+          "trust": {
+            "type": "string"
+          },
+          "trust_hash": {
+            "type": "string"
+          },
+          "trust_drift": {
+            "type": "boolean"
+          },
+          "approve": {
+            "type": "string"
+          },
+          "last_run": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          },
+          "last_event": {
+            "type": "string"
+          },
+          "last_error": {
+            "type": "string"
           }
         }
       }

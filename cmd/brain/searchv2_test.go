@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -205,9 +206,24 @@ func TestSearchCLIRankingFlags(t *testing.T) {
 			t.Fatalf("--explain payload has no %s contribution: %v", signal, hit.Explain)
 		}
 	}
+	// Every contribution keeps its key and gains a share of the score; the
+	// shares add up to 1.
+	shareSum := 0.0
+	for _, signal := range []string{"bm25", "recency", "importance", "pin", "link"} {
+		share, ok := hit.Explain[signal+"_share"].(float64)
+		if !ok {
+			t.Fatalf("--explain payload has no %s_share: %v", signal, hit.Explain)
+		}
+		shareSum += share
+	}
+	if math.Abs(shareSum-1) > 1e-9 {
+		t.Fatalf("--explain shares = %.9f, want 1: %v", shareSum, hit.Explain)
+	}
 
+	// The default mode relaxes to OR when strict AND returns fewer than K hits,
+	// so a partial match is returned below the both-term record.
 	full := searchJSON(t, "alpha beta", "--config", cfgPath, "--full")
-	if len(full.Hits) != 1 || !strings.Contains(full.Hits[0].Body, "alpha beta marker") {
+	if len(full.Hits) != 2 || !strings.Contains(full.Hits[0].Body, "alpha beta marker") {
 		t.Fatalf("--full hits = %+v", full.Hits)
 	}
 
@@ -239,6 +255,10 @@ func TestSearchCLIOldFlagsStillWork(t *testing.T) {
 	}
 	if !strings.HasPrefix(stdout, "note/demo/") || !strings.Contains(stdout, "legacymarker") {
 		t.Fatalf("search stdout = %q", stdout)
+	}
+	code, stdout, stderr = runForTest(t, "search", "--config", cfgPath, "--project", "demo", "--explain", "legacymarker")
+	if code != 0 || !strings.Contains(stdout, "contribution") || !strings.Contains(stdout, "share") {
+		t.Fatalf("search --explain text: exit %d, stdout %q, stderr %q", code, stdout, stderr)
 	}
 	limited := searchJSON(t, "legacymarker", "--config", cfgPath, "--limit", "1", "--kind", "note", "--since", "7d")
 	if len(limited.Hits) != 1 {

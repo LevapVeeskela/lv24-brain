@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 	"unicode"
@@ -16,10 +17,36 @@ import (
 // DefaultSearchLimit is used when a search does not set a limit.
 const DefaultSearchLimit = 20
 
+// SearchFallbackThreshold is the number of strict hits below which the terms
+// are retried joined with OR. A strict AND pass that finds a handful of records
+// usually means the query was too specific for the corpus, not that the corpus
+// has nothing nearby; the relaxed page is merged with the strict one rather
+// than replacing it.
+const SearchFallbackThreshold = 5
+
 // PreviewRunes is the longest preview a search returns per hit. A model reads
 // the preview first and asks for the body only when it needs one, which is what
 // keeps a search answer cheap.
 const PreviewRunes = textbudget.PreviewRunes
+
+// withinSince reports whether a record belongs to a --since window. Every
+// surface (search, context, list) compares the same instant: the record's
+// content change time. Review, snooze, redaction and merge bookkeeping rewrite
+// the frontmatter and move the revision, but not the text, so a window must not
+// re-report the corpus after them. A record written before content_updated_at
+// existed falls back to its revision and creation time, the conservative
+// answer: reporting a record once too often is cheaper than hiding a change.
+func withinSince(contentUpdatedAt, updatedAt, createdAt, since time.Time) bool {
+	if since.IsZero() {
+		return true
+	}
+	for _, at := range []time.Time{contentUpdatedAt, updatedAt, createdAt} {
+		if !at.IsZero() {
+			return !at.Before(since)
+		}
+	}
+	return true
+}
 
 // Searcher runs a full-text search against a remote server. Server mode uses
 // it for brain search through GET /v1/search.
@@ -79,8 +106,8 @@ type SearchOptions struct {
 // to do to produce it.
 type SearchReport struct {
 	Hits []ports.Hit
-	// Relaxed reports that the strict pass found nothing and the terms were
-	// retried joined with OR.
+	// Relaxed reports that the strict pass found fewer than
+	// SearchFallbackThreshold hits and the terms were retried joined with OR.
 	Relaxed bool
 	// Notice explains a withheld raw-zone result, empty when nothing was
 	// withheld.
@@ -190,7 +217,9 @@ func (a *App) search(ctx context.Context, opts SearchOptions, rawKinds []string,
 
 	// The strict pass goes first; the relaxed pass repeats the same terms
 	// joined with OR. A query without an explicit mode keeps both passes, and
-	// reports the fallback, so no caller loses results it used to get.
+	// reports the fallback, so no caller loses results it used to get. The
+	// strict pass is the precision pass, so it is always tried first even for a
+	// broad query: strict hits outrank the records only the relaxed pass found.
 	relaxed := false
 	if local {
 		query.Now = a.now()
@@ -209,13 +238,17 @@ func (a *App) search(ctx context.Context, opts SearchOptions, rawKinds []string,
 		return SearchReport{}, err
 	}
 	report := SearchReport{}
-	if len(hits) == 0 && relaxed && searchTermCount(text) > 1 {
-		query.MatchMode = ports.MatchModeAny
-		hits, err = run(ctx, query)
-		if err != nil {
-			return SearchReport{}, err
+	if relaxed && searchTermCount(text) > 1 && len(hits) < SearchFallbackThreshold {
+		relaxedQuery := query
+		relaxedQuery.MatchMode = ports.MatchModeAny
+		relaxedHits, runErr := run(ctx, relaxedQuery)
+		if runErr != nil {
+			return SearchReport{}, runErr
 		}
-		report.Relaxed = len(hits) > 0
+		if merged, used := mergeRelaxedHits(hits, relaxedHits, limit); used {
+			hits = merged
+			report.Relaxed = true
+		}
 	}
 	// The preview stays a preview: --full adds the body next to it instead of
 	// turning the snippet into one.
@@ -282,6 +315,56 @@ func localOnlySearchOption(opts SearchOptions) string {
 	default:
 		return ""
 	}
+}
+
+// mergeRelaxedHits merges the strict page with the OR page: strict hits always
+// hold the top of the page, OR-only hits follow, and each group is ordered by
+// score (then id) inside itself. The partition is what makes the merge safe:
+// the two passes normalize relevance over different match sets, so a raw score
+// from the OR page is not comparable with a strict score and must never
+// outrank a record that matched every term.
+//
+// Records are deduped by project and id; a record in both pages keeps its
+// strict position and score. used reports whether the relaxed page added
+// anything; an empty OR page leaves the strict page untouched.
+func mergeRelaxedHits(strict, relaxed []ports.Hit, limit int) ([]ports.Hit, bool) {
+	if len(relaxed) == 0 {
+		return strict, false
+	}
+	key := func(hit ports.Hit) string { return hit.ProjectID + "\x00" + hit.ID }
+	seen := make(map[string]struct{}, len(relaxed)+len(strict))
+	merged := make([]ports.Hit, 0, len(relaxed)+len(strict))
+	for _, hit := range strict {
+		id := key(hit)
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		merged = append(merged, hit)
+	}
+	strictCount := len(merged)
+	for _, hit := range relaxed {
+		id := key(hit)
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		merged = append(merged, hit)
+	}
+	byScore := func(hits []ports.Hit) {
+		sort.SliceStable(hits, func(left, right int) bool {
+			if hits[left].Score != hits[right].Score {
+				return hits[left].Score > hits[right].Score
+			}
+			return hits[left].ID < hits[right].ID
+		})
+	}
+	byScore(merged[:strictCount])
+	byScore(merged[strictCount:])
+	if len(merged) > limit {
+		merged = merged[:limit]
+	}
+	return merged, true
 }
 
 // dropRawKinds removes raw-zone kinds from a response that did not request

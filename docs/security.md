@@ -229,7 +229,12 @@ external text cannot become "truth" in an agent's context on its own.
   `brain_open`. The output adds only `quarantined: N (id, …)`; bodies never
   appear. Pass `--include-unreviewed` (CLI) or `include_unreviewed: true` (MCP
   context/open) to inspect them; the included records are labelled
-  `quarantined`.
+  `quarantined`. Server mode applies the same default: `GET /v1/search` drops
+  quarantined records before ranking, and the project listing routes (`notes`,
+  `decisions`, `attempts`, `handoffs`) drop them unless `include_unreviewed=true`.
+  Reading one record by id is an explicit request and still returns it. The
+  server search has no opt-in yet; quarantined ids stay reachable by id and
+  through the review route.
 - A quarantined state is reported as `state_quarantined: true` and its text is
   replaced with a minimal placeholder in trusted context; pass
   `--include-unreviewed` to view it. Clear it with `brain state review`
@@ -248,10 +253,11 @@ external text cannot become "truth" in an agent's context on its own.
 
 Known gaps in 0.15:
 
-- `brain state review` clears a quarantined state; `brain record review` (and
-  the temporary `brain_review_record` tool's
-  backend) is local/git only. Server mode has no provenance-edit route yet; a
-  server review endpoint is a later package.
+- `brain state review` clears a quarantined state in local/git mode only:
+  `project_state` has no provenance columns yet, so a server state write stores
+  no provenance and is read back as human/reviewed. Server record review is the
+  route above; `--review-after`/`--clear-review-after` stay local/git because
+  the HTTP client does not implement `ports.RecordScheduler`.
 
 ## Raw context excerpts (Phase 4.2)
 
@@ -573,6 +579,14 @@ issue with exploit details. Do not include secrets or personal data in reports.
 
 ## Server record provenance review
 
-Server mode exposes POST /v1/projects/{project}/records/{kind}/{id}/review (and /v1/records/{kind}/{id}/review) to update a record's 
-eviewed and 	rust fields without rewriting its body. Access follows the existing owner/member/admin rules, the write bumps the server revision and records an audit event, and optimistic concurrency uses expected_revision. Quarantined (unreviewed) records stay out of trusted context and server search until reviewed.
+Server mode exposes `POST /v1/projects/{project}/records/{kind}/{id}/review`
+(and the project-less `POST /v1/records/{kind}/{id}/review`) to update a
+record's `origin`, `reviewed` and `trust` without rewriting its body. The caller
+needs write access to the record's project, and a project named in the path must
+match the record or the answer is `404`. The body carries the `revision` the
+caller read plus optional `trust` and `origin`; `reviewed: false` is refused, a
+stale revision is `409`, and a record without a revision is `409` instead of
+last-write-wins. The write bumps the server revision and records an audit event.
+Quarantined records stay out of server search and the default project listings
+until reviewed, and remain reachable by id.
 

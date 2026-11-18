@@ -2,9 +2,44 @@ package httpapi
 
 import (
 	"net/http"
+	"strconv"
+	"strings"
 
 	"github.com/levapveeskela/lv24-brain/internal/domain"
 )
+
+// includeUnreviewedRequested reports whether a list request explicitly asks for
+// quarantined records (unreviewed agent/connector/import writes and unknown
+// origins). They stay out of the default listing like they stay out of context.
+func includeUnreviewedRequested(r *http.Request) (bool, error) {
+	raw := strings.TrimSpace(queryString(r, "include_unreviewed"))
+	if raw == "" {
+		return false, nil
+	}
+	include, err := strconv.ParseBool(raw)
+	if err != nil {
+		return false, domain.NewValidationError("include_unreviewed", "must be true or false")
+	}
+	return include, nil
+}
+
+// filterQuarantined drops records that must stay out of trusted results unless
+// the caller explicitly opted in. It keys off domain.Provenance.Quarantined, so
+// a pre-provenance record (empty origin, reviewed=false) is kept: an empty
+// origin means a human write, not a quarantined one.
+func filterQuarantined[T any](items []T, include bool, provenance func(T) domain.Provenance) []T {
+	if include {
+		return items
+	}
+	kept := make([]T, 0, len(items))
+	for _, item := range items {
+		if provenance(item).Quarantined() {
+			continue
+		}
+		kept = append(kept, item)
+	}
+	return kept
+}
 
 type noteRequest struct {
 	Title     string   `json:"title"`
@@ -18,6 +53,11 @@ func (a *API) listNotes(w http.ResponseWriter, r *http.Request) {
 	if _, ok := a.requireProject(w, r, r.PathValue("id"), levelRead); !ok {
 		return
 	}
+	include, err := includeUnreviewedRequested(r)
+	if err != nil {
+		a.writeError(w, r, err)
+		return
+	}
 	limit, offset := limitOffset(r)
 	items, err := a.store.ListNotes(r.Context(), ListOptions{
 		ProjectID: r.PathValue("id"),
@@ -28,6 +68,9 @@ func (a *API) listNotes(w http.ResponseWriter, r *http.Request) {
 		a.writeError(w, r, err)
 		return
 	}
+	items = filterQuarantined(items, include, func(record NoteRecord) domain.Provenance {
+		return record.Note.Provenance
+	})
 	writeJSON(w, http.StatusOK, map[string]any{"items": items})
 }
 
@@ -42,11 +85,12 @@ func (a *API) createNote(w http.ResponseWriter, r *http.Request) {
 	}
 	a.redactWrite(r, "note", r.PathValue("id"), redactTexts(&body.Title, &body.Body)+redactList(body.Tags))
 	record, revision, err := a.store.CreateNote(r.Context(), domain.Note{
-		ProjectID: r.PathValue("id"),
-		Title:     body.Title,
-		Body:      body.Body,
-		Tags:      body.Tags,
-		Permalink: body.Permalink,
+		ProjectID:  r.PathValue("id"),
+		Title:      body.Title,
+		Body:       body.Body,
+		Tags:       body.Tags,
+		Permalink:  body.Permalink,
+		Provenance: domain.Provenance{}.Normalized(),
 	})
 	if err != nil {
 		a.writeError(w, r, err)
@@ -132,6 +176,11 @@ func (a *API) listDecisions(w http.ResponseWriter, r *http.Request) {
 	if _, ok := a.requireProject(w, r, r.PathValue("id"), levelRead); !ok {
 		return
 	}
+	include, err := includeUnreviewedRequested(r)
+	if err != nil {
+		a.writeError(w, r, err)
+		return
+	}
 	limit, offset := limitOffset(r)
 	items, err := a.store.ListDecisions(r.Context(), ListOptions{
 		ProjectID: r.PathValue("id"),
@@ -142,6 +191,9 @@ func (a *API) listDecisions(w http.ResponseWriter, r *http.Request) {
 		a.writeError(w, r, err)
 		return
 	}
+	items = filterQuarantined(items, include, func(record DecisionRecord) domain.Provenance {
+		return record.Decision.Provenance
+	})
 	writeJSON(w, http.StatusOK, map[string]any{"items": items})
 }
 
@@ -166,6 +218,7 @@ func (a *API) createDecision(w http.ResponseWriter, r *http.Request) {
 		Consequences: body.Consequences,
 		Evidence:     body.Evidence,
 		Permalink:    body.Permalink,
+		Provenance:   domain.Provenance{}.Normalized(),
 	})
 	if err != nil {
 		a.writeError(w, r, err)
@@ -254,6 +307,11 @@ func (a *API) listAttempts(w http.ResponseWriter, r *http.Request) {
 	if _, ok := a.requireProject(w, r, r.PathValue("id"), levelRead); !ok {
 		return
 	}
+	include, err := includeUnreviewedRequested(r)
+	if err != nil {
+		a.writeError(w, r, err)
+		return
+	}
 	limit, offset := limitOffset(r)
 	items, err := a.store.ListAttempts(r.Context(), ListOptions{
 		ProjectID: r.PathValue("id"),
@@ -264,6 +322,9 @@ func (a *API) listAttempts(w http.ResponseWriter, r *http.Request) {
 		a.writeError(w, r, err)
 		return
 	}
+	items = filterQuarantined(items, include, func(record AttemptRecord) domain.Provenance {
+		return record.Attempt.Provenance
+	})
 	writeJSON(w, http.StatusOK, map[string]any{"items": items})
 }
 
@@ -285,6 +346,7 @@ func (a *API) createAttempt(w http.ResponseWriter, r *http.Request) {
 		Result:     body.Result,
 		Reason:     body.Reason,
 		Permalink:  body.Permalink,
+		Provenance: domain.Provenance{}.Normalized(),
 	})
 	if err != nil {
 		a.writeError(w, r, err)
@@ -368,6 +430,11 @@ func (a *API) listHandoffs(w http.ResponseWriter, r *http.Request) {
 	if _, ok := a.requireProject(w, r, r.PathValue("id"), levelRead); !ok {
 		return
 	}
+	include, err := includeUnreviewedRequested(r)
+	if err != nil {
+		a.writeError(w, r, err)
+		return
+	}
 	limit, offset := limitOffset(r)
 	items, err := a.store.ListHandoffs(r.Context(), ListOptions{
 		ProjectID: r.PathValue("id"),
@@ -378,6 +445,9 @@ func (a *API) listHandoffs(w http.ResponseWriter, r *http.Request) {
 		a.writeError(w, r, err)
 		return
 	}
+	items = filterQuarantined(items, include, func(record HandoffRecord) domain.Provenance {
+		return record.Handoff.Provenance
+	})
 	writeJSON(w, http.StatusOK, map[string]any{"items": items})
 }
 
@@ -398,6 +468,7 @@ func (a *API) createHandoff(w http.ResponseWriter, r *http.Request) {
 		GitContext: body.GitContext,
 		NextAction: body.NextAction,
 		Permalink:  body.Permalink,
+		Provenance: domain.Provenance{}.Normalized(),
 	})
 	if err != nil {
 		a.writeError(w, r, err)

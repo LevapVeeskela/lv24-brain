@@ -525,6 +525,7 @@ func documentArgs(doc ports.Document) []any {
 		doc.Title,
 		doc.Body,
 		doc.UpdatedAt.UnixNano(),
+		contentUpdatedAtNanos(doc),
 		validFromNanos(doc),
 		nullableNanos(doc.ValidTo),
 		nullableString(doc.SupersededBy),
@@ -536,6 +537,11 @@ func documentArgs(doc ports.Document) []any {
 		doc.TopicKey,
 		normalizedOccurrences(doc.Occurrences),
 		boolToInt(doc.Pinned),
+		// Origin and trust are stored verbatim: the projection is not the place
+		// to normalize provenance, and an empty value must stay empty so the
+		// ranking can tell "not projected" from a known trust level.
+		doc.Origin,
+		doc.Trust,
 	}
 }
 
@@ -559,6 +565,16 @@ func relationArgs(doc ports.Document, relation ports.RelationLink) []any {
 func validFromNanos(doc ports.Document) int64 {
 	if !doc.ValidFrom.IsZero() {
 		return doc.ValidFrom.UnixNano()
+	}
+	return doc.UpdatedAt.UnixNano()
+}
+
+// contentUpdatedAtNanos is the stored content_updated_at. A document without
+// one changed its text for the last time when it was written, which is the
+// conservative answer for a since window: the record is not hidden.
+func contentUpdatedAtNanos(doc ports.Document) int64 {
+	if !doc.ContentUpdatedAt.IsZero() {
+		return doc.ContentUpdatedAt.UnixNano()
 	}
 	return doc.UpdatedAt.UnixNano()
 }
@@ -797,7 +813,11 @@ func buildSearchStatement(query ports.Query, match string) (string, []any) {
 		args = append(args, topicKey)
 	}
 	if !query.Since.IsZero() {
-		builder.WriteString(" AND d.updated_at >= ?")
+		// A record's text change time, not its revision: review, snooze and
+		// validity writes move updated_at but leave the text alone. Records
+		// indexed before the column existed have 0 there, so fall back to
+		// their updated_at.
+		builder.WriteString(" AND COALESCE(NULLIF(d.content_updated_at, 0), d.updated_at) >= ?")
 		args = append(args, query.Since.UnixNano())
 	}
 	// The temporal filter mirrors domain.ValidityFilter: an as-of instant

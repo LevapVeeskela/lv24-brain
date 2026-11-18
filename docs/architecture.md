@@ -453,9 +453,12 @@ before 0.16 behaves.
 - **Review and doctor.** `brain review` adds `supersession-gap` (a newer
   current record that reads like a replacement of an older current record but
   is not linked) and `stale-superseded` (a record whose `valid_to` passed and
-  names no replacement). `brain doctor` reports invalid windows, a
-  `superseded_by` without `valid_to`, and links to missing records (code
-  `invalid-validity`). All of them are report-only.
+  names no replacement). The gap check compares significant title words after
+  dropping release boilerplate, requires 90 % coverage of the shorter title and
+  refuses two titles that name different dotted versions, so release notes are a
+  series and a shared template is not a lineage. `brain doctor` reports invalid
+  windows, a `superseded_by` without `valid_to`, and links to missing records
+  (code `invalid-validity`). All of them are report-only.
 
 ## Provenance and quarantine (0.15)
 
@@ -484,12 +487,16 @@ before 0.15.
 - **Read paths.** `Bootstrap`, `Context` and `Catchup` drop quarantined records
   (latest handoff and catchup baseline included) and report only ids via
   `quarantined: N (…)` / `Quarantined`. `--include-unreviewed` and MCP
-  `include_unreviewed` opt in and label the records. `Findings` adds the
-  `quarantined` finding; `Doctor` reports the queue.
+  `include_unreviewed` opt in and label the records. Server search applies the
+  same rule in SQL before ranking and `LIMIT`, and the server project listings
+  drop quarantined records unless `include_unreviewed=true`; reading one record
+  by id is an explicit request. `Findings` adds the `quarantined` finding;
+  `Doctor` reports the queue.
 - **Review.** `ports.RecordReviewer` lets `fsstore` mark one record reviewed
   without touching its body or timestamps. `brain record review <id>|--all`
   and the temporary MCP tool `brain_review_record` use it; the journal records
-  a `review` event.
+  a `review` event. In server mode the same interface is the HTTP client over
+  `POST .../records/{kind}/{id}/review` (see below).
 
 ## Context and raw excerpts (Phase 4.2)
 
@@ -601,7 +608,9 @@ Persistence:
   (`connector_items`, `connector_checkpoints`, run `connection_id`/`stats`)
   used by the native item-level ingestion.
 - Migration `0010_record_provenance.sql` adds record `origin`, `reviewed` and
-  `trust` columns plus the server record review route's optimistic checks.
+  `trust` columns; the server review route rewrites only those columns and
+  compare-and-swaps the record revision. `project_state` has no provenance
+  columns yet, so server state writes store no provenance.
 - The authenticated login is attached to the request context through
   `ports.WithActor`, which both the HTTP layer and the Postgres adapter use, so
   every revision and audit row records who made the change.
@@ -836,7 +845,7 @@ left untouched and the command exits non-zero.
 | Raw-zone deletes are not inferred | sources report tombstones only; `Deletes` is false without authoritative tombstones |
 | Curation is local and rule-based | `brain digest --source` and `brain promote` run in local/git mode only, read stored items, and write machine-local git-ignored proposals; server mode has no proposal surface, the local API exposes proposals read/promote/dismiss to the desktop (never automatically), and there is no scheduled digest or proposal merge/trash |
 | Raw context excerpts are local/git only | `brain context --raw` and every raw search path read `context-allow.json`; excerpts exist only in local/git mode, and server search never returns raw items to viewers or members |
-| `record review` is local/git only | server mode has no provenance-edit route yet; quarantined server records can only be changed through the ordinary update routes |
+| `record review` scheduling is local/git only | `brain record review` and `--all` work against a server through `POST .../records/{kind}/{id}/review`; `--review-after`/`--clear-review-after` need `ports.RecordScheduler`, which the HTTP client does not implement, and server `project_state` stores no provenance |
 | Relations are store-and-index only | typed relations and the judged graph are persisted and projected, but no read path uses them for neighbour navigation yet; `brain timeline` and the context `linked` layer still follow `[[id]]` only |
 | Merge is CLI-only | `brain record merge` plans, applies and rolls back in local/git mode; no MCP tool and no server route apply, trash or hard-delete records |
 | MCP surface is the 15-tool `lv24` profile | `--profile=lv24` is the only profile; retired 0.16 tool names return `NOT_FOUND` with `try_instead`; no `engram`, `codegraph` or `graphify` alias profiles and no legacy aliases exist yet |
@@ -852,6 +861,23 @@ automatic mail body storage, and Rust components (interfaces are reserved).
 
 ## Server record provenance review
 
-Server-mode records carry origin, 
-eviewed, and 	rust provenance. POST .../records/{kind}/{id}/review updates only those fields, bumps the revision, and audits the change; httpclient implements RecordReviewer so rain record review works against a server.
+Server-mode notes, decisions, attempts and handoffs carry `origin`, `reviewed`
+and `trust`. `POST /v1/projects/{project}/records/{kind}/{id}/review` (and the
+project-less `POST /v1/records/{kind}/{id}/review`) rewrites only those fields,
+bumps the revision and audits the change.
+
+The request carries the `revision` the caller read and optional `trust` and
+`origin`; `reviewed: false` is refused, a stale revision is `409`, a missing
+record is `404`, and a record whose origin is not a known value is `400` until
+the caller passes a valid `origin`, because review cannot repair a malformed
+origin. The write is always a compare-and-swap against the revision the request
+read; when the record has no revision the route answers `409` instead of
+falling back to last-write-wins. The HTTP client implements
+`ports.RecordReviewer`, so `brain record review` works against a server.
+
+Server API-created records are stamped `human/reviewed/verified` by the create
+handlers, and server search plus the project listings drop records whose
+provenance is explicitly quarantined. `project_state` has no provenance
+columns yet: a server state write stores no provenance, and `brain state
+review` remains local/git.
 

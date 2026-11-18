@@ -1,0 +1,186 @@
+{
+  "version": 1,
+  "source": "live lv24-brain-data corpus snapshot",
+  "queries": [
+    {
+      "project": "lv24-brain",
+      "query": "How are releases signed and where do the verification keys live?",
+      "expected_id": "decision-lv24-brain-20261106-180908",
+      "note": "One release-signing decision; later notes only report releases that used it."
+    },
+    {
+      "project": "lv24-brain",
+      "query": "Why use one writer per file and git merge drivers instead of a CRDT?",
+      "expected_id": "decision-lv24-brain-20261114-210110",
+      "note": "The multi-writer model decision; handoffs mention it but do not define it."
+    },
+    {
+      "project": "lv24-brain",
+      "query": "Why does the desktop reload the webview after a missing Origin error?",
+      "expected_id": "decision-2026-11-17-lv24-brain-desktop-recovers-missing-origin-tauri-ipc-with-on-01m7mkzyj69t5kte1brzz7new8",
+      "note": "The recovery decision; the linked note only files the upstream issue."
+    },
+    {
+      "project": "lv24-brain",
+      "query": "When may an agent read raw connector text instead of curated records?",
+      "expected_id": "decision-lv24-brain-20261110-100028",
+      "note": "Only record that states the raw-context access policy."
+    },
+    {
+      "project": "lv24-brain",
+      "query": "Should the three machines share a server or write to git asynchronously?",
+      "expected_id": "decision-2026-11-17-lv24-brain-support-three-machines-as-asynchronous-git-writer-01m7mt34p7k326vzmp3sehj3th",
+      "note": "Architecture decision; handoffs describe its rollout, not the choice."
+    },
+    {
+      "project": "lv24-brain",
+      "query": "How was the legacy mail and issue data untracked without rewriting history?",
+      "expected_id": "decision-2026-11-17-lv24-brain-untrack-legacy-pii-dump-zones-without-rewriting-h-01m7mkzycwwmmzd0z2v1wr00y3",
+      "note": "The untracking decision; release notes mention the shipped counts."
+    },
+    {
+      "project": "lv24-brain",
+      "query": "Which model implements and which model audits on OpenCode Go?",
+      "expected_id": "decision-lv24-brain-20261107-223812",
+      "note": "The only record that assigns the two model roles."
+    },
+    {
+      "project": "lv24-brain",
+      "query": "Can an OIDC login link an existing account by email or become admin?",
+      "expected_id": "decision-lv24-brain-20261106-175940",
+      "note": "The P1 security decision; no other record covers the linking rule."
+    },
+    {
+      "project": "lv24-brain",
+      "query": "Can a member edit or delete a record written by someone else?",
+      "expected_id": "decision-lv24-brain-20261106-191116",
+      "note": "The ownership decision; handoffs summarize it but the decision is the source."
+    },
+    {
+      "project": "lv24-brain",
+      "query": "Why are connector dumps append-only and how does the index recover?",
+      "expected_id": "decision-lv24-brain-20261107-165950",
+      "note": "The only record that defines dump batching and index repair."
+    },
+    {
+      "project": "lv24-brain",
+      "query": "How does Windows self-update replace a running binary?",
+      "expected_id": "attempt-lv24-brain-20261107-162446",
+      "note": "The abandoned update approach; release signing does not cover it."
+    },
+    {
+      "project": "lv24-brain",
+      "query": "Why did journal gap detection miss records at first?",
+      "expected_id": "attempt-lv24-brain-20261107-182802",
+      "note": "The journal read-limit failure; no decision repeats it."
+    },
+    {
+      "project": "lv24-brain",
+      "query": "Why did the packaged app fail to find its config and how was it fixed?",
+      "expected_id": "attempt-lv24-brain-20261107-202224",
+      "note": "The MSIX AppData virtualization failure; v0.3.4 fixed it elsewhere."
+    },
+    {
+      "project": "lv24-brain",
+      "query": "What did installing CLI 0.19.0 and Desktop 1.3.0 on macOS involve?",
+      "expected_id": "note-lv24-brain-20261116-183050",
+      "note": "The only macOS install record for that version pair."
+    },
+    {
+      "project": "lv24-brain",
+      "query": "Which machines were offline for the 0.25.0 release and when will they update?",
+      "expected_id": "handoff-2026-11-17-231326-01m7nwjrjfgg010hhp7sxpyffh",
+      "note": "Handoff-only detail about two machines trailing the 0.25.0 release."
+    },
+    {
+      "project": "lv24-wifi-explorer",
+      "query": "Why must the netsh parser read values instead of English labels?",
+      "expected_id": "decision-lv24-wifi-explorer-20261110-093435",
+      "note": "The parser decision; the same-day note is an audit, not the rule."
+    },
+    {
+      "project": "lv24-wifi-explorer",
+      "query": "Which signing identity do distributable macOS builds need?",
+      "expected_id": "decision-lv24-wifi-explorer-20261108-223355",
+      "note": "The signing identity decision; distribution notes only report builds."
+    },
+    {
+      "project": "lv24-wifi-explorer",
+      "query": "What DMG does public distribution ship and what stays private?",
+      "expected_id": "decision-lv24-wifi-explorer-20261108-234632",
+      "note": "The public/private build split decision."
+    },
+    {
+      "project": "lv24-wifi-explorer",
+      "query": "What shipped in the v1.0.2 desktop release for Windows?",
+      "expected_id": "note-lv24-wifi-explorer-20261110-104936",
+      "note": "The release note for that version; the handoff only links it."
+    },
+    {
+      "project": "lv24-vigil",
+      "query": "How do you publish vigil-bin to the AUR?",
+      "expected_id": "attempt-2026-11-16-publish-vigil-bin-to-aur-01m7j2gjfy5xydr8py7p3jznaj",
+      "note": "The AUR publishing attempt; no other project record covers AUR."
+    },
+    {
+      "project": "lv24-seo-optimizer",
+      "query": "Why is report diff the eleventh MCP tool?",
+      "expected_id": "decision-lv24-seo-optimizer-20261111-055326",
+      "note": "The tool-registration decision; handoffs repeat the release."
+    },
+    {
+      "project": "lv24-seo-optimizer",
+      "query": "What happens when a finished event or an unknown entity is requested?",
+      "expected_id": "decision-2026-11-17-finished-lv24-events-return-410-unknown-or-hidden-entities-s-01m7n89zw8ntncwhemsj93z8y0",
+      "note": "The only record that defines the two HTTP status rules."
+    },
+    {
+      "project": "opencode-consilium",
+      "query": "Why does the plugin entry use Plugin.define without importing the runtime?",
+      "expected_id": "decision-opencode-consilium-20261108-040955",
+      "note": "The plugin entry-shape decision; release notes mention the release."
+    },
+    {
+      "project": "opencode-consilium",
+      "query": "How does the plugin support both OpenCode V1 and V2?",
+      "expected_id": "decision-opencode-consilium-20261108-022721",
+      "note": "The compatibility design decision; notes announce the shipped version."
+    },
+    {
+      "project": "lv24-harvest",
+      "query": "When does guest progress merge into the main save?",
+      "expected_id": "decision-2026-10-05-a7e39552",
+      "note": "The merge-once rule; other ADR records cover different mechanics."
+    },
+    {
+      "project": "ims",
+      "query": "Which MUI X license does IMS use?",
+      "expected_id": "decision-2026-08-31-06d5274f",
+      "note": "The only record that names the MUI X license."
+    },
+    {
+      "project": "ims",
+      "query": "Is package-lock.json tracked and does CI use npm ci?",
+      "expected_id": "decision-2026-09-09-194f5fd0",
+      "note": "The only record that fixes the lockfile policy."
+    },
+    {
+      "project": "lv24-identity",
+      "query": "What did the OAuth PKCE and audience work ship?",
+      "expected_id": "decision-2026-07-09-30467c57",
+      "note": "The only record that scopes the PKCE and audience work."
+    },
+    {
+      "project": "lv24-code",
+      "query": "Why was the tool inventory fast-path bypass removed?",
+      "expected_id": "decision-2026-07-07-5629e340",
+      "note": "The only record about the removed bypass."
+    },
+    {
+      "project": "lv24",
+      "query": "Are battlefield order-book walls enabled in every quality mode?",
+      "expected_id": "decision-lv24-20261114-172057",
+      "note": "The only record that makes order-book walls opt-in."
+    }
+  ]
+}

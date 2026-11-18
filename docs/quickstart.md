@@ -1,4 +1,4 @@
-# Quickstart
+﻿# Quickstart
 
 Three ways to run LV24 Brain. Pick one, finish the smoke checks, then read the
 mode-specific document. The documentation site is https://brain.lv24.by.
@@ -15,6 +15,7 @@ brain project set myapp --path ~/src/myapp
 brain note --project myapp --title "First note" --body "It works"
 cd ~/src/myapp && brain open                     # the project is found from the directory
 brain agents sync --hooks                        # Claude Code, Codex and OpenCode start with this context
+brain hooks status --agents                      # installed, trusted and last run per agent host
 ```
 
 Approve the new brain hooks in Codex once (Codex keeps hooks disabled until
@@ -31,8 +32,11 @@ brain context "retry budget" --raw
 
 It prints the project state, review findings, the latest handoff, the records
 that best match the task (decisions rank above attempts and notes, newer above
-older) and failed attempts to avoid repeating, bounded by `--budget` (default
-4000 runes). Agents call the same thing through the MCP tool `brain_context`.
+older, an explicit pin above both) and failed attempts to avoid repeating,
+bounded by `--budget` (tokens; default 6000, maximum 32000). A layer that left
+records out ends with `- вЂ¦ N more dropped`, so a short answer is never mistaken
+for a complete one. Agents call the same thing through the MCP tool
+`brain_context`.
 
 `--raw` is off by default. It appends at most five granted raw excerpts when the
 curated context is thin and only in local/git mode; without a matching grant in
@@ -190,14 +194,21 @@ into the local index. `brain index --rebuild` first deletes `index/brain.db`
 
 Search matches common English and Russian word forms (plural, case and verb
 endings) as a prefix, and exact forms rank first; `--since` keeps documents
-updated within a window:
+whose **content** changed within a window (a review or a snooze rewrites the
+file without making the record recent):
 
 ```sh
 brain search decisions                 # also finds "decision"
-brain search "решений"                 # also finds "решение", "решения"
-brain search deploy --since 2026-11-01 # only records updated since 1 November
+brain search "СЂРµС€РµРЅРёР№"                 # also finds "СЂРµС€РµРЅРёРµ", "СЂРµС€РµРЅРёСЏ"
+brain search deploy --since 2026-11-01 # only records whose text changed since 1 November
 brain search deploy --since 7d --kind decision
 ```
+
+Ranking v2 normalizes lexical relevance per query and weights the signals
+`bm25` 0.55, `recency` 0.20, `pin` 0.15, `importance` 0.05 and `trust` 0.05; a
+strict all-terms pass that finds fewer than five hits is merged with an
+any-term pass, and the strict hits always stay on top. `--explain` prints the
+contribution of each signal, and the contributions add up to the score.
 
 `brain search` prints one block per hit:
 
@@ -244,6 +255,7 @@ are excluded by default; opt in with `brain search <query> --kind item`.
 printf '%s\n' '<github-token>' | ./bin/brain connection secret set gh-main token \
   --config ~/brain/brain.yaml
 ./bin/brain connection list --config ~/brain/brain.yaml
+./bin/brain connection test gh-main --config ~/brain/brain.yaml
 ./bin/brain connection run gh-main --limit 25 --config ~/brain/brain.yaml
 ./bin/brain connection migrate --copy-legacy-secrets --config ~/brain/brain.yaml
 ```
@@ -275,6 +287,52 @@ checkpoints local. `brain doctor` reports both `raw-zone` (explicitly local-only
 but tracked) and `raw-zone-policy` (tracked but no policy chosen). Sources do not
 infer deletes from absence (`Deletes` is false without authoritative tombstones).
 
+`brain connection test <id> [--json]` runs the provider's non-mutating check and
+prints a redacted cause when it fails. `brain connection list` shows the newest
+run of each connection (time, status, redacted cause), so a dead ingestion is
+visible without reading logs.
+
+### Connector identity migration (0.26)
+
+The account label and connector-declared identity settings (the IMAP
+`username`) are personal data. 0.26 stores them in the secret store
+(`conn/<id>/account`, `conn/<id>/username`) and keeps only a marker in
+`connectors/connections.json`. Reading the value is lazy: a locked keychain
+never breaks `connection list`. Update every machine to 0.26 **before**
+applying the migration, because a pre-0.26 binary reads the marker as a literal
+account string. Run the dry run first, then apply:
+
+```sh
+./bin/brain connection migrate-identity --config ~/brain/brain.yaml --check
+./bin/brain connection migrate-identity --config ~/brain/brain.yaml --apply
+./bin/brain doctor --config ~/brain/brain.yaml
+```
+
+Statuses are `would-move`, `moved`, `already-migrated`, `missing-secret`,
+`unreadable-secret` and `mismatched-secret`; a marker whose secret is gone is
+repaired with `brain connection secret set <id> account` (the value must match
+the stored fingerprint). A raw legacy value keeps working forever, so an
+unmigrated connection is not broken вЂ” only its identity stays in git.
+
+### Scrubbing e-mail addresses from raw zones
+
+`brain doctor` warns about tracked raw-zone files that hold e-mail addresses or
+mailbox user names (`tracked-pii`). GitHub and GitLab now hash addresses at
+ingest like mail does, but data written before that still carries them. The
+scrub script rewrites the addresses in place to the same
+`[email:<12 hex>]` placeholder, recomputes the item content hash and is
+idempotent:
+
+```sh
+python scripts/scrub-raw-pii.py <data-dir>            # dry run: counts per zone
+python scripts/scrub-raw-pii.py <data-dir> --apply
+go run scripts/scrub-raw-pii-hash-check.go <data-dir>
+```
+
+It covers `connectors/<id>/items`, `connectors/runs` and the legacy `mail/`,
+`github/` and `gitlab/` dumps; `--include items,runs,dumps` narrows the set.
+Only `--apply` writes, and only matched bytes are replaced.
+
 The legacy `brain connector run --name ...` snapshot path uses
 `--since <RFC3339>` to limit items by update time and `--limit <n>` to cap each
 collection. The command prints source, status, counts, and a sanitized error.
@@ -293,7 +351,7 @@ out of project-scoped search. Viewers and members never receive raw items from
 server search; `kind=item` is admin-only there.
 `GET /v1/connectors/runs` lists records, `GET /v1/connectors/runs/{id}` returns
 one, and `GET /v1/connectors/runs/{id}/markdown` exports it as Markdown.
-`BRAIN_CONNECTOR_TIMEOUT` (default `5m`, clamped to `10s`–`1h`) bounds a server run.
+`BRAIN_CONNECTOR_TIMEOUT` (default `5m`, clamped to `10s`вЂ“`1h`) bounds a server run.
 The CLI allows `1h10s` for this synchronous request, including persistence;
 ordinary API and authentication requests retain the `30s` default timeout.
 
@@ -315,8 +373,8 @@ connector and has no network or model dependency. The preview writes nothing.
 `--write` persists proposals under `<data-dir>/proposals/<project>/`; the zone
 is machine-local, self-ignored with `proposals/.gitignore`, excluded from the
 data revision, never synced, and never indexed for search. Rules are
-deterministic (closed issue → decision, decision/ADR label → decision,
-incident/Sentry → attempt, merged PR → note, commit → note); confidence is a
+deterministic (closed issue в†’ decision, decision/ADR label в†’ decision,
+incident/Sentry в†’ attempt, merged PR в†’ note, commit в†’ note); confidence is a
 heuristic and nothing is accepted automatically. `--project` is required when
 the connection or its items do not resolve to one project. `--all` ignores the
 window (default `30d`), `--limit` defaults to 500, `--rule` narrows the rules,
@@ -350,7 +408,7 @@ security:
 
 Unreviewed agent, connector and import records never enter `brain context`,
 `brain open`, `brain catchup` or MCP `brain_context`/`brain_open`. Those commands
-print only `quarantined: N (id, …)`, and `brain review` adds a `quarantined`
+print only `quarantined: N (id, вЂ¦)`, and `brain review` adds a `quarantined`
 finding. Project state uses the same provenance: `brain state set` writes
 `origin: human, reviewed: true, trust: verified`; MCP `brain_state set` writes
 `origin: agent, trust: stated` (reviewed unless `quarantine_agent` is set). A
@@ -367,8 +425,10 @@ brain catchup --include-unreviewed                  # include the quarantine in 
 
 `brain doctor` reports the queue size. Old records without provenance keys are
 human, reviewed and verified, so nothing changes until an agent or connector
-writes a record. Server mode has no provenance-edit route yet, so `brain record
-review` is local/git only.
+writes a record. Server mode reviews records through
+`POST .../records/{kind}/{id}/review`, so `brain record review` works there too;
+`--review-after`/`--clear-review-after` and `brain state review` stay local/git
+because the server state has no provenance columns.
 
 ### Edit a record in place
 
@@ -415,7 +475,7 @@ Default reads (`brain search`, `brain context`, `brain open`, `brain catchup`,
 `--as-of <RFC3339|date>` keeps records where `valid_from <= t` and `valid_to` is
 empty or later than `t`; a bare date means midnight UTC. `--include-superseded`
 (alias `--all-time`) adds the ended ones. The summary of `brain open`/`context`
-lists `as_of: …` when a past instant was requested. Temporary caveat: the server
+lists `as_of: вЂ¦` when a past instant was requested. Temporary caveat: the server
 API does not expose validity yet, so `--as-of` and `--include-superseded` are
 local/git only and return an error in server mode.
 
@@ -471,7 +531,7 @@ grant gates `brain search --dumps`, `brain search --kind item` and MCP
   `pull-request`, `merge-request`, `commit`, `message`, `page`, `document`,
   `event`, `schema`, `other`.
 - `maxAgeDays` is optional; `0` means no age limit and the maximum is `3650`.
-- `maxExcerpts` is optional; it defaults to `5` and accepts `1`–`5`.
+- `maxExcerpts` is optional; it defaults to `5` and accepts `1`вЂ“`5`.
 - Unknown fields, a duplicate `project`+`connection`, invalid ids and invalid
   kinds are hard errors. Nothing falls back to a wider grant.
 
@@ -830,9 +890,9 @@ token can be stored with
 
 Other useful endpoints:
 
-- `GET /openapi.json` — OpenAPI 3 document.
-- `GET /v1/projects`, `GET /v1/search?q=...` — authenticated read paths.
-- `GET /v1/events` — SSE revision stream with heartbeat and `Last-Event-ID`.
+- `GET /openapi.json` вЂ” OpenAPI 3 document.
+- `GET /v1/projects`, `GET /v1/search?q=...` вЂ” authenticated read paths.
+- `GET /v1/events` вЂ” SSE revision stream with heartbeat and `Last-Event-ID`.
 
 Expected `doctor` output in server mode (revision number varies):
 
@@ -850,7 +910,7 @@ A successful write prints `note note-<project>-YYYYMMDD-HHMMSS`.
 The `schema` check reports the data schema from `brain.yaml`; the server
 database schema (`postgres.SchemaVersion`, currently 6) is separate.
 
-`brain sync` is not implemented in server mode — the API is the sync path.
+`brain sync` is not implemented in server mode вЂ” the API is the sync path.
 `brain index` is local-only; `brain search` works in server mode through
 `GET /v1/search?q=...`. Server-side Markdown import/export is not wired yet.
 `brain doctor` fails the `server` check when the URL is wrong or no usable token
@@ -864,7 +924,7 @@ also accepts `--config <path>`.
 
 | Command | Flags and defaults |
 |---|---|
-| `brain open [path\|id]` | `--project <id\|alias>`; `--budget <runes>` (default 4000) caps the summary; `--brief` prints only the project and state fields (no git or graph sections); `--as-of <time\|date>`, `--include-superseded`/`--all-time` select validity |
+| `brain open [path\|id]` | `--project <id\|alias>`; `--budget <tokens>` (default 6000, maximum 32000) caps the summary; `--brief` prints only the project and state fields (no git or graph sections); `--as-of <time\|date>`, `--include-superseded`/`--all-time` select validity |
 | `brain bootstrap [path\|id]` | `--project <id\|alias>`; `--budget <runes>` (default 4000); `--as-of`, `--include-superseded`/`--all-time` |
 | `brain note [text]` | `--project`, `--title`, `--body`, `--tags a,b`, `--supersedes <id>`, `--superseded-by <id>`, `--confidence 0..1`. Positional text becomes the body and the title is its first line (at most 80 characters). Do not combine positional text with `--body`. |
 | `brain decision [title]` | `--project`, `--title`, `--status proposed\|accepted\|rejected\|superseded` (default `proposed`), `--context <text>`, `--alternatives <a,b>`, `--consequences <a,b>`, `--evidence <a,b>`, `--supersedes <id>`, `--superseded-by <id>`, `--confidence 0..1`. The three list flags are comma-separated. |
@@ -872,15 +932,17 @@ also accepts `--config <path>`.
 | `brain handoff [summary]` | `--project`, `--summary`, `--next <text>` (next action), `--git-context <text>` (default: read from the project checkout), `--no-git`, `--supersedes <id>`, `--superseded-by <id>`, `--confidence 0..1` |
 | `brain journal` | `--project`, `--user`, `--event <name>` (for example `note`, `decision`, `attempt`, `handoff`, `commit`), `--since <duration>` (for example `24h`), `--limit <n>` (default 20). Local and git mode. |
 | `brain event commit` | `--project <id>`, `--repo <path>` (default `.`), `--quiet` (print nothing on success; used by the hook). Local and git mode. |
-| `brain search <query>` | `--project <id>`, `--limit <n>` (default 20), `--kind <kind>` (`note,decision,attempt,handoff,dump,item`; raw-zone `item` is excluded by default and needs a `context-allow.json` grant), `--dumps` (legacy dumps; also un-excludes server items, grant-gated), `--since <24h\|7d\|2w\|2026-11-01\|RFC3339>`, `--as-of <time\|date>`, `--include-superseded`/`--all-time`. English and Russian word forms match as a prefix. |
-| `brain record` | `list` accepts `--kind`, `--since`, `--status`, `--limit`, `--as-of`, `--include-superseded`/`--all-time`; `show <id>` accepts `--history` and `--as-of`; `edit <id>` accepts `--title`, `--body-file` (`-` for stdin), `--tags`, `--expected-updated-at`, `--allow-duplicate`, `--dry-run`; `supersede <old> --by <new>`, `status`, `review`, `trash`, `restore`, `trash-list` as in the runbook. JSON includes a `validity` object (`valid_from`, `valid_to`, `superseded_by`, `supersedes`, `confidence`). |
+| `brain search <query>` | `--project <id>`, `--limit <n>` (default 20), `--kind <kind>` (`note,decision,attempt,handoff,dump,item`; raw-zone `item` is excluded by default and needs a `context-allow.json` grant), `--dumps` (legacy dumps; also un-excludes server items, grant-gated), `--since <24h\|7d\|2w\|2026-11-01\|RFC3339>` (content change time), `--as-of <time\|date>`, `--include-superseded`/`--all-time`, `--match-mode all\|any`, `--relaxed`, `--min-score 0..1`, `--explain`, `--full`, `--page-size`, `--cursor`. English and Russian word forms match as a prefix; the default all-terms pass falls back to any-term when it finds fewer than five hits and keeps the strict hits on top. |
+| `brain record` | `list` accepts `--kind`, `--since` (content change time), `--status`, `--limit`, `--as-of`, `--include-superseded`/`--all-time`; `show <id>` accepts `--history` and `--as-of`; `edit <id>` accepts `--title`, `--body-file` (`-` for stdin), `--tags`, `--expected-updated-at`, `--allow-duplicate`, `--dry-run`; `supersede <old> --by <new>`, `status`, `review`, `trash`, `restore`, `trash-list` as in the runbook. JSON includes a `validity` object (`valid_from`, `valid_to`, `superseded_by`, `supersedes`, `confidence`) and `contentUpdatedAt`. |
 | `brain links <id>` | `--project <id>`, `--json`; `--broken` lists `[[id]]` references to missing records. Write `[[<id>]]`, `[[<id>\|text]]` or `[[<project>/<id>]]` in record text; `brain record show` lists Links and Backlinks. |
 | `brain review` | `--project <id>`, `--since <7d>`, `--fix`, `--fix-kind <kinds>`, `--json`. Lists pending proposals (at most 20) and findings; `broken-link`, `near-duplicate`, `supersession-gap`, `stale-superseded`, `proposal-stale`, `proposal-orphan`, `proposal-contradicted` are report-only. Proposal findings are local/git only, and `--fix` never touches proposals. |
 | `brain digest` | `--since <90m\|24h\|7d>` (default `24h`; with `--source` the default is `30d`), `--project <id>`, `--json`, `--write` (saves `<data_dir>/digests/YYYY-MM-DD.md`). With `--source <connection>`: `--all`, `--limit <n>` (default 500), `--rule <names>`, `--dry-run` (default; conflicts with `--write`), `--write` (persists proposals). `--source` is local/git only. |
 | `brain promote <id>` | `--project <id>`, `--as decision\|attempt\|note`, `--status proposed\|accepted` (decision only), `--title <text>`, `--dismiss`, `--force` (stale/orphan), `--yes` (local-only source), `--dry-run`, `--json`. Local/git only. |
-| `brain context <task>` | `--project <id>`, `--budget <runes>` (default 4000), `--kind decision\|attempt\|note` (repeatable), `--since <24h\|7d\|2w\|date>`, `--as-of <time\|date>`, `--include-superseded`/`--all-time`, `--json`, `--raw` (off by default; local/git only; appends at most five excerpts allowed by `<data-dir>/context-allow.json` when the curated context is thin). State, review findings, latest handoff, best-matching records and failed attempts for the task; adds only `pending_proposals: N` when proposals exist, plus granted excerpts with `--raw`. MCP: `brain_context`. |
+| `brain context <task>` | `--project <id>`, `--budget <tokens>` (default 6000, maximum 32000), `--explain` (per-layer table), `--kind decision\|attempt\|note` (repeatable), `--since <24h\|7d\|2w\|date>` (content change time), `--as-of <time\|date>`, `--include-superseded`/`--all-time`, `--json`, `--raw` (off by default; local/git only; appends at most five excerpts allowed by `<data-dir>/context-allow.json` when the curated context is thin). State, review findings, latest handoff, best-matching records and failed attempts for the task; layer caps are budget shares and every layer reports `- вЂ¦ N more dropped`; JSON adds `total_truncated` and `state_as_of`. MCP: `brain_context`. |
 | `brain sync` | `--status` (read-only branch, ahead/behind, dirty, unmerged paths, last synced revision), `--json`, `--push` (push after committing), `--autostash` (default on; `--autostash=false` disables the stash around the rebase), `--watch` (run immediately and then every `--interval`, default `5m`, minimum `30s`; retries after a logged conflict/failure). Exit 3 means an unmerged conflict. |
 | `brain doctor` | `--json`, `--fix` (register the git merge drivers and add their `.gitattributes` lines) |
+| `brain hooks` | `install [--repo <path>] [--force] [--config <brain.yaml>]`, `uninstall [--repo <path>]`, `status [--repo <path>] [--json]`, `status --agents [--home <dir>] [--json]`. The post-commit hook journals each commit; `--agents` reports installed, trusted and last-run state for Claude Code, Codex and OpenCode. |
+| `brain connection` | `providers`; `add <provider> --id <id> [--account <id>] [--base-url <url>] [--setting k=v]вЂ¦`; `list`; `test <id>` (non-mutating check, redacted cause); `run <id> [--since RFC3339] [--days N] [--limit N]`; `secret set <id> <field>` (value from stdin); `auth <id> [--client-id] [--scopes] [--remove]`; `publish <id> local-only\|shared`; `migrate [--copy-legacy-secrets]`; `migrate-identity [--check\|--apply]`; `remove <id> --yes`. Local/git mode. |
 | `brain onboard` | `--json`, `--config`; runs `doctor --fix`, checks schema/PII/raw-zone/git sync, stamps this machine as the owner of registered checkout paths that exist here (`path_provenance`), prints the platform-specific `brain sync --watch` command. Exit 3 when unresolved conflicts exist. |
 | `brain project` | `list`, `show <id>`, `set <id>` (aliases: `add`) with `--name/--kind/--repo/--branch/--path/--add-path/--alias/--clear-paths/--clear-aliases`, `members`, `adopt [--apply] [--json]`. `adopt` reports which registered paths exist on this machine and, with `--apply`, records this machine as their owner; an owner recorded by another machine is never overwritten. |
 | `brain discover` | `--root <dir>` (required), `--apply` (register new repositories; default is a dry run), `--exclude a,b` |
@@ -930,28 +992,36 @@ by `brain config use` (stored under the OS user config directory).
 
 ## Troubleshooting
 
-- `no brain instance at ...; run brain init first` — the `--config` path is
+- `no brain instance at ...; run brain init first` вЂ” the `--config` path is
   wrong or `init` was run for another data directory.
-- `data_dir: does not exist` from `doctor` — create the directory with `init`
+- `data_dir: does not exist` from `doctor` вЂ” create the directory with `init`
   or correct `brain.yaml`.
-- `local mode has no remote` from `sync` — local mode does not sync; use `git`
+- `local mode has no remote` from `sync` вЂ” local mode does not sync; use `git`
   mode.
-- `brain sync` exits `3` — the rebase conflicted; the engine already aborted it
+- `brain sync` exits `3` вЂ” the rebase conflicted; the engine already aborted it
   and restored the autostash, so fix the listed paths (and any
   `state-conflicts/` record), then rerun. The engine never discards changes.
-- `brain doctor` warns about missing merge drivers — run
+- `brain doctor` warns about missing merge drivers вЂ” run
   `brain doctor --fix` on that clone.
-- Server exits with `BRAIN_JWT_SECRET is required` — set a signing key of at
+- Server exits with `BRAIN_JWT_SECRET is required` вЂ” set a signing key of at
   least 32 bytes.
-- `401` on server requests — the HTTP client refreshes once automatically, so a
+- `401` on server requests вЂ” the HTTP client refreshes once automatically, so a
   repeated `401` means the refresh session is expired or revoked: run
   `brain login` again (or set `BRAIN_TOKEN` for automation), then retry. Access
   tokens expire after 15 minutes by default; refresh tokens rotate.
-- `server client is not configured` from `doctor` — the URL is missing or no
+- `server client is not configured` from `doctor` вЂ” the URL is missing or no
   token was found in `BRAIN_TOKEN` / the OS secret store.
-- `local search index is not available` from `search` — run `brain index` (or
+- `local search index is not available` from `search` вЂ” run `brain index` (or
   `brain index --rebuild`) against the configured data directory.
-- `index is local-only in server mode` — `brain index` runs only in local or
+- `index is local-only in server mode` вЂ” `brain index` runs only in local or
   `git` mode; in server mode `brain search` calls `GET /v1/search?q=...`.
-- `sync in server mode: not implemented` — server mode does not use Git sync;
+- `sync in server mode: not implemented` вЂ” server mode does not use Git sync;
   reads and writes go through the HTTP API.
+- `connection "вЂ¦" stores its account in the secret store вЂ¦ but the secret is
+  missing` вЂ” the catalogue has an identity marker and this machine has no
+  secret for it. Run `brain connection secret set <id> account` (the value must
+  be the same address the marker fingerprints) or re-apply
+  `brain connection migrate-identity --apply` on the machine that holds it.
+- The first search after an engine upgrade reindexes once (index schema 9);
+  `brain index` makes that visible instead of paying it inside the first search.
+

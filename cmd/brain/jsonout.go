@@ -235,14 +235,21 @@ type jsonHit struct {
 	Body string `json:"body,omitempty"`
 }
 
-// jsonExplain is the weighted contribution of each ranking signal, printed by
-// `brain search --explain --json`.
+// jsonExplain is the weighted contribution of each ranking signal and its
+// share of the score, printed by `brain search --explain --json`.
+// The `*_share` values are each contribution over the score, so they add up
+// to 1 for a hit with a positive score; the contribution keys stay unchanged.
 type jsonExplain struct {
-	BM25       float64 `json:"bm25"`
-	Recency    float64 `json:"recency"`
-	Importance float64 `json:"importance"`
-	Pin        float64 `json:"pin"`
-	Link       float64 `json:"link"`
+	BM25            float64 `json:"bm25"`
+	Recency         float64 `json:"recency"`
+	Importance      float64 `json:"importance"`
+	Pin             float64 `json:"pin"`
+	Link            float64 `json:"link"`
+	BM25Share       float64 `json:"bm25_share"`
+	RecencyShare    float64 `json:"recency_share"`
+	ImportanceShare float64 `json:"importance_share"`
+	PinShare        float64 `json:"pin_share"`
+	LinkShare       float64 `json:"link_share"`
 }
 
 // jsonSearch is `brain search --json`. Relaxed reports that the strict term
@@ -273,7 +280,7 @@ func toJSONHits(hits []ports.Hit) []jsonHit {
 			TopicKey:     hit.TopicKey,
 			Occurrences:  hit.Occurrences,
 			MatchReasons: hit.MatchReasons,
-			Explain:      toJSONExplain(hit.Explain),
+			Explain:      toJSONExplain(hit),
 			ValidFrom:    jsonTime(hit.ValidFrom),
 			ValidTo:      jsonTime(hit.ValidTo),
 			SupersededBy: hit.SupersededBy,
@@ -283,16 +290,22 @@ func toJSONHits(hits []ports.Hit) []jsonHit {
 	return out
 }
 
-func toJSONExplain(explain *ports.Explain) *jsonExplain {
-	if explain == nil {
+func toJSONExplain(hit ports.Hit) *jsonExplain {
+	if hit.Explain == nil {
 		return nil
 	}
+	shares := explainShares(hit)
 	return &jsonExplain{
-		BM25:       explain.BM25,
-		Recency:    explain.Recency,
-		Importance: explain.Importance,
-		Pin:        explain.Pin,
-		Link:       explain.Link,
+		BM25:            hit.Explain.BM25,
+		Recency:         hit.Explain.Recency,
+		Importance:      hit.Explain.Importance,
+		Pin:             hit.Explain.Pin,
+		Link:            hit.Explain.Link,
+		BM25Share:       shares[0],
+		RecencyShare:    shares[1],
+		ImportanceShare: shares[2],
+		PinShare:        shares[3],
+		LinkShare:       shares[4],
 	}
 }
 

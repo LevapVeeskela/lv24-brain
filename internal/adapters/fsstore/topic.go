@@ -77,8 +77,13 @@ func (s *Store) replaceNote(ctx context.Context, note domain.Note, expectedUpdat
 		if err != nil {
 			return err
 		}
+		contentAt := contentUpdatedAt(frontmatter.Frontmatter)
+		if noteTextChanged(current, note) {
+			contentAt = updatedAt
+		}
 		note.CreatedAt = current.CreatedAt
 		note.UpdatedAt = updatedAt
+		note.ContentUpdatedAt = contentAt
 		entry := renderNoteEntry(noteMetadata{
 			provenanceFrontmatter: provenanceToFrontmatter(current.Provenance),
 			validityFrontmatter:   validityToFrontmatter(note.Validity, current.CreatedAt),
@@ -102,6 +107,7 @@ func (s *Store) replaceNote(ctx context.Context, note domain.Note, expectedUpdat
 		next = append(next, replacement...)
 		next = append(next, lines[end:]...)
 		frontmatter.UpdatedAt = updatedAt
+		frontmatter.ContentUpdatedAt = contentTimePtr(contentAt)
 		frontmatter.SchemaVersion = SchemaVersion
 		rendered, err := markdown.Render(frontmatter, strings.Join(next, "\n"))
 		if err != nil {
@@ -157,16 +163,22 @@ func (s *Store) replaceDecision(ctx context.Context, decision domain.Decision, e
 			return err
 		}
 		updatedAt := nextRecordUpdatedAt(current.UpdatedAt, now)
+		contentAt := current.ContentUpdatedAt
+		if decisionTextChanged(current, decision) {
+			contentAt = updatedAt
+		}
 		decision.ProjectID = current.ProjectID
 		decision.CreatedAt = current.CreatedAt
 		decision.UpdatedAt = updatedAt
+		decision.ContentUpdatedAt = contentAt
 		frontmatter := decisionFrontmatter{
 			Frontmatter: markdown.Frontmatter{
-				ProjectID:     current.ProjectID,
-				Kind:          "decision",
-				UpdatedAt:     updatedAt,
-				SchemaVersion: SchemaVersion,
-				Permalink:     decision.Permalink,
+				ProjectID:        current.ProjectID,
+				Kind:             "decision",
+				UpdatedAt:        updatedAt,
+				ContentUpdatedAt: contentTimePtr(contentAt),
+				SchemaVersion:    SchemaVersion,
+				Permalink:        decision.Permalink,
 			},
 			provenanceFrontmatter: provenanceToFrontmatter(current.Provenance),
 			validityFrontmatter:   validityToFrontmatter(decision.Validity, current.CreatedAt),
@@ -230,16 +242,22 @@ func (s *Store) replaceAttempt(ctx context.Context, attempt domain.Attempt, expe
 			return err
 		}
 		updatedAt := nextRecordUpdatedAt(current.UpdatedAt, now)
+		contentAt := current.ContentUpdatedAt
+		if attemptTextChanged(current, attempt) {
+			contentAt = updatedAt
+		}
 		attempt.ProjectID = current.ProjectID
 		attempt.CreatedAt = current.CreatedAt
 		attempt.UpdatedAt = updatedAt
+		attempt.ContentUpdatedAt = contentAt
 		frontmatter := attemptFrontmatter{
 			Frontmatter: markdown.Frontmatter{
-				ProjectID:     current.ProjectID,
-				Kind:          "attempt",
-				UpdatedAt:     updatedAt,
-				SchemaVersion: SchemaVersion,
-				Permalink:     attempt.Permalink,
+				ProjectID:        current.ProjectID,
+				Kind:             "attempt",
+				UpdatedAt:        updatedAt,
+				ContentUpdatedAt: contentTimePtr(contentAt),
+				SchemaVersion:    SchemaVersion,
+				Permalink:        attempt.Permalink,
 			},
 			provenanceFrontmatter: provenanceToFrontmatter(current.Provenance),
 			validityFrontmatter:   validityToFrontmatter(attempt.Validity, current.CreatedAt),
@@ -308,16 +326,22 @@ func (s *Store) replaceHandoff(ctx context.Context, handoff domain.Handoff, expe
 			return err
 		}
 		updatedAt := nextRecordUpdatedAt(currentUpdatedAt, now)
+		contentAt := current.ContentUpdatedAt
+		if handoffTextChanged(current, handoff) {
+			contentAt = updatedAt
+		}
 		handoff.ProjectID = current.ProjectID
 		handoff.CreatedAt = current.CreatedAt
 		handoff.UpdatedAt = updatedAt
+		handoff.ContentUpdatedAt = contentAt
 		frontmatter := handoffFrontmatter{
 			Frontmatter: markdown.Frontmatter{
-				ProjectID:     current.ProjectID,
-				Kind:          "handoff",
-				UpdatedAt:     updatedAt,
-				SchemaVersion: SchemaVersion,
-				Permalink:     handoff.Permalink,
+				ProjectID:        current.ProjectID,
+				Kind:             "handoff",
+				UpdatedAt:        updatedAt,
+				ContentUpdatedAt: contentTimePtr(contentAt),
+				SchemaVersion:    SchemaVersion,
+				Permalink:        handoff.Permalink,
 			},
 			provenanceFrontmatter: provenanceToFrontmatter(current.Provenance),
 			validityFrontmatter:   validityToFrontmatter(handoff.Validity, current.CreatedAt),
@@ -370,4 +394,49 @@ func nextRecordUpdatedAt(current, now time.Time) time.Time {
 		return now
 	}
 	return current.Add(time.Nanosecond)
+}
+
+// noteTextChanged reports whether a replace changed the title, body or tags of
+// a note. History follows a text edit, so it is not compared; provenance,
+// validity, review and topic bookkeeping are metadata and must not move the
+// content time.
+func noteTextChanged(current, next domain.Note) bool {
+	return current.Title != next.Title ||
+		current.Body != next.Body ||
+		!sameStrings(current.Tags, next.Tags)
+}
+
+func decisionTextChanged(current, next domain.Decision) bool {
+	return current.Title != next.Title ||
+		current.Context != next.Context ||
+		!sameStrings(current.Alternatives, next.Alternatives) ||
+		!sameStrings(current.Consequences, next.Consequences) ||
+		!sameStrings(current.Evidence, next.Evidence) ||
+		!sameStrings(current.Paths, next.Paths)
+}
+
+func attemptTextChanged(current, next domain.Attempt) bool {
+	return current.Title != next.Title ||
+		current.Hypothesis != next.Hypothesis ||
+		current.Result != next.Result ||
+		current.Reason != next.Reason
+}
+
+func handoffTextChanged(current, next domain.Handoff) bool {
+	return current.Summary != next.Summary ||
+		current.NextAction != next.NextAction ||
+		current.GitContext != next.GitContext
+}
+
+// sameStrings compares two string slices; nil and empty are the same content.
+func sameStrings(left, right []string) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for i := range left {
+		if left[i] != right[i] {
+			return false
+		}
+	}
+	return true
 }

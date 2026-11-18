@@ -429,3 +429,209 @@ func TestDescribeConnectionCheckErrorMapsAndSanitizes(t *testing.T) {
 		t.Fatalf("sanitize = %q", got)
 	}
 }
+
+type identitySecrets struct {
+	values map[string]string
+	sets   int
+}
+
+func (s *identitySecrets) Get(_ context.Context, connectionID, field string) (string, error) {
+	key, err := domain.CredentialKey(connectionID, field)
+	if err != nil {
+		return "", err
+	}
+	if value, ok := s.values[key]; ok {
+		return value, nil
+	}
+	return "", domain.ErrNotFound
+}
+
+func (s *identitySecrets) Set(_ context.Context, connectionID, field, value string) error {
+	key, err := domain.CredentialKey(connectionID, field)
+	if err != nil {
+		return err
+	}
+	s.sets++
+	s.values[key] = value
+	return nil
+}
+
+func (s *identitySecrets) Delete(_ context.Context, connectionID, field string) error {
+	key, err := domain.CredentialKey(connectionID, field)
+	if err != nil {
+		return err
+	}
+	delete(s.values, key)
+	return nil
+}
+
+func identityMigrationFixture(t *testing.T) (*fsstore.ConnectionStore, *identitySecrets) {
+	t.Helper()
+	store, err := fsstore.NewConnectionStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Create(context.Background(), domain.Connection{
+		ID: "mail", Provider: "imap", Account: "reader@example.test",
+		BaseURL:  "imaps://imap.example.test:993",
+		Settings: map[string]string{"username": "reader@example.test", "folders": "INBOX"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	return store, &identitySecrets{values: map[string]string{}}
+}
+
+func identityStatuses(report app.IdentityMigrationReport) map[string]string {
+	statuses := make(map[string]string, len(report.Entries))
+	for _, entry := range report.Entries {
+		statuses[entry.Field] = entry.Status
+	}
+	return statuses
+}
+
+func TestIdentityMigrationDryRunWritesNothing(t *testing.T) {
+	ctx := context.Background()
+	store, secrets := identityMigrationFixture(t)
+	migrator := app.ConnectionIdentityMigrator{Connections: store, Credentials: secrets}
+
+	report, err := migrator.Migrate(ctx, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	statuses := identityStatuses(report)
+	if report.Applied || len(report.Entries) != 2 || statuses["account"] != app.IdentityStatusWouldMove || statuses["username"] != app.IdentityStatusWouldMove {
+		t.Fatalf("dry run = %+v", report)
+	}
+	if report.Entries[0].Key != "conn/mail/account" || report.Entries[1].Key != "conn/mail/username" {
+		t.Fatalf("keys = %+v", report.Entries)
+	}
+	if secrets.sets != 0 || len(secrets.values) != 0 {
+		t.Fatalf("dry run wrote secrets: %d %v", secrets.sets, secrets.values)
+	}
+	stored, err := store.Get(ctx, "mail")
+	if err != nil || stored.Account != "reader@example.test" || stored.Settings["username"] != "reader@example.test" {
+		t.Fatalf("dry run rewrote the catalogue: %+v %v", stored, err)
+	}
+}
+
+func TestIdentityMigrationAppliesAndIsIdempotent(t *testing.T) {
+	ctx := context.Background()
+	store, secrets := identityMigrationFixture(t)
+	migrator := app.ConnectionIdentityMigrator{Connections: store, Credentials: secrets}
+
+	report, err := migrator.Migrate(ctx, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	statuses := identityStatuses(report)
+	if !report.Applied || len(report.Entries) != 2 || statuses["account"] != app.IdentityStatusMoved || statuses["username"] != app.IdentityStatusMoved {
+		t.Fatalf("apply = %+v", report)
+	}
+	if secrets.sets != 2 || secrets.values["conn/mail/account"] != "reader@example.test" || secrets.values["conn/mail/username"] != "reader@example.test" {
+		t.Fatalf("secrets = %d %v", secrets.sets, secrets.values)
+	}
+	stored, err := store.Get(ctx, "mail")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !connectorbuild.IsAccountMarker(stored.Account) || !connectorbuild.IsSettingMarker("imap", "username", stored.Settings["username"]) {
+		t.Fatalf("catalogue markers = %+v", stored)
+	}
+	if strings.Contains(stored.Account, "reader") || strings.Contains(stored.Settings["username"], "reader") || stored.Settings["folders"] != "INBOX" {
+		t.Fatalf("catalogue leaked identity: %+v", stored)
+	}
+
+	report, err = migrator.Migrate(ctx, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	statuses = identityStatuses(report)
+	if len(report.Entries) != 2 || statuses["account"] != app.IdentityStatusMigrated || statuses["username"] != app.IdentityStatusMigrated || secrets.sets != 2 {
+		t.Fatalf("second apply = %+v sets=%d", report, secrets.sets)
+	}
+}
+
+func TestIdentityMigrationSettingsOnly(t *testing.T) {
+	ctx := context.Background()
+	store, err := fsstore.NewConnectionStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Create(ctx, domain.Connection{
+		ID: "mail", Provider: "imap", BaseURL: "imaps://imap.example.test:993",
+		Settings: map[string]string{"username": "reader@example.test"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	secrets := &identitySecrets{values: map[string]string{}}
+	migrator := app.ConnectionIdentityMigrator{Connections: store, Credentials: secrets}
+	report, err := migrator.Migrate(ctx, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(report.Entries) != 1 || identityStatuses(report)["username"] != app.IdentityStatusMoved || secrets.sets != 1 {
+		t.Fatalf("settings-only apply = %+v sets=%d", report, secrets.sets)
+	}
+	stored, err := store.Get(ctx, "mail")
+	if err != nil || !connectorbuild.IsSettingMarker("imap", "username", stored.Settings["username"]) {
+		t.Fatalf("stored = %+v %v", stored, err)
+	}
+}
+
+func TestIdentityMigrationReportsProblemsWithoutFailingTheCatalogue(t *testing.T) {
+	ctx := context.Background()
+	store, secrets := identityMigrationFixture(t)
+	migrator := app.ConnectionIdentityMigrator{Connections: store, Credentials: secrets}
+	if _, err := migrator.Migrate(ctx, true); err != nil {
+		t.Fatal(err)
+	}
+	delete(secrets.values, "conn/mail/username")
+
+	list, err := store.List(ctx)
+	if err != nil || len(list) != 1 {
+		t.Fatalf("catalogue unreadable: %+v %v", list, err)
+	}
+	report, err := migrator.Migrate(ctx, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !report.HasProblems() || identityStatuses(report)["username"] != app.IdentityStatusMissing || identityStatuses(report)["account"] != app.IdentityStatusMigrated {
+		t.Fatalf("missing = %+v", report)
+	}
+	issues := connectorbuild.IdentityIssues(ctx, list, secrets)
+	if len(issues) != 1 || issues[0].Field != "username" || issues[0].Problem != connectorbuild.IdentityProblemMissing {
+		t.Fatalf("issues = %+v", issues)
+	}
+	if _, err := migrator.Migrate(ctx, true); err != nil || secrets.sets != 2 {
+		t.Fatalf("apply with a broken marker = %v sets=%d", err, secrets.sets)
+	}
+
+	secrets.values["conn/mail/username"] = "other@example.test"
+	report, err = migrator.Migrate(ctx, false)
+	if err != nil || identityStatuses(report)["username"] != app.IdentityStatusMismatched {
+		t.Fatalf("mismatch = %+v %v", report, err)
+	}
+}
+
+func TestFindConnectionByIdentitySpansRawAndMarker(t *testing.T) {
+	ctx := context.Background()
+	store, _ := identityMigrationFixture(t)
+	raw := domain.Connection{Provider: "imap", BaseURL: "imaps://imap.example.test:993", Account: "reader@example.test"}
+	if found, ok, err := app.FindConnectionByIdentity(ctx, store, raw); err != nil || !ok || found.ID != "mail" {
+		t.Fatalf("raw lookup = %+v %v %v", found, ok, err)
+	}
+	marker, err := connectorbuild.ProtectAccount(ctx, "mail", raw.Account, &identitySecrets{values: map[string]string{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	migrated := raw
+	migrated.Account = marker
+	if found, ok, err := app.FindConnectionByIdentity(ctx, store, migrated); err != nil || !ok || found.ID != "mail" {
+		t.Fatalf("marker lookup = %+v %v %v", found, ok, err)
+	}
+	other := raw
+	other.Account = "other@example.test"
+	if _, ok, err := app.FindConnectionByIdentity(ctx, store, other); err != nil || ok {
+		t.Fatalf("different account matched: %v %v", ok, err)
+	}
+}

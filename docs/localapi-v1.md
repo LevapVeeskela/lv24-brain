@@ -36,7 +36,7 @@ Every error response is JSON:
 | 403 | `forbidden` | Host, `Origin` or `Referer` rejected, or the write targets a protected project or glob. |
 | 404 | `not_found` | Unknown route, connection, schedule, run, record or proposal. |
 | 405 | `method_not_allowed` | Wrong method; `Allow` lists the supported methods. |
-| 409 | `conflict`, `duplicate` | Resource busy, conflicting with existing data, a stale record or state revision, or an exact duplicate record. |
+| 409 | `conflict`, `duplicate`, `merge_stale` | Resource busy, conflicting with existing data, a stale record or state revision, an exact duplicate record, or a merge plan/rollback whose files changed since it was shown. |
 | 413 | `body_too_large`, `limit_exceeded` | Request body or a record field exceeds the configured limit. |
 | 415 | `unsupported_media_type` | Body is not `application/json`. |
 | 500 | `internal_error`, `unavailable` | Sanitized failure; never contains internal text. |
@@ -81,6 +81,8 @@ rename one.
 | `GET` | `/v1/projects/{id}/state` |
 | `PUT` | `/v1/projects/{id}/state` |
 | `POST` | `/v1/projects/{id}/state/review` |
+| `POST` | `/v1/projects/adopt` |
+| `POST` | `/v1/projects/{id}/paths` |
 | `GET` | `/v1/records` |
 | `GET` | `/v1/records/{id}` |
 | `PATCH` | `/v1/records/{id}` |
@@ -99,6 +101,12 @@ rename one.
 | `POST` | `/v1/proposals/{project}/{id}/snooze` |
 | `DELETE` | `/v1/proposals/{project}/{id}/snooze` |
 | `GET` | `/v1/catchup` |
+| `POST` | `/v1/merge/plan` |
+| `POST` | `/v1/merge/apply` |
+| `POST` | `/v1/merge/rollback` |
+| `POST` | `/v1/digest` |
+| `GET` | `/v1/journal` |
+| `GET` | `/v1/hooks` |
 | `GET` | `/v1/sync` |
 | `POST` | `/v1/sync` |
 | `GET` | `/v1/settings` |
@@ -344,6 +352,38 @@ changed since the latest handoff (or `since`, or a seven-day default):
 `since_source` (`handoff`, `explicit`, `default`), the state and whether it
 changed, the new notes/decisions/attempts/handoffs as record rows, journal
 lines (commit branch/head/subject only) and `quarantined_count`.
+
+### Merge, digest, paths and journal
+
+- `POST /v1/merge/plan` with `{"project","survivor","duplicates":[]}` plans a
+  two-phase merge without writing. The plan reports `survivor`, `duplicates`,
+  `already_merged`, `links`, `merged_from`, `conflicts`, `changed`,
+  `fingerprint` and the opaque `plan_id`.
+- `POST /v1/merge/apply` with `{"plan_id"}` re-plans the request and refuses a
+  changed fingerprint before writing: `409` with `code: "merge_stale"`,
+  `merge_stale` is also returned when the store sees a changed file. On success
+  `plan_id` becomes the token for the rollback route and `files` lists every
+  touched data-directory-relative path.
+- `POST /v1/merge/rollback` with `{"plan_id"}` restores an applied merge byte
+  for byte; it also accepts the `manifest` path. A file changed after the merge
+  is `409 merge_stale` and is not overwritten.
+- `POST /v1/digest` with `{"project","write"}` returns `generated_at`, `since`,
+  `dry_run`, `projects` (activity counts, latest handoff, proposed decisions,
+  open questions, blocked items and findings) and, when `write` is true,
+  `written_to` with `digests/YYYY-MM-DD.md` under the data directory. It is a
+  dry run by default.
+- `POST /v1/projects/adopt` with `{"apply"}` reports per-path ownership
+  (`owned`, `stamped`, `missing`) and only writes with `apply: true`. It is
+  refused with `400 validation` while the API is limited to a project
+  allowlist, because adoption spans every project.
+- `POST /v1/projects/{id}/paths` with `{"path"}` registers an absolute checkout
+  path, stamps its machine owner and returns the project. Re-adding a path is a
+  no-op.
+- `GET /v1/journal?project=&limit=` returns `items`, `limit` and `has_more`
+  newest first; the project scope follows the same allowlist rules as the
+  memory routes.
+- `GET /v1/hooks` returns one `HookStatus` per agent host (`claude`, `codex`,
+  `opencode`): installed state, Codex trust and last-run log entry.
 
 ## Pagination and size caps
 

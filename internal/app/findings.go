@@ -670,7 +670,7 @@ func decisionFindings(in reviewInputs) []Finding {
 			continue
 		}
 		for _, attempt := range in.attempts {
-			if !attempt.CreatedAt.After(decision.CreatedAt) || !similar(decision.Title, attempt.Title+" "+attempt.Hypothesis) {
+			if !attemptRecordsFailure(attempt) || !attempt.CreatedAt.After(decision.CreatedAt) || !similar(decision.Title, attempt.Title+" "+attempt.Hypothesis) {
 				continue
 			}
 			findings = append(findings, newFinding(FindingDecisionContradicted,

@@ -291,3 +291,85 @@ func TestNearDuplicateFindingsCapLargeSets(t *testing.T) {
 		}
 	}
 }
+
+// releaseNoteBody is a release-note template where only the version changes.
+func releaseNoteBody(version string) string {
+	return "lv24-brain " + version + " bump the engine and desktop versions, publish npm and PyPI " +
+		"through trusted publishing, verify the GHCR image and the desktop bundle, update the docs site"
+}
+
+func TestNearDuplicateReleaseNotesDoNotCluster(t *testing.T) {
+	// Arrange: one template, two versions. The bodies overlap almost fully, so
+	// only the version guard keeps the series apart.
+	in := reviewInputs{notes: []domain.Note{
+		{ID: "note-060", Title: "Release notes 0.6.0", Body: releaseNoteBody("0.6.0"), CreatedAt: dupAt(0)},
+		{ID: "note-061", Title: "Release notes 0.6.1", Body: releaseNoteBody("0.6.1"), CreatedAt: dupAt(1)},
+	}}
+
+	// Act
+	findings := nearDuplicateFindings(in)
+	clusters := duplicatesOfProject("p", in)
+
+	// Assert
+	if len(findings) != 0 {
+		t.Fatalf("release notes flagged as near-duplicates: %+v", findings)
+	}
+	if len(clusters) != 0 {
+		t.Fatalf("release notes clustered: %+v", clusters)
+	}
+}
+
+func TestNearDuplicateSameTitleDifferentBodyDoesNotCluster(t *testing.T) {
+	// Arrange: the title is identical, the bodies are about different work.
+	in := reviewInputs{notes: []domain.Note{
+		{ID: "note-index", Title: "Weekly sync", Body: "rebuild the search index and swap the pointer before removing the old one", CreatedAt: dupAt(0)},
+		{ID: "note-installer", Title: "Weekly sync", Body: "sign the desktop installer, notarize the bundle and update the download page", CreatedAt: dupAt(1)},
+	}}
+
+	// Act
+	findings := nearDuplicateFindings(in)
+	clusters := duplicatesOfProject("p", in)
+
+	// Assert
+	if len(findings) != 0 {
+		t.Fatalf("same-title notes flagged as near-duplicates: %+v", findings)
+	}
+	if len(clusters) != 0 {
+		t.Fatalf("same-title notes clustered: %+v", clusters)
+	}
+}
+
+func TestNearDuplicateTrueBodyCopyClusters(t *testing.T) {
+	// Arrange: one note restated with a small wording change.
+	body := "the search index is rebuilt on every sync and the old index is removed after a successful build"
+	in := reviewInputs{notes: []domain.Note{
+		{ID: "note-a", Title: "Search index rebuild", Body: body, CreatedAt: dupAt(0)},
+		{ID: "note-b", Title: "Search index rebuild", Body: strings.ReplaceAll(body, "successful build", "successful rebuild"), CreatedAt: dupAt(1)},
+	}}
+
+	// Act
+	findings := nearDuplicateFindings(in)
+	clusters := duplicatesOfProject("p", in)
+
+	// Assert
+	if len(findings) != 1 || !strings.Contains(findings[0].Message, "note-a and note-b") {
+		t.Fatalf("near-duplicate findings = %+v", findings)
+	}
+	if len(clusters) != 1 || len(clusters[0].Members) != 2 {
+		t.Fatalf("clusters = %+v", clusters)
+	}
+}
+
+func TestDupSimilarityRequiresBodyOverlap(t *testing.T) {
+	// Arrange: same title, unrelated bodies.
+	a := newDupRecord("a", dupAt(0), "Weekly sync", "rebuild the search index and swap the pointer before removing the old one", false)
+	b := newDupRecord("b", dupAt(1), "Weekly sync", "sign the desktop installer, notarize the bundle and update the download page", false)
+
+	// Act
+	_, ok := dupSimilarity(a, b)
+
+	// Assert
+	if ok {
+		t.Fatal("same title with different bodies reported as a duplicate")
+	}
+}

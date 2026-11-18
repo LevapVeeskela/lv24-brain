@@ -1987,14 +1987,38 @@ func runSearch(args []string, stdout, stderr io.Writer) int {
 	return 0
 }
 
-// explainLine renders the signal contributions of one hit for --explain.
+// explainLine renders the signal contributions of one hit for --explain: the
+// reasons that fired, then the absolute contribution of every signal and its
+// share of the score, in the order bm25, recency, importance, pin, link. The
+// shares are the contributions over the score, so they add up to 1 for a hit
+// with a positive score.
 func explainLine(hit ports.Hit) string {
 	reasons := strings.Join(hit.MatchReasons, ",")
 	if hit.Explain == nil {
 		return "reasons: " + reasons
 	}
-	return fmt.Sprintf("reasons: %s  bm25 %.3f  recency %.3f  importance %.3f  pin %.3f  link %.3f",
-		reasons, hit.Explain.BM25, hit.Explain.Recency, hit.Explain.Importance, hit.Explain.Pin, hit.Explain.Link)
+	shares := explainShares(hit)
+	const signals = "bm25 %.3f  recency %.3f  importance %.3f  pin %.3f  link %.3f"
+	return "reasons: " + reasons +
+		"\n  contribution  " + fmt.Sprintf(signals,
+		hit.Explain.BM25, hit.Explain.Recency, hit.Explain.Importance, hit.Explain.Pin, hit.Explain.Link) +
+		"\n  share         " + fmt.Sprintf(signals, shares[0], shares[1], shares[2], shares[3], shares[4])
+}
+
+// explainShares returns each signal's contribution over the score, in the
+// order bm25, recency, importance, pin, link. A zero score explains zeros
+// instead of dividing by zero.
+func explainShares(hit ports.Hit) [5]float64 {
+	if hit.Explain == nil || hit.Score <= 0 {
+		return [5]float64{}
+	}
+	return [5]float64{
+		hit.Explain.BM25 / hit.Score,
+		hit.Explain.Recency / hit.Score,
+		hit.Explain.Importance / hit.Score,
+		hit.Explain.Pin / hit.Score,
+		hit.Explain.Link / hit.Score,
+	}
 }
 
 func runConnector(args []string, stdout, stderr io.Writer) int {

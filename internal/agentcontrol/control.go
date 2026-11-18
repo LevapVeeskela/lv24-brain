@@ -131,17 +131,38 @@ func (c *Control) Start(ctx context.Context, runtime daemon.Runtime) (int, error
 	if c.opts.Sync != nil {
 		syncService = newSyncService(c.opts.Sync)
 	}
+	// The workspace use cases live on the same app as the memory surface; the
+	// type assertion keeps the Options contract narrow for callers that only
+	// serve memory.
+	var mergeService localapi.MergeService
+	var digestService localapi.DigestService
+	var projectAdmin localapi.ProjectAdminService
+	var journalService localapi.JournalService
+	if c.opts.App != nil {
+		if workspaceApp, ok := c.opts.App.(WorkspaceApp); ok {
+			workspace := newWorkspaceService(workspaceApp, c.opts.DataDir, c.opts.Now)
+			mergeService = workspace
+			digestService = workspace
+			projectAdmin = workspace
+			journalService = workspace
+		}
+	}
 	server, err := localapi.NewServer(localapi.Options{
-		Token:     localapi.TokenFunc(func() string { return runtime.Token }),
-		Port:      0,
-		Version:   c.opts.Version,
-		PID:       runtime.PID,
-		StartedAt: runtime.StartedAt,
-		Now:       c.opts.Now,
-		Heartbeat: 15 * time.Second,
-		Status:    "running",
-		Memory:    memory,
-		Sync:      syncService,
+		Token:        localapi.TokenFunc(func() string { return runtime.Token }),
+		Port:         0,
+		Version:      c.opts.Version,
+		PID:          runtime.PID,
+		StartedAt:    runtime.StartedAt,
+		Now:          c.opts.Now,
+		Heartbeat:    15 * time.Second,
+		Status:       "running",
+		Memory:       memory,
+		Sync:         syncService,
+		Merge:        mergeService,
+		Digest:       digestService,
+		ProjectAdmin: projectAdmin,
+		Journal:      journalService,
+		Hooks:        newHookStatusService("", c.opts.DataDir),
 		// The local API's memory routes honour the same project scope as
 		// `brain mcp`.
 		ProjectAllowlist: c.opts.ProjectAllowlist,

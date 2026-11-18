@@ -119,6 +119,11 @@ type Note struct {
 	ReviewSchedule
 	CreatedAt time.Time `json:"createdAt"`
 	UpdatedAt time.Time `json:"updatedAt"`
+	// ContentUpdatedAt is the last time the title, body or tags changed.
+	// Metadata-only writes (review, snooze, validity, merge bookkeeping) leave
+	// it alone, so `--since` reports text changes. Zero on records written
+	// before the field existed; readers fall back to UpdatedAt.
+	ContentUpdatedAt time.Time `json:"contentUpdatedAt,omitzero"`
 }
 
 // Validate checks required note fields.
@@ -193,6 +198,8 @@ type Decision struct {
 	ReviewSchedule
 	CreatedAt time.Time `json:"createdAt"`
 	UpdatedAt time.Time `json:"updatedAt"`
+	// ContentUpdatedAt is the last title or body change; see Note.
+	ContentUpdatedAt time.Time `json:"contentUpdatedAt,omitzero"`
 }
 
 // NormalizePaths trims each path, converts backslashes to forward slashes and
@@ -273,6 +280,8 @@ type Attempt struct {
 	ReviewSchedule
 	CreatedAt time.Time `json:"createdAt"`
 	UpdatedAt time.Time `json:"updatedAt"`
+	// ContentUpdatedAt is the last title or body change; see Note.
+	ContentUpdatedAt time.Time `json:"contentUpdatedAt,omitzero"`
 }
 
 // Validate checks required attempt fields.
@@ -327,6 +336,8 @@ type Handoff struct {
 	// UpdatedAt is the last text edit. It is zero for records written before
 	// handoffs carried one and falls back to CreatedAt.
 	UpdatedAt time.Time `json:"updatedAt,omitzero"`
+	// ContentUpdatedAt is the last summary or next-action change; see Note.
+	ContentUpdatedAt time.Time `json:"contentUpdatedAt,omitzero"`
 }
 
 // Validate checks required handoff fields.

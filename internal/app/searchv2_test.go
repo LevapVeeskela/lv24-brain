@@ -3,6 +3,7 @@ package app_test
 import (
 	"context"
 	"errors"
+	"math"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -136,7 +137,9 @@ func TestSearchRelaxedIsReported(t *testing.T) {
 		{"explicit all is strict", app.SearchOptions{Text: "alpha gamma", MatchMode: "all"}, 0, false},
 		{"all with relaxed falls back", app.SearchOptions{Text: "alpha gamma", MatchMode: "all", Relaxed: true}, 2, true},
 		{"any starts wide", app.SearchOptions{Text: "alpha gamma", MatchMode: "any"}, 2, false},
-		{"strict hit is not relaxed", app.SearchOptions{Text: "alpha beta"}, 1, false},
+		// A strict pass that finds fewer than SearchFallbackThreshold hits is
+		// widened too: one strict hit is not enough to call the query answered.
+		{"strict hit below the threshold relaxes", app.SearchOptions{Text: "alpha beta"}, 2, true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -155,8 +158,8 @@ func TestSearchRelaxedIsReported(t *testing.T) {
 // Explain fills the contribution block; a threshold filters on the same score.
 func TestSearchExplainAndMinScore(t *testing.T) {
 	fixture := newSearchFixture(t)
-	fixture.decision(t, "decision-2026-11-01-storage", "Storage limit",
-		"storage limit for the cache", searchClock.Add(-time.Hour), domain.DecisionAccepted)
+	fixture.note(t, "note-2026-11-01-storage", "Storage limit",
+		"storage limit for the cache", searchClock.Add(-time.Hour))
 	fixture.reindex(t)
 
 	report, err := fixture.app.SearchWithReport(context.Background(), app.SearchOptions{Text: "storage", ProjectID: "demo", Explain: true})
@@ -169,11 +172,27 @@ func TestSearchExplainAndMinScore(t *testing.T) {
 	if len(report.Hits[0].MatchReasons) == 0 {
 		t.Fatal("hit has no match reasons")
 	}
-	score := report.Hits[0].Score
-	if score <= 0 || score > 1 {
-		t.Fatalf("score = %v, want (0, 1]", score)
+	hit := report.Hits[0]
+	score := hit.Score
+	if score <= 0 || score >= 1 {
+		t.Fatalf("score = %v, want (0, 1)", score)
 	}
-	empty, err := fixture.app.SearchWithReport(context.Background(), app.SearchOptions{Text: "storage", ProjectID: "demo", MinScore: 0.99})
+	explain := hit.Explain
+	sum := explain.BM25 + explain.Recency + explain.Importance + explain.Pin + explain.Link
+	if math.Abs(sum-score) > 1e-9 {
+		t.Fatalf("contributions = %.9f, score = %.9f", sum, score)
+	}
+	if math.Abs(sum/score-1) > 1e-9 {
+		t.Fatalf("share of contributions = %.9f, want 1", sum/score)
+	}
+	kept, err := fixture.app.SearchWithReport(context.Background(), app.SearchOptions{Text: "storage", ProjectID: "demo", MinScore: score})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(kept.Hits) != 1 {
+		t.Fatalf("min-score hits = %d, want the hit at its own score", len(kept.Hits))
+	}
+	empty, err := fixture.app.SearchWithReport(context.Background(), app.SearchOptions{Text: "storage", ProjectID: "demo", MinScore: score + 0.01})
 	if err != nil {
 		t.Fatal(err)
 	}

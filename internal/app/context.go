@@ -28,8 +28,6 @@ var ContextKinds = []string{ContextKindDecision, ContextKindAttempt, ContextKind
 const (
 	// contextSearchLimit is how many hits are fetched before re-ranking.
 	contextSearchLimit = 50
-	// contextMaxRecords bounds the relevant records section.
-	contextMaxRecords = 8
 	// contextMaxFindings bounds the review findings section.
 	contextMaxFindings = 5
 	// contextRecencyDays is the age at which the recency signal halves.
@@ -70,8 +68,10 @@ type ContextOptions struct {
 	Subtype  string
 	Scope    string
 	TopicKey string
-	// Since drops records and handoffs older than a window (30m, 24h, 7d, 2w)
-	// or a date (2026-11-01, RFC 3339). Empty keeps everything.
+	// Since drops records and handoffs whose content did not change within a
+	// window (30m, 24h, 7d, 2w) or after a date (2026-11-01, RFC 3339). A
+	// metadata-only write (review, snooze, validity) does not make a record
+	// recent. Empty keeps everything.
 	Since string
 	// Raw requests raw-zone excerpts from explicitly granted connections when
 	// the curated context is thin. Grants are default-deny (context-allow.json).
@@ -96,6 +96,8 @@ type ContextRecord struct {
 	Detail    string // first line of the context, reason or body
 	CreatedAt time.Time
 	UpdatedAt time.Time
+	// ContentUpdatedAt is the last title or body change; Since compares it.
+	ContentUpdatedAt time.Time
 	// Path is the logical data-directory path of the record.
 	Path  string
 	Score float64
@@ -133,8 +135,12 @@ type ContextResult struct {
 	Mode    string
 	Query   string
 	Since   time.Time // zero when not filtered
-	Budget  int
-	State   domain.State
+	// AsOf is the instant the records and the handoff were selected at. State
+	// and review findings have no history: they always describe the current
+	// data, which the summary and the JSON label report.
+	AsOf   time.Time
+	Budget int
+	State  domain.State
 	// Handoff is the newest handoff (within Since), nil when none.
 	Handoff *domain.Handoff
 	// Records are the top-ranked decisions, attempts and notes.
@@ -220,7 +226,7 @@ func (a *App) Context(ctx context.Context, opts ContextOptions) (ContextResult, 
 	handoff := latestHandoff(filterHandoffs(handoffs, filter, now), since, opts.IncludeUnreviewed)
 
 	result := ContextResult{
-		Project: project, Mode: a.cfg.Mode, Query: query, Since: since,
+		Project: project, Mode: a.cfg.Mode, Query: query, Since: since, AsOf: opts.AsOf,
 		Budget: opts.Budget, State: state, Handoff: handoff, Quarantined: quarantined,
 		StateQuarantined:  state.Provenance.Quarantined(),
 		IncludeUnreviewed: opts.IncludeUnreviewed,
@@ -240,7 +246,9 @@ func (a *App) Context(ctx context.Context, opts ContextOptions) (ContextResult, 
 		}
 		result.Skipped = append(result.Skipped, "relevant records: "+err.Error())
 	} else {
-		result.Records = ranking.rank(hits, nil, contextMaxRecords)
+		// No fixed record ceiling: the budget decides how many relevant
+		// records fit, and the packer reports the rest as dropped.
+		result.Records = ranking.rank(hits, nil, 0)
 	}
 	// Failed attempts are listed whatever Kinds says: they warn against
 	// repeating an approach that already failed.
@@ -249,7 +257,7 @@ func (a *App) Context(ctx context.Context, opts ContextOptions) (ContextResult, 
 		if attemptErr != nil {
 			result.Skipped = append(result.Skipped, "failed attempts: "+attemptErr.Error())
 		} else {
-			result.FailedAttempts = ranking.newestAttempts(attemptHits, recordIDs(result.Records), maxListedItems)
+			result.FailedAttempts = ranking.newestAttempts(attemptHits, recordIDs(result.Records), 0)
 		}
 	}
 
@@ -281,7 +289,8 @@ func (a *App) Context(ctx context.Context, opts ContextOptions) (ContextResult, 
 		result.Skipped = append(result.Skipped, "linked records: "+packErr.Error())
 	}
 	result.Pack = pack
-	result.Records, result.FailedAttempts = splitQuerySection(pack, recordIDs(result.FailedAttempts))
+	failedIDs := recordIDs(result.FailedAttempts)
+	result.Records, result.FailedAttempts = splitQuerySection(pack, failedIDs)
 	if opts.Raw {
 		curated := len(result.Records) + len(result.FailedAttempts) + len(result.Findings)
 		excerpts, skipped, excerptErr := a.contextExcerpts(ctx, project, query, since, now, curated)
@@ -292,7 +301,7 @@ func (a *App) Context(ctx context.Context, opts ContextOptions) (ContextResult, 
 		result.Skipped = append(result.Skipped, skipped...)
 	}
 
-	summary := renderContext(result, a.revision(ctx), now)
+	summary := fitContextPack(&result, a.revision(ctx), now, failedIDs)
 	if result.Budget > 0 {
 		summary = truncateSummary(summary, result.Budget)
 	}
@@ -325,7 +334,7 @@ func latestHandoff(handoffs []domain.Handoff, since time.Time, includeUnreviewed
 		if !includeUnreviewed && handoff.Quarantined() {
 			continue
 		}
-		if !since.IsZero() && handoff.CreatedAt.Before(since) {
+		if !withinSince(handoff.ContentUpdatedAt, handoff.UpdatedAt, handoff.CreatedAt, since) {
 			continue
 		}
 		if latest == nil || handoff.CreatedAt.After(latest.CreatedAt) {
@@ -356,7 +365,8 @@ func (a *App) contextCatalog(ctx context.Context, projectID string) (contextCata
 			catalog.records[decision.ID] = ContextRecord{
 				ID: decision.ID, Kind: ContextKindDecision, Title: decision.Title, Status: string(decision.Status),
 				Detail: SummarizeLine(decision.Context, promptLineRunes), CreatedAt: decision.CreatedAt,
-				UpdatedAt: decision.UpdatedAt, Path: contextRecordPath(projectID, ContextKindDecision, decision.ID),
+				UpdatedAt: decision.UpdatedAt, ContentUpdatedAt: decision.ContentUpdatedAt,
+				Path:     contextRecordPath(projectID, ContextKindDecision, decision.ID),
 				Validity: decision.Validity, Quarantined: decision.Quarantined(),
 			}
 			if decision.Quarantined() {
@@ -374,7 +384,8 @@ func (a *App) contextCatalog(ctx context.Context, projectID string) (contextCata
 			catalog.records[attempt.ID] = ContextRecord{
 				ID: attempt.ID, Kind: ContextKindAttempt, Title: attempt.Title,
 				Detail: attemptDetail(attempt), CreatedAt: attempt.CreatedAt,
-				UpdatedAt: attempt.UpdatedAt, Path: contextRecordPath(projectID, ContextKindAttempt, attempt.ID),
+				UpdatedAt: attempt.UpdatedAt, ContentUpdatedAt: attempt.ContentUpdatedAt,
+				Path:     contextRecordPath(projectID, ContextKindAttempt, attempt.ID),
 				Validity: attempt.Validity, Quarantined: attempt.Quarantined(),
 			}
 			if attempt.Quarantined() {
@@ -392,7 +403,8 @@ func (a *App) contextCatalog(ctx context.Context, projectID string) (contextCata
 			catalog.records[note.ID] = ContextRecord{
 				ID: note.ID, Kind: ContextKindNote, Title: valueOr(note.Title, SummarizeLine(note.Body, 80)),
 				Detail: SummarizeLine(note.Body, promptLineRunes), CreatedAt: note.CreatedAt,
-				UpdatedAt: note.UpdatedAt, Path: contextRecordPath(projectID, ContextKindNote, note.ID),
+				UpdatedAt: note.UpdatedAt, ContentUpdatedAt: note.ContentUpdatedAt,
+				Path:     contextRecordPath(projectID, ContextKindNote, note.ID),
 				Validity: note.Validity, Quarantined: note.Quarantined(),
 			}
 			if note.Quarantined() {
@@ -454,7 +466,7 @@ func (r contextRanking) candidates(hits []ports.Hit, exclude map[string]bool) []
 		if !r.filter.Allows(record.Validity, record.CreatedAt, r.now) {
 			continue
 		}
-		if !r.since.IsZero() && !record.CreatedAt.IsZero() && record.CreatedAt.Before(r.since) {
+		if !r.since.IsZero() && !withinSince(record.ContentUpdatedAt, record.UpdatedAt, record.CreatedAt, r.since) {
 			continue
 		}
 		if record.Path == "" {
@@ -494,7 +506,7 @@ func (r contextRanking) newestAttempts(hits []ports.Hit, exclude map[string]bool
 }
 
 func headRecords(records []ContextRecord, limit int) []ContextRecord {
-	if len(records) > limit {
+	if limit > 0 && len(records) > limit {
 		records = records[:limit]
 	}
 	return records
@@ -559,6 +571,12 @@ func renderContextHeader(result ContextResult, revision string) string {
 	fmt.Fprintf(&out, "task: %s\n", SummarizeLine(result.Query, promptLineRunes))
 	if !result.Since.IsZero() {
 		fmt.Fprintf(&out, "since: %s\n", formatTime(result.Since))
+	}
+	if !result.AsOf.IsZero() {
+		fmt.Fprintf(&out, "as_of: %s\n", formatTime(result.AsOf))
+		// State and findings have no history, so the answer must say that the
+		// past-instant request did not reach them.
+		fmt.Fprintf(&out, "state_as_of: current (state and review findings describe the current data)\n")
 	}
 	if result.PendingProposals != nil {
 		fmt.Fprintf(&out, "pending_proposals: %d\n", *result.PendingProposals)
@@ -630,7 +648,8 @@ func renderContextCore(result ContextResult, now time.Time) (string, []ContextSe
 }
 
 // renderContext writes the Markdown context from the packed sections. Layers
-// are ordered by how much they matter, so a reader meets the state first.
+// are ordered by how much they matter, so a reader meets the state, the latest
+// handoff and the records that match the task first.
 func renderContext(result ContextResult, revision string, now time.Time) string {
 	var out strings.Builder
 	out.WriteString(renderContextHeader(result, revision))
@@ -640,24 +659,38 @@ func renderContext(result ContextResult, revision string, now time.Time) string 
 		coreText, _ := renderContextCore(result, now)
 		out.WriteString(coreText)
 	}
-	if records := sectionRecords(result.Pack, ContextLayerDecisions); len(records) > 0 {
-		out.WriteString("\n## Current decisions\n")
-		writeContextRecords(&out, records, "")
-	}
-	if records := sectionRecords(result.Pack, ContextLayerAttempts); len(records) > 0 {
-		out.WriteString("\n## Recent attempts\n")
-		writeContextRecords(&out, records, "")
-	}
 	out.WriteString("\n## Relevant records\n")
 	writeContextRecords(&out, result.Records, "- none matched the task\n")
 	out.WriteString("\n## Failed attempts matching the task\n")
 	writeContextRecords(&out, result.FailedAttempts, "- none beyond the relevant records\n")
-	if records := sectionRecords(result.Pack, ContextLayerLinked); len(records) > 0 {
-		out.WriteString("\n## Linked records\n")
+	writeContextDropped(&out, result.Pack, ContextLayerQuery)
+	for _, layer := range []struct {
+		name    string
+		heading string
+	}{
+		{ContextLayerDecisions, "\n## Current decisions\n"},
+		{ContextLayerAttempts, "\n## Recent attempts\n"},
+		{ContextLayerLinked, "\n## Linked records\n"},
+	} {
+		records := sectionRecords(result.Pack, layer.name)
+		dropped := contextDroppedCount(result.Pack.Truncated, layer.name)
+		if len(records) == 0 && dropped == 0 {
+			continue
+		}
+		out.WriteString(layer.heading)
 		writeContextRecords(&out, records, "")
+		writeContextDropped(&out, result.Pack, layer.name)
 	}
 	writeContextExcerpts(&out, result.RawExcerpts)
 	return out.String()
+}
+
+// writeContextDropped reports how many records of one layer the budget left
+// out, so a reader can tell a short layer from a complete one.
+func writeContextDropped(out *strings.Builder, pack ContextPack, layer string) {
+	if dropped := contextDroppedCount(pack.Truncated, layer); dropped > 0 {
+		fmt.Fprintf(out, "- … %d more dropped\n", dropped)
+	}
 }
 
 func writeContextFindings(out *strings.Builder, findings []Finding) {

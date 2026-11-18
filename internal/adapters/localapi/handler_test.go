@@ -278,6 +278,85 @@ func (f *fakeSettings) PutSettings(_ context.Context, v map[string]string) error
 	return nil
 }
 
+// codedFakeError lets a test return the stale_plan code from any route.
+type codedFakeError struct {
+	code    string
+	message string
+}
+
+func (e codedFakeError) Error() string { return e.message }
+func (e codedFakeError) Code() string  { return e.code }
+
+// fakeWorkspace models the merge, digest, path and journal use cases and
+// records the request of every route so a test can prove the handler resolved
+// and validated it first.
+type fakeWorkspace struct {
+	plan        MergePlan
+	planErr     error
+	apply       MergeResult
+	applyErr    error
+	rollback    MergeRollbackResult
+	rollbackErr error
+	digest      DigestView
+	digestErr   error
+	adopt       AdoptReportView
+	adoptErr    error
+	project     Project
+	pathErr     error
+	journal     JournalPage
+	journalErr  error
+
+	lastPlan     MergePlanRequest
+	lastApply    MergeApplyRequest
+	lastRollback MergeRollbackRequest
+	lastDigest   DigestRequest
+	lastAdopt    bool
+	lastPath     AddProjectPathRequest
+	lastJournal  JournalQuery
+}
+
+func (f *fakeWorkspace) PlanMerge(_ context.Context, request MergePlanRequest) (MergePlan, error) {
+	f.lastPlan = request
+	return f.plan, f.planErr
+}
+
+func (f *fakeWorkspace) ApplyMerge(_ context.Context, request MergeApplyRequest) (MergeResult, error) {
+	f.lastApply = request
+	return f.apply, f.applyErr
+}
+
+func (f *fakeWorkspace) RollbackMerge(_ context.Context, request MergeRollbackRequest) (MergeRollbackResult, error) {
+	f.lastRollback = request
+	return f.rollback, f.rollbackErr
+}
+
+func (f *fakeWorkspace) Digest(_ context.Context, request DigestRequest) (DigestView, error) {
+	f.lastDigest = request
+	return f.digest, f.digestErr
+}
+
+func (f *fakeWorkspace) AdoptLocalPaths(_ context.Context, apply bool) (AdoptReportView, error) {
+	f.lastAdopt = apply
+	return f.adopt, f.adoptErr
+}
+
+func (f *fakeWorkspace) AddProjectPath(_ context.Context, request AddProjectPathRequest) (Project, error) {
+	f.lastPath = request
+	return f.project, f.pathErr
+}
+
+func (f *fakeWorkspace) Journal(_ context.Context, query JournalQuery) (JournalPage, error) {
+	f.lastJournal = query
+	return f.journal, f.journalErr
+}
+
+type fakeHooks struct {
+	items []HookStatus
+	err   error
+}
+
+func (f *fakeHooks) Hooks(context.Context) ([]HookStatus, error) { return f.items, f.err }
+
 type fakeUpdater struct{ calls int }
 
 func (f *fakeUpdater) Update(context.Context) (UpdateResult, error) {
@@ -296,6 +375,8 @@ type testFixture struct {
 	settings    *fakeSettings
 	updater     *fakeUpdater
 	sync        *fakeSync
+	workspace   *fakeWorkspace
+	hooks       *fakeHooks
 	shutdown    chan struct{}
 }
 
@@ -335,9 +416,20 @@ func (w *synchronizedWriter) String() string {
 func newFixture(t *testing.T) *testFixture {
 	t.Helper()
 	f := &testFixture{connections: newFakeConnections(), credentials: &fakeCredentials{}, jobs: &fakeJobs{}, cancels: &fakeCancels{statuses: map[string]string{"run-1": "queued"}}, runs: &fakeRuns{log: newFakeRunLog()}, schedules: &fakeSchedules{}, settings: &fakeSettings{values: map[string]string{"theme": "dark", "api_token": "should-not-escape"}}, updater: &fakeUpdater{}, sync: &fakeSync{status: SyncView{Provider: "git", Branch: "main", Conflicts: []string{}, ConflictRecords: []string{}}, result: SyncView{Provider: "git", Branch: "main", Conflicts: []string{}, ConflictRecords: []string{}}}, shutdown: make(chan struct{})}
+	f.workspace = &fakeWorkspace{
+		plan: MergePlan{PlanID: "plan-1", Project: "brain", Survivor: MergeRecordView{ID: "note-1"},
+			Duplicates: []MergeRecordView{}, Conflicts: []string{}},
+		apply:    MergeResult{PlanID: "plan-1", Project: "brain", Applied: true, Manifest: "merges/2026.json", Files: []MergeFileView{}},
+		rollback: MergeRollbackResult{PlanID: "plan-1", Manifest: "merges/2026.json", Files: []MergeFileView{}},
+		digest:   DigestView{Projects: []DigestProjectView{}},
+		adopt:    AdoptReportView{Machine: "test", Projects: []ProjectOwnershipView{}},
+		project:  Project{ID: "brain", Name: "Brain", Paths: []string{}},
+		journal:  JournalPage{Items: []JournalView{}, Limit: 50},
+	}
+	f.hooks = &fakeHooks{items: []HookStatus{{Host: "claude", Path: "/home/.claude/settings.json", Installed: true, Detail: "ok"}}}
 	f.schedules.connections = f.connections
 	var err error
-	f.handler, err = NewHandler(Options{Token: TokenFunc(func() string { return testToken }), Port: testPort, Version: "test", PID: 99, StartedAt: time.Now().Add(-time.Minute), Now: time.Now, MaxBody: 256, Heartbeat: 10 * time.Millisecond, Connections: f.connections, Sources: fakeRegistry{}, Credentials: f.credentials, Jobs: f.jobs, Cancels: f.cancels, Runs: f.runs, Schedules: f.schedules, Projects: fakeProjects{items: []Project{{ID: "brain", Name: "Brain"}}}, Settings: f.settings, Sync: f.sync, Updater: f.updater, Shutdown: ShutdownFunc(func(context.Context) error { close(f.shutdown); return nil })})
+	f.handler, err = NewHandler(Options{Token: TokenFunc(func() string { return testToken }), Port: testPort, Version: "test", PID: 99, StartedAt: time.Now().Add(-time.Minute), Now: time.Now, MaxBody: 256, Heartbeat: 10 * time.Millisecond, Connections: f.connections, Sources: fakeRegistry{}, Credentials: f.credentials, Jobs: f.jobs, Cancels: f.cancels, Runs: f.runs, Schedules: f.schedules, Projects: fakeProjects{items: []Project{{ID: "brain", Name: "Brain"}}}, Settings: f.settings, Sync: f.sync, Merge: f.workspace, Digest: f.workspace, ProjectAdmin: f.workspace, Journal: f.workspace, Hooks: f.hooks, Updater: f.updater, Shutdown: ShutdownFunc(func(context.Context) error { close(f.shutdown); return nil })})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -970,5 +1062,192 @@ func TestSecretKeyClassification(t *testing.T) {
 		if isSecretKey(key) {
 			t.Fatalf("%q should not be classified as secret", key)
 		}
+	}
+}
+
+func TestWorkspaceRoutesRequireAuth(t *testing.T) {
+	f := newFixture(t)
+	cases := []struct{ method, path, body string }{
+		{http.MethodPost, "/v1/merge/plan", `{"project":"brain"}`},
+		{http.MethodPost, "/v1/merge/apply", `{"plan_id":"plan-1"}`},
+		{http.MethodPost, "/v1/merge/rollback", `{"plan_id":"plan-1"}`},
+		{http.MethodPost, "/v1/digest", `{}`},
+		{http.MethodPost, "/v1/projects/adopt", `{"apply":false}`},
+		{http.MethodPost, "/v1/projects/brain/paths", `{"path":"C:\\work\\brain"}`},
+		{http.MethodGet, "/v1/journal", ""},
+		{http.MethodGet, "/v1/hooks", ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.method+" "+tc.path, func(t *testing.T) {
+			r := httptest.NewRequest(tc.method, tc.path, strings.NewReader(tc.body))
+			r.Host = net.JoinHostPort("127.0.0.1", strconvI(testPort))
+			if tc.body != "" {
+				r.Header.Set("Content-Type", "application/json")
+			}
+			w := httptest.NewRecorder()
+			f.handler.ServeHTTP(w, r)
+			if w.Code != http.StatusUnauthorized {
+				t.Fatalf("unauthenticated status=%d body=%s", w.Code, w.Body.String())
+			}
+		})
+	}
+}
+
+func TestMergeRoutesResolveProjectAndMapStalePlan(t *testing.T) {
+	f := newFixture(t)
+	f.handler.opts.Memory = newFakeMemory()
+	f.workspace.plan.Survivor.Title = "leaked " + testToken
+
+	w := request(f, http.MethodPost, "/v1/merge/plan", `{"project":"brain","survivor":"note-1","duplicates":["note-2"]}`, nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("plan=%d %s", w.Code, w.Body.String())
+	}
+	if f.workspace.lastPlan.ProjectID != "brain" || f.workspace.lastPlan.Survivor != "note-1" ||
+		len(f.workspace.lastPlan.Duplicates) != 1 {
+		t.Fatalf("plan request = %+v", f.workspace.lastPlan)
+	}
+	if strings.Contains(w.Body.String(), testToken) {
+		t.Fatal("token leaked through a plan title")
+	}
+	if got := request(f, http.MethodPost, "/v1/merge/plan", `{"survivor":"note-1"}`, nil); got.Code != http.StatusBadRequest {
+		t.Fatalf("missing project=%d %s", got.Code, got.Body.String())
+	}
+	if got := request(f, http.MethodGet, "/v1/merge/plan", "", nil); got.Code != http.StatusMethodNotAllowed || got.Header().Get("Allow") != "POST" {
+		t.Fatalf("plan method=%d Allow=%q", got.Code, got.Header().Get("Allow"))
+	}
+
+	f.handler.opts.ProjectAllowlist = []string{"brain"}
+	if got := request(f, http.MethodPost, "/v1/merge/apply", `{"plan_id":"plan-1"}`, nil); got.Code != http.StatusOK {
+		t.Fatalf("apply=%d %s", got.Code, got.Body.String())
+	}
+	if f.workspace.lastApply.PlanID != "plan-1" || len(f.workspace.lastApply.AllowedProjects) != 1 {
+		t.Fatalf("apply request = %+v", f.workspace.lastApply)
+	}
+	w = request(f, http.MethodPost, "/v1/merge/rollback", `{"plan_id":"plan-1"}`, nil)
+	if w.Code != http.StatusOK || f.workspace.lastRollback.PlanID != "plan-1" {
+		t.Fatalf("rollback=%d %s", w.Code, w.Body.String())
+	}
+
+	f.workspace.applyErr = codedFakeError{code: "stale_plan", message: "stale_plan: refused " + testToken}
+	w = request(f, http.MethodPost, "/v1/merge/apply", `{"plan_id":"plan-1"}`, nil)
+	if w.Code != http.StatusConflict || strings.Contains(w.Body.String(), testToken) {
+		t.Fatalf("stale apply=%d %s", w.Code, w.Body.String())
+	}
+	envelope := decodeMap(t, w.Body.String())
+	errorBody, ok := envelope["error"].(map[string]any)
+	if !ok || errorBody["code"] != "merge_stale" {
+		t.Fatalf("stale envelope=%s", w.Body.String())
+	}
+	if got := request(f, http.MethodPost, "/v1/merge/apply", `{}`, nil); got.Code != http.StatusBadRequest {
+		t.Fatalf("missing plan_id=%d %s", got.Code, got.Body.String())
+	}
+}
+
+func TestDigestRouteScopeAndDryRun(t *testing.T) {
+	f := newFixture(t)
+	f.handler.opts.Memory = newFakeMemory()
+
+	w := request(f, http.MethodPost, "/v1/digest", `{"project":"brain","write":false}`, nil)
+	if w.Code != http.StatusOK || f.workspace.lastDigest.ProjectID != "brain" || f.workspace.lastDigest.Write {
+		t.Fatalf("digest=%d %s last=%+v", w.Code, w.Body.String(), f.workspace.lastDigest)
+	}
+	w = request(f, http.MethodPost, "/v1/digest", `{"project":"brain","write":true}`, nil)
+	if w.Code != http.StatusOK || !f.workspace.lastDigest.Write {
+		t.Fatalf("digest write=%d %s", w.Code, w.Body.String())
+	}
+	f.handler.opts.ProjectAllowlist = []string{"brain"}
+	if got := request(f, http.MethodPost, "/v1/digest", `{}`, nil); got.Code != http.StatusOK || f.workspace.lastDigest.ProjectID != "brain" {
+		t.Fatalf("single-project digest=%d %s", got.Code, got.Body.String())
+	}
+	f.handler.opts.ProjectAllowlist = []string{"brain", "demo"}
+	if got := request(f, http.MethodPost, "/v1/digest", `{}`, nil); got.Code != http.StatusBadRequest {
+		t.Fatalf("multi-project digest=%d %s", got.Code, got.Body.String())
+	}
+	f.workspace.digestErr = errors.New("digest failed with " + testToken)
+	if got := request(f, http.MethodPost, "/v1/digest", `{"project":"brain"}`, nil); got.Code != http.StatusInternalServerError ||
+		strings.Contains(got.Body.String(), testToken) {
+		t.Fatalf("unsafe digest error=%d %s", got.Code, got.Body.String())
+	}
+}
+
+func TestProjectAdoptAndPathRoutes(t *testing.T) {
+	f := newFixture(t)
+	f.handler.opts.Memory = newFakeMemory()
+
+	w := request(f, http.MethodPost, "/v1/projects/adopt", `{"apply":true}`, nil)
+	if w.Code != http.StatusOK || !f.workspace.lastAdopt {
+		t.Fatalf("adopt=%d %s last=%v", w.Code, w.Body.String(), f.workspace.lastAdopt)
+	}
+	f.handler.opts.ProjectAllowlist = []string{"brain"}
+	if got := request(f, http.MethodPost, "/v1/projects/adopt", `{"apply":false}`, nil); got.Code != http.StatusBadRequest {
+		t.Fatalf("scoped adopt=%d %s", got.Code, got.Body.String())
+	}
+	f.handler.opts.ProjectAllowlist = nil
+
+	f.workspace.project = Project{ID: "brain", Name: "Brain", Paths: []string{"C:/work/brain"}}
+	w = request(f, http.MethodPost, "/v1/projects/brain/paths", `{"path":"C:\\work\\brain"}`, nil)
+	if w.Code != http.StatusOK || f.workspace.lastPath.ProjectID != "brain" || f.workspace.lastPath.Path != `C:\work\brain` {
+		t.Fatalf("add path=%d %s last=%+v", w.Code, w.Body.String(), f.workspace.lastPath)
+	}
+	if got := request(f, http.MethodPost, "/v1/projects/brain/paths", `{"path":" "}`, nil); got.Code != http.StatusBadRequest {
+		t.Fatalf("empty path=%d %s", got.Code, got.Body.String())
+	}
+	// The existing project state route keeps its handler.
+	if got := request(f, http.MethodGet, "/v1/projects/brain/state", "", nil); got.Code != http.StatusOK {
+		t.Fatalf("state route=%d %s", got.Code, got.Body.String())
+	}
+	if got := request(f, http.MethodGet, "/v1/projects/brain/paths", "", nil); got.Code != http.StatusMethodNotAllowed ||
+		got.Header().Get("Allow") != "POST" {
+		t.Fatalf("paths method=%d Allow=%q", got.Code, got.Header().Get("Allow"))
+	}
+}
+
+func TestJournalRouteScopeLimitAndRedaction(t *testing.T) {
+	f := newFixture(t)
+	f.handler.opts.Memory = newFakeMemory()
+	f.workspace.journal = JournalPage{
+		Items: []JournalView{{Event: "note", Project: "brain", ID: "note-1", Title: "safe " + testToken}},
+		Limit: 5,
+	}
+
+	w := request(f, http.MethodGet, "/v1/journal?project=brain&limit=5", "", nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("journal=%d %s", w.Code, w.Body.String())
+	}
+	if f.workspace.lastJournal.ProjectID != "brain" || f.workspace.lastJournal.Limit != 5 {
+		t.Fatalf("journal query = %+v", f.workspace.lastJournal)
+	}
+	if strings.Contains(w.Body.String(), testToken) {
+		t.Fatal("token leaked through the journal")
+	}
+	if got := request(f, http.MethodGet, "/v1/journal?limit=0", "", nil); got.Code != http.StatusBadRequest {
+		t.Fatalf("bad limit=%d %s", got.Code, got.Body.String())
+	}
+	f.handler.opts.ProjectAllowlist = []string{"brain", "demo"}
+	if got := request(f, http.MethodGet, "/v1/journal", "", nil); got.Code != http.StatusBadRequest {
+		t.Fatalf("unscoped journal=%d %s", got.Code, got.Body.String())
+	}
+	if got := request(f, http.MethodGet, "/v1/journal?project=other", "", nil); got.Code != http.StatusBadRequest {
+		t.Fatalf("out-of-scope journal=%d %s", got.Code, got.Body.String())
+	}
+	f.handler.opts.ProjectAllowlist = []string{"brain"}
+	if got := request(f, http.MethodGet, "/v1/journal", "", nil); got.Code != http.StatusOK || f.workspace.lastJournal.ProjectID != "brain" {
+		t.Fatalf("single-project journal=%d %s", got.Code, got.Body.String())
+	}
+}
+
+func TestHooksRouteStatusAndSanitizedFailure(t *testing.T) {
+	f := newFixture(t)
+	w := request(f, http.MethodGet, "/v1/hooks", "", nil)
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"host":"claude"`) {
+		t.Fatalf("hooks=%d %s", w.Code, w.Body.String())
+	}
+	if got := request(f, http.MethodPost, "/v1/hooks", "", nil); got.Code != http.StatusMethodNotAllowed || got.Header().Get("Allow") != "GET" {
+		t.Fatalf("hooks method=%d Allow=%q", got.Code, got.Header().Get("Allow"))
+	}
+	f.hooks.err = errors.New("hooks failed with " + testToken)
+	if got := request(f, http.MethodGet, "/v1/hooks", "", nil); got.Code != http.StatusInternalServerError ||
+		strings.Contains(got.Body.String(), testToken) {
+		t.Fatalf("unsafe hooks error=%d %s", got.Code, got.Body.String())
 	}
 }

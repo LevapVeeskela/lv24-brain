@@ -145,7 +145,7 @@ func TestFindingsReportOnlyHeuristics(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if _, err := f.app.Attempt(ctx, app.AttemptInput{ProjectID: "p", Title: "Union merge for journals", Hypothesis: "git union merge keeps both sides", Result: "duplicated lines"}); err != nil {
+	if _, err := f.app.Attempt(ctx, app.AttemptInput{ProjectID: "p", Title: "Union merge for journals", Hypothesis: "git union merge keeps both sides", Result: "failed: the merge duplicated lines"}); err != nil {
 		t.Fatal(err)
 	}
 	*f.clock = f.clock.Add(2 * time.Hour)

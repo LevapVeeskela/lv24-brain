@@ -30,6 +30,9 @@ type RecordSummary struct {
 	Status    string
 	CreatedAt time.Time
 	UpdatedAt time.Time
+	// ContentUpdatedAt is the last title or body change; a --since window
+	// compares it, so a metadata write does not re-report the record.
+	ContentUpdatedAt time.Time
 	// Validity is the record's temporal validity and supersede links.
 	ValidFrom    time.Time
 	ValidTo      time.Time
@@ -107,7 +110,8 @@ type ListRecordsOptions struct {
 	ProjectID string
 	// Kinds keeps only these record kinds; empty lists every kind.
 	Kinds []string
-	// Since keeps records created or updated after it.
+	// Since keeps records whose content changed at or after it. A metadata-only
+	// write (review, snooze, validity) does not make a record recent.
 	Since time.Time
 	// Status keeps decisions with this status (and drops other kinds).
 	Status string
@@ -164,6 +168,7 @@ func (r Record) Summary() RecordSummary {
 	summary.SupersededBy = valid.SupersededBy
 	summary.Supersedes = valid.Supersedes
 	summary.Confidence = valid.Confidence
+	summary.ContentUpdatedAt = contentUpdatedOr(recordContentUpdatedAt(r), summary.UpdatedAt)
 	summary.Subtype, summary.Scope, summary.TopicKey, summary.Occurrences = taxonomyOf(r)
 	summary.Provenance = r.Provenance()
 	summary.Permalink = r.Permalink()
@@ -172,6 +177,22 @@ func (r Record) Summary() RecordSummary {
 		summary.Tags = append([]string(nil), r.Note.Tags...)
 	}
 	return summary
+}
+
+// recordContentUpdatedAt returns the content edit time of whichever record is
+// set, zero when the stored file did not carry one.
+func recordContentUpdatedAt(record Record) time.Time {
+	switch {
+	case record.Note != nil:
+		return record.Note.ContentUpdatedAt
+	case record.Decision != nil:
+		return record.Decision.ContentUpdatedAt
+	case record.Attempt != nil:
+		return record.Attempt.ContentUpdatedAt
+	case record.Handoff != nil:
+		return record.Handoff.ContentUpdatedAt
+	}
+	return time.Time{}
 }
 
 // taxonomyOf returns the classification of whichever record is set.
@@ -308,7 +329,7 @@ func (a *App) ListRecords(ctx context.Context, opts ListRecordsOptions) ([]Recor
 		if !filter.Allows(validity, summary.CreatedAt, now) {
 			continue
 		}
-		if !opts.Since.IsZero() && !summary.CreatedAt.After(opts.Since) && !summary.UpdatedAt.After(opts.Since) {
+		if !withinSince(summary.ContentUpdatedAt, summary.UpdatedAt, summary.CreatedAt, opts.Since) {
 			continue
 		}
 		out = append(out, summary)

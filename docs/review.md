@@ -226,6 +226,11 @@ Near duplicates are reported, never refused or merged:
   detector because the sketch is too coarse for them;
 - the shingle (Jaccard) detector used by the `near-duplicate` finding.
 
+Both detectors pass a gate first: the two records must not name different dotted
+release versions (release notes are a series, not duplicates), and their
+**bodies** must overlap by at least 0.5. Titles and weekly-report templates
+collide too easily on their own, so a shared heading alone is not a duplicate.
+
 `brain review` reports a newer record once, against its most similar older
 record, as a `near-duplicate` finding with both ids in the message. The shingle
 detector stays deliberately conservative for automatic session handoffs (they

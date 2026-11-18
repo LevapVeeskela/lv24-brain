@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"math"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -35,6 +36,11 @@ const (
 	// duplicateTitleThreshold is the body similarity that is enough when the
 	// normalized titles are identical.
 	duplicateTitleThreshold = 0.6
+	// duplicateBodyThreshold is the body-only similarity two records need
+	// before any near-duplicate detector may report them. Titles and the
+	// boilerplate of a template collide too easily (release notes, weekly
+	// reports), so the body has to say the same thing too.
+	duplicateBodyThreshold = 0.5
 	// duplicateMinShingles is the shingle count below which a text is too
 	// short for shingles to mean anything; such records match only when their
 	// normalized text is equal.
@@ -48,12 +54,16 @@ const (
 
 // dupRecord is one record prepared for comparison.
 type dupRecord struct {
-	id        string
-	created   time.Time
-	title     string // normalized
-	body      string // normalized
-	text      string // normalized title + body
-	display   string // original title, for reports
+	id      string
+	created time.Time
+	title   string // normalized
+	body    string // normalized
+	text    string // normalized title + body
+	display string // original title, for reports
+	// versions are the dotted release numbers the original title names, sorted
+	// and deduplicated. Records that name different versions are a series of
+	// releases, never near-duplicates of each other.
+	versions  string
 	shingles  map[string]struct{}
 	bodyShing map[string]struct{}
 	auto      bool
@@ -138,11 +148,38 @@ func newDupRecord(id string, created time.Time, title, body string, auto bool) d
 	text := strings.TrimSpace(normTitle + " " + normBody)
 	return dupRecord{
 		id: id, created: created, title: normTitle, body: normBody, text: text,
+		versions: strings.Join(titleVersions(title), " "),
 		shingles: wordShingles(text), bodyShing: wordShingles(normBody), auto: auto,
 		fingerprint: domain.BodyFingerprint(text),
 		simhash:     domain.Simhash64(text),
 		words:       len(strings.Fields(text)),
 	}
+}
+
+// recordVersionPattern matches dotted release numbers such as 0.6.1, v1.6.2
+// or 0.25.0. A single number is deliberately not a version here: it is too
+// often an issue, a port or a count.
+var recordVersionPattern = regexp.MustCompile(`(?i)\bv?(\d+(?:\.\d+)+)`)
+
+// titleVersions returns the dotted release numbers a title names, sorted and
+// deduplicated.
+func titleVersions(title string) []string {
+	matches := recordVersionPattern.FindAllStringSubmatch(title, -1)
+	seen := map[string]struct{}{}
+	versions := make([]string, 0, len(matches))
+	for _, match := range matches {
+		version := strings.Trim(match[1], ".")
+		if version == "" {
+			continue
+		}
+		if _, ok := seen[version]; ok {
+			continue
+		}
+		seen[version] = struct{}{}
+		versions = append(versions, version)
+	}
+	sort.Strings(versions)
+	return versions
 }
 
 // normalizeDupText lowercases, folds ё to е, drops punctuation and Markdown
@@ -183,6 +220,41 @@ func jaccard(a, b map[string]struct{}) float64 {
 	return float64(shared) / float64(union)
 }
 
+// bodyOverlap scores how much two record bodies say the same thing: shingle
+// Jaccard when both are long enough for shingles, word Jaccard otherwise.
+func bodyOverlap(a, b dupRecord) float64 {
+	if a.body == "" || b.body == "" {
+		return 0
+	}
+	if a.body == b.body {
+		return 1
+	}
+	if len(a.bodyShing) >= duplicateMinShingles && len(b.bodyShing) >= duplicateMinShingles {
+		return jaccard(a.bodyShing, b.bodyShing)
+	}
+	return jaccard(dupWordSet(a.body), dupWordSet(b.body))
+}
+
+// dupWordSet is the set of words of a normalized text, for short bodies where
+// shingles are too few to be meaningful.
+func dupWordSet(text string) map[string]struct{} {
+	set := map[string]struct{}{}
+	for _, word := range strings.Fields(text) {
+		set[word] = struct{}{}
+	}
+	return set
+}
+
+// nearDuplicateGate reports whether two records may be near-duplicates at all.
+// They must not name different release versions, and their bodies — not just
+// their titles or a shared template — must overlap.
+func nearDuplicateGate(a, b dupRecord) bool {
+	if a.versions != "" && b.versions != "" && a.versions != b.versions {
+		return false
+	}
+	return bodyOverlap(a, b) >= duplicateBodyThreshold
+}
+
 // dupSimilarity scores a pair; ok reports whether it is a near-duplicate.
 func dupSimilarity(a, b dupRecord) (float64, bool) {
 	if a.text == "" || b.text == "" {
@@ -190,6 +262,9 @@ func dupSimilarity(a, b dupRecord) (float64, bool) {
 	}
 	if a.text == b.text {
 		return 1, true
+	}
+	if !nearDuplicateGate(a, b) {
+		return 0, false
 	}
 	if len(a.shingles) < duplicateMinShingles || len(b.shingles) < duplicateMinShingles {
 		return 0, false

@@ -271,6 +271,9 @@ func duplicatePair(a, b dupRecord) (float64, string, bool) {
 	if a.text == "" || b.text == "" || a.fingerprint == b.fingerprint {
 		return 0, "", false
 	}
+	if !nearDuplicateGate(a, b) {
+		return 0, "", false
+	}
 	if a.words >= domain.SimhashMinWords && b.words >= domain.SimhashMinWords {
 		distance := domain.HammingDistance(a.simhash, b.simhash)
 		if distance <= domain.NearDuplicateHammingDistance {

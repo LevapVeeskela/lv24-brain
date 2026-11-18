@@ -127,8 +127,26 @@ func (h *Handler) route(w http.ResponseWriter, r *http.Request) {
 		h.scheduleRoute(w, r, strings.TrimPrefix(path, "/v1/schedules/"))
 	case path == "/v1/projects":
 		h.projects(w, r)
+	case path == "/v1/projects/adopt":
+		h.projectsAdopt(w, r)
 	case strings.HasPrefix(path, "/v1/projects/"):
+		if projectID, ok := projectPathsRoute(path); ok {
+			h.projectPaths(w, r, projectID)
+			return
+		}
 		h.projectRoute(w, r, strings.TrimPrefix(path, "/v1/projects/"))
+	case path == "/v1/merge/plan":
+		h.mergePlan(w, r)
+	case path == "/v1/merge/apply":
+		h.mergeApply(w, r)
+	case path == "/v1/merge/rollback":
+		h.mergeRollback(w, r)
+	case path == "/v1/digest":
+		h.digest(w, r)
+	case path == "/v1/journal":
+		h.journal(w, r)
+	case path == "/v1/hooks":
+		h.hooks(w, r)
 	case path == "/v1/records":
 		h.records(w, r)
 	case strings.HasPrefix(path, "/v1/records/"):
@@ -791,6 +809,426 @@ func (h *Handler) projects(w http.ResponseWriter, r *http.Request) {
 		items[i].Name = h.redact(items[i].Name)
 	}
 	writeJSON(w, http.StatusOK, items)
+}
+
+// projectPathsRoute matches /v1/projects/{id}/paths. Every other
+// /v1/projects/... route keeps its existing handler.
+func projectPathsRoute(path string) (string, bool) {
+	parts, ok := pathParts(strings.TrimPrefix(path, "/v1/projects/"))
+	if !ok || len(parts) != 2 || parts[1] != "paths" {
+		return "", false
+	}
+	return parts[0], true
+}
+
+func (h *Handler) projectsAdopt(w http.ResponseWriter, r *http.Request) {
+	if !method(w, r, http.MethodPost) {
+		return
+	}
+	if h.opts.ProjectAdmin == nil {
+		unavailable(w)
+		return
+	}
+	// Adoption writes every registered project's provenance, which cannot be
+	// bounded to an allowlist. Refuse rather than write outside the scope this
+	// API was asked to serve.
+	if len(h.opts.ProjectAllowlist) > 0 {
+		writeError(w, http.StatusBadRequest, "validation",
+			"path adoption touches every project and is refused while this API is limited to specific projects")
+		return
+	}
+	var body struct {
+		Apply bool `json:"apply"`
+	}
+	if !h.decode(w, r, &body) {
+		return
+	}
+	report, err := h.opts.ProjectAdmin.AdoptLocalPaths(r.Context(), body.Apply)
+	if err != nil {
+		h.writeWorkspaceError(w, err)
+		return
+	}
+	report.Machine = h.redact(report.Machine)
+	for i := range report.Projects {
+		report.Projects[i].ProjectID = h.redact(report.Projects[i].ProjectID)
+		for j := range report.Projects[i].Paths {
+			report.Projects[i].Paths[j].Path = h.redact(report.Projects[i].Paths[j].Path)
+			report.Projects[i].Paths[j].Machine = h.redact(report.Projects[i].Paths[j].Machine)
+		}
+	}
+	if report.Projects == nil {
+		report.Projects = []ProjectOwnershipView{}
+	}
+	writeJSON(w, http.StatusOK, report)
+}
+
+func (h *Handler) projectPaths(w http.ResponseWriter, r *http.Request, projectSelector string) {
+	if !method(w, r, http.MethodPost) {
+		return
+	}
+	if h.opts.ProjectAdmin == nil || h.opts.Memory == nil {
+		unavailable(w)
+		return
+	}
+	var body struct {
+		Path string `json:"path"`
+	}
+	if !h.decode(w, r, &body) {
+		return
+	}
+	if strings.TrimSpace(body.Path) == "" {
+		writeError(w, http.StatusBadRequest, "validation", "path is required")
+		return
+	}
+	projectID, ok := h.resolveProjectID(w, r, projectSelector)
+	if !ok {
+		return
+	}
+	project, err := h.opts.ProjectAdmin.AddProjectPath(r.Context(), AddProjectPathRequest{
+		ProjectID: projectID, Path: body.Path,
+	})
+	if err != nil {
+		h.writeWorkspaceError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, h.safeProject(project))
+}
+
+// safeProject redacts every string of a project view.
+func (h *Handler) safeProject(project Project) Project {
+	project.ID = h.redact(project.ID)
+	project.Name = h.redact(project.Name)
+	for i := range project.Paths {
+		project.Paths[i] = h.redact(project.Paths[i])
+	}
+	if len(project.PathProvenance) > 0 {
+		provenance := make(map[string]string, len(project.PathProvenance))
+		for path, machine := range project.PathProvenance {
+			provenance[h.redact(path)] = h.redact(machine)
+		}
+		project.PathProvenance = provenance
+	}
+	return project
+}
+
+func (h *Handler) mergePlan(w http.ResponseWriter, r *http.Request) {
+	if !method(w, r, http.MethodPost) {
+		return
+	}
+	if h.opts.Merge == nil || h.opts.Memory == nil {
+		unavailable(w)
+		return
+	}
+	var body struct {
+		Project    string   `json:"project"`
+		Survivor   string   `json:"survivor"`
+		Duplicates []string `json:"duplicates"`
+	}
+	if !h.decode(w, r, &body) {
+		return
+	}
+	selector := strings.TrimSpace(body.Project)
+	if selector == "" {
+		writeError(w, http.StatusBadRequest, "validation", "project is required")
+		return
+	}
+	projectID, ok := h.resolveProjectID(w, r, selector)
+	if !ok {
+		return
+	}
+	plan, err := h.opts.Merge.PlanMerge(r.Context(), MergePlanRequest{
+		ProjectID: projectID, Survivor: body.Survivor, Duplicates: body.Duplicates,
+	})
+	if err != nil {
+		h.writeWorkspaceError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, h.safeMergePlan(plan))
+}
+
+func (h *Handler) mergeApply(w http.ResponseWriter, r *http.Request) {
+	if !method(w, r, http.MethodPost) {
+		return
+	}
+	if h.opts.Merge == nil {
+		unavailable(w)
+		return
+	}
+	var body struct {
+		PlanID string `json:"plan_id"`
+	}
+	if !h.decode(w, r, &body) {
+		return
+	}
+	if strings.TrimSpace(body.PlanID) == "" {
+		writeError(w, http.StatusBadRequest, "validation", "plan_id is required")
+		return
+	}
+	result, err := h.opts.Merge.ApplyMerge(r.Context(), MergeApplyRequest{
+		PlanID: body.PlanID, AllowedProjects: h.opts.ProjectAllowlist,
+	})
+	if err != nil {
+		h.writeWorkspaceError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, h.safeMergeResult(result))
+}
+
+func (h *Handler) mergeRollback(w http.ResponseWriter, r *http.Request) {
+	if !method(w, r, http.MethodPost) {
+		return
+	}
+	if h.opts.Merge == nil {
+		unavailable(w)
+		return
+	}
+	var body struct {
+		PlanID string `json:"plan_id"`
+	}
+	if !h.decode(w, r, &body) {
+		return
+	}
+	if strings.TrimSpace(body.PlanID) == "" {
+		writeError(w, http.StatusBadRequest, "validation", "plan_id is required")
+		return
+	}
+	result, err := h.opts.Merge.RollbackMerge(r.Context(), MergeRollbackRequest{
+		PlanID: body.PlanID, AllowedProjects: h.opts.ProjectAllowlist,
+	})
+	if err != nil {
+		h.writeWorkspaceError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, h.safeMergeRollbackResult(result))
+}
+
+func (h *Handler) digest(w http.ResponseWriter, r *http.Request) {
+	if !method(w, r, http.MethodPost) {
+		return
+	}
+	if h.opts.Digest == nil {
+		unavailable(w)
+		return
+	}
+	var body struct {
+		Project string `json:"project"`
+		Write   bool   `json:"write"`
+	}
+	if !h.decode(w, r, &body) {
+		return
+	}
+	request := DigestRequest{Write: body.Write}
+	if selector := strings.TrimSpace(body.Project); selector != "" {
+		projectID, ok := h.resolveProjectID(w, r, selector)
+		if !ok {
+			return
+		}
+		request.ProjectID = projectID
+	} else {
+		switch len(h.opts.ProjectAllowlist) {
+		case 0:
+		case 1:
+			request.ProjectID = h.opts.ProjectAllowlist[0]
+		default:
+			writeError(w, http.StatusBadRequest, "validation",
+				"project is required: this API is limited to several projects, so an all-projects digest is not allowed")
+			return
+		}
+	}
+	report, err := h.opts.Digest.Digest(r.Context(), request)
+	if err != nil {
+		h.writeWorkspaceError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, h.safeDigest(report))
+}
+
+func (h *Handler) journal(w http.ResponseWriter, r *http.Request) {
+	if !method(w, r, http.MethodGet) {
+		return
+	}
+	if h.opts.Journal == nil {
+		unavailable(w)
+		return
+	}
+	scope, ok := h.projectScope(w, r)
+	if !ok {
+		return
+	}
+	limit, ok := h.queryLimit(w, r, 50, recordsMaxPageSize)
+	if !ok {
+		return
+	}
+	query := JournalQuery{Limit: limit}
+	if !scope.AllProjects {
+		query.ProjectID = scope.ProjectID
+	}
+	page, err := h.opts.Journal.Journal(r.Context(), query)
+	if err != nil {
+		h.writeWorkspaceError(w, err)
+		return
+	}
+	if page.Items == nil {
+		page.Items = []JournalView{}
+	}
+	for i := range page.Items {
+		page.Items[i] = h.safeJournal(page.Items[i])
+	}
+	writeJSON(w, http.StatusOK, page)
+}
+
+func (h *Handler) hooks(w http.ResponseWriter, r *http.Request) {
+	if !method(w, r, http.MethodGet) {
+		return
+	}
+	if h.opts.Hooks == nil {
+		unavailable(w)
+		return
+	}
+	statuses, err := h.opts.Hooks.Hooks(r.Context())
+	if err != nil {
+		h.writeWorkspaceError(w, err)
+		return
+	}
+	if statuses == nil {
+		statuses = []HookStatus{}
+	}
+	for i := range statuses {
+		statuses[i] = h.safeHookStatus(statuses[i])
+	}
+	writeJSON(w, http.StatusOK, statuses)
+}
+
+// writeWorkspaceError maps the new workspace use cases. A stale merge plan is
+// the one conflict that carries a distinct machine code; every other error
+// keeps the memory-route mapping.
+func (h *Handler) writeWorkspaceError(w http.ResponseWriter, err error) {
+	var coded interface{ Code() string }
+	if errors.As(err, &coded) && coded.Code() == "stale_plan" {
+		writeError(w, http.StatusConflict, "merge_stale", h.redact(err.Error()))
+		return
+	}
+	h.writeMemoryError(w, err)
+}
+
+func (h *Handler) safeMergePlan(plan MergePlan) MergePlan {
+	plan.PlanID = h.redact(plan.PlanID)
+	plan.Project = h.redact(plan.Project)
+	plan.Kind = h.redact(plan.Kind)
+	plan.Survivor = h.safeMergeRecord(plan.Survivor)
+	for i := range plan.Duplicates {
+		plan.Duplicates[i] = h.safeMergeRecord(plan.Duplicates[i])
+	}
+	for i := range plan.AlreadyMerged {
+		plan.AlreadyMerged[i] = h.safeMergeRecord(plan.AlreadyMerged[i])
+	}
+	for i := range plan.Links {
+		plan.Links[i].SourceKind = h.redact(plan.Links[i].SourceKind)
+		plan.Links[i].SourceID = h.redact(plan.Links[i].SourceID)
+		plan.Links[i].Field = h.redact(plan.Links[i].Field)
+		plan.Links[i].Ref = h.redact(plan.Links[i].Ref)
+		plan.Links[i].OldID = h.redact(plan.Links[i].OldID)
+		plan.Links[i].NewID = h.redact(plan.Links[i].NewID)
+	}
+	for i := range plan.MergedFrom {
+		plan.MergedFrom[i] = h.redact(plan.MergedFrom[i])
+	}
+	for i := range plan.Conflicts {
+		plan.Conflicts[i] = h.redact(plan.Conflicts[i])
+	}
+	plan.Fingerprint = h.redact(plan.Fingerprint)
+	return plan
+}
+
+func (h *Handler) safeMergeRecord(record MergeRecordView) MergeRecordView {
+	record.Kind = h.redact(record.Kind)
+	record.ID = h.redact(record.ID)
+	record.Title = h.redact(record.Title)
+	record.State = h.redact(record.State)
+	return record
+}
+
+func (h *Handler) safeMergeResult(result MergeResult) MergeResult {
+	result.PlanID = h.redact(result.PlanID)
+	result.Project = h.redact(result.Project)
+	result.Manifest = h.redact(result.Manifest)
+	result.Files = h.safeMergeFiles(result.Files)
+	return result
+}
+
+func (h *Handler) safeMergeRollbackResult(result MergeRollbackResult) MergeRollbackResult {
+	result.PlanID = h.redact(result.PlanID)
+	result.Manifest = h.redact(result.Manifest)
+	result.Files = h.safeMergeFiles(result.Files)
+	for i := range result.Conflicts {
+		result.Conflicts[i] = h.redact(result.Conflicts[i])
+	}
+	return result
+}
+
+func (h *Handler) safeMergeFiles(files []MergeFileView) []MergeFileView {
+	if files == nil {
+		return []MergeFileView{}
+	}
+	for i := range files {
+		files[i].Path = h.redact(files[i].Path)
+		files[i].Change = h.redact(files[i].Change)
+	}
+	return files
+}
+
+func (h *Handler) safeDigest(report DigestView) DigestView {
+	for i := range report.Projects {
+		project := &report.Projects[i]
+		project.Project = h.safeProject(project.Project)
+		for j := range project.ProposedDecisions {
+			project.ProposedDecisions[j].ID = h.redact(project.ProposedDecisions[j].ID)
+			project.ProposedDecisions[j].Title = h.redact(project.ProposedDecisions[j].Title)
+		}
+		for j := range project.OpenQuestions {
+			project.OpenQuestions[j] = h.redact(project.OpenQuestions[j])
+		}
+		for j := range project.Blocked {
+			project.Blocked[j] = h.redact(project.Blocked[j])
+		}
+		if project.LatestHandoff != nil {
+			project.LatestHandoff.ID = h.redact(project.LatestHandoff.ID)
+			project.LatestHandoff.Summary = h.redact(project.LatestHandoff.Summary)
+			project.LatestHandoff.NextAction = h.redact(project.LatestHandoff.NextAction)
+		}
+	}
+	if report.Projects == nil {
+		report.Projects = []DigestProjectView{}
+	}
+	report.WrittenTo = h.redact(report.WrittenTo)
+	return report
+}
+
+func (h *Handler) safeJournal(entry JournalView) JournalView {
+	entry.Event = h.redact(entry.Event)
+	entry.Project = h.redact(entry.Project)
+	entry.ID = h.redact(entry.ID)
+	entry.Title = h.redact(entry.Title)
+	for key, value := range entry.Fields {
+		entry.Fields[key] = h.redact(value)
+	}
+	return entry
+}
+
+func (h *Handler) safeHookStatus(status HookStatus) HookStatus {
+	status.Host = h.redact(status.Host)
+	status.Path = h.redact(status.Path)
+	status.Detail = h.redact(status.Detail)
+	status.Trust = h.redact(status.Trust)
+	status.TrustHash = h.redact(status.TrustHash)
+	status.Approve = h.redact(status.Approve)
+	status.LastEvent = h.redact(status.LastEvent)
+	status.LastError = h.redact(status.LastError)
+	if status.LastRun != nil {
+		value := h.redact(*status.LastRun)
+		status.LastRun = &value
+	}
+	return status
 }
 
 func (h *Handler) settings(w http.ResponseWriter, r *http.Request) {

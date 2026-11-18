@@ -6,7 +6,7 @@
     "recall_at_5": 0.9841269841269841,
     "precision_at_5": 0.19682539682539663,
     "mrr": 0.9436507936507937,
-    "tokens_per_answer": 98.6984126984127,
+    "tokens_per_answer": 124.17460317460318,
     "p50_latency_ms": 0.6236,
     "p95_latency_ms": 1.5322,
     "superseded_tasks": 13,

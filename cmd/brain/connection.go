@@ -15,6 +15,7 @@ import (
 	"github.com/levapveeskela/lv24-brain/internal/app"
 	"github.com/levapveeskela/lv24-brain/internal/bootstrap"
 	"github.com/levapveeskela/lv24-brain/internal/config"
+	"github.com/levapveeskela/lv24-brain/internal/connectorbuild"
 	"github.com/levapveeskela/lv24-brain/internal/domain"
 )
 
@@ -33,6 +34,7 @@ func printConnectionUsage(w io.Writer) {
   brain connection secret set <id> <field>
   brain connection remove <id> --yes [--json]
   brain connection migrate [--copy-legacy-secrets] [--json]
+  brain connection migrate-identity [--check|--apply] [--json]
   brain connection providers [--json]
   brain connection run <id> [--since RFC3339] [--days N] [--limit N] [--json]
   brain connection auth <id> [--client-id <id>] [--scopes a,b] [--remove]
@@ -42,13 +44,19 @@ list shows the newest run of each connection: last-run time, status and the
 redacted cause of a failed run. test runs the provider's non-mutating check
 (the same Source.Check the agent uses) and exits non-zero on failure.
 Use providers to inspect required settings. Secret fields must be set from
-stdin with connection secret set; never put them in --setting.
+stdin with connection secret set; never put them in --setting. A protected
+identity value can be restored with: connection secret set <id> <field>.
 publish records the explicit raw-zone policy: local-only untracks
 connectors/<id> from git (files and history kept), shared publishes items and
 keeps checkpoints local. A connection without an explicit policy keeps the
 policy git already tracks, or stays local-only when nothing is tracked.
 Remove keeps items, checkpoints and credentials. Migration copies legacy
 credentials only with --copy-legacy-secrets; it never deletes legacy data.
+Account labels and connector-declared identity settings (imap username) are
+personal data: add and migrate-identity store them in the secret store as
+conn/<id>/<field> and keep only a marker in the catalogue. migrate-identity is
+a dry run unless --apply is passed; raw legacy values stay readable and are
+never rewritten without --apply.
 `)
 }
 
@@ -78,7 +86,7 @@ func runConnection(args []string, stdin io.Reader, stdout, stderr io.Writer) int
 	}
 	fs := newFlagSet("connection "+command, stderr)
 	cfgPath := configFlag(fs)
-	var asJSON, yes, copySecrets bool
+	var asJSON, yes, copySecrets, applyIdentity, checkIdentity bool
 	var id, account, baseURL, schedule, publish string
 	var sinceRaw, clientID, scopesRaw string
 	var limit, days int
@@ -113,6 +121,10 @@ func runConnection(args []string, stdin io.Reader, stdout, stderr io.Writer) int
 	case "migrate":
 		fs.BoolVar(&asJSON, "json", false, "print JSON")
 		fs.BoolVar(&copySecrets, "copy-legacy-secrets", false, "copy missing credentials from legacy secret names without overwriting")
+	case "migrate-identity":
+		fs.BoolVar(&asJSON, "json", false, "print JSON")
+		fs.BoolVar(&applyIdentity, "apply", false, "store raw accounts in the secret store and replace them with markers")
+		fs.BoolVar(&checkIdentity, "check", false, "report only; writes nothing (default)")
 	case "secret set": // Values are read only from stdin, never from flags.
 	default:
 		fmt.Fprintf(stderr, "brain connection: unknown subcommand %q\n", command)
@@ -134,6 +146,10 @@ func runConnection(args []string, stdin io.Reader, stdout, stderr io.Writer) int
 	}
 	if len(positional) != wantArgs {
 		fmt.Fprintf(stderr, "brain connection %s: expected %d arguments\n", command, wantArgs)
+		return 2
+	}
+	if applyIdentity && checkIdentity {
+		fmt.Fprintln(stderr, "brain connection migrate-identity: --check and --apply cannot be combined")
 		return 2
 	}
 	cfg, err := loadRequiredConfig(*cfgPath)
@@ -196,6 +212,8 @@ func runConnection(args []string, stdin io.Reader, stdout, stderr io.Writer) int
 		return connectionPublish(ctx, runtime, cfg, positional[0], positional[1], asJSON, stdout, stderr)
 	case "migrate":
 		return connectionMigrate(ctx, runtime, copySecrets, asJSON, stdout, stderr)
+	case "migrate-identity":
+		return connectionMigrateIdentity(ctx, runtime, applyIdentity, asJSON, stdout, stderr)
 	}
 	return 2
 }
@@ -216,6 +234,13 @@ func connectionTest(ctx context.Context, cfg config.BrainConfig, id string, asJS
 	connection, err := host.Connections.Get(ctx, id)
 	if err != nil {
 		return reportError(stderr, "connection test", err)
+	}
+	// Identity values are resolved here, when a check actually reads the
+	// connection, never for a whole catalogue: a scheduled run may have no
+	// unlocked keychain.
+	connection, err = connectorbuild.ResolveIdentity(ctx, connection, host.Deps.Credentials)
+	if err != nil {
+		return reportConnectionFailure(stdout, stderr, id, app.DescribeConnectionCheckError(err), asJSON)
 	}
 	source, err := host.Registry.Build(connection, host.Deps)
 	if err != nil {
@@ -312,9 +337,12 @@ func connectionList(ctx context.Context, runtime *bootstrap.ConnectionRuntime, d
 	if err != nil {
 		return reportError(stderr, "connection list", err)
 	}
-	views, err := connectionViews(runtime, connections)
+	views, warnings, err := connectionViews(ctx, runtime, connections)
 	if err != nil {
 		return reportError(stderr, "connection list", err)
+	}
+	for _, warning := range warnings {
+		fmt.Fprintf(stderr, "warning: %s\n", warning)
 	}
 	if len(views) > 0 {
 		store, err := fsstore.New(dataDir)
@@ -367,13 +395,43 @@ func connectionAdd(ctx context.Context, runtime *bootstrap.ConnectionRuntime, co
 	if err := entry.Descriptor.ValidateConnection(connection); err != nil {
 		return connectionValidationError(stderr, "add", err)
 	}
+	if connectorbuild.IsAccountMarker(connection.Account) {
+		return connectionValidationError(stderr, "add", errors.New("--account must be the account label, not a keychain marker"))
+	}
+	for _, field := range connectorbuild.IdentitySettingKeys(connection.Provider) {
+		if connectorbuild.IsIdentityMarker(connection.Settings[field]) {
+			return connectionValidationError(stderr, "add", fmt.Errorf("%s must be a value, not a keychain marker", field))
+		}
+	}
+	display := connection
+	if len(connectorbuild.IdentityFields(connection)) > 0 {
+		// Never overwrite the account secret of an existing ID, and never add a
+		// second connection for the same provider, endpoint and account.
+		if _, err := runtime.Connections.Get(ctx, connection.ID); err == nil {
+			return connectionValidationError(stderr, "add", fmt.Errorf("connection %q already exists", connection.ID))
+		} else if !errors.Is(err, domain.ErrNotFound) {
+			return reportError(stderr, "connection add", err)
+		}
+		existing, found, err := app.FindConnectionByIdentity(ctx, runtime.Connections, connection)
+		if err != nil {
+			return reportError(stderr, "connection add", err)
+		}
+		if found {
+			return connectionValidationError(stderr, "add", fmt.Errorf("connection %q already uses this provider, endpoint and account", existing.ID))
+		}
+		protected, err := connectorbuild.ProtectIdentity(ctx, connection, runtime.Credentials)
+		if err != nil {
+			return reportError(stderr, "connection add", err)
+		}
+		connection = protected
+	}
 	if err := runtime.Connections.Create(ctx, connection); err != nil {
 		if errors.Is(err, domain.ErrValidation) {
 			return connectionValidationError(stderr, "add", err)
 		}
 		return reportError(stderr, "connection add", err)
 	}
-	view := viewConnection(connection, entry.Descriptor)
+	view := viewConnection(display, entry.Descriptor)
 	if asJSON {
 		printConnectionSecretHints(stderr, connection.ID, entry.Descriptor)
 		return writeJSONReport(stdout, stderr, "connection add", view)
@@ -393,20 +451,37 @@ func connectionSecretSet(ctx context.Context, runtime *bootstrap.ConnectionRunti
 		return reportError(stderr, "connection secret set", err)
 	}
 	field, ok := entry.Descriptor.Field(fieldKey)
-	if !ok || !field.Secret {
-		return connectionValidationError(stderr, "secret set", errors.New("field must be a Secret config field of "+connection.Provider))
+	identity := fieldKey == connectorbuild.AccountField || connectorbuild.IsIdentitySetting(connection.Provider, fieldKey)
+	if !identity && (!ok || !field.Secret) {
+		return connectionValidationError(stderr, "secret set", errors.New("field must be a Secret config field, or a declared identity field of "+connection.Provider))
 	}
 	value, err := readSecretValue(stdin)
 	if err != nil {
 		return reportError(stderr, "connection secret set", errors.New("value is required on stdin (read failed or empty input)"))
 	}
-	if err := runtime.Credentials.Set(ctx, connection.ID, field.Key, value); err != nil {
+	if identity && identityRepairMismatch(connection, fieldKey, value) {
+		return connectionValidationError(stderr, "secret set", errors.New("value does not match this connection's stored identity marker; use migrate-identity to change it"))
+	}
+	if err := runtime.Credentials.Set(ctx, connection.ID, fieldKey, value); err != nil {
 		// Secret backends may include process output or the value in errors.
 		return reportError(stderr, "connection secret set", errors.New("could not store credential; check the secret backend and environment overrides"))
 	}
-	key, _ := domain.CredentialKey(connection.ID, field.Key)
+	key, _ := domain.CredentialKey(connection.ID, fieldKey)
 	fmt.Fprintln(stdout, key)
 	return 0
+}
+
+// identityRepairMismatch reports whether field is marked in the catalogue and
+// value does not match that marker. A raw legacy value is unmarked, so any
+// repair value is allowed.
+func identityRepairMismatch(connection domain.Connection, field, value string) bool {
+	if field == connectorbuild.AccountField {
+		return connectorbuild.IsAccountMarker(connection.Account) && !connectorbuild.AccountMarkerMatches(connection.Account, value)
+	}
+	if !connectorbuild.IsSettingMarker(connection.Provider, field, connection.Settings[field]) {
+		return false
+	}
+	return !connectorbuild.IdentitySettingMarkerMatches(connection.Provider, field, connection.Settings[field], value)
 }
 
 func connectionRemove(ctx context.Context, runtime *bootstrap.ConnectionRuntime, connectionID, dataDir, cfgPath string, yes, asJSON bool, stdout, stderr io.Writer) int {
@@ -538,13 +613,16 @@ func connectionMigrate(ctx context.Context, runtime *bootstrap.ConnectionRuntime
 		return reportError(stderr, "connection migrate", err)
 	}
 	if asJSON {
-		created, err := connectionViews(runtime, report.Created)
+		created, createdWarnings, err := connectionViews(ctx, runtime, report.Created)
 		if err != nil {
 			return reportError(stderr, "connection migrate", err)
 		}
-		skipped, err := connectionViews(runtime, report.Existing)
+		skipped, skippedWarnings, err := connectionViews(ctx, runtime, report.Existing)
 		if err != nil {
 			return reportError(stderr, "connection migrate", err)
+		}
+		for _, warning := range append(createdWarnings, skippedWarnings...) {
+			fmt.Fprintf(stderr, "warning: %s\n", warning)
 		}
 		return writeJSONReport(stdout, stderr, "connection migrate", struct {
 			Created     []connectionView                `json:"created"`
@@ -561,6 +639,37 @@ func connectionMigrate(ctx context.Context, runtime *bootstrap.ConnectionRuntime
 	}
 	for _, credential := range report.Credentials {
 		fmt.Fprintf(stdout, "%s %s: legacy %s (%s)\n", credential.ConnectionID, credential.Field, credential.LegacyKey, credential.Status)
+	}
+	return 0
+}
+
+// connectionMigrateIdentity moves connection accounts from the git catalogue
+// into the secret store. Without --apply it only reports. The raw account
+// remains a valid fallback, so a partial migration never breaks a connection.
+func connectionMigrateIdentity(ctx context.Context, runtime *bootstrap.ConnectionRuntime, apply, asJSON bool, stdout, stderr io.Writer) int {
+	migrator := app.ConnectionIdentityMigrator{Connections: runtime.Connections, Credentials: runtime.Credentials}
+	report, err := migrator.Migrate(ctx, apply)
+	if err != nil {
+		return reportError(stderr, "connection migrate-identity", err)
+	}
+	if asJSON {
+		return writeJSONReport(stdout, stderr, "connection migrate-identity", report)
+	}
+	if apply {
+		fmt.Fprintln(stdout, "apply: raw accounts are moved to the secret store")
+	} else {
+		fmt.Fprintln(stdout, "dry run: nothing written; pass --apply to move accounts")
+	}
+	if len(report.Entries) == 0 {
+		fmt.Fprintln(stdout, "no connections with a stored account")
+		return 0
+	}
+	for _, entry := range report.Entries {
+		fmt.Fprintf(stdout, "%s %s -> %s (%s)\n", entry.ConnectionID, entry.Field, entry.Key, entry.Status)
+	}
+	if report.HasProblems() {
+		fmt.Fprintln(stderr, "some account markers have no usable secret; restore them with: brain connection secret set <id> account")
+		return 1
 	}
 	return 0
 }
@@ -604,16 +713,26 @@ func viewConnection(connection domain.Connection, descriptor domain.SourceDescri
 	}
 }
 
-func connectionViews(runtime *bootstrap.ConnectionRuntime, connections []domain.Connection) ([]connectionView, error) {
+func connectionViews(ctx context.Context, runtime *bootstrap.ConnectionRuntime, connections []domain.Connection) ([]connectionView, []string, error) {
 	views := make([]connectionView, 0, len(connections))
+	warnings := []string{}
 	for _, connection := range connections {
 		entry, err := runtime.Registry.Lookup(connection.Provider)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
-		views = append(views, viewConnection(connection, entry.Descriptor))
+		display := connection
+		if resolved, err := connectorbuild.ResolveAccount(ctx, connection, runtime.Credentials); err != nil {
+			// A locked or incomplete keychain must not make list/add/migrate
+			// unusable. Show a placeholder and one explicit warning instead.
+			display.Account = connectorbuild.DescribeAccount(connection.Account)
+			warnings = append(warnings, app.SanitizeConnectorError(err.Error()))
+		} else {
+			display = resolved
+		}
+		views = append(views, viewConnection(display, entry.Descriptor))
 	}
-	return views, nil
+	return views, warnings, nil
 }
 
 func printConnection(w io.Writer, connection connectionView) {

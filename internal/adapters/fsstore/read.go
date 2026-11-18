@@ -335,6 +335,7 @@ func readNotesFile(path string) (noteFileFrontmatter, []domain.Note, error) {
 	for i := range notes {
 		notes[i].ProjectID = frontmatter.ProjectID
 		notes[i].UpdatedAt = frontmatter.UpdatedAt.UTC()
+		notes[i].ContentUpdatedAt = contentUpdatedAt(frontmatter.Frontmatter)
 		if err := validateRecordSourceRef(notes[i].Source, frontmatter.ProjectID); err != nil {
 			// Invalid provenance must not yield a valid curated record; the
 			// whole daily file is reported as a problem so it can be fixed.
@@ -342,6 +343,29 @@ func readNotesFile(path string) (noteFileFrontmatter, []domain.Note, error) {
 		}
 	}
 	return frontmatter, notes, nil
+}
+
+// contentUpdatedAt resolves the last text change of a parsed record. Files
+// written before content_updated_at existed fall back to updated_at, which is
+// the conservative answer: an old record is not hidden from a --since window.
+func contentUpdatedAt(frontmatter markdown.Frontmatter) time.Time {
+	if frontmatter.ContentUpdatedAt != nil {
+		return frontmatter.ContentUpdatedAt.UTC()
+	}
+	if !frontmatter.UpdatedAt.IsZero() {
+		return frontmatter.UpdatedAt.UTC()
+	}
+	return time.Time{}
+}
+
+// contentTimePtr renders a content edit time into frontmatter. A zero time is
+// omitted, so a metadata-only rewrite of a legacy file does not invent one.
+func contentTimePtr(at time.Time) *time.Time {
+	if at.IsZero() {
+		return nil
+	}
+	utc := at.UTC()
+	return &utc
 }
 
 func readDecisionFile(path string) (domain.Decision, error) {
@@ -396,27 +420,28 @@ func readDecisionFile(path string) (domain.Decision, error) {
 		return domain.Decision{}, fmt.Errorf("parse %s: %w", path, err)
 	}
 	return domain.Decision{
-		ID:             frontmatter.ID,
-		ProjectID:      frontmatter.ProjectID,
-		Title:          title,
-		Status:         status,
-		Pinned:         frontmatter.Pinned,
-		Context:        contextText,
-		Alternatives:   alternatives,
-		Consequences:   consequences,
-		Evidence:       evidence,
-		Paths:          paths,
-		Permalink:      frontmatter.Permalink,
-		Source:         source,
-		Provenance:     provenanceFromFrontmatter(frontmatter.provenanceFrontmatter),
-		Validity:       validity,
-		MergeInfo:      merge,
-		Taxonomy:       taxonomy,
-		TopicHistory:   domain.TopicHistory{History: history},
-		Relations:      relations,
-		ReviewSchedule: review,
-		CreatedAt:      frontmatter.CreatedAt.UTC(),
-		UpdatedAt:      frontmatter.UpdatedAt.UTC(),
+		ID:               frontmatter.ID,
+		ProjectID:        frontmatter.ProjectID,
+		Title:            title,
+		Status:           status,
+		Pinned:           frontmatter.Pinned,
+		Context:          contextText,
+		Alternatives:     alternatives,
+		Consequences:     consequences,
+		Evidence:         evidence,
+		Paths:            paths,
+		Permalink:        frontmatter.Permalink,
+		Source:           source,
+		Provenance:       provenanceFromFrontmatter(frontmatter.provenanceFrontmatter),
+		Validity:         validity,
+		MergeInfo:        merge,
+		Taxonomy:         taxonomy,
+		TopicHistory:     domain.TopicHistory{History: history},
+		Relations:        relations,
+		ReviewSchedule:   review,
+		CreatedAt:        frontmatter.CreatedAt.UTC(),
+		UpdatedAt:        frontmatter.UpdatedAt.UTC(),
+		ContentUpdatedAt: contentUpdatedAt(frontmatter.Frontmatter),
 	}, nil
 }
 
@@ -466,24 +491,25 @@ func readAttemptFile(path string) (domain.Attempt, error) {
 		return domain.Attempt{}, fmt.Errorf("parse %s: %w", path, err)
 	}
 	return domain.Attempt{
-		ID:             frontmatter.ID,
-		ProjectID:      frontmatter.ProjectID,
-		Title:          title,
-		Pinned:         frontmatter.Pinned,
-		Hypothesis:     hypothesis,
-		Result:         result,
-		Reason:         reason,
-		Permalink:      frontmatter.Permalink,
-		Source:         source,
-		Provenance:     provenanceFromFrontmatter(frontmatter.provenanceFrontmatter),
-		Validity:       validity,
-		MergeInfo:      merge,
-		Taxonomy:       taxonomy,
-		TopicHistory:   domain.TopicHistory{History: history},
-		Relations:      relations,
-		ReviewSchedule: review,
-		CreatedAt:      frontmatter.CreatedAt.UTC(),
-		UpdatedAt:      frontmatter.UpdatedAt.UTC(),
+		ID:               frontmatter.ID,
+		ProjectID:        frontmatter.ProjectID,
+		Title:            title,
+		Pinned:           frontmatter.Pinned,
+		Hypothesis:       hypothesis,
+		Result:           result,
+		Reason:           reason,
+		Permalink:        frontmatter.Permalink,
+		Source:           source,
+		Provenance:       provenanceFromFrontmatter(frontmatter.provenanceFrontmatter),
+		Validity:         validity,
+		MergeInfo:        merge,
+		Taxonomy:         taxonomy,
+		TopicHistory:     domain.TopicHistory{History: history},
+		Relations:        relations,
+		ReviewSchedule:   review,
+		CreatedAt:        frontmatter.CreatedAt.UTC(),
+		UpdatedAt:        frontmatter.UpdatedAt.UTC(),
+		ContentUpdatedAt: contentUpdatedAt(frontmatter.Frontmatter),
 	}, nil
 }
 
@@ -530,22 +556,23 @@ func readHandoffFile(path string) (domain.Handoff, error) {
 		return domain.Handoff{}, fmt.Errorf("parse %s: %w", path, err)
 	}
 	return domain.Handoff{
-		ID:             frontmatter.ID,
-		ProjectID:      frontmatter.ProjectID,
-		Summary:        summary,
-		Pinned:         frontmatter.Pinned,
-		GitContext:     gitContext,
-		NextAction:     nextAction,
-		Permalink:      frontmatter.Permalink,
-		Source:         source,
-		Provenance:     provenanceFromFrontmatter(frontmatter.provenanceFrontmatter),
-		Validity:       validity,
-		MergeInfo:      merge,
-		Taxonomy:       taxonomy,
-		TopicHistory:   domain.TopicHistory{History: history},
-		Relations:      relations,
-		ReviewSchedule: review,
-		CreatedAt:      frontmatter.CreatedAt.UTC(),
-		UpdatedAt:      frontmatter.UpdatedAt.UTC(),
+		ID:               frontmatter.ID,
+		ProjectID:        frontmatter.ProjectID,
+		Summary:          summary,
+		Pinned:           frontmatter.Pinned,
+		GitContext:       gitContext,
+		NextAction:       nextAction,
+		Permalink:        frontmatter.Permalink,
+		Source:           source,
+		Provenance:       provenanceFromFrontmatter(frontmatter.provenanceFrontmatter),
+		Validity:         validity,
+		MergeInfo:        merge,
+		Taxonomy:         taxonomy,
+		TopicHistory:     domain.TopicHistory{History: history},
+		Relations:        relations,
+		ReviewSchedule:   review,
+		CreatedAt:        frontmatter.CreatedAt.UTC(),
+		UpdatedAt:        frontmatter.UpdatedAt.UTC(),
+		ContentUpdatedAt: contentUpdatedAt(frontmatter.Frontmatter),
 	}, nil
 }
