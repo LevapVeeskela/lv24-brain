@@ -124,6 +124,12 @@ func New(cfg Config) (*Connector, error) {
 	if now == nil {
 		now = time.Now
 	}
+	client := cfg.HTTPClient
+	if client == nil {
+		// A renamed repository answers with 301 on api.github.com; follow it
+		// on the same host only, never leaking the token elsewhere.
+		client = &http.Client{Timeout: 30 * time.Second, CheckRedirect: connectors.SameHostRedirect(baseURL)}
+	}
 
 	return &Connector{
 		baseURL:   baseURL,
@@ -132,7 +138,7 @@ func New(cfg Config) (*Connector, error) {
 		repos:     repos,
 		secrets:   cfg.Secrets,
 		sink:      cfg.Sink,
-		http:      connectors.NewHTTP(connectors.HTTPOptions{Client: cfg.HTTPClient, Retry: cfg.Retry}),
+		http:      connectors.NewHTTP(connectors.HTTPOptions{Client: client, Retry: cfg.Retry}),
 		now:       now,
 	}, nil
 }

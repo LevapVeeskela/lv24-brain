@@ -125,6 +125,10 @@ func NewSource(conn domain.Connection, credentials ports.CredentialProvider, cli
 	if err != nil {
 		return nil, err
 	}
+	if client == nil {
+		// A moved project answers with a redirect on the same GitLab host.
+		client = &http.Client{Timeout: 30 * time.Second, CheckRedirect: connectors.SameHostRedirect(baseURL)}
+	}
 	return &Source{
 		connection:  conn,
 		baseURL:     baseURL,

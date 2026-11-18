@@ -20,6 +20,26 @@ const (
 	defaultRetryAfterMax = 60 * time.Second
 )
 
+// SameHostRedirect follows a small number of redirects while keeping the
+// connector token on the configured host. GitHub and GitLab answer a renamed
+// repository with 301 Moved Permanently on the same API host; a cross-host or
+// scheme-changing redirect is refused so the token never leaves the base URL.
+func SameHostRedirect(baseURL string) func(*http.Request, []*http.Request) error {
+	base, err := url.Parse(strings.TrimSpace(baseURL))
+	return func(req *http.Request, via []*http.Request) error {
+		if len(via) >= 3 {
+			return fmt.Errorf("connector: stopped after %d redirects", len(via))
+		}
+		if err != nil || base == nil || base.Host == "" {
+			return http.ErrUseLastResponse
+		}
+		if !strings.EqualFold(req.URL.Host, base.Host) || req.URL.Scheme != base.Scheme {
+			return http.ErrUseLastResponse
+		}
+		return nil
+	}
+}
+
 // RetryPolicy controls exponential backoff and rate-limit waits.
 type RetryPolicy struct {
 	MaxAttempts   int
