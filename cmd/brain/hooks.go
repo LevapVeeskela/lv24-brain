@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+
+	"github.com/levapveeskela/lv24-brain/internal/winproc"
 )
 
 const (
@@ -220,6 +222,7 @@ func hooksLocate(repo string) (string, string, error) {
 
 func hooksGit(dir string, args ...string) (string, error) {
 	cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
+	winproc.Hide(cmd)
 	out, err := cmd.Output()
 	if err != nil {
 		var exitErr *exec.ExitError

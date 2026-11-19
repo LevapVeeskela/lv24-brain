@@ -14,6 +14,7 @@ import (
 
 	"github.com/levapveeskela/lv24-brain/internal/domain"
 	"github.com/levapveeskela/lv24-brain/internal/textbudget"
+	"github.com/levapveeskela/lv24-brain/internal/winproc"
 )
 
 // Context layer names, in packing order. The order is the priority: an
@@ -527,7 +528,9 @@ func repoChangeSignal(ctx context.Context, dir string) ([]string, string) {
 	runCtx, cancel := context.WithTimeout(ctx, contextPathSignalTimeout)
 	defer cancel()
 	run := func(args ...string) (string, bool) {
-		out, err := exec.CommandContext(runCtx, "git", append([]string{"-C", dir}, args...)...).Output()
+		cmd := exec.CommandContext(runCtx, "git", append([]string{"-C", dir}, args...)...)
+		winproc.Hide(cmd)
+		out, err := cmd.Output()
 		if err != nil {
 			return "", false
 		}

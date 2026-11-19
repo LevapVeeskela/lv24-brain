@@ -14,6 +14,7 @@ import (
 	"github.com/levapveeskela/lv24-brain/internal/domain"
 	"github.com/levapveeskela/lv24-brain/internal/gitinfo"
 	"github.com/levapveeskela/lv24-brain/internal/ports"
+	"github.com/levapveeskela/lv24-brain/internal/winproc"
 )
 
 // FindingKind names one review heuristic.
@@ -764,7 +765,9 @@ func gitCommitsTouching(ctx context.Context, dir string, since time.Time, paths 
 	defer cancel()
 	args := []string{"-C", dir, "log", "--since=" + since.UTC().Format(time.RFC3339), "--format=%h", "--"}
 	args = append(args, paths...)
-	out, err := exec.CommandContext(runCtx, "git", args...).Output()
+	cmd := exec.CommandContext(runCtx, "git", args...)
+	winproc.Hide(cmd)
+	out, err := cmd.Output()
 	if err != nil {
 		return nil, err
 	}

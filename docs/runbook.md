@@ -569,6 +569,29 @@ The launcher runs the command (batch files go through `cmd /d /c`) with
 The task's `Hidden` setting is cosmetic and does not suppress the window on its
 own. The same launcher works for other CLIs scheduled on the machine.
 
+### MCP hosts and console windows
+
+An MCP host that starts a server through a `.cmd` shim (for example
+`codegraph.cmd` or `npx.cmd`) runs it through `cmd.exe /d /s /c`, which opens a
+console window. `brain-task --stdio <command> [args...]` is a GUI-subsystem
+proxy: the host sees a windowless process, the child keeps the inherited
+stdin/stdout/stderr pipes, and a `.cmd` target still runs through a hidden
+`cmd /d /c`. In an MCP client whose config takes a command array, use:
+
+```json
+"command": [
+  "C:/0project/lv24-brain/bin/brain-task.exe",
+  "--stdio",
+  "C:/nvm4w/nodejs/codegraph.cmd",
+  "serve",
+  "--mcp"
+]
+```
+
+The command array form matters: a plain string is a different (malformed)
+config value in OpenCode. Native `.exe` servers already spawned directly by the
+host do not need the wrapper.
+
 ### Legacy PII dump zones
 
 `mail/`, root `github/` and `gitlab/`, `merges/` and orphan

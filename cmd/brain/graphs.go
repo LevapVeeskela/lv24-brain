@@ -17,6 +17,7 @@ import (
 	"github.com/levapveeskela/lv24-brain/internal/bootstrap"
 	"github.com/levapveeskela/lv24-brain/internal/domain"
 	"github.com/levapveeskela/lv24-brain/internal/gitinfo"
+	"github.com/levapveeskela/lv24-brain/internal/winproc"
 )
 
 const (
@@ -46,6 +47,7 @@ var graphsLogPath = func() (string, error) {
 func execGraphsCommand(ctx context.Context, dir, name string, args ...string) ([]byte, error) {
 	cmd := exec.CommandContext(ctx, name, args...)
 	cmd.Dir = dir
+	winproc.Hide(cmd)
 	return cmd.CombinedOutput()
 }
 

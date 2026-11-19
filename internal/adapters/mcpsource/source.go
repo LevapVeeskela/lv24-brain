@@ -25,6 +25,7 @@ import (
 
 	"github.com/levapveeskela/lv24-brain/internal/domain"
 	"github.com/levapveeskela/lv24-brain/internal/ports"
+	"github.com/levapveeskela/lv24-brain/internal/winproc"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
@@ -364,6 +365,7 @@ func (s *Source) connect(ctx context.Context) (*mcp.ClientSession, func(), error
 			return nil, func() {}, err
 		}
 		cmd := exec.CommandContext(ctx, command, args...)
+		winproc.Hide(cmd)
 		cmd.Env = env
 		transport = &mcp.CommandTransport{Command: cmd}
 	} else {

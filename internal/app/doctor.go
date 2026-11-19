@@ -19,6 +19,7 @@ import (
 	"github.com/levapveeskela/lv24-brain/internal/gitinfo"
 	"github.com/levapveeskela/lv24-brain/internal/ports"
 	"github.com/levapveeskela/lv24-brain/internal/version"
+	"github.com/levapveeskela/lv24-brain/internal/winproc"
 )
 
 const (
@@ -539,7 +540,9 @@ func indexCommitDistance(ctx context.Context, dir, marker string) (int, bool) {
 	}
 	runCtx, cancel := context.WithTimeout(ctx, gitinfo.Timeout)
 	defer cancel()
-	out, err := exec.CommandContext(runCtx, "git", "-C", dir, "rev-list", "--count", "--max-count=2", marker+"..HEAD").Output()
+	cmd := exec.CommandContext(runCtx, "git", "-C", dir, "rev-list", "--count", "--max-count=2", marker+"..HEAD")
+	winproc.Hide(cmd)
+	out, err := cmd.Output()
 	if err != nil {
 		return 0, false
 	}

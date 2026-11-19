@@ -14,6 +14,7 @@ import (
 	"github.com/levapveeskela/lv24-brain/internal/bootstrap"
 	"github.com/levapveeskela/lv24-brain/internal/domain"
 	"github.com/levapveeskela/lv24-brain/internal/gitinfo"
+	"github.com/levapveeskela/lv24-brain/internal/winproc"
 )
 
 // discoverDefaultExcludes are child names never scanned, in addition to the
@@ -279,7 +280,9 @@ func discoverRepoInfo(ctx context.Context, path string) (string, string) {
 func discoverGit(ctx context.Context, dir string, args ...string) (string, error) {
 	runCtx, cancel := context.WithTimeout(ctx, gitinfo.Timeout)
 	defer cancel()
-	out, err := exec.CommandContext(runCtx, "git", append([]string{"-C", dir}, args...)...).Output()
+	cmd := exec.CommandContext(runCtx, "git", append([]string{"-C", dir}, args...)...)
+	winproc.Hide(cmd)
+	out, err := cmd.Output()
 	if err != nil {
 		return "", err
 	}

@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/levapveeskela/lv24-brain/internal/domain"
+	"github.com/levapveeskela/lv24-brain/internal/winproc"
 )
 
 // maxDiffOutputBytes bounds the raw --name-status output of one diff. A diff
@@ -57,6 +58,7 @@ func ChangedFiles(ctx context.Context, root, base, head string, maxFiles int) (f
 	}
 	command := exec.CommandContext(ctx, "git", "-C", root,
 		"diff", "--name-status", "--no-renames", "--no-ext-diff", "-z", base, head)
+	winproc.Hide(command)
 	stdout := &limitedBuffer{limit: maxDiffOutputBytes}
 	stderr := &limitedBuffer{limit: 4 << 10}
 	command.Stdout = stdout

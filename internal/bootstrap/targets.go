@@ -25,6 +25,7 @@ import (
 	"github.com/levapveeskela/lv24-brain/internal/connectors"
 	"github.com/levapveeskela/lv24-brain/internal/domain"
 	"github.com/levapveeskela/lv24-brain/internal/ports"
+	"github.com/levapveeskela/lv24-brain/internal/winproc"
 )
 
 // MailConfigPath is the legacy-compatible IMAP account list inside the data
@@ -259,7 +260,9 @@ func DiscoverLegacyConnectors(ctx context.Context, opts LegacyConnectorOptions) 
 func legacyRemoteURL(ctx context.Context, directory, remote string) (string, error) {
 	runCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
-	raw, err := exec.CommandContext(runCtx, "git", "-C", directory, "remote", "get-url", remote).Output()
+	cmd := exec.CommandContext(runCtx, "git", "-C", directory, "remote", "get-url", remote)
+	winproc.Hide(cmd)
+	raw, err := cmd.Output()
 	return strings.TrimSpace(string(raw)), err
 }
 
@@ -400,7 +403,9 @@ func GitLabProjects(ctx context.Context, projects []domain.Project) []string {
 			}
 			for _, remote := range []string{"gitlab", "origin"} {
 				runCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-				url, err := exec.CommandContext(runCtx, "git", "-C", dir, "remote", "get-url", remote).Output()
+				cmd := exec.CommandContext(runCtx, "git", "-C", dir, "remote", "get-url", remote)
+				winproc.Hide(cmd)
+				url, err := cmd.Output()
 				cancel()
 				if err == nil {
 					add(string(url))
@@ -427,7 +432,9 @@ func withGHTokenFallback(inner ports.SecretStore) ports.SecretStore {
 		SecretStore: inner,
 		lookPath:    exec.LookPath,
 		output: func(ctx context.Context, name string, args ...string) ([]byte, error) {
-			return exec.CommandContext(ctx, name, args...).Output()
+			cmd := exec.CommandContext(ctx, name, args...)
+			winproc.Hide(cmd)
+			return cmd.Output()
 		},
 	}
 }

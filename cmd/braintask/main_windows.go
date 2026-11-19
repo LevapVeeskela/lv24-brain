@@ -21,7 +21,33 @@ import (
 
 const createNoWindow = 0x08000000
 
+// runStdio runs a stdio server behind a GUI-subsystem launcher: the parent
+// sees a windowless process, while the child keeps the inherited pipes. An MCP
+// host that would otherwise open a console can start a console server
+// invisibly through it.
+func runStdio(name string, args []string) int {
+	if lower := strings.ToLower(name); strings.HasSuffix(lower, ".bat") || strings.HasSuffix(lower, ".cmd") {
+		args = append([]string{"/d", "/c", name}, args...)
+		name = "cmd.exe"
+	}
+	cmd := exec.Command(name, args...)
+	cmd.Stdin = os.Stdin
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true, CreationFlags: createNoWindow}
+	if err := cmd.Run(); err != nil {
+		if exit, ok := err.(*exec.ExitError); ok {
+			return exit.ExitCode()
+		}
+		return 1
+	}
+	return 0
+}
+
 func main() {
+	if len(os.Args) >= 3 && os.Args[1] == "--stdio" {
+		os.Exit(runStdio(os.Args[2], os.Args[3:]))
+	}
 	if len(os.Args) < 2 {
 		fmt.Fprintln(os.Stderr, "usage: brain-task <command> [args...]")
 		os.Exit(2)

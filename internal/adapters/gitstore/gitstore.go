@@ -27,6 +27,7 @@ import (
 
 	"github.com/levapveeskela/lv24-brain/internal/domain"
 	"github.com/levapveeskela/lv24-brain/internal/ports"
+	"github.com/levapveeskela/lv24-brain/internal/winproc"
 )
 
 const (
@@ -152,6 +153,7 @@ func (p *Provider) run(ctx context.Context, args ...string) (string, error) {
 	}
 
 	cmd := exec.CommandContext(ctx, p.gitPath, args...)
+	winproc.Hide(cmd)
 	cmd.Dir = p.dir
 	cmd.WaitDelay = waitDelay
 	cmd.Env = append(os.Environ(),

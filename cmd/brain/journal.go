@@ -15,6 +15,7 @@ import (
 	"github.com/levapveeskela/lv24-brain/internal/bootstrap"
 	"github.com/levapveeskela/lv24-brain/internal/domain"
 	"github.com/levapveeskela/lv24-brain/internal/ports"
+	"github.com/levapveeskela/lv24-brain/internal/winproc"
 )
 
 // runJournal prints the per-user activity journal, newest first.
@@ -178,6 +179,7 @@ type gitCommit struct {
 func readGitCommit(repo string) (gitCommit, error) {
 	git := func(args ...string) (string, error) {
 		cmd := exec.Command("git", append([]string{"-C", repo}, args...)...)
+		winproc.Hide(cmd)
 		out, err := cmd.Output()
 		if err != nil {
 			var exitErr *exec.ExitError

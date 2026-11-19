@@ -12,6 +12,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/levapveeskela/lv24-brain/internal/winproc"
 )
 
 // Timeout bounds every git invocation so a hung repository never blocks the
@@ -39,7 +41,9 @@ func Read(ctx context.Context, dir string) Summary {
 	run := func(args ...string) (string, bool) {
 		runCtx, cancel := context.WithTimeout(ctx, Timeout)
 		defer cancel()
-		out, err := exec.CommandContext(runCtx, "git", append([]string{"-C", dir}, args...)...).Output()
+		cmd := exec.CommandContext(runCtx, "git", append([]string{"-C", dir}, args...)...)
+		winproc.Hide(cmd)
+		out, err := cmd.Output()
 		if err != nil {
 			return "", false
 		}

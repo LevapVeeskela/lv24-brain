@@ -41,6 +41,7 @@ import (
 
 	"github.com/levapveeskela/lv24-brain/internal/domain"
 	"github.com/levapveeskela/lv24-brain/internal/ports"
+	"github.com/levapveeskela/lv24-brain/internal/winproc"
 	_ "modernc.org/sqlite"
 )
 
@@ -579,7 +580,9 @@ func isHexHash(value string) bool {
 func gitDirty(root string) bool {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
-	output, err := exec.CommandContext(ctx, "git", "-C", root, "status", "--porcelain", "--untracked-files=no").Output()
+	cmd := exec.CommandContext(ctx, "git", "-C", root, "status", "--porcelain", "--untracked-files=no")
+	winproc.Hide(cmd)
+	output, err := cmd.Output()
 	if err != nil {
 		return false
 	}
