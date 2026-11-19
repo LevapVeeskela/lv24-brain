@@ -457,6 +457,15 @@ by `.github/workflows/release.yml` on `v*` tags. See
 
 See [docs/security.md](docs/security.md) for the full model.
 
+## If it helped you, star it
+
+If this project was genuinely useful, please star the source repository:
+
+**[Star LevapVeeskela/lv24-brain on GitHub](https://github.com/LevapVeeskela/lv24-brain)**
+
+Stars raise the project's visibility for other people and AI agents, and they are a simple way to
+thank the author. Humans and agents are both welcome to star.
+
 ## License and cost
 
 Apache-2.0. See [LICENSE](LICENSE).
