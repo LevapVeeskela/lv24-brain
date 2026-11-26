@@ -148,7 +148,9 @@ func (a *App) ideaStore() (ports.IdeaStore, error) {
 }
 
 // projectIdeas loads the live ideas of one project. Knowledge retrieval never
-// calls it, so ideas stay out of `brain context`.
+// calls it, so ideas stay out of `brain context`. A store without the optional
+// IdeaStore (server mode) has no ideas: record listing still works and simply
+// omits them, while the dedicated idea use cases return ErrUnsupported.
 func (a *App) projectIdeas(ctx context.Context, projectID string) ([]domain.Idea, error) {
 	store, ok := a.deps.Store.(ports.IdeaStore)
 	if !ok {
@@ -319,6 +321,11 @@ func (a *App) AddIdea(ctx context.Context, input IdeaInput) (IdeaResult, error) 
 	if idea.DueAt != nil && idea.DueDate != "" {
 		return IdeaResult{}, domain.NewValidationError("idea.due", "due_at and due_date are mutually exclusive")
 	}
+	if idea.Status == domain.IdeaDone {
+		// done is a writer action even on create: completed_at records when.
+		completed := now
+		idea.CompletedAt = &completed
+	}
 	if err := idea.Validate(); err != nil {
 		return IdeaResult{}, err
 	}
@@ -358,7 +365,7 @@ func (a *App) AddIdea(ctx context.Context, input IdeaInput) (IdeaResult, error) 
 
 // ListIdeas lists ideas with the contract filters. A single project is
 // resolved like a write; All lists every registered project and keeps orphan
-// idea directories visible.
+// idea directories visible, and has no single ProjectSource.
 func (a *App) ListIdeas(ctx context.Context, opts IdeaListOptions) (IdeaListResult, error) {
 	store, err := a.ideaStore()
 	if err != nil {
@@ -383,6 +390,8 @@ func (a *App) ListIdeas(ctx context.Context, opts IdeaListOptions) (IdeaListResu
 	result := IdeaListResult{}
 	var projectIDs []string
 	if opts.All {
+		// All is not a project resolution: there is no single project_source,
+		// so ProjectSource stays empty and the JSON omits it.
 		projects, err := a.deps.Store.ListProjects(ctx)
 		if err != nil {
 			return IdeaListResult{}, err

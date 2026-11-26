@@ -183,6 +183,28 @@ func TestIdeaCompletedRoundTrip(t *testing.T) {
 	}
 }
 
+func TestIdeaAppendDoneSetsCompletedAt(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+	project := seedProject(t, store)
+	created := time.Date(2026, 11, 26, 10, 0, 0, 0, time.UTC)
+	idea := domain.Idea{
+		ID:        ideaID("2026-11-26", "already-done"),
+		ProjectID: project.ID,
+		Title:     "Already done",
+		Status:    domain.IdeaDone,
+		Priority:  domain.IdeaPriorityNormal,
+		CreatedAt: created,
+	}
+	if _, err := store.AppendIdea(ctx, idea); err != nil {
+		t.Fatalf("AppendIdea: %v", err)
+	}
+	got := readIdea(t, store, idea.ID)
+	if got.Status != domain.IdeaDone || got.CompletedAt == nil {
+		t.Fatalf("done idea without completed_at = %+v", got)
+	}
+}
+
 func TestIdeaAppendIsCreateOnly(t *testing.T) {
 	store := newTestStore(t)
 	ctx := context.Background()
@@ -586,5 +608,143 @@ func TestIdeaGeneratedID(t *testing.T) {
 	}
 	if !strings.HasPrefix(listed[0].ID, "idea-2026-11-26-dark-theme-") {
 		t.Fatalf("generated id = %q", listed[0].ID)
+	}
+}
+
+// TestIdeaTagFilterAppliesBeforeLimit is the regression for the filter order:
+// the tagged idea sorts last, so a limit applied before the tag filter would
+// return an untagged row (or nothing).
+func TestIdeaTagFilterAppliesBeforeLimit(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+	project := seedProject(t, store)
+	created := time.Date(2026, 11, 26, 10, 0, 0, 0, time.UTC)
+	soon := moscowTime(t, 2026, time.November, 27, 9)
+	ideas := []domain.Idea{
+		{ID: ideaID("2026-11-26", "untagged-soon"), Title: "Untagged soon", Priority: domain.IdeaPriorityNormal, DueAt: &soon},
+		{ID: ideaID("2026-11-26", "untagged-high"), Title: "Untagged high", Priority: domain.IdeaPriorityHigh},
+		{ID: ideaID("2026-11-26", "tagged"), Title: "Tagged", Priority: domain.IdeaPriorityLow, Tags: []string{"tagged"}},
+	}
+	for i := range ideas {
+		ideas[i].ProjectID = project.ID
+		ideas[i].Status = domain.IdeaOpen
+		ideas[i].CreatedAt = created
+		if _, err := store.AppendIdea(ctx, ideas[i]); err != nil {
+			t.Fatalf("AppendIdea %q: %v", ideas[i].Title, err)
+		}
+	}
+
+	// Control: without the tag filter, the first limited row is untagged.
+	first, err := store.ListIdeas(ctx, ports.IdeaFilter{ProjectID: project.ID, Limit: 1})
+	if err != nil || len(first) != 1 || first[0].Title != "Untagged soon" {
+		t.Fatalf("control first row = %+v, %v", first, err)
+	}
+	tagged, err := store.ListIdeas(ctx, ports.IdeaFilter{
+		ProjectID: project.ID, Tags: []string{"TAGGED"}, Limit: 1,
+	})
+	if err != nil {
+		t.Fatalf("ListIdeas(tagged): %v", err)
+	}
+	if len(tagged) != 1 || tagged[0].Title != "Tagged" || tagged[0].ID != ideaID("2026-11-26", "tagged") {
+		t.Fatalf("tag filter ran after Limit: %+v", tagged)
+	}
+}
+
+func TestIdeaRejectsLegacyOrInvalidID(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+	project := seedProject(t, store)
+	created := time.Date(2026, 11, 26, 10, 0, 0, 0, time.UTC)
+	for _, id := range []string{
+		"idea-2026-11-26-legacy",
+		"decision-2026-11-26-wrong-kind",
+		"idea-2026-13-01-bad-date-01jcs6abcdefghjkmnpqrstvwx",
+	} {
+		idea := domain.Idea{
+			ID:        id,
+			ProjectID: project.ID,
+			Title:     "Legacy",
+			Status:    domain.IdeaOpen,
+			Priority:  domain.IdeaPriorityNormal,
+			CreatedAt: created,
+		}
+		if _, err := store.AppendIdea(ctx, idea); !errors.Is(err, domain.ErrValidation) {
+			t.Fatalf("AppendIdea(%q) error = %v, want ErrValidation", id, err)
+		}
+	}
+	paths := globFiles(t, filepath.Join(store.Root(), "projects", project.ID, "ideas", "*.md"))
+	if len(paths) != 0 {
+		t.Fatalf("invalid ids produced files (a legacy name or numeric suffix?): %v", paths)
+	}
+}
+
+func TestIdeaProblemFileIsNotUpdatedOrTrashed(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+	project := seedProject(t, store)
+	created := time.Date(2026, 11, 26, 10, 0, 0, 0, time.UTC)
+	conflictID := ideaID("2026-11-26", "conflict")
+	conflictPath := filepath.Join(store.Root(), "projects", project.ID, "ideas", conflictID+".md")
+	if err := os.MkdirAll(filepath.Dir(conflictPath), 0o755); err != nil {
+		t.Fatalf("create ideas dir: %v", err)
+	}
+	conflict := "---\nproject_id: " + project.ID + "\nkind: idea\nid: " + conflictID + "\ntitle: Conflict\n---\n<<<<<<< HEAD\nours\n=======\ntheirs\n>>>>>>> origin/main\n"
+	if err := os.WriteFile(conflictPath, []byte(conflict), 0o644); err != nil {
+		t.Fatalf("write conflict file: %v", err)
+	}
+	before, err := os.ReadFile(conflictPath)
+	if err != nil {
+		t.Fatalf("read conflict file: %v", err)
+	}
+
+	rewritten := domain.Idea{
+		ID:        conflictID,
+		ProjectID: project.ID,
+		Title:     "Rewritten",
+		Status:    domain.IdeaOpen,
+		Priority:  domain.IdeaPriorityNormal,
+		CreatedAt: created,
+	}
+	var problem *domain.ProblemError
+	if err := store.UpdateIdea(ctx, rewritten); !errors.As(err, &problem) {
+		t.Fatalf("UpdateIdea problem error = %v, want *domain.ProblemError", err)
+	}
+	if err := store.TrashIdea(ctx, project.ID, conflictID); !errors.As(err, &problem) {
+		t.Fatalf("TrashIdea problem error = %v, want *domain.ProblemError", err)
+	}
+	after, err := os.ReadFile(conflictPath)
+	if err != nil || string(after) != string(before) {
+		t.Fatalf("problem file was modified or removed: %v", err)
+	}
+	trashPath := filepath.Join(store.Root(), "projects", project.ID, "trash", "ideas", conflictID+".md")
+	if _, err := os.Stat(trashPath); !os.IsNotExist(err) {
+		t.Fatalf("problem file was moved to trash: %v", err)
+	}
+}
+
+func TestIdeaQueryMatchesTitleBodyAndTags(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+	project := seedProject(t, store)
+	created := time.Date(2026, 11, 26, 10, 0, 0, 0, time.UTC)
+	for _, idea := range []domain.Idea{
+		{ID: ideaID("2026-11-26", "tag-only"), Title: "Alpha", Body: "plain", Tags: []string{"opentasks"}},
+		{ID: ideaID("2026-11-26", "body-only"), Title: "Beta", Body: "dark calendar", Tags: []string{"other"}},
+	} {
+		idea.ProjectID = project.ID
+		idea.Status = domain.IdeaOpen
+		idea.Priority = domain.IdeaPriorityNormal
+		idea.CreatedAt = created
+		if _, err := store.AppendIdea(ctx, idea); err != nil {
+			t.Fatalf("AppendIdea %q: %v", idea.Title, err)
+		}
+	}
+	byTag, err := store.ListIdeas(ctx, ports.IdeaFilter{ProjectID: project.ID, Query: "OPENTASKS"})
+	if err != nil || len(byTag) != 1 || byTag[0].Title != "Alpha" {
+		t.Fatalf("query over tags = %+v, %v", byTag, err)
+	}
+	byBody, err := store.ListIdeas(ctx, ports.IdeaFilter{ProjectID: project.ID, Query: "calendar"})
+	if err != nil || len(byBody) != 1 || byBody[0].Title != "Beta" {
+		t.Fatalf("query over body = %+v, %v", byBody, err)
 	}
 }
