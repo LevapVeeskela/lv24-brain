@@ -268,18 +268,33 @@ func (a *App) afterIdeaWrite(ctx context.Context, idea domain.Idea) error {
 	if a.deps.Index == nil {
 		return nil
 	}
-	return a.upsertIndex(ctx, ideaDocument(idea))
+	if err := a.upsertIndex(ctx, ideaDocument(idea)); err != nil {
+		return fmt.Errorf("idea %s was written but the search index update failed: %w", idea.ID, err)
+	}
+	return nil
+}
+
+// deleteIdeaIndexKey drops one idea row from the search projection. It returns
+// the adapter error unwrapped: the caller states whether the file was written,
+// trashed or moved, so a failed index update never looks like a failed write.
+// A failure marks the projection dirty, and the next search rebuilds the rows
+// from Markdown.
+func (a *App) deleteIdeaIndexKey(ctx context.Context, projectID, id string) error {
+	if a.deps.Index == nil {
+		return nil
+	}
+	if err := a.deps.Index.Delete(ctx, indexKey(projectID, id)); err != nil {
+		a.markIndexDirty()
+		return err
+	}
+	return nil
 }
 
 // afterIdeaTrash removes a trashed idea from the search index. The file is
 // already in trash, so a failed delete only marks the index dirty; the next
 // reindex drops the row because the live file is gone.
 func (a *App) afterIdeaTrash(ctx context.Context, idea domain.Idea) error {
-	if a.deps.Index == nil {
-		return nil
-	}
-	if err := a.deps.Index.Delete(ctx, indexKey(idea.ProjectID, idea.ID)); err != nil {
-		a.markIndexDirty()
+	if err := a.deleteIdeaIndexKey(ctx, idea.ProjectID, idea.ID); err != nil {
 		return fmt.Errorf("idea %s was trashed but the search index update failed: %w", idea.ID, err)
 	}
 	return nil
@@ -597,6 +612,15 @@ func (a *App) UpdateIdea(ctx context.Context, input IdeaUpdateInput) (IdeaUpdate
 	idea.UpdatedAt = a.now()
 	if err := store.UpdateIdea(ctx, idea); err != nil {
 		return IdeaUpdateResult{}, err
+	}
+	if moved {
+		// The store renamed the file into the new project; the old project's
+		// index key would otherwise keep returning the idea and a later trash
+		// would leave it behind.
+		if err := a.deleteIdeaIndexKey(ctx, original.ProjectID, idea.ID); err != nil {
+			return IdeaUpdateResult{Idea: idea, Moved: true, ProjectSource: projectSource},
+				fmt.Errorf("idea %s was moved but the search index update failed: %w", idea.ID, err)
+		}
 	}
 	if err := a.afterIdeaWrite(ctx, idea); err != nil {
 		return IdeaUpdateResult{Idea: idea, Moved: moved, ProjectSource: projectSource}, err
