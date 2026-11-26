@@ -378,7 +378,8 @@ A window is a pair of bounds; callers pass instants:
 - A timed idea compares its `due_at` instant.
 - An all-day idea compares its `due_date` to the local calendar date of the
   bound: `due_date >= localDate(DueAfter)` and
-  `due_date < localDate(DueBefore)`.
+  `due_date < localDate(DueBefore)`. The local zone is the reading machine's
+  `time.Local`; no stored zone is consulted.
 - An undated idea is excluded when either bound is set.
 
 Examples (`now = 2026-11-27T10:00+03:00`, local):
@@ -452,8 +453,9 @@ nothing is deleted because a registry entry changed. A move to a project that is
 not in the registry is rejected.
 
 Prerequisite: `C:\0project\lv24-brain-desktop` must be registered (WS0/WP0 in
-the plan) before ideas can be tagged to it; until then the engine rejects that
-id and the caller falls back to `personal`.
+the plan) before ideas can be tagged to it. Until then the engine rejects that
+explicit id with candidates; the agent may choose `personal` instead, but the
+engine never falls back for an explicit selector.
 
 ## 8. Store interface
 
@@ -466,6 +468,7 @@ const RecordIdea = "idea"
 type IdeaFilter struct {
     ProjectID string
     Statuses  []domain.IdeaStatus
+    Tags      []string
     DueBefore time.Time
     DueAfter  time.Time
     Query     string
@@ -480,53 +483,72 @@ type IdeaStore interface {
     TrashIdea(ctx context.Context, projectID, id string) error
     RestoreIdea(ctx context.Context, projectID, id string) error
 }
-
-var _ IdeaStore = (*fsstore.Store)(nil)
 ```
+
+The compile-time assertion belongs to the adapter, not to `ports`:
+`var _ ports.IdeaStore = (*Store)(nil)` lives in `internal/adapters/fsstore`.
+`internal/ports` must not import an adapter.
 
 `IdeaFilter` semantics:
 
 | Field | Meaning |
 | --- | --- |
-| `ProjectID` | empty = all registered projects; otherwise one project |
+| `ProjectID` | empty = all registered projects plus orphan `projects/*/ideas` directories; otherwise one registered project |
 | `Statuses` | empty = all five; otherwise the listed statuses |
-| `DueBefore` | exclusive upper bound (§6.3): timed compares the instant, all-day the local date; zero = no bound |
-| `DueAfter` | inclusive lower bound (§6.3): timed compares the instant, all-day the local date; zero = no bound |
+| `Tags` | empty = all; otherwise exact case-insensitive AND match over the idea tags; applied before `Limit` |
+| `DueBefore` | exclusive upper bound (§6.3): timed compares the instant, all-day the bound's local date; zero = no bound |
+| `DueAfter` | inclusive lower bound (§6.3): timed compares the instant, all-day the bound's local date; zero = no bound |
 | `Query` | case-insensitive substring over title, body and tags; empty = all |
 | `Limit` | at most this many rows; `<= 0` = no store limit (the caller caps) |
 
 Store behaviour:
 
-- `AppendIdea` validates, resolves and registers the project, sets
+- `AppendIdea` accepts an already resolved, concrete `ProjectID` and only
+  checks that it is a registered id: it never resolves an alias or path,
+  registers a project, or falls back to `personal`. Project resolution,
+  registration and the cwd/personal fallback stay in `internal/app`
+  (`ensureProject` and the idea project resolver). The store sets
   `created_at`/`updated_at` when zero, defaults `status` to `open` and
-  `priority` to `normal`, allocates `NewIdeaID(now, title)` (propagating its
-  error) when `ID` is empty,
-  writes atomically and refuses an existing id with `ErrTargetExists`. It
-  returns the new revision.
-- `ListIdeas` scans the project idea directories, skips unparsable files and
-  records them for `ProblemReporter` (kind `idea`, path + reason), and returns a
-  deterministic order:
+  `priority` to `normal`, normalizes provenance, and allocates
+  `NewIdeaID(createdAt, title)` (propagating its error) when `ID` is empty. A
+  non-empty `ID` must satisfy `IsRecordID("idea", id)`; otherwise the write is
+  rejected. The writer never falls back to a legacy name and never adds a
+  numeric suffix: it writes atomically and refuses an existing id with
+  `ErrTargetExists`. It returns the new revision.
+- `ListIdeas` scans the project idea directories of registered projects (and,
+  for the empty `ProjectID` scope, orphan `projects/*/ideas` directories so a
+  removed project's idea stays visible), skips unparsable files and records
+  them for `ProblemReporter` (kind `idea`, path + reason). It applies every
+  filter, including `Tags`, before `Limit`, and returns a deterministic order:
   1. status rank: `open`, `doing`, `someday`, `done`, `dropped`;
   2. ideas with a due before ideas without one;
   3. due ascending (effective instant; all-day uses 09:00 local);
   4. priority rank: `high`, `normal`, `low`;
   5. `updated_at` descending;
   6. id ascending.
-- `GetIdea` finds an idea by globally unique id across registered projects.
-  `ErrNotFound` when absent. A problem file returns the parse/validation error
-  with its path, never a zero idea.
+- `GetIdea` finds an idea by globally unique id across registered projects and
+  orphan `projects/*/ideas` directories, so a removed project's idea stays
+  readable and shows the raw id. `ErrNotFound` when absent. A problem file
+  returns a `domain.ProblemError{Path, Kind, Reason}` (a typed conflict), never
+  a zero idea.
 - `UpdateIdea` locates the stored file by id, preserves `created_at`, sets
   `updated_at` to now (UTC), validates the whole record, and rewrites
   atomically. If `ProjectID` differs it also moves the file to the new
-  project's directory. It never changes the id. Last-write-wins locally; a git
-  conflict is surfaced as a problem row (§14).
+  project's directory, and the new project must be registered; an in-place edit
+  of an idea whose project was later removed from the registry still works. It
+  never changes the id. A problem file returns `domain.ProblemError` and is not
+  modified. Last-write-wins locally; a git conflict is surfaced as a problem
+  row (§14).
 - `TrashIdea` moves `projects/<project>/ideas/<file>` to
   `projects/<project>/trash/ideas/<file>` and `RestoreIdea` moves it back.
   `ErrNotFound` for a missing live record/trash entry; `ErrConflict` when a
-  live file already uses the id.
+  live file already uses the id. A problem file is not moved: `TrashIdea`
+  returns `domain.ProblemError` and leaves the file for manual resolution.
 - The optional `ProblemReporter` (`Problems(ctx, projectID)`) reports
   `RecordProblem{Path, Kind: "idea", Reason}` exactly as it does for other
   kinds.
+- MCP `list` and `GET /v1/ideas` must expose the same `tags` filter (exact
+  case-insensitive AND) in WS4/WS5; the store already applies it.
 
 The generic `RecordEditor` (`TrashRecord`/`RestoreRecord`) is not extended to
 `idea` in v1: `brain record trash` and `brain record restore` refuse ideas;
@@ -690,7 +712,7 @@ tools. Input properties are snake_case.
 | `due_at` | string | add, update | RFC3339 with offset; mutually exclusive with `due_date` |
 | `due_date` | string | add, update | `YYYY-MM-DD`; mutually exclusive with `due_at` |
 | `remind_before_minutes` | integer | add, update | 0..10080 |
-| `tags` | array of strings | add, update | replaces the list; at most 10 |
+| `tags` | array of strings | add, update, list | on add/update it replaces the list (at most 10); on list it is an exact case-insensitive AND filter (WS5) |
 | `source` | object | add | `{type, id?, harness?}` |
 | `note` | string | done | completion note |
 | `reason` | string | drop | stored in `completion_note` |
@@ -759,8 +781,9 @@ globally unique; `project` is a resolver, not part of the identity.
 
 ### 11.1 `GET /v1/ideas`
 
-Query: `project`, `status` (repeated or comma-separated), `due_before`,
-`due_after` (RFC3339), `q`, `limit` (default 100, max 1000).
+Query: `project`, `status` (repeated or comma-separated), `tags` (repeated or
+comma-separated, exact case-insensitive AND; WS4), `due_before`, `due_after`
+(RFC3339), `q`, `limit` (default 100, max 1000).
 
 ```json
 {
@@ -939,8 +962,8 @@ updated_at` for them.
   ideas with a due, and fires at the effective due and, when set, at the lead.
 - Dedupe key is `{idea_id, due_key, trigger}` where `due_key` is the RFC3339
   `due_at` or the `due_date` and `trigger` is `due` or `lead`. Changing the due
-  resets the key; completing/dropping cancels it. Watermark is local
-  (`agent/ideas-reminders.json` or app data), never synced.
+  resets the key; completing/dropping cancels it. The one watermark is local:
+  `<data-dir>/agent/ideas-reminders.json`, never synced.
 - Quiet hours default 22:00–08:00: no toast/sound; items join the next open
   digest.
 - Missed triggers while the app was closed become one launch digest, never a
@@ -956,7 +979,14 @@ A file under `ideas/` is a problem row when:
 - the frontmatter is missing or unterminated;
 - YAML fails to decode, or a required field fails `Idea.Validate`;
 - the id does not satisfy `IsRecordID("idea", id)`, or the file name stem and
-  the frontmatter id disagree.
+  the frontmatter id disagree;
+- the frontmatter `project_id` does not match the project directory it is
+  stored in.
+
+The store returns a problem file as `domain.ProblemError{Path, Kind, Reason}`,
+a typed error that unwraps to `domain.ErrConflict` (the local API maps it to
+`409`; the CLI exits `1`). `GetIdea`, `UpdateIdea` and `TrashIdea` return it
+instead of a zero idea, and `UpdateIdea`/`TrashIdea` leave the file untouched.
 
 Behaviour:
 
@@ -1028,8 +1058,14 @@ A change to any surface must keep these true:
    `due_at` offset and the `due_date` string.
 4. An unknown project is rejected with candidates; `personal` is used only when
    the cwd/default path applies.
-5. A conflicted idea file appears in `problems` and the other ideas still list.
+5. A conflicted idea file appears in `problems` and the other ideas still list;
+   `GetIdea`, `UpdateIdea` and `TrashIdea` return `domain.ProblemError` and do
+   not modify it.
 6. The same brief text is produced by `brain idea brief`, MCP `brief`, the API
    and the session hook.
 7. Deleting an idea moves the file to trash, and restore brings back the same
-   id and content.
+   id and content; a live collision is `ErrConflict`.
+8. `IdeaFilter.Tags` is an exact case-insensitive AND filter applied before
+   `Limit`, and the same filter is exposed by MCP/API list inputs.
+9. An idea of a project removed from the registry is still readable by its
+   global id and appears in the global list; no registry entry is invented.
