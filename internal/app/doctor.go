@@ -49,8 +49,11 @@ func (a *App) Doctor(ctx context.Context, opts DoctorOptions) (DoctorReport, err
 	checks = append(checks, a.doctorSchema())
 	checks = append(checks, a.doctorIndex(ctx))
 	checks = append(checks, a.doctorIndexGeneration(ctx))
-	checks = append(checks, a.doctorRecords(ctx))
-	checks = append(checks, a.doctorIdeas(ctx))
+	// One problem scan feeds both checks: the generic record view and the
+	// idea-kind count read the same snapshot.
+	problems := a.collectProblemRecords(ctx)
+	checks = append(checks, a.doctorRecordsCheck(problems))
+	checks = append(checks, a.doctorIdeas(ctx, problems))
 	checks = append(checks, a.doctorRecordLimits(ctx))
 	checks = append(checks, a.doctorJournal(ctx))
 	checks = append(checks, a.doctorIDs(ctx))
@@ -433,43 +436,68 @@ func (a *App) doctorRecordLimits(ctx context.Context) DoctorCheck {
 	}
 }
 
-// doctorRecords reports record files that listing skips (damaged, empty or
-// quarantined), which would otherwise be invisible to every command.
-func (a *App) doctorRecords(ctx context.Context) DoctorCheck {
+// problemSnapshot is the one record-file problem scan doctor shares between
+// the generic records check and the idea-kind view. available is false when the
+// store has no problem reporter; err names the project whose scan failed.
+type problemSnapshot struct {
+	available bool
+	projects  int
+	problems  []ports.RecordProblem
+	err       error
+}
+
+// collectProblemRecords scans every registered project once. The store's
+// problem reporter is project-scoped, so orphan project directories are not
+// part of the snapshot; their idea files stay visible through `brain idea list`
+// and the idea reindex.
+func (a *App) collectProblemRecords(ctx context.Context) problemSnapshot {
 	reporter, ok := a.deps.Store.(ports.ProblemReporter)
 	if !ok {
-		return DoctorCheck{Name: "records", Status: doctorOK, Message: "not checked for this store"}
+		return problemSnapshot{}
 	}
 	projects, err := a.deps.Store.ListProjects(ctx)
 	if err != nil {
-		return DoctorCheck{Name: "records", Status: doctorFail, Message: err.Error()}
+		return problemSnapshot{available: true, err: err}
 	}
-	var problems []ports.RecordProblem
+	snapshot := problemSnapshot{available: true, projects: len(projects)}
 	for _, project := range projects {
 		found, err := reporter.Problems(ctx, project.ID)
 		if err != nil {
-			return DoctorCheck{Name: "records", Status: doctorFail, Message: project.ID + ": " + err.Error()}
+			snapshot.err = fmt.Errorf("%s: %w", project.ID, err)
+			return snapshot
 		}
-		problems = append(problems, found...)
+		snapshot.problems = append(snapshot.problems, found...)
 	}
-	if len(problems) == 0 {
-		return DoctorCheck{Name: "records", Status: doctorOK, Message: fmt.Sprintf("all record files readable (%d projects)", len(projects))}
+	return snapshot
+}
+
+// doctorRecordsCheck reports record files that listing skips (damaged, empty or
+// conflicted), which would otherwise be invisible to every command.
+func (a *App) doctorRecordsCheck(snapshot problemSnapshot) DoctorCheck {
+	if !snapshot.available {
+		return DoctorCheck{Name: "records", Status: doctorOK, Message: "not checked for this store"}
+	}
+	if snapshot.err != nil {
+		return DoctorCheck{Name: "records", Status: doctorFail, Message: snapshot.err.Error()}
+	}
+	if len(snapshot.problems) == 0 {
+		return DoctorCheck{Name: "records", Status: doctorOK, Message: fmt.Sprintf("all record files readable (%d projects)", snapshot.projects)}
 	}
 	listed := make([]string, 0, maxListedProblems)
-	for _, problem := range problems[:min(len(problems), maxListedProblems)] {
+	for _, problem := range snapshot.problems[:min(len(snapshot.problems), maxListedProblems)] {
 		listed = append(listed, problem.Path+" ("+problem.Reason+")")
 	}
 	return DoctorCheck{
 		Name:    "records",
 		Status:  doctorWarn,
-		Message: fmt.Sprintf("%d record files are skipped by listing: %s", len(problems), strings.Join(listed, "; ")),
+		Message: fmt.Sprintf("%d record files are skipped by listing: %s", len(snapshot.problems), strings.Join(listed, "; ")),
 	}
 }
 
 // doctorIdeas reports the idea layer: the live count, how many are open and
 // the idea files the store skipped as problem rows. Ideas are optional and
 // report-only here; doctor never moves, rewrites or deletes one.
-func (a *App) doctorIdeas(ctx context.Context) DoctorCheck {
+func (a *App) doctorIdeas(ctx context.Context, snapshot problemSnapshot) DoctorCheck {
 	const name = "ideas"
 	if a.cfg.Mode == config.ModeServer {
 		return DoctorCheck{Name: name, Status: doctorOK, Message: "ideas are not supported in server mode"}
@@ -477,6 +505,9 @@ func (a *App) doctorIdeas(ctx context.Context) DoctorCheck {
 	store, ok := a.deps.Store.(ports.IdeaStore)
 	if !ok {
 		return DoctorCheck{Name: name, Status: doctorOK, Message: "not checked for this store"}
+	}
+	if snapshot.available && snapshot.err != nil {
+		return DoctorCheck{Name: name, Status: doctorFail, Message: snapshot.err.Error()}
 	}
 	ideas, err := store.ListIdeas(ctx, ports.IdeaFilter{})
 	if err != nil {
@@ -488,21 +519,17 @@ func (a *App) doctorIdeas(ctx context.Context) DoctorCheck {
 			open++
 		}
 	}
-	projects, err := a.deps.Store.ListProjects(ctx)
-	if err != nil {
-		return DoctorCheck{Name: name, Status: doctorFail, Message: err.Error()}
-	}
 	var problems []ports.RecordProblem
-	for _, project := range projects {
-		found, err := a.ideaProblems(ctx, project.ID)
-		if err != nil {
-			return DoctorCheck{Name: name, Status: doctorFail, Message: project.ID + ": " + err.Error()}
+	if snapshot.available {
+		for _, problem := range snapshot.problems {
+			if problem.Kind == ports.RecordIdea {
+				problems = append(problems, problem)
+			}
 		}
-		problems = append(problems, found...)
 	}
-	summary := fmt.Sprintf("kind idea: %d ideas (%d open)", len(ideas), open)
-	if len(ideas) == 0 {
-		summary = "kind idea: no ideas"
+	summary := "kind idea: no ideas"
+	if len(ideas) > 0 {
+		summary = fmt.Sprintf("kind idea: %s (%d open)", countLabel(len(ideas), "idea", "ideas"), open)
 	}
 	if len(problems) == 0 {
 		return DoctorCheck{Name: name, Status: doctorOK, Message: summary}
@@ -511,13 +538,22 @@ func (a *App) doctorIdeas(ctx context.Context) DoctorCheck {
 	for _, problem := range problems[:min(len(problems), maxListedProblems)] {
 		listed = append(listed, a.displayPath(problem.Path)+" ("+problem.Reason+")")
 	}
+	suffix := countLabel(len(problems), "problem file is", "problem files are") + " skipped and not indexed"
 	return DoctorCheck{
 		Name:   name,
 		Status: doctorWarn,
 		Code:   "idea-problems",
-		Message: fmt.Sprintf("%s, %d problem files are skipped and not indexed: %s; resolve them in git (nothing is deleted or rewritten)",
-			summary, len(problems), strings.Join(listed, "; ")),
+		Message: fmt.Sprintf("%s, %s: %s; resolve them in git (nothing is deleted or rewritten)",
+			summary, suffix, strings.Join(listed, "; ")),
 	}
+}
+
+// countLabel renders a count with a matching noun: "1 idea", "2 ideas".
+func countLabel(count int, singular, plural string) string {
+	if count == 1 {
+		return "1 " + singular
+	}
+	return fmt.Sprintf("%d %s", count, plural)
 }
 
 func (a *App) doctorIndex(ctx context.Context) DoctorCheck {
@@ -532,9 +568,6 @@ func (a *App) doctorIndex(ctx context.Context) DoctorCheck {
 	if _, err := a.deps.Index.Search(ctx, ports.Query{Text: "brain-doctor", Limit: 1}); err != nil {
 		return DoctorCheck{Name: "index", Status: doctorFail, Message: err.Error()}
 	}
-	if a.indexDirty() {
-		return DoctorCheck{Name: "index", Status: doctorWarn, Message: "the index may miss records (a write or sync could not update it); run brain index"}
-	}
 	message := "SQLite FTS5 is usable"
 	if reader, ok := a.deps.Index.(indexMetaReader); ok {
 		if meta, err := reader.Meta(ctx); err == nil {
@@ -542,6 +575,9 @@ func (a *App) doctorIndex(ctx context.Context) DoctorCheck {
 				message += " (schema " + version + ")"
 			}
 		}
+	}
+	if a.indexDirty() {
+		return DoctorCheck{Name: "index", Status: doctorWarn, Message: message + "; the index may miss records (a write or sync could not update it); run brain index"}
 	}
 	return DoctorCheck{Name: "index", Status: doctorOK, Message: message}
 }

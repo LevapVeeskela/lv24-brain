@@ -2,6 +2,7 @@ package app_test
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -80,13 +81,28 @@ func (f *ideaIndexFixture) reindex(t *testing.T) app.IndexResult {
 
 func (f *ideaIndexFixture) search(t *testing.T, text string, kinds ...string) []ports.Hit {
 	t.Helper()
+	return f.searchProject(t, "p1", text, kinds...)
+}
+
+func (f *ideaIndexFixture) searchProject(t *testing.T, projectID, text string, kinds ...string) []ports.Hit {
+	t.Helper()
 	hits, err := f.app.SearchWith(context.Background(), app.SearchOptions{
-		Text: text, ProjectID: "p1", Kinds: kinds, Limit: 20,
+		Text: text, ProjectID: projectID, Kinds: kinds, Limit: 20,
 	})
 	if err != nil {
-		t.Fatalf("SearchWith(%q): %v", text, err)
+		t.Fatalf("SearchWith(%q, %s): %v", text, projectID, err)
 	}
 	return hits
+}
+
+func (f *ideaIndexFixture) addProject(t *testing.T, id string) {
+	t.Helper()
+	if err := f.store.PutProject(context.Background(), domain.Project{
+		ID: id, Name: id, Kind: domain.ProjectKindOther,
+		CreatedAt: ideaIndexClock.Add(-90 * 24 * time.Hour),
+	}); err != nil {
+		t.Fatalf("PutProject(%s): %v", id, err)
+	}
 }
 
 func ideaHit(t *testing.T, hits []ports.Hit, id string) ports.Hit {
@@ -187,6 +203,148 @@ func TestIdeaIndexFollowsWritesAndTrash(t *testing.T) {
 	if hit.Status != string(domain.IdeaDone) {
 		t.Fatalf("restored row = %+v", hit)
 	}
+}
+
+// Moving an idea between projects rewrites the file and must drop the old
+// project's index key: otherwise search returns the idea under both projects
+// and trashing it from the new project leaves the stale row behind.
+func TestIdeaMoveRemovesOldProjectIndexRow(t *testing.T) {
+	ctx := context.Background()
+	fixture := newIdeaIndexFixture(t)
+	fixture.addProject(t, "p2")
+	idea := fixture.addIdea(t, app.IdeaInput{Title: "Zebracache move", Body: "moved plan"})
+	if hits := fixture.searchProject(t, "p2", "zebracache", ports.RecordIdea); len(hits) != 0 {
+		t.Fatalf("idea indexed in p2 before the move: %+v", hits)
+	}
+
+	result, err := fixture.app.UpdateIdea(ctx, app.IdeaUpdateInput{ID: idea.ID, ProjectID: "p2"})
+	if err != nil {
+		t.Fatalf("UpdateIdea: %v", err)
+	}
+	if !result.Moved || result.Idea.ProjectID != "p2" {
+		t.Fatalf("move result = %+v", result)
+	}
+	if hits := fixture.searchProject(t, "p1", "zebracache", ports.RecordIdea); len(hits) != 0 {
+		t.Fatalf("old project still returns the moved idea: %+v", hits)
+	}
+	hit := ideaHit(t, fixture.searchProject(t, "p2", "zebracache", ports.RecordIdea), idea.ID)
+	if hit.ProjectID != "p2" {
+		t.Fatalf("moved row = %+v", hit)
+	}
+
+	if _, err := fixture.app.TrashIdea(ctx, "p2", idea.ID); err != nil {
+		t.Fatalf("TrashIdea: %v", err)
+	}
+	if hits := fixture.searchProject(t, "p2", "zebracache", ports.RecordIdea); len(hits) != 0 {
+		t.Fatalf("trashed moved idea still indexed: %+v", hits)
+	}
+}
+
+// The idea reindex reads the whole store, including an orphan project directory
+// that is no longer in the registry.
+func TestReindexIndexesOrphanProjectIdeas(t *testing.T) {
+	fixture := newIdeaIndexFixture(t)
+	const id = "idea-2026-11-27-orphan-01jcs6abcdefghjkmnpqrstvwx"
+	dir := filepath.Join(fixture.store.Root(), "projects", "orphan", "ideas")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	content := "---\n" +
+		"project_id: orphan\n" +
+		"kind: idea\n" +
+		"updated_at: 2026-11-27T10:00:00Z\n" +
+		"schema_version: 1\n" +
+		"origin: human\n" +
+		"id: " + id + "\n" +
+		"title: Orphan idea\n" +
+		"status: open\n" +
+		"priority: normal\n" +
+		"created_at: 2026-11-27T10:00:00Z\n" +
+		"---\n" +
+		"orphan zebracache body\n"
+	if err := os.WriteFile(filepath.Join(dir, id+".md"), []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	result := fixture.reindex(t)
+	if result.Ideas != 1 {
+		t.Fatalf("reindex result = %+v, want the orphan idea", result)
+	}
+	hits := fixture.searchProject(t, "orphan", "zebracache", ports.RecordIdea)
+	if len(hits) != 1 || hits[0].ID != id || hits[0].ProjectID != "orphan" {
+		t.Fatalf("orphan idea hits = %+v", hits)
+	}
+}
+
+// Ideas feed the reindex generation watermark: a reindex records a generation,
+// a new idea file changes it, and the index reports schema 11.
+func TestIdeaIndexGenerationIncludesIdeas(t *testing.T) {
+	ctx := context.Background()
+	fixture := newIdeaIndexFixture(t)
+	fixture.addIdea(t, app.IdeaInput{Title: "First generation"})
+	fixture.reindex(t)
+	first, err := fixture.app.IndexStatus(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.Generation == "" || first.Stale || first.SchemaVersion != "11" {
+		t.Fatalf("status after reindex = %+v", first)
+	}
+
+	fixture.addIdea(t, app.IdeaInput{Title: "Second generation"})
+	fixture.reindex(t)
+	second, err := fixture.app.IndexStatus(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second.Generation == first.Generation {
+		t.Fatalf("generation %q did not change after a new idea", second.Generation)
+	}
+}
+
+// A lost index write is reported after the file landed and marks the projection
+// dirty, so the failure can never read as a lost idea.
+func TestIdeaWriteReportsIndexFailureAfterTheFileLanded(t *testing.T) {
+	ctx := context.Background()
+	dataDir := t.TempDir()
+	store, err := fsstore.New(dataDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.PutProject(ctx, domain.Project{ID: "p1", Name: "P1", Kind: domain.ProjectKindOther}); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Default()
+	cfg.Mode = config.ModeLocal
+	cfg.DataDir = dataDir
+	application := app.New(cfg, app.Dependencies{
+		Store: store, Index: offlineIndex{err: errors.New("index offline")},
+	})
+
+	_, addErr := application.AddIdea(ctx, app.IdeaInput{ProjectID: "p1", Title: "Offline idea"})
+	if addErr == nil || !strings.Contains(addErr.Error(), "was written but the search index update failed") {
+		t.Fatalf("AddIdea error = %v, want the written-but-not-indexed message", addErr)
+	}
+	if !strings.Contains(addErr.Error(), "index offline") {
+		t.Fatalf("AddIdea error = %v, want the adapter cause", addErr)
+	}
+	ideas, err := store.ListIdeas(ctx, ports.IdeaFilter{ProjectID: "p1"})
+	if err != nil || len(ideas) != 1 {
+		t.Fatalf("stored ideas = %+v, %v; want the idea file", ideas, err)
+	}
+	if _, err := os.Stat(filepath.Join(dataDir, "index", "dirty")); err != nil {
+		t.Fatalf("dirty marker after a failed index write: %v", err)
+	}
+}
+
+// offlineIndex fails every operation, modelling a search index that is
+// unavailable while the Markdown store is healthy.
+type offlineIndex struct{ err error }
+
+func (i offlineIndex) Upsert(context.Context, ports.Document) error { return i.err }
+func (i offlineIndex) Delete(context.Context, string) error         { return i.err }
+func (i offlineIndex) Search(context.Context, ports.Query) ([]ports.Hit, error) {
+	return nil, i.err
 }
 
 // A reindex rebuilds the idea rows from Markdown and prunes a row whose file is
@@ -357,8 +515,8 @@ func TestDoctorReportsIdeasAndIndexSchema(t *testing.T) {
 	if indexCheck.Status != "ok" || !strings.Contains(indexCheck.Message, "schema 11") {
 		t.Fatalf("index check = %+v, want schema 11", indexCheck)
 	}
-	if ideasCheck.Status != "ok" || !strings.Contains(ideasCheck.Message, "kind idea") || !strings.Contains(ideasCheck.Message, "1 idea") {
-		t.Fatalf("ideas check = %+v, want the kind and the count", ideasCheck)
+	if ideasCheck.Status != "ok" || !strings.Contains(ideasCheck.Message, "kind idea") || !strings.Contains(ideasCheck.Message, "1 idea (1 open)") {
+		t.Fatalf("ideas check = %+v, want the kind and the singular count", ideasCheck)
 	}
 	if strings.Contains(ideasCheck.Message, "problem") {
 		t.Fatalf("ideas check reports a problem for a healthy file: %+v", ideasCheck)
@@ -373,8 +531,20 @@ func TestDoctorReportsIdeasAndIndexSchema(t *testing.T) {
 		t.Fatal(err)
 	}
 	ideasCheck = doctorCheck(t, report, "ideas")
-	if ideasCheck.Status != "warn" || !strings.Contains(ideasCheck.Message, "problem") {
-		t.Fatalf("ideas check with a problem file = %+v, want a warning naming the count", ideasCheck)
+	if ideasCheck.Status != "warn" || !strings.Contains(ideasCheck.Message, "1 problem file is skipped") {
+		t.Fatalf("ideas check with a problem file = %+v, want the singular problem count", ideasCheck)
+	}
+
+	if err := os.WriteFile(filepath.Join(fixture.dataDir, "index", "dirty"), []byte("test\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	report, err = fixture.app.Doctor(ctx, app.DoctorOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	indexCheck = doctorCheck(t, report, "index")
+	if indexCheck.Status != "warn" || !strings.Contains(indexCheck.Message, "schema 11") {
+		t.Fatalf("dirty index check = %+v, want a warning that keeps the schema", indexCheck)
 	}
 }
 
