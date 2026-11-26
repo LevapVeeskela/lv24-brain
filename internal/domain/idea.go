@@ -404,12 +404,12 @@ func CanTransition(from, to IdeaStatus) bool {
 // NewIdeaID returns idea-<YYYY-MM-DD>-<slug>-<ULID>, the id and file name stem
 // of a new idea. The date is the UTC date, matching every other record id; the
 // slug is normalized with Slugify, so a human title is accepted as well as an
-// already slugified string. The ULID is generated with crypto/rand; a failure
-// of the OS random source is unrecoverable and panics.
-func NewIdeaID(date time.Time, slug string) string {
+// already slugified string. A failure of the OS random source is returned as an
+// error instead of producing an id with a broken or reused suffix.
+func NewIdeaID(date time.Time, slug string) (string, error) {
 	ulid, err := NewULID(date)
 	if err != nil {
-		panic("domain: generate idea id: " + err.Error())
+		return "", fmt.Errorf("domain: generate idea id: %w", err)
 	}
-	return NewRecordID("idea", date, Slugify(slug), ulid)
+	return NewRecordID("idea", date, Slugify(slug), ulid), nil
 }

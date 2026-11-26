@@ -323,7 +323,10 @@ func TestNewIdeaID(t *testing.T) {
 	// matching every other record id.
 	msk := time.FixedZone("MSK", 3*3600)
 	at := time.Date(2026, 11, 27, 1, 30, 0, 0, msk)
-	id := NewIdeaID(at, "Calendar Dark Theme")
+	id, err := NewIdeaID(at, "Calendar Dark Theme")
+	if err != nil {
+		t.Fatalf("NewIdeaID: %v", err)
+	}
 	const prefix = "idea-2026-11-26-calendar-dark-theme-"
 	if !strings.HasPrefix(id, prefix) {
 		t.Fatalf("NewIdeaID = %q, want prefix %q", id, prefix)
@@ -341,14 +344,20 @@ func TestNewIdeaID(t *testing.T) {
 
 func TestNewIdeaIDSlugifiesAndIsUnique(t *testing.T) {
 	at := time.Date(2026, 11, 26, 10, 0, 0, 0, time.UTC)
-	id := NewIdeaID(at, "Тёмная тема / календарь")
+	id, err := NewIdeaID(at, "Тёмная тема / календарь")
+	if err != nil {
+		t.Fatalf("NewIdeaID: %v", err)
+	}
 	if !strings.HasPrefix(id, "idea-2026-11-26-temnaya-tema-kalendar-") {
 		t.Fatalf("NewIdeaID = %q, want a transliterated slug", id)
 	}
 	if !IsRecordID("idea", id) {
 		t.Fatalf("NewIdeaID produced an id IsRecordID rejects: %q", id)
 	}
-	other := NewIdeaID(at, "Тёмная тема / календарь")
+	other, err := NewIdeaID(at, "Тёмная тема / календарь")
+	if err != nil {
+		t.Fatalf("NewIdeaID second call: %v", err)
+	}
 	if id == other {
 		t.Fatalf("two calls returned the same id %q", id)
 	}
@@ -356,7 +365,10 @@ func TestNewIdeaIDSlugifiesAndIsUnique(t *testing.T) {
 
 func TestNewIdeaIDEmptySlugFallsBack(t *testing.T) {
 	at := time.Date(2026, 11, 26, 10, 0, 0, 0, time.UTC)
-	id := NewIdeaID(at, "   ")
+	id, err := NewIdeaID(at, "   ")
+	if err != nil {
+		t.Fatalf("NewIdeaID: %v", err)
+	}
 	if !strings.HasPrefix(id, "idea-2026-11-26-item-") {
 		t.Fatalf("NewIdeaID = %q, want the item slug fallback", id)
 	}

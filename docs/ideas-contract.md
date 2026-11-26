@@ -286,14 +286,14 @@ Valid `Type` values: `session`, `note`, `decision`, `commit`, `manual`,
 ### 3.4 ID helper
 
 ```go
-func NewIdeaID(date time.Time, slug string) string
+func NewIdeaID(date time.Time, slug string) (string, error)
 ```
 
 Returns `idea-<UTC date>-<Slugify(slug)>-<ULID>`. It normalizes the slug, so a
 title is accepted as well as an already slugified string; an empty or unusable
-slug becomes `item`. It panics only if the OS random source fails (unrecoverable
-and equivalent to `crypto/rand` failure elsewhere). `IsRecordID("idea", id)` is
-true for every returned id.
+slug becomes `item`. When the OS random source fails it returns the `NewULID`
+error instead of an id with a missing or reused suffix. `IsRecordID("idea", id)`
+is true for every non-empty id it returns.
 
 ## 4. Validation rules
 
@@ -499,7 +499,8 @@ Store behaviour:
 
 - `AppendIdea` validates, resolves and registers the project, sets
   `created_at`/`updated_at` when zero, defaults `status` to `open` and
-  `priority` to `normal`, allocates `NewIdeaID(now, title)` when `ID` is empty,
+  `priority` to `normal`, allocates `NewIdeaID(now, title)` (propagating its
+  error) when `ID` is empty,
   writes atomically and refuses an existing id with `ErrTargetExists`. It
   returns the new revision.
 - `ListIdeas` scans the project idea directories, skips unparsable files and
