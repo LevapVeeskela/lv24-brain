@@ -305,15 +305,16 @@ type tool struct {
 	run     toolFunc
 }
 
-// nativeToolList is the 17-tool native surface, in a fixed order: session
-// start, task context, search, one-record access, the four appends, the
-// curation tools, the code graph, then introspection.
+// nativeToolList is the 18-tool native surface, in a fixed order: session
+// start, task context, search, one-record access, the idea layer, the four
+// appends, the curation tools, the code graph, then introspection.
 func (s *Server) nativeToolList() []tool {
 	return []tool{
 		s.openTool(),
 		s.contextTool(),
 		s.searchTool(),
 		s.recordTool(),
+		s.ideaTool(),
 		s.noteTool(),
 		s.decisionTool(),
 		s.attemptTool(),

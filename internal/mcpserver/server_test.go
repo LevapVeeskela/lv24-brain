@@ -226,7 +226,7 @@ func TestMCPServerToolsListSchemas(t *testing.T) {
 	responses := session(t, &fakeBackend{}, `{"jsonrpc":"2.0","id":1,"method":"tools/list"}`)
 	tools := responses[0]["result"].(map[string]any)["tools"].([]any)
 	want := []string{
-		"brain_open", "brain_context", "brain_search", "brain_record", "brain_note",
+		"brain_open", "brain_context", "brain_search", "brain_record", "brain_idea", "brain_note",
 		"brain_decision", "brain_attempt", "brain_handoff", "brain_state", "brain_catchup",
 		"brain_review", "brain_judge", "brain_projects", "brain_prompt", "brain_code",
 		"brain_graph", "brain_capabilities",

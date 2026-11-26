@@ -102,8 +102,8 @@ func TestMCPServesBrainTools(t *testing.T) {
 	}
 
 	tools := mcpResult(t, responses[1])["tools"].([]any)
-	if len(tools) != 17 {
-		t.Fatalf("tools = %d, want 17", len(tools))
+	if len(tools) != 18 {
+		t.Fatalf("tools = %d, want 18", len(tools))
 	}
 	if name := tools[1].(map[string]any)["name"]; name != "brain_context" {
 		t.Fatalf("tool 1 = %v, want brain_context next to brain_open", name)

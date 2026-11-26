@@ -17,15 +17,16 @@ import (
 // in the session block. The caller may ask for fewer or more (1..10) items, but
 // the character budget is fixed so the block never crowds out the handoff.
 const (
-	DefaultIdeaBriefMax     = 3
-	MaxIdeaBriefMax         = 10
-	IdeaBriefMaxCharacters  = 700
-	IdeaBriefScopeCurrent   = "current"
-	IdeaBriefScopeAll       = "all"
-	ideaBriefFooterHint     = "brain idea list"
-	ideaGreetingStateDir    = "agent"
-	ideaGreetingStateFile   = "ideas.json"
-	ideaGreetingIgnoreEntry = "*\n"
+	DefaultIdeaBriefMax      = 3
+	MaxIdeaBriefMax          = 10
+	IdeaBriefMaxCharacters   = 700
+	IdeaPointerMaxCharacters = 400
+	IdeaBriefScopeCurrent    = "current"
+	IdeaBriefScopeAll        = "all"
+	ideaBriefFooterHint      = "brain idea list"
+	ideaGreetingStateDir     = "agent"
+	ideaGreetingStateFile    = "ideas.json"
+	ideaGreetingIgnoreEntry  = "*\n"
 )
 
 // ideaGreetingState is the machine-local mute file. It is never published and
@@ -51,6 +52,11 @@ type IdeaBriefResult struct {
 	Open     int
 	DueToday int
 	Muted    bool
+	// ProjectOpen counts the actionable ideas of the project the block was
+	// ordered for; ProjectIdeas are its items in store order, capped at Max.
+	// Both are zero when the brief has no ordering project (a workspace root).
+	ProjectOpen  int
+	ProjectIdeas []domain.Idea
 }
 
 // IdeaBrief renders the capped session block. The same function serves the
@@ -117,6 +123,17 @@ func (a *App) IdeaBrief(ctx context.Context, opts IdeaBriefOptions) (IdeaBriefRe
 	now := a.now()
 	result.Open = len(result.Ideas)
 	result.DueToday = ideaDueTodayCount(result.Ideas, now)
+	if currentProjectID != "" {
+		for _, idea := range result.Ideas {
+			if idea.ProjectID == currentProjectID {
+				result.ProjectIdeas = append(result.ProjectIdeas, idea)
+			}
+		}
+		result.ProjectOpen = len(result.ProjectIdeas)
+		if len(result.ProjectIdeas) > max {
+			result.ProjectIdeas = result.ProjectIdeas[:max]
+		}
+	}
 	if until := a.IdeaGreetingMutedUntil(); !until.IsZero() {
 		result.Muted = true
 		result.Ideas = []domain.Idea{}
@@ -127,6 +144,66 @@ func (a *App) IdeaBrief(ctx context.Context, opts IdeaBriefOptions) (IdeaBriefRe
 	result.Ideas = selected
 	result.Text = renderIdeaBriefText(selected, result.Open, result.DueToday, now)
 	return result, nil
+}
+
+// IdeaPointer is the `brain open` view of ideas: one line with the project and
+// global counts, plus the project's top items when the character budget allows.
+type IdeaPointer struct {
+	Text        string
+	ProjectOpen int
+	Open        int
+	DueToday    int
+}
+
+// IdeaPointer renders the project-scoped `brain open` pointer. It is bounded by
+// IdeaPointerMaxCharacters and never includes a body; an empty project still
+// reports the global count. The greeting mute does not hide this block: it is
+// project context the caller asked for, not a session greeting.
+func (a *App) IdeaPointer(ctx context.Context, projectID string, max int) (IdeaPointer, error) {
+	if max <= 0 {
+		max = DefaultIdeaBriefMax
+	}
+	brief, err := a.IdeaBrief(ctx, IdeaBriefOptions{
+		ProjectID: projectID,
+		Scope:     IdeaBriefScopeAll,
+		Max:       max,
+	})
+	if err != nil {
+		return IdeaPointer{}, err
+	}
+	pointer := IdeaPointer{
+		ProjectOpen: brief.ProjectOpen,
+		Open:        brief.Open,
+		DueToday:    brief.DueToday,
+	}
+	line := fmt.Sprintf("ideas: %d open in this project · %d open overall", pointer.ProjectOpen, pointer.Open)
+	if pointer.DueToday > 0 {
+		line += fmt.Sprintf(", %d due today", pointer.DueToday)
+	}
+	now := a.now()
+	lines := []string{line}
+	for _, idea := range brief.ProjectIdeas {
+		if len(lines) > max {
+			break
+		}
+		candidate := ideaPointerLine(idea, now)
+		if utf8.RuneCountInString(strings.Join(append(lines, candidate), "\n")) > IdeaPointerMaxCharacters {
+			break
+		}
+		lines = append(lines, candidate)
+	}
+	pointer.Text = strings.Join(lines, "\n")
+	return pointer, nil
+}
+
+// ideaPointerLine renders one project item of the `brain open` pointer without
+// the project chip: the line already names the project.
+func ideaPointerLine(idea domain.Idea, now time.Time) string {
+	line := "- " + IdeaMarker(idea, now)
+	if label, ok := IdeaDueLabel(idea, now); ok && label != "" {
+		line += " " + label
+	}
+	return line + " — " + idea.Title
 }
 
 // selectIdeaBriefItems picks the block items in the contract order: up to two

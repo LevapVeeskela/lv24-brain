@@ -21,11 +21,17 @@ import (
 // earlier layer is filled before a later one and the core is never dropped.
 const (
 	ContextLayerCore      = "core"
+	ContextLayerIdeas     = "ideas"
 	ContextLayerDecisions = "decisions"
 	ContextLayerAttempts  = "attempts"
 	ContextLayerQuery     = "query"
 	ContextLayerLinked    = "linked"
 )
+
+// contextIdeasCapTokens is the fixed cap of the bounded `brain open` ideas
+// pointer (about 400 Latin characters). It is not a proportional share: the
+// pointer is a small convenience layer, never a reason to starve decisions.
+const contextIdeasCapTokens = 220
 
 // Per-layer shares of the total token budget. The cap of a layer is
 // proportional to the budget instead of a fixed number, so a 500-token answer
@@ -73,15 +79,14 @@ type ContextSectionRecord struct {
 }
 
 // ContextSection is one packed layer: its configured cap, the tokens it uses
-// and the records that fit.
+// and the records that fit. Text carries the rendered prose of the core and
+// ideas layers; the other layers are rendered from Records by section name.
 type ContextSection struct {
 	Name    string
 	Cap     int
 	Tokens  int
 	Records []ContextSectionRecord
-	// Text is the rendered core block. Only the core section sets it: the
-	// other layers are rendered from Records by section name.
-	Text string
+	Text    string
 }
 
 // Reason codes for records left out of a context answer. They are stable:
@@ -161,6 +166,9 @@ type contextPackInput struct {
 	Header      string
 	CoreText    string
 	CoreRecords []ContextSectionRecord
+	// Ideas is the already rendered `brain open` pointer block. It is prose,
+	// not records, and is bounded by its own fixed cap.
+	Ideas       string
 	Decisions   []ContextRecord
 	Attempts    []ContextRecord
 	Query       []ContextRecord
@@ -221,6 +229,25 @@ func buildContextPack(in contextPackInput) (ContextPack, error) {
 
 	selected := make(map[string]bool, 32)
 	selectedOrder := make([]string, 0, 32)
+
+	// Ideas: bounded prose, placed right after the core and before the ranked
+	// layers. A pointer that does not fit is dropped whole; a half item line
+	// is worse than no line.
+	if text := strings.TrimSpace(in.Ideas); text != "" {
+		allowance := minInt(contextIdeasCapTokens, remaining)
+		tokens := textbudget.Tokens(text)
+		if allowance > 0 && tokens <= allowance {
+			pack.Sections = append(pack.Sections, ContextSection{
+				Name: ContextLayerIdeas, Cap: contextIdeasCapTokens, Tokens: tokens, Text: text,
+			})
+			remaining -= tokens
+			if remaining < 0 {
+				remaining = 0
+			}
+			borrowed = contextBorrowLeft(borrowed, contextIdeasCapTokens, tokens)
+		}
+	}
+
 	addLayer := func(name string, candidates []ContextRecord, always bool) {
 		share := contextLayerCap(name, in.Budget)
 		allowance := minInt(share+borrowed, remaining)
@@ -765,6 +792,11 @@ func (p ContextPack) ExplainLines() []string {
 			capTokens = section.Cap
 		}
 		lines = append(lines, fmt.Sprintf("%s: %d/%d tokens, %d records", layer.name, tokens, capTokens, records))
+		if layer.name == ContextLayerCore {
+			if ideas, ok := contextSection(p, ContextLayerIdeas); ok {
+				lines = append(lines, fmt.Sprintf("%s: %d/%d tokens, prose", ContextLayerIdeas, ideas.Tokens, ideas.Cap))
+			}
+		}
 	}
 	lines = append(lines, fmt.Sprintf("total: %d/%d tokens, %d dropped", p.TotalTokens, p.Budget, len(p.Truncated)))
 	if p.PathSignal {

@@ -965,6 +965,8 @@ func toRecordDetail(record app.Record) mcpserver.RecordDetail {
 		detail.Body = record.Handoff.Summary
 		detail.NextAction = record.Handoff.NextAction
 		detail.GitContext = record.Handoff.GitContext
+	case record.Idea != nil:
+		detail.Body = record.Idea.Body
 	}
 	return detail
 }

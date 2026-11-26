@@ -120,7 +120,7 @@ func TestReadOnlyPolicyOmitsEveryWriteTool(t *testing.T) {
 			t.Fatalf("read-only server lists write tool %s", tool)
 		}
 	}
-	for _, tool := range []string{"brain_open", "brain_context", "brain_search", "brain_record", "brain_catchup", "brain_review", "brain_projects", "brain_capabilities"} {
+	for _, tool := range []string{"brain_open", "brain_context", "brain_search", "brain_record", "brain_idea", "brain_catchup", "brain_review", "brain_projects", "brain_capabilities"} {
 		if !names[tool] {
 			t.Fatalf("read-only server dropped read tool %s", tool)
 		}

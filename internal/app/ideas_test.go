@@ -3,11 +3,13 @@ package app_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/levapveeskela/lv24-brain/internal/adapters/fsstore"
 	"github.com/levapveeskela/lv24-brain/internal/app"
@@ -537,5 +539,89 @@ func TestGetIdeaReadsAnOrphanProject(t *testing.T) {
 	}
 	if all.ProjectSource != "" {
 		t.Fatalf("all scope ProjectSource = %q, want empty (no single project)", all.ProjectSource)
+	}
+}
+
+// pointerFixture seeds two projects and returns their actionable counts.
+func pointerFixture(t *testing.T) (*app.App, *fsstore.Store) {
+	t.Helper()
+	ctx := context.Background()
+	a, store := newIdeaApp(t)
+	seedIdeaProject(t, store, domain.Project{ID: "demo", Name: "Demo", Kind: domain.ProjectKindRepository})
+	seedIdeaProject(t, store, domain.Project{ID: "personal", Name: "Personal", Kind: domain.ProjectKindOther})
+	today := time.Now().In(time.Local).Format(domain.IdeaDateLayout)
+	for i := range 4 {
+		due := ""
+		if i < 2 {
+			due = today
+		}
+		if _, err := a.AddIdea(ctx, app.IdeaInput{ProjectID: "demo", Title: fmt.Sprintf("Demo item %d", i), DueDate: due}); err != nil {
+			t.Fatalf("AddIdea demo %d: %v", i, err)
+		}
+	}
+	for i := range 2 {
+		if _, err := a.AddIdea(ctx, app.IdeaInput{ProjectID: "personal", Title: fmt.Sprintf("Personal item %d", i)}); err != nil {
+			t.Fatalf("AddIdea personal %d: %v", i, err)
+		}
+	}
+	return a, store
+}
+
+func TestIdeaPointerCountsAndBudget(t *testing.T) {
+	ctx := context.Background()
+	a, _ := pointerFixture(t)
+	pointer, err := a.IdeaPointer(ctx, "demo", 3)
+	if err != nil {
+		t.Fatalf("IdeaPointer: %v", err)
+	}
+	if pointer.ProjectOpen != 4 || pointer.Open != 6 || pointer.DueToday != 2 {
+		t.Fatalf("pointer counts = %+v", pointer)
+	}
+	if !strings.HasPrefix(pointer.Text, "ideas: 4 open in this project · 6 open overall, 2 due today") {
+		t.Fatalf("pointer text = %q", pointer.Text)
+	}
+	if utf8.RuneCountInString(pointer.Text) > app.IdeaPointerMaxCharacters {
+		t.Fatalf("pointer is %d runes, cap %d", utf8.RuneCountInString(pointer.Text), app.IdeaPointerMaxCharacters)
+	}
+	if items := strings.Count(pointer.Text, "\n- "); items > 3 || items == 0 {
+		t.Fatalf("pointer items = %d in %q", items, pointer.Text)
+	}
+	// The block never mentions personal items: it is project-scoped.
+	if strings.Contains(pointer.Text, "Personal item") {
+		t.Fatalf("pointer leaked another project: %q", pointer.Text)
+	}
+}
+
+func TestBootstrapCarriesTheIdeasPointerAndSessionBlock(t *testing.T) {
+	ctx := context.Background()
+	a, _ := pointerFixture(t)
+	packed, err := a.Bootstrap(ctx, app.BootstrapOptions{ProjectID: "demo", TokenBudget: 4000})
+	if err != nil {
+		t.Fatalf("Bootstrap packed: %v", err)
+	}
+	if !strings.Contains(packed.Summary, "ideas: 4 open in this project · 6 open overall") {
+		t.Fatalf("packed summary has no pointer:\n%s", packed.Summary)
+	}
+	if strings.Index(packed.Summary, "ideas:") < strings.Index(packed.Summary, "## Latest handoff") {
+		t.Fatalf("pointer is above the handoff:\n%s", packed.Summary)
+	}
+	if !strings.Contains(packed.Summary, "Demo item") {
+		t.Fatalf("packed summary has no project item:\n%s", packed.Summary)
+	}
+
+	block := "## Ideas — 4 open · 2 due today\n- [ ] today — Demo item 0 (demo)"
+	plain, err := a.Bootstrap(ctx, app.BootstrapOptions{ProjectID: "demo", Budget: 4000, IdeasBlock: block})
+	if err != nil {
+		t.Fatalf("Bootstrap rune: %v", err)
+	}
+	handoff := strings.Index(plain.Summary, "## Latest handoff")
+	ideas := strings.Index(plain.Summary, "## Ideas")
+	decisions := strings.Index(plain.Summary, "## Recent decisions")
+	if handoff < 0 || ideas < 0 || decisions < 0 || !(handoff < ideas && ideas < decisions) {
+		t.Fatalf("ideas block position = handoff %d, ideas %d, decisions %d:\n%s",
+			handoff, ideas, decisions, plain.Summary)
+	}
+	if !strings.Contains(plain.Summary, "- [ ] today — Demo item 0 (demo)") {
+		t.Fatalf("the supplied block was not rendered verbatim:\n%s", plain.Summary)
 	}
 }

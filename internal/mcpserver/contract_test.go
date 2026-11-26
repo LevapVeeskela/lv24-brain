@@ -16,8 +16,8 @@ func listToolsWith(t *testing.T, backend Backend) map[string]any {
 func TestContractEveryToolIsAnnotated(t *testing.T) {
 	result := listToolsWith(t, &fullFake{})
 	tools := result["tools"].([]any)
-	if len(tools) != 17 {
-		t.Fatalf("tools = %d, want 17", len(tools))
+	if len(tools) != 18 {
+		t.Fatalf("tools = %d, want 18", len(tools))
 	}
 	for _, raw := range tools {
 		tool := raw.(map[string]any)
@@ -69,8 +69,8 @@ func TestContractReadOnlyHintsMatchTheTools(t *testing.T) {
 
 func TestContractCatalogueCoversEveryTool(t *testing.T) {
 	specs := Catalog("test-version", DefaultProfile())
-	if len(specs) != 17 {
-		t.Fatalf("catalogue = %d tools, want 17", len(specs))
+	if len(specs) != 18 {
+		t.Fatalf("catalogue = %d tools, want 18", len(specs))
 	}
 	seen := map[string]bool{}
 	for _, spec := range specs {

@@ -6,7 +6,7 @@ handshake clients both work: **`2026-07-28`** (stateless, per-request metadata)
 and **`2025-06-18`** (handshake). This page is the contract for hosts, for
 `skills` and for anyone pinning our tool definitions.
 
-The default profile is `lv24`: **17 tools** plus the read-only `memory://`
+The default profile is `lv24`: **18 tools** plus the read-only `memory://`
 resources and the `code://` symbol resource. Migration profiles (`engram`), the
 code-graph vocabularies (`codegraph`, `graphify`) and the resources are
 described in §10–§14. Stdout carries protocol messages only; diagnostics go to
@@ -159,7 +159,7 @@ without calling it. A migration profile adds its own gaps to the payload: every
 grade-C alias names the approximation and every grade-D alias names the CLI
 path that can do the work (§12).
 
-## 6. The 17 tools
+## 6. The 18 tools
 
 Each tool has one intent; a write action never hides inside a tool annotated
 read-only. `action` defaults to the historical read behaviour. `brain_code` is
@@ -171,7 +171,8 @@ its `readOnlyHint` is false while `x-lv24-read-actions` names the reads.
 | `brain_open` | read | – (`include` adds `state`, `handoff`, `recent`, `counts`) | session-start brief |
 | `brain_context` | read | – | task-shaped context pack |
 | `brain_search` | read | – | full-text search over records |
-| `brain_record` | read | `get` (default), `list`, `relations`, `history`, `links` | one record, a listing, relations, supersede chain, links |
+| `brain_record` | read | `get` (default), `list`, `relations`, `history`, `links` | one record, a listing, relations, supersede chain, links; ideas are readable with `kinds:["idea"]` |
+| `brain_idea` | mixed | `add`, `list`, `get`, `update`, `done`, `reopen`, `drop`, `rm`, `restore`, `brief` | the agent-first TODO layer; `rm` is reversible trash; `brief` is the session block (`list`/`get`/`brief` are the read actions) |
 | `brain_note` | append | `record` (default), `suggest_topic` | append or evolve a note (`topic_key`, `subtype`, `scope`, `source`) |
 | `brain_decision` | append | – | record a decision (lifecycle is `brain_judge`) |
 | `brain_attempt` | append | – | record an attempt and its reason |
@@ -322,6 +323,7 @@ stable, so a walk over the pages neither repeats nor skips a row.
 |---|---|---|---|
 | `brain_search` | 20 | 100 | 200 (index hit cap) |
 | `brain_record(action=list)` | 50 | 200 | unbounded |
+| `brain_idea(action=list)` | 50 | 200 | unbounded (no cursor) |
 | `brain_catchup(mode=journal)` | 20 | 500 | 1000 (journal read cap) |
 | `brain_record(action=relations)` / `brain_judge(action=list)` | 50 | 200 | unbounded |
 
@@ -349,6 +351,7 @@ actions. The four hints are always present (MCP defaults would otherwise apply):
 | Read | `brain_open`, `brain_context`, `brain_search`, `brain_record`, `brain_catchup`, `brain_review`, `brain_projects`, `brain_graph`, `brain_capabilities` | true | false | true | false |
 | Append | `brain_note`, `brain_decision`, `brain_attempt`, `brain_handoff` | false | false | false | false |
 | Mixed | `brain_code` | false | false | true | false |
+| Mixed | `brain_idea` | false | false | false | false |
 | Destructive | `brain_state`, `brain_judge` | false | true | true | false |
 | Destructive | `brain_prompt` | false | true | false | false |
 

@@ -328,7 +328,7 @@ func ideaRelativePath(dataDir, path string) string {
 // ideaRowPath is the stable storage path of an idea, independent of the data
 // directory.
 func ideaRowPath(idea domain.Idea) string {
-	return "projects/" + idea.ProjectID + "/ideas/" + idea.ID + ".md"
+	return app.IdeaStoragePath(idea)
 }
 
 // ideaWriteSource makes an id-addressed write report a project source. The id
@@ -343,46 +343,12 @@ func ideaWriteSource(source string) string {
 // ---------------------------------------------------------------------------
 // JSON rows (§9.3)
 
-type jsonIdeaRow struct {
-	ID                  string             `json:"id"`
-	ProjectID           string             `json:"project_id"`
-	Title               string             `json:"title"`
-	Body                *string            `json:"body,omitempty"`
-	Status              string             `json:"status"`
-	Priority            string             `json:"priority"`
-	DueAt               *string            `json:"due_at"`
-	DueDate             *string            `json:"due_date"`
-	RemindBeforeMinutes *int               `json:"remind_before_minutes"`
-	Tags                []string           `json:"tags"`
-	Source              *domain.IdeaSource `json:"source"`
-	CompletedAt         *string            `json:"completed_at"`
-	CompletionNote      string             `json:"completion_note"`
-	CreatedAt           *string            `json:"created_at"`
-	UpdatedAt           *string            `json:"updated_at"`
-	Path                string             `json:"path"`
-	Provenance          jsonIdeaProvenance `json:"provenance"`
-	Validity            jsonIdeaValidity   `json:"validity"`
-	Relations           []domain.Relation  `json:"relations"`
-	Review              jsonIdeaReview     `json:"review"`
-}
+// The row shape lives in internal/app, so the CLI, MCP brain_idea and the
+// local API render one idea through the same mapper.
+type jsonIdeaRow = app.IdeaRow
 
-type jsonIdeaProvenance struct {
-	Origin   string `json:"origin"`
-	Reviewed bool   `json:"reviewed"`
-	Trust    string `json:"trust"`
-}
-
-type jsonIdeaValidity struct {
-	ValidFrom    *string `json:"valid_from"`
-	ValidTo      *string `json:"valid_to"`
-	SupersededBy string  `json:"superseded_by"`
-	Supersedes   string  `json:"supersedes"`
-	Confidence   float64 `json:"confidence"`
-}
-
-type jsonIdeaReview struct {
-	ReviewAfter *string `json:"review_after"`
-	ReviewedAt  *string `json:"reviewed_at"`
+func toJSONIdeaRow(idea domain.Idea, withBody bool) jsonIdeaRow {
+	return app.NewIdeaRow(idea, withBody)
 }
 
 type jsonIdeaProblem struct {
@@ -422,87 +388,6 @@ type jsonIdeaBrief struct {
 
 type jsonIdeaMute struct {
 	MutedUntil *string `json:"muted_until"`
-}
-
-// ideaJSONDueAt keeps the stored offset of a timed due instead of normalizing
-// it to UTC.
-func ideaJSONDueAt(at *time.Time) *string {
-	if at == nil || at.IsZero() {
-		return nil
-	}
-	formatted := at.Format(time.RFC3339)
-	return &formatted
-}
-
-func ideaJSONOptionalString(value string) *string {
-	if strings.TrimSpace(value) == "" {
-		return nil
-	}
-	return &value
-}
-
-// toJSONIdeaRow maps one idea to the snake_case row of the contract. The body
-// is included only where the contract includes it (show and writes).
-func toJSONIdeaRow(idea domain.Idea, withBody bool) jsonIdeaRow {
-	status := idea.Status
-	if status == "" {
-		status = domain.IdeaOpen
-	}
-	priority := idea.Priority
-	if priority == "" {
-		priority = domain.IdeaPriorityNormal
-	}
-	provenance := idea.Provenance.Normalized()
-	relations := make([]domain.Relation, 0, len(idea.Relations))
-	relations = append(relations, idea.Relations...)
-	var body *string
-	if withBody {
-		body = &idea.Body
-	}
-	return jsonIdeaRow{
-		ID:                  idea.ID,
-		ProjectID:           idea.ProjectID,
-		Title:               idea.Title,
-		Body:                body,
-		Status:              string(status),
-		Priority:            string(priority),
-		DueAt:               ideaJSONDueAt(idea.DueAt),
-		DueDate:             ideaJSONOptionalString(idea.DueDate),
-		RemindBeforeMinutes: idea.RemindBeforeMinutes,
-		Tags:                nonNilStrings(idea.Tags),
-		Source:              idea.Source,
-		CompletedAt:         jsonTime(pointerTime(idea.CompletedAt)),
-		CompletionNote:      idea.CompletionNote,
-		CreatedAt:           jsonTime(idea.CreatedAt),
-		UpdatedAt:           jsonTime(idea.UpdatedAt),
-		Path:                ideaRowPath(idea),
-		Provenance: jsonIdeaProvenance{
-			Origin:   string(provenance.Origin),
-			Reviewed: provenance.ReviewedState(),
-			Trust:    string(provenance.Trust),
-		},
-		Validity: jsonIdeaValidity{
-			ValidFrom:    jsonTime(idea.Validity.EffectiveFrom(idea.CreatedAt)),
-			ValidTo:      jsonTime(idea.Validity.ValidTo),
-			SupersededBy: idea.Validity.SupersededBy,
-			Supersedes:   idea.Validity.Supersedes,
-			Confidence:   idea.Validity.Confidence,
-		},
-		Relations: relations,
-		Review: jsonIdeaReview{
-			ReviewAfter: jsonTime(idea.ReviewSchedule.ReviewAfter),
-			ReviewedAt:  jsonTime(idea.ReviewSchedule.ReviewedAt),
-		},
-	}
-}
-
-// pointerTime dereferences an optional timestamp for jsonTime, which expects a
-// value rather than a pointer.
-func pointerTime(value *time.Time) time.Time {
-	if value == nil {
-		return time.Time{}
-	}
-	return *value
 }
 
 // toJSONIdeaProblems renders problem rows with data-dir-relative paths when the

@@ -142,6 +142,10 @@ type BootstrapOptions struct {
 	// IncludeSuperseded keeps records whose validity ended. An AsOf instant
 	// selects the point in time and takes precedence.
 	IncludeSuperseded bool
+	// IdeasBlock is an already rendered session Ideas block. The rune renderer
+	// places it after the latest handoff and before the decisions; the packed
+	// renderer ignores it and emits its own bounded pointer layer instead.
+	IdeasBlock string
 }
 
 // BootstrapResult summarizes generated context.

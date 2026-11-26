@@ -191,12 +191,13 @@ func (s *Server) recordTool() tool {
 		Annotations: readOnlyAnnotations("Read a record or record listing"),
 		Description: "Read one record in full (action=get, the default) by id, list records with filters (action=list), " +
 			"list typed relations (action=relations), read the supersede chain (action=history) or read only the links and backlinks (action=links). " +
+			"Ideas can be listed and shown here (kind=idea), but brain_idea is the only writer: this tool never mutates one. " +
 			"It never writes: evolution is brain_note(topic_key=...), lifecycle is brain_judge, removal is `brain record trash` (CLI, reversible).",
 		InputSchema: objectSchema(nil, map[string]any{
 			"action":     enumProp("get (default), list, relations, history or links.", []string{"get", "list", "relations", "history", "links"}),
 			"id":         stringProp("Record id, as returned by action=list or brain_search."),
 			"project":    project,
-			"kinds":      stringArrayProp("Keep only these kinds: note, decision, attempt, handoff. Omit for every kind."),
+			"kinds":      stringArrayProp("Keep only these kinds: note, decision, attempt, handoff, idea. Omit for every kind."),
 			"status":     enumProp("Keep decisions with this status (drops other kinds).", decisionStatuses),
 			"since_days": intProp("Keep records created or updated in the last N days; 0 keeps all.", 0),
 			"due_review": boolProp("Not available here: use brain_review(action=due)."),
@@ -210,11 +211,11 @@ func (s *Server) recordTool() tool {
 			"records":      arrayProp("Records, newest first (action=list).", recordSummarySchema()),
 			"versions":     arrayProp("Records of the supersede chain, oldest first (action=history).", recordSummarySchema()),
 			"relations":    arrayProp("Relations, pending first (action=relations).", objectProp("One relation with both ends and its status.")),
-			"kind":         stringProp("Record kind (action=get or links)."),
+			"kind":         stringProp("Record kind (action=get or links). An idea is readable here; changing it is brain_idea."),
 			"id":           stringProp("Record id."),
 			"title":        stringProp("Record title."),
-			"status":       stringProp("Decision status, when the record is a decision."),
-			"body":         stringProp("Note body."),
+			"status":       stringProp("Decision status or idea status."),
+			"body":         stringProp("Note or idea body."),
 			"context":      stringProp("Why a decision was needed."),
 			"alternatives": arrayProp("Options that were considered.", stringProp("Option.")),
 			"consequences": arrayProp("Expected consequences.", stringProp("Consequence.")),
