@@ -764,7 +764,7 @@ func runIdeaList(args []string, stdout, stderr io.Writer) int {
 	fs := newFlagSet("idea list", stderr)
 	open := fs.Bool("open", false, "open and doing ideas (the default)")
 	done := fs.Bool("done", false, "done ideas only")
-	allStatuses := fs.Bool("all", false, "every status")
+	allStatuses := fs.Bool("all", false, "every status; with no --project, also every project")
 	var statusFlags repeatedFlag
 	fs.Var(&statusFlags, "status", "comma-separated statuses: open, doing, someday, done, dropped (repeatable)")
 	project := fs.String("project", "", "project id, alias, checkout path, auto or all")
@@ -796,6 +796,13 @@ func runIdeaList(args []string, stdout, stderr io.Writer) int {
 	if err != nil {
 		fmt.Fprintf(stderr, "brain idea list: %v\n", err)
 		return 2
+	}
+	// --all is the status shortcut, but without an explicit project it also
+	// widens the scope to every project, exactly like `brief --scope all`. The
+	// default list still resolves cwd -> personal, so a typo is never silently
+	// turned into a global scan; an explicit --project (including auto) wins.
+	if *allStatuses && strings.TrimSpace(*project) == "" {
+		all = true
 	}
 	now := time.Now()
 	after, before, err := ideaListDueWindow(*due, now)
@@ -1295,7 +1302,7 @@ func runIdeaMute(args []string, stdout, stderr io.Writer) int {
 
 func runIdeaICAL(args []string, stdout, stderr io.Writer) int {
 	fs := newFlagSet("idea ical", stderr)
-	project := fs.String("project", "", "project id, alias, checkout path, auto or all")
+	project := fs.String("project", "", "project id, alias, checkout path, auto or all (default: every project)")
 	cfgPath := configFlag(fs)
 	positional, err := parseInterspersed(fs, args)
 	if err != nil {
@@ -1305,10 +1312,15 @@ func runIdeaICAL(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "brain idea ical: unexpected arguments: %s\n", strings.Join(positional, " "))
 		return 2
 	}
-	selector, all, err := ideaProjectSelector(*project, false)
+	selector, all, err := ideaProjectSelector(*project, true)
 	if err != nil {
 		fmt.Fprintf(stderr, "brain idea ical: %v\n", err)
 		return 2
+	}
+	// A file export is global by default, like the local API's /v1/ideas/ical.
+	// `--project auto` is the explicit opt-in to cwd -> personal resolution.
+	if strings.TrimSpace(*project) == "" {
+		all = true
 	}
 	cfg, application, closeApp, code := newIdeaApp(*cfgPath, stderr, "idea ical")
 	if code != 0 {

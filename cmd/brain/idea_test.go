@@ -536,6 +536,49 @@ func TestIdeaCLIListFilters(t *testing.T) {
 	}
 }
 
+func TestIdeaCLIListAllSkipsProjectResolution(t *testing.T) {
+	f := newIdeaFixture(t)
+	f.register("smoke")
+	f.register("second")
+	f.add("smoke", "Smoke idea")
+	f.add("second", "Second idea")
+	doneID := f.add("smoke", "Smoke done")
+	ideaCLIOK(t, "idea", "done", doneID, "--config", f.cfg)
+	t.Chdir(t.TempDir())
+
+	// The bare list still resolves cwd -> personal and refuses to guess.
+	if code, _, stderr := ideaCLI(t, "idea", "list", "--config", f.cfg); code != 1 || !strings.Contains(stderr, "pass --project") {
+		t.Fatalf("default list = exit %d, %q", code, stderr)
+	}
+
+	out := ideaCLIOK(t, "idea", "list", "--all", "--config", f.cfg)
+	for _, want := range []string{"OPEN (2)", "Smoke idea", "Second idea", "DONE (1)", "Smoke done"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("list --all missing %q in %q", want, out)
+		}
+	}
+	rows, data := f.listRows("--all")
+	if len(rows) != 3 {
+		t.Fatalf("list --all rows = %d, want 3: %#v", len(rows), rows)
+	}
+	if _, ok := data["project_source"]; ok {
+		t.Fatalf("list --all reported project_source: %#v", data)
+	}
+
+	rows, data = f.listRows("--project", "all")
+	if len(rows) != 2 || data["total"] != float64(2) {
+		t.Fatalf("list --project all = %d rows, total %v: %#v", len(rows), data["total"], rows)
+	}
+
+	// --all keeps its status meaning inside an explicit project.
+	if rows, _ := f.listRows("--all", "--project", "smoke"); len(rows) != 2 {
+		t.Fatalf("list --all --project smoke = %#v", rows)
+	}
+	if rows, _ := f.listRows("--project", "smoke"); len(rows) != 1 {
+		t.Fatalf("list --project smoke = %#v", rows)
+	}
+}
+
 func TestIdeaCLIBrief(t *testing.T) {
 	f := newIdeaFixture(t)
 	f.register("demo")
@@ -753,6 +796,33 @@ func TestIdeaCLIICAL(t *testing.T) {
 	}
 }
 
+func TestIdeaCLIICALDefaultScope(t *testing.T) {
+	f := newIdeaFixture(t)
+	f.register("smoke")
+	f.register("second")
+	f.add("smoke", "Smoke dated", "--due", "2030-06-01")
+	f.add("second", "Second dated", "--due", "2030-06-02")
+	t.Chdir(t.TempDir())
+
+	all := ideaCLIOK(t, "idea", "ical", "--config", f.cfg)
+	for _, want := range []string{"SUMMARY:Smoke dated", "SUMMARY:Second dated"} {
+		if !strings.Contains(all, want) {
+			t.Fatalf("default ical missing %q:\n%s", want, all)
+		}
+	}
+	scoped := ideaCLIOK(t, "idea", "ical", "--config", f.cfg, "--project", "smoke")
+	if !strings.Contains(scoped, "SUMMARY:Smoke dated") || strings.Contains(scoped, "Second dated") {
+		t.Fatalf("scoped ical = \n%s", scoped)
+	}
+	explicitAll := ideaCLIOK(t, "idea", "ical", "--config", f.cfg, "--project", "all")
+	if !strings.Contains(explicitAll, "SUMMARY:Smoke dated") || !strings.Contains(explicitAll, "SUMMARY:Second dated") {
+		t.Fatalf("--project all ical = \n%s", explicitAll)
+	}
+	if code, _, stderr := ideaCLI(t, "idea", "ical", "--config", f.cfg, "--project", "auto"); code != 1 || !strings.Contains(stderr, "pass --project") {
+		t.Fatalf("ical --project auto = exit %d, %q", code, stderr)
+	}
+}
+
 func TestIdeaCLIProblemRows(t *testing.T) {
 	f := newIdeaFixture(t)
 	f.register("demo")
@@ -827,7 +897,6 @@ func TestIdeaCLIUsageErrors(t *testing.T) {
 		{"idea", "add", "X", "--config", f.cfg, "--project", "demo", "--remind", "8d"},
 		{"idea", "add", "X", "--config", f.cfg, "--project", "demo", "--priority", "urgent"},
 		{"idea", "add", "X", "--config", f.cfg, "--project", "all"},
-		{"idea", "ical", "--config", f.cfg, "--project", "all"},
 		{"idea", "edit", id, "--config", f.cfg},
 		{"idea", "edit", id, "--config", f.cfg, "--status", "nope"},
 		{"idea", "edit", id, "--config", f.cfg, "--priority", "urgent"},
