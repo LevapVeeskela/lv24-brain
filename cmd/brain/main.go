@@ -171,6 +171,8 @@ func runCommand(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return runState(rest, stdout, stderr)
 	case "record":
 		return runRecord(rest, stdin, stdout, stderr)
+	case "idea":
+		return runIdea(rest, stdin, stdout, stderr)
 	case "prompt":
 		return runPrompt(rest, stdout, stderr)
 	case "relation":
@@ -270,6 +272,7 @@ Commands:
   catchup    what changed since the latest handoff
   digest     Morning summary across projects: changes, and what needs you (--write saves it); --source <conn> previews proposals
   record     List, show, change status, merge, trash and restore records
+  idea       Capture and manage ideas (add, list, done, brief, ical)
   prompt     Save or list local-only prompts (opt-in, never committed or indexed)
   relation   List, show and judge typed relations between records
   links      [[id]] links and backlinks of a record; --broken lists dangling links
