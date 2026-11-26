@@ -5,13 +5,12 @@ import (
 	"errors"
 	"io"
 	"net/http"
-	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/levapveeskela/lv24-brain/internal/app"
 	"github.com/levapveeskela/lv24-brain/internal/domain"
-	"github.com/levapveeskela/lv24-brain/internal/ports"
+	"github.com/levapveeskela/lv24-brain/internal/ideasview"
 )
 
 // Idea list bounds from the local API contract. The CLI caps a listing at 200;
@@ -35,97 +34,8 @@ type IdeaService interface {
 	IdeaBrief(context.Context, app.IdeaBriefOptions) (app.IdeaBriefResult, error)
 }
 
-// ideaProvenanceView is the row provenance block of §9.3.
-type ideaProvenanceView struct {
-	Origin   string `json:"origin"`
-	Reviewed bool   `json:"reviewed"`
-	Trust    string `json:"trust"`
-}
-
-// ideaValidityView is the row validity block of §9.3.
-type ideaValidityView struct {
-	ValidFrom    *string `json:"valid_from"`
-	ValidTo      *string `json:"valid_to"`
-	SupersededBy string  `json:"superseded_by"`
-	Supersedes   string  `json:"supersedes"`
-	Confidence   float64 `json:"confidence"`
-}
-
-// ideaReviewView is the row review block of §9.3.
-type ideaReviewView struct {
-	ReviewAfter *string `json:"review_after"`
-	ReviewedAt  *string `json:"reviewed_at"`
-}
-
-// ideaRowView is the snake_case idea row shared by the list, read, write and
-// brief responses. Body is present only where the contract includes it.
-type ideaRowView struct {
-	ID                  string             `json:"id"`
-	ProjectID           string             `json:"project_id"`
-	Title               string             `json:"title"`
-	Body                *string            `json:"body,omitempty"`
-	Status              string             `json:"status"`
-	Priority            string             `json:"priority"`
-	DueAt               *string            `json:"due_at"`
-	DueDate             *string            `json:"due_date"`
-	RemindBeforeMinutes *int               `json:"remind_before_minutes"`
-	Tags                []string           `json:"tags"`
-	Source              *domain.IdeaSource `json:"source"`
-	CompletedAt         *string            `json:"completed_at"`
-	CompletionNote      string             `json:"completion_note"`
-	CreatedAt           *string            `json:"created_at"`
-	UpdatedAt           *string            `json:"updated_at"`
-	Path                string             `json:"path"`
-	Provenance          ideaProvenanceView `json:"provenance"`
-	Validity            ideaValidityView   `json:"validity"`
-	Relations           []domain.Relation  `json:"relations"`
-	Review              ideaReviewView     `json:"review"`
-}
-
-// ideaProblemView is one unparsable or conflicted idea file. The file is
-// reported, never rewritten or dropped.
-type ideaProblemView struct {
-	Path   string `json:"path"`
-	Kind   string `json:"kind"`
-	Reason string `json:"reason"`
-}
-
-// ideaListView is GET /v1/ideas. ProjectSource is omitted for an all-project
-// listing, which has no single resolved project.
-type ideaListView struct {
-	Ideas         []ideaRowView     `json:"ideas"`
-	Problems      []ideaProblemView `json:"problems"`
-	Total         int               `json:"total"`
-	ProjectSource string            `json:"project_source,omitempty"`
-}
-
-// ideaWriteView is a create or an edit. ProjectSource is added to an edit only
-// when the request moved the idea.
-type ideaWriteView struct {
-	Idea          ideaRowView `json:"idea"`
-	ProjectSource string      `json:"project_source,omitempty"`
-}
-
-// ideaShowView is GET /v1/ideas/{id} and the restore response.
-type ideaShowView struct {
-	Idea ideaRowView `json:"idea"`
-}
-
-// ideaTrashView is DELETE /v1/ideas/{id}.
-type ideaTrashView struct {
-	ID      string `json:"id"`
-	Trashed bool   `json:"trashed"`
-}
-
-// ideaBriefView is GET /v1/ideas/brief: exactly the session block every other
-// surface renders.
-type ideaBriefView struct {
-	Text     string        `json:"text"`
-	Ideas    []ideaRowView `json:"ideas"`
-	Open     int           `json:"open"`
-	DueToday int           `json:"due_today"`
-	Muted    bool          `json:"muted"`
-}
+// The idea row, problem row and response envelopes are shared with the CLI
+// (internal/ideasview), so the two frozen surfaces cannot drift.
 
 // ideaCreateRequest is POST /v1/ideas. Every field except title is optional;
 // pointers distinguish an omitted value from an explicit empty one.
@@ -140,6 +50,7 @@ type ideaCreateRequest struct {
 	RemindBeforeMinutes *int               `json:"remind_before_minutes"`
 	Tags                *[]string          `json:"tags"`
 	Source              *domain.IdeaSource `json:"source"`
+	CompletionNote      string             `json:"completion_note"`
 }
 
 // ideaPatchRequest is PATCH /v1/ideas/{id}. Omitted means unchanged; the clear
@@ -158,6 +69,7 @@ type ideaPatchRequest struct {
 	ClearReminder       bool      `json:"clear_reminder"`
 	ClearTags           bool      `json:"clear_tags"`
 	ExpectedUpdatedAt   *string   `json:"expected_updated_at"`
+	CompletionNote      *string   `json:"completion_note"`
 }
 
 // ideas serves GET and POST /v1/ideas.
@@ -258,9 +170,9 @@ func (h *Handler) listIdeas(w http.ResponseWriter, r *http.Request) {
 		// An all-project listing has no single resolved project.
 		source = ""
 	}
-	writeJSON(w, http.StatusOK, ideaListView{
-		Ideas:         ideaRowViews(ideas, false),
-		Problems:      ideaProblemViews(h.opts.DataDir, result.Problems),
+	writeJSON(w, http.StatusOK, ideasview.List{
+		Ideas:         ideasview.Rows(ideas, false),
+		Problems:      ideasview.Problems(h.opts.DataDir, result.Problems),
 		Total:         total,
 		ProjectSource: source,
 	})
@@ -289,6 +201,7 @@ func (h *Handler) createIdea(w http.ResponseWriter, r *http.Request) {
 		Priority:            domain.IdeaPriority(strings.TrimSpace(body.Priority)),
 		RemindBeforeMinutes: body.RemindBeforeMinutes,
 		Source:              body.Source,
+		CompletionNote:      body.CompletionNote,
 	}
 	if body.Tags != nil {
 		input.Tags = append([]string(nil), (*body.Tags)...)
@@ -321,8 +234,8 @@ func (h *Handler) createIdea(w http.ResponseWriter, r *http.Request) {
 		h.writeIdeaError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusCreated, ideaWriteView{
-		Idea:          ideaRowViewOf(result.Idea, true),
+	writeJSON(w, http.StatusCreated, ideasview.Write{
+		Idea:          ideasview.RowOf(result.Idea, true),
 		ProjectSource: result.ProjectSource,
 	})
 }
@@ -339,7 +252,7 @@ func (h *Handler) getIdea(w http.ResponseWriter, r *http.Request, id string) {
 		h.writeIdeaError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, ideaShowView{Idea: ideaRowViewOf(idea, true)})
+	writeJSON(w, http.StatusOK, ideasview.Show{Idea: ideasview.RowOf(idea, true)})
 }
 
 // patchIdea applies the mutable fields and the clear flags. expected_updated_at
@@ -368,6 +281,7 @@ func (h *Handler) patchIdea(w http.ResponseWriter, r *http.Request, id string) {
 		ClearDue:            body.ClearDue,
 		ClearReminder:       body.ClearReminder,
 		ClearTags:           body.ClearTags,
+		CompletionNote:      body.CompletionNote,
 	}
 	if body.Project != nil {
 		input.ProjectID = *body.Project
@@ -422,8 +336,8 @@ func (h *Handler) patchIdea(w http.ResponseWriter, r *http.Request, id string) {
 	}
 	// App sets ProjectSource only when the request moved the idea; omitempty
 	// keeps an in-place edit's response to just the idea.
-	writeJSON(w, http.StatusOK, ideaWriteView{
-		Idea:          ideaRowViewOf(result.Idea, true),
+	writeJSON(w, http.StatusOK, ideasview.Write{
+		Idea:          ideasview.RowOf(result.Idea, true),
 		ProjectSource: result.ProjectSource,
 	})
 }
@@ -440,7 +354,7 @@ func (h *Handler) trashIdea(w http.ResponseWriter, r *http.Request, id string) {
 		h.writeIdeaError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, ideaTrashView{ID: idea.ID, Trashed: true})
+	writeJSON(w, http.StatusOK, ideasview.Trash{ID: idea.ID, Trashed: true})
 }
 
 // restoreIdea brings one trashed idea back. A live file with the same id is a
@@ -455,7 +369,7 @@ func (h *Handler) restoreIdea(w http.ResponseWriter, r *http.Request, id string)
 		h.writeIdeaError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, ideaShowView{Idea: ideaRowViewOf(idea, true)})
+	writeJSON(w, http.StatusOK, ideasview.Show{Idea: ideasview.RowOf(idea, true)})
 }
 
 // ideasBrief serves GET /v1/ideas/brief: the same capped session block the CLI,
@@ -490,9 +404,9 @@ func (h *Handler) ideasBrief(w http.ResponseWriter, r *http.Request) {
 		h.writeIdeaError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, ideaBriefView{
+	writeJSON(w, http.StatusOK, ideasview.Brief{
 		Text:     result.Text,
-		Ideas:    ideaRowViews(result.Ideas, false),
+		Ideas:    ideasview.Rows(result.Ideas, false),
 		Open:     result.Open,
 		DueToday: result.DueToday,
 		Muted:    result.Muted,
@@ -500,8 +414,9 @@ func (h *Handler) ideasBrief(w http.ResponseWriter, r *http.Request) {
 }
 
 // ideasCalendar serves GET /v1/ideas/ical with the shared renderer, so the
-// DATE/DATE-TIME and VALARM rules cannot drift from the CLI export. Dropped
-// ideas are terminal and stay out of the export; done ideas are opt-in.
+// DATE/DATE-TIME and VALARM rules cannot drift from the CLI export. An
+// explicit status filter wins over the default set; include_done only widens
+// that default. Dropped ideas are terminal and stay out of the export.
 func (h *Handler) ideasCalendar(w http.ResponseWriter, r *http.Request) {
 	if h.opts.Ideas == nil {
 		unavailable(w)
@@ -514,15 +429,38 @@ func (h *Handler) ideasCalendar(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	statuses := []domain.IdeaStatus{domain.IdeaOpen, domain.IdeaDoing, domain.IdeaSomeday}
-	if includeDone {
-		statuses = append(statuses, domain.IdeaDone)
+	statuses, ok := ideaStatusFilter(w, r)
+	if !ok {
+		return
+	}
+	if len(statuses) == 0 {
+		statuses = []domain.IdeaStatus{domain.IdeaOpen, domain.IdeaDoing, domain.IdeaSomeday}
+		if includeDone {
+			statuses = append(statuses, domain.IdeaDone)
+		}
+	} else {
+		filtered := make([]domain.IdeaStatus, 0, len(statuses))
+		for _, status := range statuses {
+			if status != domain.IdeaDropped {
+				filtered = append(filtered, status)
+			}
+		}
+		statuses = filtered
+		if len(statuses) == 0 {
+			// A status filter that names only dropped has nothing to export.
+			w.Header().Set("Content-Type", "text/calendar; charset=utf-8")
+			w.WriteHeader(http.StatusOK)
+			_, _ = io.WriteString(w, app.RenderIdeaCalendar(nil, h.opts.Now()))
+			return
+		}
 	}
 	project := queryText(r, "project")
 	result, err := h.opts.Ideas.ListIdeas(r.Context(), app.IdeaListOptions{
 		ProjectID: project,
 		All:       project == "",
 		Statuses:  statuses,
+		Tags:      ideaQueryValues(r, "tags", "tag"),
+		Query:     queryText(r, "q"),
 		Limit:     0,
 	})
 	if err != nil {
@@ -591,6 +529,7 @@ func ideaPatchEmpty(body ideaPatchRequest) bool {
 	return body.Title == nil && body.Body == nil && body.Project == nil &&
 		body.Status == nil && body.Priority == nil && body.DueAt == nil &&
 		body.DueDate == nil && body.RemindBeforeMinutes == nil && body.Tags == nil &&
+		body.CompletionNote == nil &&
 		!body.ClearDue && !body.ClearReminder && !body.ClearTags
 }
 
@@ -605,7 +544,7 @@ func (h *Handler) writeIdeaError(w http.ResponseWriter, err error) {
 	var duplicate *domain.DuplicateError
 	switch {
 	case errors.As(err, &problem):
-		message := ideaRelativePath(h.opts.DataDir, problem.Path) + ": " + problem.Reason
+		message := ideasview.RelativePath(h.opts.DataDir, problem.Path) + ": " + problem.Reason
 		writeError(w, http.StatusConflict, "conflict", h.redact(message))
 	case errors.As(err, &revision):
 		writeErrorRevision(w, h.redact(revision.Error()), revision.CurrentRevision())
@@ -630,145 +569,4 @@ func (h *Handler) writeIdeaError(w http.ResponseWriter, err error) {
 	default:
 		internal(w)
 	}
-}
-
-// ideaRowViews maps a list; body never enters a list or brief row.
-func ideaRowViews(ideas []domain.Idea, withBody bool) []ideaRowView {
-	rows := make([]ideaRowView, 0, len(ideas))
-	for _, idea := range ideas {
-		rows = append(rows, ideaRowViewOf(idea, withBody))
-	}
-	return rows
-}
-
-// ideaRowViewOf maps one idea to the snake_case wire row of §9.3.
-func ideaRowViewOf(idea domain.Idea, withBody bool) ideaRowView {
-	status := idea.Status
-	if status == "" {
-		status = domain.IdeaOpen
-	}
-	priority := idea.Priority
-	if priority == "" {
-		priority = domain.IdeaPriorityNormal
-	}
-	provenance := idea.Provenance.Normalized()
-	relations := make([]domain.Relation, 0, len(idea.Relations))
-	relations = append(relations, idea.Relations...)
-	var body *string
-	if withBody {
-		body = &idea.Body
-	}
-	return ideaRowView{
-		ID:                  idea.ID,
-		ProjectID:           idea.ProjectID,
-		Title:               idea.Title,
-		Body:                body,
-		Status:              string(status),
-		Priority:            string(priority),
-		DueAt:               ideaAPIDueAt(idea.DueAt),
-		DueDate:             ideaAPIString(idea.DueDate),
-		RemindBeforeMinutes: idea.RemindBeforeMinutes,
-		Tags:                ideaAPIStrings(idea.Tags),
-		Source:              idea.Source,
-		CompletedAt:         ideaAPITimeValue(idea.CompletedAt),
-		CompletionNote:      idea.CompletionNote,
-		CreatedAt:           ideaAPITime(idea.CreatedAt),
-		UpdatedAt:           ideaAPITime(idea.UpdatedAt),
-		Path:                ideaAPIPath(idea),
-		Provenance: ideaProvenanceView{
-			Origin:   string(provenance.Origin),
-			Reviewed: provenance.ReviewedState(),
-			Trust:    string(provenance.Trust),
-		},
-		Validity: ideaValidityView{
-			ValidFrom:    ideaAPITime(idea.Validity.EffectiveFrom(idea.CreatedAt)),
-			ValidTo:      ideaAPITime(idea.Validity.ValidTo),
-			SupersededBy: idea.Validity.SupersededBy,
-			Supersedes:   idea.Validity.Supersedes,
-			Confidence:   idea.Validity.Confidence,
-		},
-		Relations: relations,
-		Review: ideaReviewView{
-			ReviewAfter: ideaAPITime(idea.ReviewSchedule.ReviewAfter),
-			ReviewedAt:  ideaAPITime(idea.ReviewSchedule.ReviewedAt),
-		},
-	}
-}
-
-// ideaAPIPath is the stable logical storage path, independent of the data
-// directory and of the machine's separator.
-func ideaAPIPath(idea domain.Idea) string {
-	return "projects/" + idea.ProjectID + "/ideas/" + idea.ID + ".md"
-}
-
-// ideaRelativePath renders a path inside the data directory with forward
-// slashes; a path outside it stays absolute. It mirrors the CLI's problem-row
-// rendering so both surfaces name the same file.
-func ideaRelativePath(dataDir, path string) string {
-	if strings.TrimSpace(dataDir) == "" {
-		return path
-	}
-	rel, err := filepath.Rel(dataDir, path)
-	if err != nil || strings.HasPrefix(rel, "..") {
-		return path
-	}
-	return filepath.ToSlash(rel)
-}
-
-// ideaProblemViews renders the problem rows of a listing.
-func ideaProblemViews(dataDir string, problems []ports.RecordProblem) []ideaProblemView {
-	views := make([]ideaProblemView, 0, len(problems))
-	for _, problem := range problems {
-		views = append(views, ideaProblemView{
-			Path:   ideaRelativePath(dataDir, problem.Path),
-			Kind:   problem.Kind,
-			Reason: problem.Reason,
-		})
-	}
-	return views
-}
-
-// ideaAPITime renders a timestamp as RFC3339 (UTC) or null. Nanoseconds are
-// preserved when present so an edit's updated_at is an exact revision and
-// expected_updated_at round-trips.
-func ideaAPITime(value time.Time) *string {
-	if value.IsZero() {
-		return nil
-	}
-	formatted := value.UTC().Format(time.RFC3339Nano)
-	return &formatted
-}
-
-// ideaAPITimeValue is ideaAPITime for an optional timestamp.
-func ideaAPITimeValue(value *time.Time) *string {
-	if value == nil {
-		return nil
-	}
-	return ideaAPITime(*value)
-}
-
-// ideaAPIDueAt keeps the stored offset of a timed due instead of normalizing
-// it to UTC, the same way the CLI JSON does.
-func ideaAPIDueAt(value *time.Time) *string {
-	if value == nil || value.IsZero() {
-		return nil
-	}
-	formatted := value.Format(time.RFC3339Nano)
-	return &formatted
-}
-
-// ideaAPIString renders an optional string field as null when unset.
-func ideaAPIString(value string) *string {
-	if strings.TrimSpace(value) == "" {
-		return nil
-	}
-	return &value
-}
-
-// ideaAPIStrings keeps an empty tag list as [] rather than null.
-func ideaAPIStrings(values []string) []string {
-	if values == nil {
-		return []string{}
-	}
-	return values
 }

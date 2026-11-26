@@ -1790,7 +1790,7 @@
           {
             "name": "project",
             "in": "query",
-            "description": "A registered project id, alias or path; omit it to list every project.",
+            "description": "A registered project id, alias or path; auto resolves the working directory or default; omit it to list every project.",
             "schema": {
               "type": "string"
             }
@@ -1920,7 +1920,7 @@
           {
             "name": "project",
             "in": "query",
-            "description": "A registered project id, alias or path; it orders the block for the current project.",
+            "description": "A registered project id, alias or path; auto resolves the working directory or default; it orders the block for the current project.",
             "schema": {
               "type": "string"
             }
@@ -1970,12 +1970,12 @@
     },
     "/v1/ideas/ical": {
       "get": {
-        "description": "Exports dated ideas as one iCalendar file through the shared renderer: DTSTART;VALUE=DATE for all-day ideas, a UTC DTSTART for timed ideas, and VALARM from the lead time. This is a file export, not a live subscription. Done ideas are omitted unless include_done=1; dropped ideas are terminal and never exported.",
+        "description": "Exports dated ideas as one iCalendar file through the shared renderer: DTSTART;VALUE=DATE for all-day ideas, a UTC DTSTART for timed ideas, and VALARM from the lead time. This is a file export, not a live subscription. Done ideas are omitted unless include_done=1; explicit status values override the default and include_done; dropped ideas are terminal and never exported.",
         "parameters": [
           {
             "name": "project",
             "in": "query",
-            "description": "A registered project id, alias or path; omit it to export every project.",
+            "description": "A registered project id, alias or path; auto resolves the working directory or default; omit it to export every project.",
             "schema": {
               "type": "string"
             }
@@ -1986,6 +1986,38 @@
             "schema": {
               "type": "boolean",
               "default": false
+            }
+          },
+          {
+            "name": "status",
+            "in": "query",
+            "description": "open, doing, done, dropped or someday; repeat or comma-separate. Explicit statuses override the default and include_done; dropped is never exported.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "tags",
+            "in": "query",
+            "description": "Exact case-insensitive AND filter; repeat or comma-separate. tag is an alias.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "tag",
+            "in": "query",
+            "description": "Alias of tags.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "q",
+            "in": "query",
+            "description": "Case-insensitive substring over title, body and tags.",
+            "schema": {
+              "type": "string"
             }
           }
         ],
@@ -4407,6 +4439,7 @@
           },
           "body": {
             "type": "string",
+            "x-max-bytes": 1048576,
             "description": "Present on read and write rows only; a list or brief row omits it."
           },
           "status": {
@@ -4541,7 +4574,7 @@
           "relations": {
             "type": "array",
             "items": {
-              "type": "object"
+              "$ref": "#/components/schemas/Relation"
             }
           },
           "review": {
@@ -4610,9 +4643,11 @@
           "project_source": {
             "type": "string",
             "enum": [
-              "explicit"
+              "explicit",
+              "cwd",
+              "default"
             ],
-            "description": "Present only when the request named one project."
+            "description": "Present when the request named one project; auto resolves to cwd or default."
           }
         }
       },
@@ -4706,10 +4741,13 @@
           },
           "body": {
             "type": "string",
-            "maxLength": 1048576
+            "maxLength": 1048576,
+            "x-max-bytes": 1048576,
+            "description": "Markdown body; the enforced write limit is 1 MiB of bytes."
           },
           "project": {
-            "type": "string"
+            "type": "string",
+            "description": "A registered project id, alias or checkout path; auto resolves the working directory or default."
           },
           "status": {
             "type": "string",
@@ -4731,15 +4769,18 @@
           },
           "due_at": {
             "type": "string",
-            "format": "date-time"
+            "format": "date-time",
+            "nullable": true
           },
           "due_date": {
-            "type": "string"
+            "type": "string",
+            "nullable": true
           },
           "remind_before_minutes": {
             "type": "integer",
             "minimum": 0,
-            "maximum": 10080
+            "maximum": 10080,
+            "nullable": true
           },
           "tags": {
             "type": "array",
@@ -4772,6 +4813,11 @@
             "required": [
               "type"
             ]
+          },
+          "completion_note": {
+            "type": "string",
+            "nullable": true,
+            "description": "Optional completion or drop note; reopening via status open clears it."
           }
         }
       },
@@ -4785,10 +4831,13 @@
           },
           "body": {
             "type": "string",
-            "maxLength": 1048576
+            "maxLength": 1048576,
+            "x-max-bytes": 1048576,
+            "description": "Markdown body; the enforced write limit is 1 MiB of bytes."
           },
           "project": {
-            "type": "string"
+            "type": "string",
+            "description": "A registered project id, alias or checkout path; auto resolves the working directory or default."
           },
           "status": {
             "type": "string",
@@ -4810,15 +4859,18 @@
           },
           "due_at": {
             "type": "string",
-            "format": "date-time"
+            "format": "date-time",
+            "nullable": true
           },
           "due_date": {
-            "type": "string"
+            "type": "string",
+            "nullable": true
           },
           "remind_before_minutes": {
             "type": "integer",
             "minimum": 0,
-            "maximum": 10080
+            "maximum": 10080,
+            "nullable": true
           },
           "tags": {
             "type": "array",
@@ -4842,6 +4894,11 @@
           "expected_updated_at": {
             "type": "string",
             "format": "date-time"
+          },
+          "completion_note": {
+            "type": "string",
+            "nullable": true,
+            "description": "Optional completion or drop note; reopening via status open clears it."
           }
         }
       }

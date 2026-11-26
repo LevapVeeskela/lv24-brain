@@ -283,7 +283,7 @@ func TestIdeasCreateMapsTheRequestAndReturnsTheBody(t *testing.T) {
 	response := request(fixture, http.MethodPost, "/v1/ideas", `{
 		"title":"Dark theme","body":"Ship the dark calendar","project":"brain",
 		"priority":"high","due_at":"2026-12-01T18:00:00+03:00","remind_before_minutes":30,
-		"tags":["ui"],"source":{"type":"desktop"}
+		"tags":["ui"],"source":{"type":"desktop"},"completion_note":"done via API"
 	}`, nil)
 	if response.Code != http.StatusCreated {
 		t.Fatalf("create = %d %s", response.Code, response.Body.String())
@@ -309,6 +309,9 @@ func TestIdeasCreateMapsTheRequestAndReturnsTheBody(t *testing.T) {
 	}
 	if got.RemindBeforeMinutes == nil || *got.RemindBeforeMinutes != 30 {
 		t.Fatalf("reminder = %v", got.RemindBeforeMinutes)
+	}
+	if got.CompletionNote != "done via API" {
+		t.Fatalf("completion note = %q", got.CompletionNote)
 	}
 }
 
@@ -388,7 +391,7 @@ func TestIdeasPatchClearFlagsAndCompareAndSwap(t *testing.T) {
 	fixture.ideas.updated = app.IdeaUpdateResult{Idea: patch}
 
 	response := request(fixture, http.MethodPatch, "/v1/ideas/idea-1",
-		`{"title":"New title","clear_due":true,"expected_updated_at":"2026-11-26T10:00:00Z"}`, nil)
+		`{"title":"New title","clear_due":true,"expected_updated_at":"2026-11-26T10:00:00Z","completion_note":"shipped"}`, nil)
 	if response.Code != http.StatusOK {
 		t.Fatalf("patch = %d %s", response.Code, response.Body.String())
 	}
@@ -402,6 +405,9 @@ func TestIdeasPatchClearFlagsAndCompareAndSwap(t *testing.T) {
 	}
 	if got.ExpectedUpdatedAt.Format(time.RFC3339) != "2026-11-26T10:00:00Z" {
 		t.Fatalf("expected_updated_at = %v", got.ExpectedUpdatedAt)
+	}
+	if got.CompletionNote == nil || *got.CompletionNote != "shipped" {
+		t.Fatalf("completion note = %v", got.CompletionNote)
 	}
 
 	fixture.ideas.updated = app.IdeaUpdateResult{Idea: patch, Moved: true, ProjectSource: app.IdeaProjectExplicit}
@@ -602,6 +608,43 @@ func TestIdeasCalendarRendersDateAndDateTimeWithAlarms(t *testing.T) {
 	}
 }
 
+func TestIdeasCalendarAppliesListFilters(t *testing.T) {
+	fixture := newFixture(t)
+	done := testIdea("idea-done", "Finished")
+	done.Status = domain.IdeaDone
+	fixture.ideas.ideas = []domain.Idea{testIdea("idea-1", "One"), done}
+
+	response := request(fixture, http.MethodGet,
+		"/v1/ideas/ical?project=brain&q=theme&tag=UI&status=doing", "", nil)
+	if response.Code != http.StatusOK {
+		t.Fatalf("filtered ical = %d %s", response.Code, response.Body.String())
+	}
+	got := fixture.ideas.lastList
+	if got.Query != "theme" || len(got.Tags) != 1 || got.Tags[0] != "UI" ||
+		len(got.Statuses) != 1 || got.Statuses[0] != domain.IdeaDoing {
+		t.Fatalf("ical filter options = %+v", got)
+	}
+
+	response = request(fixture, http.MethodGet, "/v1/ideas/ical?status=done", "", nil)
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), "UID:idea-done") {
+		t.Fatalf("explicit done export = %d %s", response.Code, response.Body.String())
+	}
+	foundDone := false
+	for _, status := range fixture.ideas.lastList.Statuses {
+		if status == domain.IdeaDone {
+			foundDone = true
+		}
+	}
+	if !foundDone {
+		t.Fatalf("explicit status=done options = %v", fixture.ideas.lastList.Statuses)
+	}
+
+	response = request(fixture, http.MethodGet, "/v1/ideas/ical?status=dropped", "", nil)
+	if response.Code != http.StatusOK || strings.Contains(response.Body.String(), "BEGIN:VEVENT") {
+		t.Fatalf("dropped-only export = %d %s", response.Code, response.Body.String())
+	}
+}
+
 func TestIdeasRequireBearerAndReportUnavailable(t *testing.T) {
 	fixture := newFixture(t)
 	requestWithoutAuth := httptest.NewRequest(http.MethodGet, "/v1/ideas", nil)
@@ -663,6 +706,76 @@ func TestIdeasWriteLimitAndServerModeKeepTheirEnvelopes(t *testing.T) {
 	}
 }
 
+func TestIdeasUpdatedAtRoundTripsThroughExpectedUpdatedAt(t *testing.T) {
+	fixture := newFixture(t)
+	idea := testIdea("idea-1", "One")
+	idea.UpdatedAt = time.Date(2026, 11, 26, 10, 0, 0, 0, time.UTC)
+	fixture.ideas.got = idea
+
+	response := request(fixture, http.MethodGet, "/v1/ideas/idea-1", "", nil)
+	if response.Code != http.StatusOK {
+		t.Fatalf("get = %d %s", response.Code, response.Body.String())
+	}
+	payload := decodeIdeaJSON(t, response.Body.Bytes())
+	row, _ := payload["idea"].(map[string]any)
+	revision, _ := row["updated_at"].(string)
+	if revision != "2026-11-26T10:00:00Z" {
+		t.Fatalf("updated_at = %q, want RFC3339", revision)
+	}
+
+	fixture.ideas.updated = app.IdeaUpdateResult{Idea: idea}
+	response = request(fixture, http.MethodPatch, "/v1/ideas/idea-1",
+		`{"title":"Two","expected_updated_at":"`+revision+`"}`, nil)
+	if response.Code != http.StatusOK {
+		t.Fatalf("patch = %d %s", response.Code, response.Body.String())
+	}
+	if got := fixture.ideas.lastUpdate.ExpectedUpdatedAt; got.IsZero() || !got.Equal(idea.UpdatedAt) {
+		t.Fatalf("expected_updated_at = %v, want %v", got, idea.UpdatedAt)
+	}
+}
+
+func TestIdeasProtectedProjectIsForbidden(t *testing.T) {
+	fixture := newFixture(t)
+	fixture.ideas.addErr = domain.NewProtectedProjectError("brain")
+	response := request(fixture, http.MethodPost, "/v1/ideas", `{"title":"x","project":"brain"}`, nil)
+	if response.Code != http.StatusForbidden {
+		t.Fatalf("protected create = %d %s", response.Code, response.Body.String())
+	}
+	payload := decodeIdeaJSON(t, response.Body.Bytes())
+	envelope, _ := payload["error"].(map[string]any)
+	if envelope["code"] != "forbidden" {
+		t.Fatalf("protected create code = %v", envelope)
+	}
+
+	fixture.ideas.addErr = nil
+	fixture.ideas.updateErr = domain.NewProtectedProjectError("brain")
+	response = request(fixture, http.MethodPatch, "/v1/ideas/idea-1", `{"title":"x"}`, nil)
+	if response.Code != http.StatusForbidden {
+		t.Fatalf("protected edit = %d %s", response.Code, response.Body.String())
+	}
+}
+
+func TestIdeasRoutesIgnoreTheMemoryAllowlist(t *testing.T) {
+	fixture := newFixture(t)
+	fixture.handler.opts.ProjectAllowlist = []string{"brain"}
+
+	response := request(fixture, http.MethodGet, "/v1/ideas", "", nil)
+	if response.Code != http.StatusOK {
+		t.Fatalf("global list = %d %s", response.Code, response.Body.String())
+	}
+	if !fixture.ideas.lastList.All || fixture.ideas.lastList.ProjectID != "" {
+		t.Fatalf("global list options = %+v", fixture.ideas.lastList)
+	}
+
+	response = request(fixture, http.MethodGet, "/v1/ideas?project=personal", "", nil)
+	if response.Code != http.StatusOK {
+		t.Fatalf("explicit list = %d %s", response.Code, response.Body.String())
+	}
+	if fixture.ideas.lastList.ProjectID != "personal" || fixture.ideas.lastList.All {
+		t.Fatalf("explicit list options = %+v", fixture.ideas.lastList)
+	}
+}
+
 func TestOpenAPIDocumentsTheIdeaSchemas(t *testing.T) {
 	data, err := os.ReadFile("openapi.json")
 	if err != nil {
@@ -689,6 +802,61 @@ func TestOpenAPIDocumentsTheIdeaSchemas(t *testing.T) {
 	for _, field := range []string{"id", "project_id", "title", "body", "status", "priority", "due_at", "due_date", "remind_before_minutes", "tags", "source", "completed_at", "created_at", "updated_at", "path", "provenance", "validity", "relations", "review"} {
 		if _, ok := properties[field]; !ok {
 			t.Fatalf("Idea schema is missing %s", field)
+		}
+	}
+
+	schemaObject := func(name string) map[string]any {
+		var object map[string]any
+		if err := json.Unmarshal(parsed.Components.Schemas[name], &object); err != nil {
+			t.Fatalf("decode schema %s: %v", name, err)
+		}
+		return object
+	}
+	for field, want := range map[string]string{
+		"relations": "#/components/schemas/Relation",
+	} {
+		block, _ := properties[field].(map[string]any)
+		items, _ := block["items"].(map[string]any)
+		if items["$ref"] != want {
+			t.Fatalf("Idea.%s items = %v, want $ref %s", field, items, want)
+		}
+	}
+	for _, field := range []string{"body"} {
+		block, _ := properties[field].(map[string]any)
+		if block["x-max-bytes"] != float64(1048576) {
+			t.Fatalf("Idea.%s x-max-bytes = %v", field, block["x-max-bytes"])
+		}
+	}
+
+	for _, name := range []string{"IdeaCreate", "IdeaPatch"} {
+		object := schemaObject(name)
+		props, _ := object["properties"].(map[string]any)
+		for _, field := range []string{"due_at", "due_date", "remind_before_minutes"} {
+			block, _ := props[field].(map[string]any)
+			if block["nullable"] != true {
+				t.Fatalf("%s.%s must be nullable: %v", name, field, block)
+			}
+		}
+		body, _ := props["body"].(map[string]any)
+		if body["x-max-bytes"] != float64(1048576) {
+			t.Fatalf("%s.body x-max-bytes = %v", name, body["x-max-bytes"])
+		}
+		if _, ok := props["completion_note"]; !ok {
+			t.Fatalf("%s is missing completion_note", name)
+		}
+	}
+
+	page := schemaObject("IdeaPage")
+	pageProps, _ := page["properties"].(map[string]any)
+	source, _ := pageProps["project_source"].(map[string]any)
+	enum, _ := source["enum"].([]any)
+	seen := map[string]bool{}
+	for _, value := range enum {
+		seen[value.(string)] = true
+	}
+	for _, want := range []string{"explicit", "cwd", "default"} {
+		if !seen[want] {
+			t.Fatalf("IdeaPage.project_source enum = %v, missing %s", enum, want)
 		}
 	}
 }

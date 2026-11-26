@@ -37,6 +37,7 @@ type IdeaInput struct {
 	RemindBeforeMinutes *int
 	Tags                []string
 	Source              *domain.IdeaSource
+	CompletionNote      string
 	Provenance          domain.Provenance
 	// ID pins the record id. It must already be a valid idea id; retries
 	// allocate a fresh ULID instead of adding a numeric suffix.
@@ -110,7 +111,7 @@ type IdeaUpdateResult struct {
 }
 
 func (in *IdeaInput) redact() {
-	redactAll(&in.Title, &in.Body)
+	redactAll(&in.Title, &in.Body, &in.CompletionNote)
 	in.Tags = redactCopy(in.Tags)
 	if in.Source != nil {
 		source := *in.Source
@@ -334,6 +335,7 @@ func (a *App) AddIdea(ctx context.Context, input IdeaInput) (IdeaResult, error) 
 		RemindBeforeMinutes: input.RemindBeforeMinutes,
 		Tags:                input.Tags,
 		Source:              input.Source,
+		CompletionNote:      input.CompletionNote,
 		Provenance:          input.Provenance.Normalized(),
 		CreatedAt:           now,
 		UpdatedAt:           now,
@@ -620,8 +622,13 @@ func (a *App) UpdateIdea(ctx context.Context, input IdeaUpdateInput) (IdeaUpdate
 	}
 	// The store stamps updated_at itself, so re-read the persisted row: the
 	// response revision is then exactly what a later read returns, even when
-	// the wall clock rolls to a new second between the two writes. A failed
-	// re-read keeps the in-memory row; the write already succeeded.
+	// the wall clock rolls to a new second between the two writes.
+	//
+	// Decision: a failed re-read after a successful store write is non-fatal.
+	// The write already landed; returning an error would turn a durable
+	// success into an API 500 and invite a retry that rewrites the same
+	// revision. Keep the in-memory row; the next read or CAS resolves the
+	// persisted revision.
 	if stored, err := store.GetIdea(ctx, idea.ID); err == nil {
 		idea = stored
 	}

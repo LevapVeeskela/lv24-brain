@@ -414,25 +414,31 @@ reports `project_source: "explicit"`. `total` counts matches before `limit`.
 ideas stay usable.
 
 `POST /v1/ideas` creates one idea. `title` is required; `body`, `project`,
-`status`, `priority`, `due_at`, `due_date`, `remind_before_minutes`, `tags` and
-`source` are optional. `due_at` and `due_date` are mutually exclusive; send one
-or neither. The response is `201` with `{idea, project_source}` and the body is
-included. An unknown `project` is `400 validation` (never created), a protected
-project is `403`, and a field over the configured write limit is `413`.
+`status`, `priority`, `due_at`, `due_date`, `remind_before_minutes`, `tags`,
+`source` and `completion_note` are optional. `due_at` and `due_date` are
+mutually exclusive; send one or neither. The response is `201` with
+`{idea, project_source}` and the body is included. An unknown `project` is
+`400 validation` (never created), a protected project is `403`, and a field
+over the configured write limit is `413`. `completion_note` is validated like
+a record text field: valid UTF-8, no NUL. It is normally set with `done` or
+`dropped`; a create with `status: done` is also an explicit writer action and
+stamps `completed_at`.
 
 `GET /v1/ideas/{id}` returns `{idea}` with `body`. An unknown id is `404`; a
 problem file is `409` with its path and reason in the message and is never
 returned as a zero idea.
 
 `PATCH /v1/ideas/{id}` accepts the mutable fields plus `clear_due`,
-`clear_reminder`, `clear_tags`, `project` and `expected_updated_at`. An omitted
-field is unchanged; setting `due_at` or `due_date` clears the other;
-`clear_due` removes both. `status` follows the record transitions, moving to
-`done` stamps `completed_at`, and reopening clears `completed_at` and the
-completion note. `expected_updated_at` is the `updated_at` the client read; a
-stale value is `409` with `error.current_revision` and writes nothing. The
-response is `{idea}` with the body; `project_source` is added only when the
-request moved the idea.
+`clear_reminder`, `clear_tags`, `project`, `completion_note` and
+`expected_updated_at`. An omitted field is unchanged; setting `due_at` or
+`due_date` clears the other; `clear_due` removes both. `status` follows the
+record transitions, moving to `done` stamps `completed_at`, and reopening via
+`status: open` clears `completed_at` and the completion note. `completion_note`
+is validated like a record text field (valid UTF-8, no NUL). An empty
+`completion_note` clears it. `expected_updated_at` is the `updated_at` the
+client read; a stale value is `409` with `error.current_revision` and writes
+nothing. The response is `{idea}` with the body; `project_source` is added only
+when the request moved the idea.
 
 `DELETE /v1/ideas/{id}` moves the file to the project trash (soft delete) and
 returns `{"id":"...","trashed":true}`. `POST /v1/ideas/{id}/restore` reverses
@@ -445,12 +451,16 @@ session block the CLI, MCP, API and session hook share:
 `{text, ideas, open, due_today, muted}`. `max` is 1–10 (default 3) and the
 700-character budget is fixed. Body text never enters `text`.
 
-`GET /v1/ideas/ical?project=&include_done=1` returns
+`GET /v1/ideas/ical?project=&include_done=1&status=&tags=&q=` returns
 `Content-Type: text/calendar; charset=utf-8` with one `VEVENT` per dated idea:
 `DTSTART;VALUE=DATE:YYYYMMDD` for all-day ideas, a UTC `DTSTART` for timed
 ideas, `SUMMARY` from the title, `UID` from the id and a `VALARM` from the lead
-time. This is a file export, not a live subscription. Done ideas are omitted
-unless `include_done=1`; dropped ideas are terminal and are never exported.
+time. This is a file export, not a live subscription. Without `status`, the
+export covers open, doing and someday ideas, plus done ideas when
+`include_done=1`. An explicit repeated/comma-separated `status` overrides that
+default (and `include_done`); `tags`/`tag` and `q` use the same list filters as
+`GET /v1/ideas`. Dropped ideas are terminal and are never exported, even when
+named explicitly.
 
 Ideas are local/git mode only. A store without the idea capability (server
 mode) returns `400 unsupported` for every ideas route.
