@@ -331,15 +331,6 @@ func ideaRowPath(idea domain.Idea) string {
 	return "projects/" + idea.ProjectID + "/ideas/" + idea.ID + ".md"
 }
 
-// ideaWriteSource makes an id-addressed write report a project source. The id
-// is global, so nothing was inferred from the working directory or personal.
-func ideaWriteSource(source string) string {
-	if source == "" {
-		return app.IdeaProjectExplicit
-	}
-	return source
-}
-
 // ---------------------------------------------------------------------------
 // JSON rows (§9.3)
 
@@ -400,7 +391,7 @@ type jsonIdeaList struct {
 
 type jsonIdeaWrite struct {
 	Idea          jsonIdeaRow `json:"idea"`
-	ProjectSource string      `json:"project_source"`
+	ProjectSource string      `json:"project_source,omitempty"`
 }
 
 type jsonIdeaShow struct {
@@ -625,7 +616,7 @@ func printIdeaDetail(w io.Writer, idea domain.Idea) {
 	fmt.Fprintf(w, "status: %s\n", status)
 	fmt.Fprintf(w, "priority: %s\n", priority)
 	if idea.DueAt != nil && !idea.DueAt.IsZero() {
-		fmt.Fprintf(w, "due: %s\n", idea.DueAt.Format(time.RFC3339))
+		fmt.Fprintf(w, "due: %s\n", idea.DueAt.In(time.Local).Format(time.RFC3339))
 	} else if idea.DueDate != "" {
 		fmt.Fprintf(w, "due: %s (all-day)\n", idea.DueDate)
 	}
@@ -635,10 +626,10 @@ func printIdeaDetail(w io.Writer, idea domain.Idea) {
 	if len(idea.Tags) > 0 {
 		fmt.Fprintf(w, "tags: %s\n", strings.Join(idea.Tags, ", "))
 	}
-	fmt.Fprintf(w, "created: %s\n", idea.CreatedAt.UTC().Format(time.RFC3339))
-	fmt.Fprintf(w, "updated: %s\n", idea.UpdatedAt.UTC().Format(time.RFC3339))
+	fmt.Fprintf(w, "created: %s\n", idea.CreatedAt.In(time.Local).Format(time.RFC3339))
+	fmt.Fprintf(w, "updated: %s\n", idea.UpdatedAt.In(time.Local).Format(time.RFC3339))
 	if idea.CompletedAt != nil && !idea.CompletedAt.IsZero() {
-		fmt.Fprintf(w, "completed: %s\n", idea.CompletedAt.UTC().Format(time.RFC3339))
+		fmt.Fprintf(w, "completed: %s\n", idea.CompletedAt.In(time.Local).Format(time.RFC3339))
 	}
 	if idea.Source != nil {
 		source := idea.Source.Type
@@ -849,34 +840,39 @@ func runIdeaList(args []string, stdout, stderr io.Writer) int {
 	return 0
 }
 
-// printIdeaList renders the OPEN and DONE sections plus the problem rows.
+// printIdeaList renders the OPEN, DONE and DROPPED sections plus the problem
+// rows. Dropped ideas stay visible but never hide under the DONE heading.
 func printIdeaList(w io.Writer, ideas []domain.Idea, problems []ports.RecordProblem, dataDir string, now time.Time) {
 	if len(ideas) == 0 && len(problems) == 0 {
 		fmt.Fprintln(w, "no ideas")
 		return
 	}
-	var active, closed []domain.Idea
+	var active, doneIdeas, droppedIdeas []domain.Idea
 	for _, idea := range ideas {
-		if idea.Status.Terminal() {
-			closed = append(closed, idea)
-		} else {
+		switch idea.Status {
+		case domain.IdeaDone:
+			doneIdeas = append(doneIdeas, idea)
+		case domain.IdeaDropped:
+			droppedIdeas = append(droppedIdeas, idea)
+		default:
 			active = append(active, idea)
 		}
 	}
 	printed := false
-	if len(active) > 0 {
-		fmt.Fprintf(w, "OPEN (%d)\n", len(active))
-		printIdeaRows(w, active, now)
-		printed = true
-	}
-	if len(closed) > 0 {
+	printSection := func(label string, section []domain.Idea) {
+		if len(section) == 0 {
+			return
+		}
 		if printed {
 			fmt.Fprintln(w)
 		}
-		fmt.Fprintf(w, "DONE (%d)\n", len(closed))
-		printIdeaRows(w, closed, now)
+		fmt.Fprintf(w, "%s (%d)\n", label, len(section))
+		printIdeaRows(w, section, now)
 		printed = true
 	}
+	printSection("OPEN", active)
+	printSection("DONE", doneIdeas)
+	printSection("DROPPED", droppedIdeas)
 	if len(problems) > 0 {
 		if printed {
 			fmt.Fprintln(w)
@@ -1039,9 +1035,13 @@ func runIdeaEdit(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return reportIdeaError(stderr, "idea edit", cfg.DataDir, err)
 	}
 	if *asJSON {
+		projectSource := result.ProjectSource
+		if projectSource == "" && selector != "" {
+			projectSource = app.IdeaProjectExplicit
+		}
 		return writeJSONReport(stdout, stderr, "idea edit", jsonIdeaWrite{
 			Idea:          toJSONIdeaRow(result.Idea, true),
-			ProjectSource: ideaWriteSource(result.ProjectSource),
+			ProjectSource: projectSource,
 		})
 	}
 	fmt.Fprintf(stdout, "idea %s\n", result.Idea.ID)
@@ -1080,8 +1080,7 @@ func ideaSetStatus(args []string, command string, status domain.IdeaStatus, note
 	}
 	if *asJSON {
 		return writeJSONReport(stdout, stderr, "idea "+command, jsonIdeaWrite{
-			Idea:          toJSONIdeaRow(result.Idea, true),
-			ProjectSource: ideaWriteSource(result.ProjectSource),
+			Idea: toJSONIdeaRow(result.Idea, true),
 		})
 	}
 	fmt.Fprintf(stdout, "%s idea %s\n", ideaStatusVerb(command), result.Idea.ID)
@@ -1161,8 +1160,7 @@ func runIdeaRestore(args []string, stdout, stderr io.Writer) int {
 	}
 	if *asJSON {
 		return writeJSONReport(stdout, stderr, "idea restore", jsonIdeaWrite{
-			Idea:          toJSONIdeaRow(idea, true),
-			ProjectSource: ideaWriteSource(""),
+			Idea: toJSONIdeaRow(idea, true),
 		})
 	}
 	fmt.Fprintf(stdout, "restored idea %s\n", idea.ID)

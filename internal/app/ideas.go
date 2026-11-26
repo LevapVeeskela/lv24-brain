@@ -65,6 +65,10 @@ type IdeaListOptions struct {
 	DueAfter  time.Time
 	Query     string
 	Limit     int
+	// SkipProblems omits the problem-row scan. The session brief sets it so a
+	// hook never runs a full problem scan and a problem-report failure cannot
+	// break the greeting. `brain idea list` and the API keep the scan.
+	SkipProblems bool
 }
 
 // IdeaListResult is a filtered idea listing. Problems are the idea files the
@@ -404,6 +408,9 @@ func (a *App) ListIdeas(ctx context.Context, opts IdeaListOptions) (IdeaListResu
 		return IdeaListResult{}, err
 	}
 	result.Ideas = ideas
+	if opts.SkipProblems {
+		return result, nil
+	}
 	for _, projectID := range projectIDs {
 		problems, err := a.ideaProblems(ctx, projectID)
 		if err != nil {

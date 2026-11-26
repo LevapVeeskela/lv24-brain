@@ -229,10 +229,19 @@ func TestIdeaCLIDueForms(t *testing.T) {
 		t.Fatalf("all-day due = %v/%v", allDay["due_at"], allDay["due_date"])
 	}
 
-	timed := ideaJSONRow(t, ideaJSONData(t, f.addRaw("demo", "Timed",
-		"--due", "2030-05-06T09:15:00+05:30", "--json")))
+	timedRaw := f.addRaw("demo", "Timed",
+		"--due", "2030-05-06T09:15:00+05:30", "--json")
+	timed := ideaJSONRow(t, ideaJSONData(t, timedRaw))
 	if timed["due_at"] != "2030-05-06T09:15:00+05:30" || timed["due_date"] != nil {
 		t.Fatalf("timed due lost its offset: %v/%v", timed["due_at"], timed["due_date"])
+	}
+	// show renders the instant in the machine's local zone, not the stored
+	// offset; JSON keeps the offset.
+	localDue := time.Date(2030, 5, 6, 9, 15, 0, 0, time.FixedZone("", 5*3600+30*60)).
+		In(time.Local).Format(time.RFC3339)
+	human := ideaCLIOK(t, "idea", "show", timed["id"].(string), "--config", f.cfg)
+	if !strings.Contains(human, "due: "+localDue) {
+		t.Fatalf("show due is not local: want %q in %q", "due: "+localDue, human)
 	}
 
 	atDue := ideaJSONRow(t, ideaJSONData(t, f.addRaw("demo", "At time",
@@ -346,8 +355,8 @@ func TestIdeaCLIStatusLifecycle(t *testing.T) {
 	if row["status"] != "done" || row["completed_at"] == nil || row["completion_note"] != "finished" {
 		t.Fatalf("done row = %#v", row)
 	}
-	if done["project_source"] == nil {
-		t.Fatalf("done omitted project_source: %#v", done)
+	if _, ok := done["project_source"]; ok {
+		t.Fatalf("done should omit project_source: %#v", done)
 	}
 	completedAt := row["completed_at"]
 	again := ideaJSONRow(t, ideaJSONData(t, ideaCLIOK(t, "idea", "done", id, "--config", f.cfg, "--json")))
@@ -373,7 +382,7 @@ func TestIdeaCLIStatusLifecycle(t *testing.T) {
 		t.Fatalf("drop = %#v", dropped)
 	}
 	list = ideaCLIOK(t, "idea", "list", "--config", f.cfg, "--project", "demo", "--all")
-	if !strings.Contains(list, "[~] ~~Flow~~") {
+	if !strings.Contains(list, "DROPPED (1)") || !strings.Contains(list, "[~] ~~Flow~~") || strings.Contains(list, "DONE (") {
 		t.Fatalf("dropped list = %q", list)
 	}
 
@@ -402,13 +411,17 @@ func TestIdeaCLIEditTrashRestore(t *testing.T) {
 	id := f.add("demo", "Original", "--due", "2030-05-06", "--tag", "ui")
 
 	body := "Edited body\nwith a second line"
-	code, _, stderr := runWithInputForTest(t, body,
+	code, editOut, stderr := runWithInputForTest(t, body,
 		"idea", "edit", id, "--config", f.cfg, "--title", "Edited", "--body-file", "-",
-		"--tags", "ui,api", "--priority", "low", "--status", "doing", "--project", "other")
+		"--tags", "ui,api", "--priority", "low", "--status", "doing", "--project", "other", "--json")
 	if code != 0 {
 		t.Fatalf("edit exit %d: %s", code, stderr)
 	}
-	row := f.showRow(id)
+	editData := ideaJSONData(t, editOut)
+	if editData["project_source"] != "explicit" {
+		t.Fatalf("edit move source = %#v", editData["project_source"])
+	}
+	row := ideaJSONRow(t, editData)
 	if row["title"] != "Edited" || row["body"] != body || row["status"] != "doing" ||
 		row["priority"] != "low" || row["project_id"] != "other" {
 		t.Fatalf("edited row = %#v", row)
@@ -433,11 +446,22 @@ func TestIdeaCLIEditTrashRestore(t *testing.T) {
 
 	restored := ideaJSONData(t, ideaCLIOK(t, "idea", "restore", id, "--config", f.cfg, "--json"))
 	row = ideaJSONRow(t, restored)
-	if restored["project_source"] == nil || row["id"] != id || row["body"] != body || row["title"] != "Edited" {
+	if _, ok := restored["project_source"]; ok {
+		t.Fatalf("restore should omit project_source: %#v", restored)
+	}
+	if row["id"] != id || row["body"] != body || row["title"] != "Edited" {
 		t.Fatalf("restore = %#v", restored)
 	}
 	if code, _, _ := ideaCLI(t, "idea", "restore", id, "--config", f.cfg); code != 1 {
 		t.Fatalf("restore twice exit %d, want 1", code)
+	}
+
+	renamed := ideaJSONData(t, ideaCLIOK(t, "idea", "edit", id, "--config", f.cfg, "--title", "Edited again", "--json"))
+	if _, ok := renamed["project_source"]; ok {
+		t.Fatalf("id-addressed edit should omit project_source: %#v", renamed)
+	}
+	if ideaJSONRow(t, renamed)["title"] != "Edited again" {
+		t.Fatalf("id-addressed edit = %#v", renamed)
 	}
 }
 
@@ -544,6 +568,12 @@ func TestIdeaCLIListAllSkipsProjectResolution(t *testing.T) {
 	f.add("second", "Second idea")
 	doneID := f.add("smoke", "Smoke done")
 	ideaCLIOK(t, "idea", "done", doneID, "--config", f.cfg)
+	checkout := t.TempDir()
+	ideaCLIOK(t, "project", "set", "smoke", "--path", checkout, "--config", f.cfg)
+	t.Chdir(checkout)
+	if rows, _ := f.listRows("--all"); len(rows) != 3 {
+		t.Fatalf("registered-cwd list --all = %d rows, want 3: %#v", len(rows), rows)
+	}
 	t.Chdir(t.TempDir())
 
 	// The bare list still resolves cwd -> personal and refuses to guess.
@@ -657,8 +687,24 @@ func TestIdeaCLIBrief(t *testing.T) {
 		f.add("demo", strings.Repeat("Long idea ", 12)+string(rune('A'+i)), "--due", "2020-01-03")
 	}
 	long := ideaJSONData(t, ideaCLIOK(t, "idea", "brief", "--config", f.cfg, "--max", "10", "--json"))
-	if got := len([]rune(long["text"].(string))); got > 700 {
+	longText := long["text"].(string)
+	if got := len([]rune(longText)); got > 700 {
 		t.Fatalf("brief is %d characters, want <= 700", got)
+	}
+	longRows := ideaJSONRows(t, long)
+	itemLines := 0
+	for _, line := range strings.Split(longText, "\n") {
+		if strings.HasPrefix(line, "- ") {
+			itemLines++
+		}
+	}
+	if len(longRows) != itemLines {
+		t.Fatalf("brief JSON has %d ideas but the text has %d item lines:\n%s", len(longRows), itemLines, longText)
+	}
+	for _, row := range longRows {
+		if !strings.Contains(longText, row["title"].(string)) {
+			t.Fatalf("brief text is missing rendered idea %q:\n%s", row["title"], longText)
+		}
 	}
 
 	// Mute is machine-local state and replaces the block with one line.
@@ -669,6 +715,21 @@ func TestIdeaCLIBrief(t *testing.T) {
 	mutePath := filepath.Join(f.dataDir, "agent", "ideas.json")
 	if _, err := os.Stat(mutePath); err != nil {
 		t.Fatalf("mute file missing at %s: %v", mutePath, err)
+	}
+	ignorePath := filepath.Join(f.dataDir, "agent", ".gitignore")
+	ignoreRaw, err := os.ReadFile(ignorePath)
+	if err != nil || !strings.Contains(string(ignoreRaw), "*") {
+		t.Fatalf("agent ignore file = %q, %v", ignoreRaw, err)
+	}
+	// The mute command must leave an existing daemon/user ignore policy alone.
+	customIgnore := "# daemon policy\n"
+	if err := os.WriteFile(ignorePath, []byte(customIgnore), 0o600); err != nil {
+		t.Fatalf("write custom ignore: %v", err)
+	}
+	ideaCLIOK(t, "idea", "mute", "--config", f.cfg, "--days", "5", "--json")
+	ignoreRaw, err = os.ReadFile(ignorePath)
+	if err != nil || string(ignoreRaw) != customIgnore {
+		t.Fatalf("mute overwrote agent/.gitignore: %q, %v", ignoreRaw, err)
 	}
 	mutedBrief := ideaJSONData(t, ideaCLIOK(t, "idea", "brief", "--config", f.cfg, "--json"))
 	mutedText := fmt.Sprintf("ideas: %v open (greeting muted)", long["open"])
@@ -729,6 +790,8 @@ func TestIdeaCLIICAL(t *testing.T) {
 	longID := f.add("demo", strings.Repeat("Long ", 20), "--due", "2030-05-11")
 
 	out := ideaCLIOK(t, "idea", "ical", "--config", f.cfg, "--project", "demo")
+	allDayLeadTrigger := "TRIGGER;VALUE=DATE-TIME:" +
+		time.Date(2030, 5, 5, 9, 0, 0, 0, time.Local).UTC().Format("20060102T150405Z")
 	allDayDueTrigger := "TRIGGER;VALUE=DATE-TIME:" +
 		time.Date(2030, 5, 6, 9, 0, 0, 0, time.Local).UTC().Format("20060102T150405Z")
 	longDueTrigger := "TRIGGER;VALUE=DATE-TIME:" +
@@ -739,7 +802,7 @@ func TestIdeaCLIICAL(t *testing.T) {
 		"UID:" + allDay + "\r\n",
 		"DTSTART;VALUE=DATE:20300506\r\n",
 		"SUMMARY:All day\\, with\\; chars\r\n",
-		"TRIGGER:-PT1440M\r\n",
+		allDayLeadTrigger + "\r\n",
 		allDayDueTrigger + "\r\n",
 		"UID:" + timed + "\r\n",
 		"DTSTART:20300507T150000Z\r\n",
@@ -761,6 +824,12 @@ func TestIdeaCLIICAL(t *testing.T) {
 	allDayBlock := icalEventBlock(t, out, allDay)
 	if got := strings.Count(allDayBlock, "BEGIN:VALARM"); got != 2 {
 		t.Fatalf("all-day lead+due alarms = %d, want 2:\n%s", got, allDayBlock)
+	}
+	if !strings.Contains(allDayBlock, allDayLeadTrigger) || !strings.Contains(allDayBlock, allDayDueTrigger) {
+		t.Fatalf("all-day alarms are not absolute at 09:00 local:\n%s", allDayBlock)
+	}
+	if strings.Contains(allDayBlock, "TRIGGER:-PT1440M") {
+		t.Fatalf("all-day lead used a midnight-relative trigger:\n%s", allDayBlock)
 	}
 	timedBlock := icalEventBlock(t, out, timed)
 	if got := strings.Count(timedBlock, "BEGIN:VALARM"); got != 2 {
@@ -802,6 +871,13 @@ func TestIdeaCLIICALDefaultScope(t *testing.T) {
 	f.register("second")
 	f.add("smoke", "Smoke dated", "--due", "2030-06-01")
 	f.add("second", "Second dated", "--due", "2030-06-02")
+	checkout := t.TempDir()
+	ideaCLIOK(t, "project", "set", "smoke", "--path", checkout, "--config", f.cfg)
+	t.Chdir(checkout)
+	registered := ideaCLIOK(t, "idea", "ical", "--config", f.cfg)
+	if !strings.Contains(registered, "SUMMARY:Smoke dated") || !strings.Contains(registered, "SUMMARY:Second dated") {
+		t.Fatalf("registered-cwd ical is not global:\n%s", registered)
+	}
 	t.Chdir(t.TempDir())
 
 	all := ideaCLIOK(t, "idea", "ical", "--config", f.cfg)

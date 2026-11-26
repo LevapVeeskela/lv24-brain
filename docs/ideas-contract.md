@@ -566,7 +566,7 @@ brain idea add <title> [--project ID|auto] [--body-file -|PATH]
                        [--remind 2h|1d|MINUTES] [--priority low|normal|high]
                        [--tag TAG ...] [--source TYPE:ID] [--harness NAME] [--json]
 brain idea list [--open|--done|--all] [--status open,doing,done,dropped,someday]
-                [--project ID] [--due today|tomorrow|week|overdue]
+                [--project ID|all] [--due today|tomorrow|week|overdue]
                 [--tag TAG ...] [--search TEXT] [--limit N] [--json]
 brain idea show <id> [--json]
 brain idea edit <id> [--title TEXT] [--body-file -|PATH] [--project ID]
@@ -579,16 +579,20 @@ brain idea reopen <id> [--json]
 brain idea drop <id> [--reason TEXT] [--json]
 brain idea rm <id>
 brain idea restore <id>
-brain idea brief [--project ID] [--max N] [--scope current|all] [--json]
+brain idea brief [--project ID|all] [--max N] [--scope current|all] [--json]
 brain idea mute [--days N] [--off]
-brain idea ical [--project ID] > ideas.ics
+brain idea ical [--project ID|auto|all] > ideas.ics
 ```
+
+`brain idea ical` is a global file export by default (like `/v1/ideas/ical`);
+`--project ID` scopes it, `--project all` is explicit global, and
+`--project auto` opts into the §7 cwd → `personal` resolution.
 
 ### 9.1 Flag semantics
 
 | Flag | Semantics |
 | --- | --- |
-| `--project ID\|auto\|all` | for `add`/`edit` and the default-scope reads, `auto` is the default and means §7 resolution; an id/alias/path is explicit and must exist. On `list`, `all` lists every registered project and is the only way to override the cwd default. `brief` is global by default (`--scope all`), so it needs no `--project` |
+| `--project ID\|auto\|all` | for `add`/`edit` and the default-scope reads, `auto` is the default and means §7 resolution; an id/alias/path is explicit and must exist. On `list`, `all` lists every registered project; bare `list --all` widens the scope the same way (see `--all`). `brief` is global by default (`--scope all`), so it needs no `--project`. `ical` is global by default; `--project all` is explicit global and `--project auto` opts into §7 resolution |
 | `--due` | `today`/`tomorrow` = all-day local date; `YYYY-MM-DD` = all-day; RFC3339 = timed and keeps the offset |
 | `--at HH:MM` | upgrades the `--due` date to a timed `due_at` in the machine's local zone; requires a date from `--due` |
 | `--remind` | `2h`, `1d` or plain minutes; written as a concrete integer; `0` means no lead |
@@ -598,7 +602,7 @@ brain idea ical [--project ID] > ideas.ics
 | `--status` on list | repeatable/comma-separated; overrides the `--open`/`--done`/`--all` shortcut |
 | `--open` | default: `open` and `doing` |
 | `--done` | `done` only |
-| `--all` | all five statuses |
+| `--all` | all five statuses; on `list`, when no explicit `--project` is given, it also spans every registered project (the cwd → `personal` default is bypassed) |
 | `--due` on list | `today`, `tomorrow`, `week`, `overdue`; maps to §6.3 windows |
 | `--tag` on list | exact case-insensitive tag match; multiple tags are AND |
 | `--search` | case-insensitive substring over title/body/tags |
@@ -621,16 +625,21 @@ OPEN (4)
 
 DONE (2)
   [x] ~~Починить футер~~                   lv24-brain
+
+DROPPED (1)
+  [~] ~~Не сейчас~~                        personal
 ```
 
 - `[ ]` open/doing/someday, `[!]` overdue, `[x]` done, `[~]` dropped.
 - Done and dropped titles are wrapped in `~~...~~`; nothing is deleted.
+- Dropped ideas are listed under their own `DROPPED (n)` section, never under
+  `DONE`.
 - `today HH:MM` for timed items, `today` for all-day, `overdue Nd` for past
   days, `high`/`low` for non-normal priority, `Fri` style for the current week.
 - Project chip and reminder chip are shown when set.
 - `brain idea list` adds a `PROBLEMS (n)` section with `path: reason` rows.
 - `brain idea show` prints the metadata block, body, source and completion
-  note.
+  note; timestamps are rendered in the machine's local zone.
 - Empty list prints `no ideas` and exits 0.
 
 ### 9.3 JSON output
@@ -643,14 +652,19 @@ Every `--json` command uses the existing envelope:
 
 Data shapes (snake_case, same field names as §11):
 
-- `add`, `edit`, `done`, `reopen`, `drop`, `restore`:
-  `{"idea": <idea row>, "project_source": "explicit|cwd|default"}`.
+- `add`: `{"idea": <idea row>, "project_source": "explicit|cwd|default"}`.
+- `edit`: `{"idea": <idea row>}`; `project_source` is added only when the
+  request names a project or moves the idea.
+- `done`, `reopen`, `drop`, `restore`: `{"idea": <idea row>}`. The id is global,
+  so no project was resolved and there is no `project_source` to report.
 - `show`: `{"idea": <idea row>}`; an id is resolved without a project selector,
   so there is no `project_source` to report.
 - `list`: `{"ideas": [<row>], "problems": [{"path","kind","reason"}], "total": N, "project_source": "explicit|cwd|default"}`.
-  `project_source` is omitted for `--project all`, where there is no single
-  resolved project.
+  `project_source` is omitted for `--project all` and bare `list --all`, where
+  there is no single resolved project.
 - `brief`: `{"text": "...", "ideas": [<row>], "open": N, "due_today": N, "muted": bool}`.
+  `ideas` is exactly the set of item lines rendered in `text`; the 700-character
+  budget may drop items, and dropped items are absent from both.
 - `rm`: `{"id": "...", "trashed": true}`.
 - `mute`: `{"muted_until": "RFC3339"|null}`.
 
@@ -681,8 +695,9 @@ An idea row is:
 }
 ```
 
-`body` is omitted from list rows and included by `show`/`add`/`edit`. Null means
-"not set"; empty string means an empty value.
+`body` is omitted from list and brief rows and included by
+`show`/`add`/`edit`/`done`/`reopen`/`drop`/`restore`. Null means "not set";
+empty string means an empty value.
 
 Exit codes: `0` success (including an empty list), `1` runtime/validation error,
 `2` usage error. `--json` writes one document to stdout and nothing else; errors
@@ -878,11 +893,16 @@ the desktop cannot drift. Body text never enters `text`.
 ### 11.7 `GET /v1/ideas/ical`
 
 Returns `Content-Type: text/calendar; charset=utf-8` and a file export (not a
-subscription). One `VEVENT` per dated idea, with `VALARM` from the lead time:
+subscription). One `VEVENT` per dated idea, with a due-time `VALARM` and an
+optional lead `VALARM`:
 
 - `DTSTART;VALUE=DATE:YYYYMMDD` for all-day ideas, no `TZID`;
 - `DTSTART;TZID=...:...` or a UTC `DTSTART` for timed ideas;
-- `VALARM` with `TRIGGER:-PT<N>M` when `remind_before_minutes > 0`;
+- a due-time `VALARM` for every dated idea: `TRIGGER:-PT0M` for timed ideas;
+  for all-day ideas an absolute `TRIGGER;VALUE=DATE-TIME:<09:00 local, UTC>`;
+- when `remind_before_minutes > 0`, a lead `VALARM` before it: `TRIGGER:-PT<N>M`
+  for timed ideas; for all-day ideas an absolute trigger at 09:00 local minus N
+  minutes, converted to UTC (so a lead+due idea has two alarms);
 - `SUMMARY` = title, `UID` = idea id, `DESCRIPTION` = body (optional);
 - `STATUS:COMPLETED` is not emitted; done ideas are omitted unless
   `include_done=1` is passed (default omitted).

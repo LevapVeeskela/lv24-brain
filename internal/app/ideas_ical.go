@@ -21,9 +21,10 @@ import (
 //
 // Every VEVENT carries a due-time VALARM and, when RemindBeforeMinutes > 0, a
 // lead VALARM before it. A timed due-time alarm is relative (-PT0M); an all-day
-// idea has no midnight instant, so its due-time alarm is absolute at 09:00 in
-// the machine's local zone, converted to UTC. This matches the desktop
-// scheduler, so importing either export alerts at the same instants.
+// idea has no midnight instant, so both its lead and due-time alarms are
+// absolute at 09:00 in the machine's local zone (minus the lead), converted to
+// UTC. This matches the desktop scheduler, so importing either export alerts at
+// the same instants.
 func RenderIdeaCalendar(ideas []domain.Idea, now time.Time) string {
 	ordered := make([]domain.Idea, 0, len(ideas))
 	for _, idea := range ideas {
@@ -62,7 +63,16 @@ func RenderIdeaCalendar(ideas []domain.Idea, now time.Time) string {
 			writeICSLine(&b, "DESCRIPTION:"+escapeICSText(body))
 		}
 		if idea.RemindBeforeMinutes != nil && *idea.RemindBeforeMinutes > 0 {
-			writeICSAlarm(&b, fmt.Sprintf("TRIGGER:-PT%dM", *idea.RemindBeforeMinutes), idea.Title)
+			lead := time.Duration(*idea.RemindBeforeMinutes) * time.Minute
+			if idea.DueAt != nil && !idea.DueAt.IsZero() {
+				writeICSAlarm(&b, fmt.Sprintf("TRIGGER:-PT%dM", *idea.RemindBeforeMinutes), idea.Title)
+			} else if anchor, ok := ideaCalendarDue(idea); ok {
+				// An all-day DTSTART is midnight, so a relative lead would fire
+				// nine hours early. Anchor the lead to the 09:00 local due
+				// instant instead.
+				leadAt := anchor.Add(-lead).UTC().Format("20060102T150405Z")
+				writeICSAlarm(&b, "TRIGGER;VALUE=DATE-TIME:"+leadAt, idea.Title)
+			}
 		}
 		if idea.DueAt != nil && !idea.DueAt.IsZero() {
 			writeICSAlarm(&b, "TRIGGER:-PT0M", idea.Title)
