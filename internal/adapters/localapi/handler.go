@@ -147,6 +147,14 @@ func (h *Handler) route(w http.ResponseWriter, r *http.Request) {
 		h.journal(w, r)
 	case path == "/v1/hooks":
 		h.hooks(w, r)
+	case path == "/v1/ideas":
+		h.ideas(w, r)
+	case path == "/v1/ideas/brief":
+		h.ideasBrief(w, r)
+	case path == "/v1/ideas/ical":
+		h.ideasCalendar(w, r)
+	case strings.HasPrefix(path, "/v1/ideas/"):
+		h.ideaRoute(w, r, strings.TrimPrefix(path, "/v1/ideas/"))
 	case path == "/v1/records":
 		h.records(w, r)
 	case strings.HasPrefix(path, "/v1/records/"):

@@ -89,6 +89,14 @@ rename one.
 | `POST` | `/v1/records/{id}/trash` |
 | `POST` | `/v1/records/{id}/restore` |
 | `POST` | `/v1/records/{id}/review` |
+| `GET` | `/v1/ideas` |
+| `POST` | `/v1/ideas` |
+| `GET` | `/v1/ideas/brief` |
+| `GET` | `/v1/ideas/ical` |
+| `GET` | `/v1/ideas/{id}` |
+| `PATCH` | `/v1/ideas/{id}` |
+| `DELETE` | `/v1/ideas/{id}` |
+| `POST` | `/v1/ideas/{id}/restore` |
 | `GET` | `/v1/search` |
 | `GET` | `/v1/review` |
 | `POST` | `/v1/review/fix` |
@@ -384,6 +392,68 @@ lines (commit branch/head/subject only) and `quarantined_count`.
   memory routes.
 - `GET /v1/hooks` returns one `HookStatus` per agent host (`claude`, `codex`,
   `opencode`): installed state, Codex trust and last-run log entry.
+
+## Ideas routes (desktop 1.8)
+
+The ideas routes are additive to `localapi-v1` and use snake_case JSON. An idea
+id is globally unique; `project` is a resolver, not part of the identity. The
+literal `/v1/ideas/brief` and `/v1/ideas/ical` paths are matched before
+`/v1/ideas/{id}`. Because the Ideas page, the session brief and the session hook
+are global by design, these routes are not bounded by the agent's `--projects`
+memory allowlist; the bearer token and loopback rules still apply.
+
+`GET /v1/ideas` query: `project`, `status` (repeated or comma-separated),
+`tags` (also accepted as `tag`; repeated or comma-separated, exact
+case-insensitive AND), `due_before`, `due_after` (RFC3339; the upper bound is
+exclusive), `q` (case-insensitive substring) and `limit` (default 100, max
+1000). An omitted `project` lists every registered project and omits
+`project_source`; an explicit selector resolves like every other route and
+reports `project_source: "explicit"`. `total` counts matches before `limit`.
+`problems` carries every unparsable or conflicted idea file (`path`, `kind`,
+`reason`); such a file is reported, never rewritten or dropped, and the other
+ideas stay usable.
+
+`POST /v1/ideas` creates one idea. `title` is required; `body`, `project`,
+`status`, `priority`, `due_at`, `due_date`, `remind_before_minutes`, `tags` and
+`source` are optional. `due_at` and `due_date` are mutually exclusive; send one
+or neither. The response is `201` with `{idea, project_source}` and the body is
+included. An unknown `project` is `400 validation` (never created), a protected
+project is `403`, and a field over the configured write limit is `413`.
+
+`GET /v1/ideas/{id}` returns `{idea}` with `body`. An unknown id is `404`; a
+problem file is `409` with its path and reason in the message and is never
+returned as a zero idea.
+
+`PATCH /v1/ideas/{id}` accepts the mutable fields plus `clear_due`,
+`clear_reminder`, `clear_tags`, `project` and `expected_updated_at`. An omitted
+field is unchanged; setting `due_at` or `due_date` clears the other;
+`clear_due` removes both. `status` follows the record transitions, moving to
+`done` stamps `completed_at`, and reopening clears `completed_at` and the
+completion note. `expected_updated_at` is the `updated_at` the client read; a
+stale value is `409` with `error.current_revision` and writes nothing. The
+response is `{idea}` with the body; `project_source` is added only when the
+request moved the idea.
+
+`DELETE /v1/ideas/{id}` moves the file to the project trash (soft delete) and
+returns `{"id":"...","trashed":true}`. `POST /v1/ideas/{id}/restore` reverses
+it and returns `{idea}`. A missing live id is `404`; a restore that would
+collide with a live file is `409` and never overwrites it. A problem file stays
+untouched and is `409`.
+
+`GET /v1/ideas/brief?project=&scope=current|all&max=` returns exactly the
+session block the CLI, MCP, API and session hook share:
+`{text, ideas, open, due_today, muted}`. `max` is 1–10 (default 3) and the
+700-character budget is fixed. Body text never enters `text`.
+
+`GET /v1/ideas/ical?project=&include_done=1` returns
+`Content-Type: text/calendar; charset=utf-8` with one `VEVENT` per dated idea:
+`DTSTART;VALUE=DATE:YYYYMMDD` for all-day ideas, a UTC `DTSTART` for timed
+ideas, `SUMMARY` from the title, `UID` from the id and a `VALARM` from the lead
+time. This is a file export, not a live subscription. Done ideas are omitted
+unless `include_done=1`; dropped ideas are terminal and are never exported.
+
+Ideas are local/git mode only. A store without the idea capability (server
+mode) returns `400 unsupported` for every ideas route.
 
 ## Pagination and size caps
 

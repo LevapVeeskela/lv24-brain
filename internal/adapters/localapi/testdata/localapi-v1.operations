@@ -1,10 +1,15 @@
 DELETE /v1/connections/{id}
+DELETE /v1/ideas/{id}
 DELETE /v1/proposals/{project}/{id}/snooze
 GET /v1/catchup
 GET /v1/connections
 GET /v1/connections/{id}
 GET /v1/health
 GET /v1/hooks
+GET /v1/ideas
+GET /v1/ideas/brief
+GET /v1/ideas/ical
+GET /v1/ideas/{id}
 GET /v1/journal
 GET /v1/projects
 GET /v1/projects/{id}/state
@@ -22,6 +27,7 @@ GET /v1/search
 GET /v1/settings
 GET /v1/sync
 PATCH /v1/connections/{id}
+PATCH /v1/ideas/{id}
 PATCH /v1/records/{id}
 POST /v1/connections
 POST /v1/connections/{id}/credentials/{field}
@@ -29,6 +35,8 @@ POST /v1/connections/{id}/run
 POST /v1/connections/{id}/test
 POST /v1/digest
 POST /v1/engine/update
+POST /v1/ideas
+POST /v1/ideas/{id}/restore
 POST /v1/merge/apply
 POST /v1/merge/plan
 POST /v1/merge/rollback

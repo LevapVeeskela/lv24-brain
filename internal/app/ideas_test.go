@@ -329,6 +329,51 @@ func TestUpdateIdeaMovesProject(t *testing.T) {
 	}
 }
 
+func TestUpdateIdeaCompareAndSwapUsesTheStoredRevision(t *testing.T) {
+	ctx := context.Background()
+	a, store := newIdeaApp(t)
+	project := seedIdeaProject(t, store, domain.Project{ID: "p", Name: "P", Kind: domain.ProjectKindRepository})
+	added, err := a.AddIdea(ctx, app.IdeaInput{ProjectID: project.ID, Title: "Original"})
+	if err != nil {
+		t.Fatalf("AddIdea: %v", err)
+	}
+	revision := added.Idea.UpdatedAt
+	if revision.Nanosecond() != 0 {
+		t.Fatalf("the returned revision %v is not the second-precision stored value", revision)
+	}
+
+	_, err = a.UpdateIdea(ctx, app.IdeaUpdateInput{
+		ID: added.Idea.ID, Title: stringPointer("Stale"), ExpectedUpdatedAt: revision.Add(-time.Hour),
+	})
+	var conflict *domain.RevisionConflictError
+	if !errors.As(err, &conflict) || !errors.Is(err, domain.ErrConflict) {
+		t.Fatalf("stale edit error = %v, want a revision conflict", err)
+	}
+	if conflict.CurrentRevision() != revision.UTC().Format(time.RFC3339) {
+		t.Fatalf("current revision = %q, want %q", conflict.CurrentRevision(), revision.UTC().Format(time.RFC3339))
+	}
+	if got, err := a.GetIdea(ctx, added.Idea.ID); err != nil || got.Title != "Original" {
+		t.Fatalf("a stale edit wrote: %q, %v", got.Title, err)
+	}
+
+	updated, err := a.UpdateIdea(ctx, app.IdeaUpdateInput{
+		ID: added.Idea.ID, Title: stringPointer("Fresh"), ExpectedUpdatedAt: revision,
+	})
+	if err != nil {
+		t.Fatalf("fresh edit: %v", err)
+	}
+	stored, err := a.GetIdea(ctx, added.Idea.ID)
+	if err != nil {
+		t.Fatalf("GetIdea after edit: %v", err)
+	}
+	if !updated.Idea.UpdatedAt.Equal(stored.UpdatedAt) {
+		t.Fatalf("returned revision %v != stored revision %v", updated.Idea.UpdatedAt, stored.UpdatedAt)
+	}
+	if stored.Title != "Fresh" {
+		t.Fatalf("stored title = %q", stored.Title)
+	}
+}
+
 func TestIdeaTrashRestoreAndCollision(t *testing.T) {
 	ctx := context.Background()
 	a, store := newIdeaApp(t)

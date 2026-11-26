@@ -377,6 +377,7 @@ type testFixture struct {
 	sync        *fakeSync
 	workspace   *fakeWorkspace
 	hooks       *fakeHooks
+	ideas       *fakeIdeas
 	shutdown    chan struct{}
 }
 
@@ -427,9 +428,10 @@ func newFixture(t *testing.T) *testFixture {
 		journal:  JournalPage{Items: []JournalView{}, Limit: 50},
 	}
 	f.hooks = &fakeHooks{items: []HookStatus{{Host: "claude", Path: "/home/.claude/settings.json", Installed: true, Detail: "ok"}}}
+	f.ideas = newFakeIdeas()
 	f.schedules.connections = f.connections
 	var err error
-	f.handler, err = NewHandler(Options{Token: TokenFunc(func() string { return testToken }), Port: testPort, Version: "test", PID: 99, StartedAt: time.Now().Add(-time.Minute), Now: time.Now, MaxBody: 256, Heartbeat: 10 * time.Millisecond, Connections: f.connections, Sources: fakeRegistry{}, Credentials: f.credentials, Jobs: f.jobs, Cancels: f.cancels, Runs: f.runs, Schedules: f.schedules, Projects: fakeProjects{items: []Project{{ID: "brain", Name: "Brain"}}}, Settings: f.settings, Sync: f.sync, Merge: f.workspace, Digest: f.workspace, ProjectAdmin: f.workspace, Journal: f.workspace, Hooks: f.hooks, Updater: f.updater, Shutdown: ShutdownFunc(func(context.Context) error { close(f.shutdown); return nil })})
+	f.handler, err = NewHandler(Options{Token: TokenFunc(func() string { return testToken }), Port: testPort, Version: "test", PID: 99, StartedAt: time.Now().Add(-time.Minute), Now: time.Now, MaxBody: 256, Heartbeat: 10 * time.Millisecond, Connections: f.connections, Sources: fakeRegistry{}, Credentials: f.credentials, Jobs: f.jobs, Cancels: f.cancels, Runs: f.runs, Schedules: f.schedules, Projects: fakeProjects{items: []Project{{ID: "brain", Name: "Brain"}}}, Settings: f.settings, Sync: f.sync, Merge: f.workspace, Digest: f.workspace, ProjectAdmin: f.workspace, Journal: f.workspace, Hooks: f.hooks, Ideas: f.ideas, DataDir: "C:/brain-data", Updater: f.updater, Shutdown: ShutdownFunc(func(context.Context) error { close(f.shutdown); return nil })})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -95,6 +95,10 @@ type IdeaUpdateInput struct {
 	Tags                *[]string
 	ClearTags           bool
 	CompletionNote      *string
+	// ExpectedUpdatedAt is the updated_at the caller read. When non-zero the
+	// write is a compare-and-swap: a stale value returns
+	// *domain.RevisionConflictError and writes nothing.
+	ExpectedUpdatedAt time.Time
 }
 
 // IdeaUpdateResult is the rewritten idea. ProjectSource is set only when the
@@ -316,7 +320,9 @@ func (a *App) AddIdea(ctx context.Context, input IdeaInput) (IdeaResult, error) 
 	if !priority.Valid() {
 		return IdeaResult{}, domain.NewValidationError("idea.priority", fmt.Sprintf("unknown priority %q", priority))
 	}
-	now := a.now()
+	// The file stores RFC3339 second precision; truncating here keeps the
+	// returned row, the CLI JSON and the reopened file the same revision.
+	now := a.now().UTC().Truncate(time.Second)
 	idea := domain.Idea{
 		ProjectID:           project.ID,
 		Title:               strings.TrimSpace(input.Title),
@@ -496,6 +502,9 @@ func (a *App) UpdateIdea(ctx context.Context, input IdeaUpdateInput) (IdeaUpdate
 	if err != nil {
 		return IdeaUpdateResult{}, err
 	}
+	if !input.ExpectedUpdatedAt.IsZero() && !original.UpdatedAt.Equal(input.ExpectedUpdatedAt) {
+		return IdeaUpdateResult{}, domain.NewRevisionConflictError(ports.RecordIdea, original.ID, original.UpdatedAt)
+	}
 	idea := original
 	wasTerminal := idea.Status.Terminal()
 	if input.Title != nil {
@@ -565,11 +574,11 @@ func (a *App) UpdateIdea(ctx context.Context, input IdeaUpdateInput) (IdeaUpdate
 		}
 		idea.Status = next
 	}
+	now := a.now().UTC().Truncate(time.Second)
 	switch {
 	case idea.Status == domain.IdeaDone:
 		if idea.CompletedAt == nil {
-			completed := a.now()
-			idea.CompletedAt = &completed
+			idea.CompletedAt = &now
 		}
 	case idea.Status == domain.IdeaOpen && wasTerminal:
 		// Reopening is the only edge out of done/dropped: clear both the
@@ -603,9 +612,18 @@ func (a *App) UpdateIdea(ctx context.Context, input IdeaUpdateInput) (IdeaUpdate
 			return IdeaUpdateResult{}, err
 		}
 	}
-	idea.UpdatedAt = a.now()
+	// The store truncates to seconds when it rewrites the file; the returned
+	// row must carry the same revision so expected_updated_at round-trips.
+	idea.UpdatedAt = now
 	if err := store.UpdateIdea(ctx, idea); err != nil {
 		return IdeaUpdateResult{}, err
+	}
+	// The store stamps updated_at itself, so re-read the persisted row: the
+	// response revision is then exactly what a later read returns, even when
+	// the wall clock rolls to a new second between the two writes. A failed
+	// re-read keeps the in-memory row; the write already succeeded.
+	if stored, err := store.GetIdea(ctx, idea.ID); err == nil {
+		idea = stored
 	}
 	if err := a.afterIdeaWrite(ctx, idea); err != nil {
 		return IdeaUpdateResult{Idea: idea, Moved: moved, ProjectSource: projectSource}, err

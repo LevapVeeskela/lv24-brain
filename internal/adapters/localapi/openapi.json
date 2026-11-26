@@ -1782,6 +1782,361 @@
           }
         }
       }
+    },
+    "/v1/ideas": {
+      "get": {
+        "description": "Lists ideas from every registered project by default, or from one resolved project. status and tags/tag are repeated or comma-separated; tags are an exact case-insensitive AND filter. total counts matches before limit. Unparsable or conflicted files are reported in problems and never dropped. An omitted project omits project_source.",
+        "parameters": [
+          {
+            "name": "project",
+            "in": "query",
+            "description": "A registered project id, alias or path; omit it to list every project.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "status",
+            "in": "query",
+            "description": "open, doing, done, dropped or someday; repeat or comma-separate for several.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "tags",
+            "in": "query",
+            "description": "Exact case-insensitive AND filter; repeat or comma-separate. tag is an alias.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "tag",
+            "in": "query",
+            "description": "Alias of tags.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "due_before",
+            "in": "query",
+            "description": "Exclusive RFC3339 upper bound; excludes undated ideas.",
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            }
+          },
+          {
+            "name": "due_after",
+            "in": "query",
+            "description": "Inclusive RFC3339 lower bound; excludes undated ideas.",
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            }
+          },
+          {
+            "name": "q",
+            "in": "query",
+            "description": "Case-insensitive substring over title, body and tags.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 1000,
+              "default": 100
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Filtered ideas, problem rows and the pre-limit match count",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IdeaPage"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "500": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      },
+      "post": {
+        "description": "Creates one idea through the shared add use case: project resolution, redaction, write limits, ID allocation and search projection are the CLI's. due_at and due_date are mutually exclusive; send one or neither.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/IdeaCreate"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "The created idea with its body and the project source",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IdeaWrite"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "413": {
+            "$ref": "#/components/responses/Error"
+          },
+          "500": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/v1/ideas/brief": {
+      "get": {
+        "description": "Returns exactly the capped session block the CLI, MCP, the local API and the session hook render: text, the selected rows without bodies, the open and due-today counts and the mute flag. max is 1-10; the 700-character budget is fixed.",
+        "parameters": [
+          {
+            "name": "project",
+            "in": "query",
+            "description": "A registered project id, alias or path; it orders the block for the current project.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "scope",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "current",
+                "all"
+              ],
+              "default": "all"
+            }
+          },
+          {
+            "name": "max",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 10,
+              "default": 3
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The session block",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IdeaBrief"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "500": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/v1/ideas/ical": {
+      "get": {
+        "description": "Exports dated ideas as one iCalendar file through the shared renderer: DTSTART;VALUE=DATE for all-day ideas, a UTC DTSTART for timed ideas, and VALARM from the lead time. This is a file export, not a live subscription. Done ideas are omitted unless include_done=1; dropped ideas are terminal and never exported.",
+        "parameters": [
+          {
+            "name": "project",
+            "in": "query",
+            "description": "A registered project id, alias or path; omit it to export every project.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "include_done",
+            "in": "query",
+            "schema": {
+              "type": "boolean",
+              "default": false
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "An iCalendar file export",
+            "content": {
+              "text/calendar": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "500": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/v1/ideas/{id}": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/ID"
+        }
+      ],
+      "get": {
+        "description": "One idea with its body. The id is globally unique, so no project selector is needed. An unknown id is 404; a conflicted or unparsable file is 409 with its path and reason in the message and never a zero idea.",
+        "responses": {
+          "200": {
+            "description": "The idea with its body",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IdeaShow"
+                }
+              }
+            }
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error"
+          },
+          "500": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      },
+      "patch": {
+        "description": "Edits one idea in place. Omitted fields are unchanged; clear_due, clear_reminder and clear_tags are the only way to remove a value. Setting due_at or due_date clears the other and status follows the record transitions. expected_updated_at is the revision read; a stale value returns 409 with error.current_revision and writes nothing. project_source appears only when the request moved the idea.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/IdeaPatch"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The edited idea with its body",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IdeaWrite"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error"
+          },
+          "413": {
+            "$ref": "#/components/responses/Error"
+          },
+          "500": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      },
+      "delete": {
+        "description": "Moves the idea file to the project trash and never hard-deletes it. The move is reversible with POST /v1/ideas/{id}/restore. An unknown live id is 404; a problem file is 409 and stays untouched.",
+        "responses": {
+          "200": {
+            "description": "The trashed idea id",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IdeaTrash"
+                }
+              }
+            }
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error"
+          },
+          "500": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/v1/ideas/{id}/restore": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/ID"
+        }
+      ],
+      "post": {
+        "description": "Restores one trashed idea and returns it with its body. A missing trashed id is 404; a live file with the same id is 409 and is never overwritten.",
+        "responses": {
+          "200": {
+            "description": "The restored idea with its body",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IdeaShow"
+                }
+              }
+            }
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error"
+          },
+          "500": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
     }
   },
   "components": {
@@ -4021,6 +4376,472 @@
           },
           "last_error": {
             "type": "string"
+          }
+        }
+      },
+      "Idea": {
+        "type": "object",
+        "required": [
+          "id",
+          "project_id",
+          "title",
+          "status",
+          "priority",
+          "tags",
+          "path",
+          "provenance",
+          "validity",
+          "relations",
+          "review"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "project_id": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string",
+            "maxLength": 200
+          },
+          "body": {
+            "type": "string",
+            "description": "Present on read and write rows only; a list or brief row omits it."
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "open",
+              "doing",
+              "done",
+              "dropped",
+              "someday"
+            ]
+          },
+          "priority": {
+            "type": "string",
+            "enum": [
+              "low",
+              "normal",
+              "high"
+            ]
+          },
+          "due_at": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true,
+            "description": "A timed due instant with its stored offset; null when unset."
+          },
+          "due_date": {
+            "type": "string",
+            "nullable": true,
+            "description": "An all-day local date (YYYY-MM-DD); null when unset."
+          },
+          "remind_before_minutes": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 10080,
+            "nullable": true
+          },
+          "tags": {
+            "type": "array",
+            "maxItems": 10,
+            "items": {
+              "type": "string"
+            }
+          },
+          "source": {
+            "type": "object",
+            "nullable": true,
+            "properties": {
+              "type": {
+                "type": "string",
+                "enum": [
+                  "session",
+                  "note",
+                  "decision",
+                  "commit",
+                  "manual",
+                  "desktop"
+                ]
+              },
+              "id": {
+                "type": "string"
+              },
+              "harness": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
+            ]
+          },
+          "completed_at": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          },
+          "completion_note": {
+            "type": "string"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true,
+            "description": "The revision expected_updated_at must carry."
+          },
+          "path": {
+            "type": "string",
+            "description": "Logical data-directory path projects/<project>/ideas/<id>.md."
+          },
+          "provenance": {
+            "type": "object",
+            "properties": {
+              "origin": {
+                "type": "string"
+              },
+              "reviewed": {
+                "type": "boolean"
+              },
+              "trust": {
+                "type": "string"
+              }
+            }
+          },
+          "validity": {
+            "type": "object",
+            "properties": {
+              "valid_from": {
+                "type": "string",
+                "format": "date-time",
+                "nullable": true
+              },
+              "valid_to": {
+                "type": "string",
+                "format": "date-time",
+                "nullable": true
+              },
+              "superseded_by": {
+                "type": "string"
+              },
+              "supersedes": {
+                "type": "string"
+              },
+              "confidence": {
+                "type": "number"
+              }
+            }
+          },
+          "relations": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            }
+          },
+          "review": {
+            "type": "object",
+            "properties": {
+              "review_after": {
+                "type": "string",
+                "format": "date-time",
+                "nullable": true
+              },
+              "reviewed_at": {
+                "type": "string",
+                "format": "date-time",
+                "nullable": true
+              }
+            }
+          }
+        }
+      },
+      "IdeaProblem": {
+        "type": "object",
+        "required": [
+          "path",
+          "kind",
+          "reason"
+        ],
+        "properties": {
+          "path": {
+            "type": "string"
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "idea"
+            ]
+          },
+          "reason": {
+            "type": "string"
+          }
+        }
+      },
+      "IdeaPage": {
+        "type": "object",
+        "required": [
+          "ideas",
+          "problems",
+          "total"
+        ],
+        "properties": {
+          "ideas": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Idea"
+            }
+          },
+          "problems": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/IdeaProblem"
+            }
+          },
+          "total": {
+            "type": "integer",
+            "description": "Matches before limit."
+          },
+          "project_source": {
+            "type": "string",
+            "enum": [
+              "explicit"
+            ],
+            "description": "Present only when the request named one project."
+          }
+        }
+      },
+      "IdeaWrite": {
+        "type": "object",
+        "required": [
+          "idea"
+        ],
+        "properties": {
+          "idea": {
+            "$ref": "#/components/schemas/Idea"
+          },
+          "project_source": {
+            "type": "string",
+            "enum": [
+              "explicit",
+              "cwd",
+              "default"
+            ],
+            "description": "Added to an edit only when the request moved the idea."
+          }
+        }
+      },
+      "IdeaShow": {
+        "type": "object",
+        "required": [
+          "idea"
+        ],
+        "properties": {
+          "idea": {
+            "$ref": "#/components/schemas/Idea"
+          }
+        }
+      },
+      "IdeaTrash": {
+        "type": "object",
+        "required": [
+          "id",
+          "trashed"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "trashed": {
+            "type": "boolean"
+          }
+        }
+      },
+      "IdeaBrief": {
+        "type": "object",
+        "required": [
+          "text",
+          "ideas",
+          "open",
+          "due_today",
+          "muted"
+        ],
+        "properties": {
+          "text": {
+            "type": "string",
+            "description": "Exactly the session block; never contains body text."
+          },
+          "ideas": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Idea"
+            }
+          },
+          "open": {
+            "type": "integer"
+          },
+          "due_today": {
+            "type": "integer"
+          },
+          "muted": {
+            "type": "boolean"
+          }
+        }
+      },
+      "IdeaCreate": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "title"
+        ],
+        "properties": {
+          "title": {
+            "type": "string",
+            "maxLength": 200
+          },
+          "body": {
+            "type": "string",
+            "maxLength": 1048576
+          },
+          "project": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "open",
+              "doing",
+              "done",
+              "dropped",
+              "someday"
+            ]
+          },
+          "priority": {
+            "type": "string",
+            "enum": [
+              "low",
+              "normal",
+              "high"
+            ]
+          },
+          "due_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "due_date": {
+            "type": "string"
+          },
+          "remind_before_minutes": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 10080
+          },
+          "tags": {
+            "type": "array",
+            "maxItems": 10,
+            "items": {
+              "type": "string"
+            }
+          },
+          "source": {
+            "type": "object",
+            "properties": {
+              "type": {
+                "type": "string",
+                "enum": [
+                  "session",
+                  "note",
+                  "decision",
+                  "commit",
+                  "manual",
+                  "desktop"
+                ]
+              },
+              "id": {
+                "type": "string"
+              },
+              "harness": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
+            ]
+          }
+        }
+      },
+      "IdeaPatch": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "title": {
+            "type": "string",
+            "maxLength": 200
+          },
+          "body": {
+            "type": "string",
+            "maxLength": 1048576
+          },
+          "project": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "open",
+              "doing",
+              "done",
+              "dropped",
+              "someday"
+            ]
+          },
+          "priority": {
+            "type": "string",
+            "enum": [
+              "low",
+              "normal",
+              "high"
+            ]
+          },
+          "due_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "due_date": {
+            "type": "string"
+          },
+          "remind_before_minutes": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 10080
+          },
+          "tags": {
+            "type": "array",
+            "maxItems": 10,
+            "items": {
+              "type": "string"
+            }
+          },
+          "clear_due": {
+            "type": "boolean",
+            "default": false
+          },
+          "clear_reminder": {
+            "type": "boolean",
+            "default": false
+          },
+          "clear_tags": {
+            "type": "boolean",
+            "default": false
+          },
+          "expected_updated_at": {
+            "type": "string",
+            "format": "date-time"
           }
         }
       }
