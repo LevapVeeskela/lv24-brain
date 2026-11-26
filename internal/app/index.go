@@ -32,7 +32,10 @@ type IndexResult struct {
 	Decisions int
 	Attempts  int
 	Handoffs  int
-	Dumps     int
+	// Ideas counts live ideas, including those of a project removed from the
+	// registry (their directory is still scanned).
+	Ideas int
+	Dumps int
 	// Items counts live raw-zone items (connectors/<id>/items).
 	Items     int
 	Documents int
@@ -149,6 +152,12 @@ func (a *App) Reindex(ctx context.Context, opts IndexOptions) (IndexResult, erro
 			result.Handoffs++
 			result.Documents++
 		}
+	}
+	ideas, err := a.indexIdeas(ctx, upsert)
+	result.Ideas = ideas
+	result.Documents += ideas
+	if err != nil {
+		return result, err
 	}
 	dumps, warnings, err := a.indexDumps(ctx, projects, upsert)
 	result.Dumps = dumps
@@ -442,6 +451,28 @@ func (a *App) IndexDumps(ctx context.Context) (int, error) {
 		a.markIndexDirty()
 	}
 	return count, err
+}
+
+// indexIdeas upserts every live idea. The store lists all registered projects
+// and the orphan projects/*/ideas directories, so an idea of a removed project
+// stays searchable by its id without inventing a registry entry. Unparsable
+// files are skipped by the store and reported as problem rows; they are never
+// indexed, deleted or rewritten here.
+func (a *App) indexIdeas(ctx context.Context, upsert func(ports.Document) error) (int, error) {
+	store, ok := a.deps.Store.(ports.IdeaStore)
+	if !ok {
+		return 0, nil
+	}
+	ideas, err := store.ListIdeas(ctx, ports.IdeaFilter{})
+	if err != nil {
+		return 0, fmt.Errorf("list ideas: %w", err)
+	}
+	for index, idea := range ideas {
+		if err := upsert(ideaDocument(idea)); err != nil {
+			return index, fmt.Errorf("index idea %s: %w", idea.ID, err)
+		}
+	}
+	return len(ideas), nil
 }
 
 // indexDumps indexes connector dumps and returns the ambiguous repository

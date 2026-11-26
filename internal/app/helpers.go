@@ -420,6 +420,49 @@ func handoffDocument(handoff domain.Handoff) ports.Document {
 	}
 }
 
+// ideaDocument projects one idea into the search index. The body keeps the
+// idea text and appends the tags so a tag is searchable without a separate
+// column. Ideas do not write content_updated_at, so the projection uses the
+// revision for it, and the due instant is indexed in Unix milliseconds by the
+// adapter. The planning fields travel in dedicated columns: search filters and
+// rows read them instead of parsing the body.
+func ideaDocument(idea domain.Idea) ports.Document {
+	origin, trust := provenanceColumns(idea.Provenance)
+	body := idea.Body
+	if len(idea.Tags) > 0 {
+		body = joinText(body, strings.Join(idea.Tags, " "))
+	}
+	updated := updatedOrCreated(idea.UpdatedAt, idea.CreatedAt)
+	doc := ports.Document{
+		ID:               indexKey(idea.ProjectID, idea.ID),
+		ProjectID:        idea.ProjectID,
+		Kind:             ports.RecordIdea,
+		Title:            idea.Title,
+		Body:             body,
+		Origin:           origin,
+		Trust:            trust,
+		UpdatedAt:        updated,
+		ContentUpdatedAt: updated,
+		ValidFrom:        idea.Validity.EffectiveFrom(idea.CreatedAt),
+		ValidTo:          idea.Validity.ValidTo,
+		SupersededBy:     idea.Validity.SupersededBy,
+		Supersedes:       idea.Validity.Supersedes,
+		Status:           string(idea.Status),
+		Priority:         string(idea.Priority),
+		DueDate:          idea.DueDate,
+		Confidence:       idea.Validity.Confidence,
+		Subtype:          idea.Subtype,
+		Scope:            string(idea.Scope),
+		TopicKey:         idea.TopicKey,
+		Occurrences:      idea.Taxonomy.NormalizedOccurrences(),
+		Relations:        relationLinks(idea.Relations),
+	}
+	if idea.DueAt != nil {
+		doc.DueAt = idea.DueAt.UTC()
+	}
+	return doc
+}
+
 func handoffTitle(handoff domain.Handoff) string {
 	if handoff.CreatedAt.IsZero() {
 		return "Handoff"

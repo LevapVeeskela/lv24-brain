@@ -8,10 +8,10 @@ import (
 	"github.com/levapveeskela/lv24-brain/internal/ports"
 )
 
-// TestSchemaV10AddsProjectionColumnsAndMeta pins the v10 shape: the derived
-// projection columns on documents and the meta table that carries the index
-// generation, indexed_from and schema version.
-func TestSchemaV10AddsProjectionColumnsAndMeta(t *testing.T) {
+// TestSchemaAddsProjectionColumnsAndMeta pins the v10 projection columns and
+// the meta table that carries the index generation, indexed_from and schema
+// version; the current schema version is asserted alongside.
+func TestSchemaAddsProjectionColumnsAndMeta(t *testing.T) {
 	index := newTestIndex(t)
 	ctx := context.Background()
 
@@ -19,8 +19,8 @@ func TestSchemaV10AddsProjectionColumnsAndMeta(t *testing.T) {
 	if err := index.db.QueryRowContext(ctx, "PRAGMA user_version").Scan(&version); err != nil {
 		t.Fatal(err)
 	}
-	if version != 10 {
-		t.Fatalf("user_version = %d, want 10", version)
+	if version != 11 {
+		t.Fatalf("user_version = %d, want 11", version)
 	}
 	columns := tableColumns(t, index, "documents")
 	for _, want := range []string{"content_hash", "stub"} {
@@ -35,8 +35,8 @@ func TestSchemaV10AddsProjectionColumnsAndMeta(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if meta[metaSchemaVersion] != "10" {
-		t.Fatalf("meta schema_version = %q, want 10", meta[metaSchemaVersion])
+	if meta[metaSchemaVersion] != "11" {
+		t.Fatalf("meta schema_version = %q, want 11", meta[metaSchemaVersion])
 	}
 }
 
@@ -62,7 +62,7 @@ func TestMetaRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if meta[metaGeneration] != "generation-2" || meta[metaIndexedFrom] != "abc1234+dirty" || meta[metaSchemaVersion] != "10" {
+	if meta[metaGeneration] != "generation-2" || meta[metaIndexedFrom] != "abc1234+dirty" || meta[metaSchemaVersion] != "11" {
 		t.Fatalf("meta = %v", meta)
 	}
 	if err := index.SetMeta(ctx, map[string]string{"": "bad"}); err == nil {
@@ -165,7 +165,7 @@ func TestSchemaUpgradeFromV9RebuildsOnce(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if meta[metaSchemaVersion] != "10" {
+	if meta[metaSchemaVersion] != "11" {
 		t.Fatalf("meta after rebuild = %v", meta)
 	}
 }

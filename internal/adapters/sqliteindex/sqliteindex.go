@@ -677,6 +677,12 @@ func documentArgs(doc ports.Document, projection projectionColumns) []any {
 		// leaves them empty so an adapter-only write is visibly unprojected.
 		projection.contentHash,
 		boolToInt(projection.stub),
+		// priority, due_at and due_date are the idea scheduling projection.
+		// The schema default gives every non-idea document "normal"; the two
+		// due columns stay NULL when the idea has no due of that shape.
+		normalizedPriority(doc.Priority),
+		nullableMilliseconds(doc.DueAt),
+		nullableString(doc.DueDate),
 	}
 }
 
@@ -737,6 +743,24 @@ func nullableString(value string) any {
 		return nil
 	}
 	return strings.TrimSpace(value)
+}
+
+// nullableMilliseconds stores the zero time as SQL NULL and every other
+// instant as Unix milliseconds, the unit the idea contract fixes for due_at.
+func nullableMilliseconds(at time.Time) any {
+	if at.IsZero() {
+		return nil
+	}
+	return at.UnixMilli()
+}
+
+// normalizedPriority stores the schema default for a document without one, so
+// a priority filter never silently drops a record that never had the field.
+func normalizedPriority(priority string) string {
+	if value := strings.TrimSpace(priority); value != "" {
+		return value
+	}
+	return "normal"
 }
 
 // normalizedScope stores an explicit project scope for documents written
@@ -863,6 +887,9 @@ func (i *Index) runSearch(ctx context.Context, query ports.Query, match string) 
 			validTo      sql.NullInt64
 			supersededBy sql.NullString
 			status       string
+			priority     string
+			dueAt        sql.NullInt64
+			dueDate      sql.NullString
 			confidence   float64
 			subtype      string
 			scope        string
@@ -874,7 +901,7 @@ func (i *Index) runSearch(ctx context.Context, query ports.Query, match string) 
 		)
 		if err := rows.Scan(&hit.ID, &hit.ProjectID, &hit.Kind, &hit.Title, &snippet, &body, &score,
 			&contrib[0], &contrib[1], &contrib[2], &contrib[3], &contrib[4],
-			&validFrom, &validTo, &supersededBy, &status, &confidence,
+			&validFrom, &validTo, &supersededBy, &status, &priority, &dueAt, &dueDate, &confidence,
 			&subtype, &scope, &topicKey, &occurrences, &pinnedFlag, &contentHash, &updatedAt); err != nil {
 			return nil, fmt.Errorf("sqliteindex: scan hit: %w", err)
 		}
@@ -883,6 +910,12 @@ func (i *Index) runSearch(ctx context.Context, query ports.Query, match string) 
 		hit.Body = body.String
 		hit.ContentHash = contentHash
 		hit.Score = score
+		hit.Status = status
+		hit.Priority = priority
+		hit.DueDate = dueDate.String
+		if dueAt.Valid {
+			hit.DueAt = time.UnixMilli(dueAt.Int64).UTC()
+		}
 		hit.Subtype = subtype
 		hit.Scope = scope
 		hit.TopicKey = topicKey
