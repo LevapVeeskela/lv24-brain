@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -84,6 +85,8 @@ func linkFields(record Record) []recordField {
 		return []recordField{{"hypothesis", a.Hypothesis}, {"result", a.Result}, {"reason", a.Reason}}
 	case record.Handoff != nil:
 		return []recordField{{"summary", record.Handoff.Summary}, {"next_action", record.Handoff.NextAction}}
+	case record.Idea != nil:
+		return []recordField{{"body", record.Idea.Body}}
 	}
 	return nil
 }
@@ -205,6 +208,19 @@ func (a *App) RecordLinks(ctx context.Context, projectID, id string) (RecordLink
 		if record.Summary().ID == id {
 			result.Record, found = record, true
 			break
+		}
+	}
+	if !found {
+		// `brain record show <idea-id>` reaches RecordLinks; ideas are not in
+		// projectRecords because knowledge retrieval excludes them.
+		record, err := a.GetRecord(ctx, project.ID, id)
+		if err == nil && record.Idea != nil {
+			result.Record, found = record, true
+			records = append(records, record)
+		}
+		var problem *domain.ProblemError
+		if errors.As(err, &problem) {
+			return RecordLinks{}, err
 		}
 	}
 	if !found {

@@ -67,6 +67,10 @@ func (a *App) EditRecord(ctx context.Context, edit RecordEdit) (RecordEditResult
 	if err != nil {
 		return RecordEditResult{}, err
 	}
+	if record.Idea != nil {
+		return RecordEditResult{}, domain.NewValidationError("kind",
+			"an idea is edited with brain idea edit, not brain record edit")
+	}
 	summary := record.Summary()
 	if !edit.ExpectedUpdatedAt.IsZero() && !edit.ExpectedUpdatedAt.UTC().Equal(summary.UpdatedAt.UTC()) {
 		return RecordEditResult{}, domain.NewRevisionConflictError(summary.Kind, summary.ID, summary.UpdatedAt)

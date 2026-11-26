@@ -102,6 +102,10 @@ func RecordText(record Record) string {
 	case record.Handoff != nil:
 		writeSection("Summary", record.Handoff.Summary)
 		writeSection("Next action", record.Handoff.NextAction)
+	case record.Idea != nil:
+		// The body is the only free text of an idea; the title lives in the
+		// summary line.
+		builder.WriteString(record.Idea.Body)
 	}
 	return builder.String()
 }

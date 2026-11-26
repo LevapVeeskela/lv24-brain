@@ -72,11 +72,14 @@ func (r Record) Provenance() domain.Provenance {
 		return r.Attempt.Provenance
 	case r.Handoff != nil:
 		return r.Handoff.Provenance
+	case r.Idea != nil:
+		return r.Idea.Provenance
 	}
 	return domain.Provenance{}
 }
 
-// Permalink returns the canonical permalink of whichever record is set.
+// Permalink returns the canonical permalink of whichever record is set. An
+// idea has none: its globally unique id is the stable reference.
 func (r Record) Permalink() string {
 	switch {
 	case r.Note != nil:
@@ -140,6 +143,10 @@ type Record struct {
 	Decision *domain.Decision
 	Attempt  *domain.Attempt
 	Handoff  *domain.Handoff
+	// Idea is set only by the idea read path (`brain idea ...` and a
+	// `brain record show` of an idea id). Knowledge retrieval never loads
+	// ideas, so a Record returned by the context builder cannot be an idea.
+	Idea *domain.Idea
 }
 
 // Summary returns the listing form of a record.
@@ -166,6 +173,11 @@ func (r Record) Summary() RecordSummary {
 			Title: SummarizeLine(r.Handoff.Summary, 100), CreatedAt: r.Handoff.CreatedAt,
 			UpdatedAt: updatedOrCreated(r.Handoff.UpdatedAt, r.Handoff.CreatedAt)}
 		valid = r.Handoff.Validity
+	case r.Idea != nil:
+		summary = RecordSummary{Kind: ports.RecordIdea, ID: r.Idea.ID, ProjectID: r.Idea.ProjectID,
+			Title: SummarizeLine(r.Idea.Title, 100), Status: string(r.Idea.Status),
+			CreatedAt: r.Idea.CreatedAt, UpdatedAt: updatedOrCreated(r.Idea.UpdatedAt, r.Idea.CreatedAt)}
+		valid = r.Idea.Validity
 	}
 	summary.ValidFrom = valid.EffectiveFrom(summary.CreatedAt)
 	summary.ValidTo = valid.ValidTo
@@ -195,6 +207,10 @@ func recordContentUpdatedAt(record Record) time.Time {
 		return record.Attempt.ContentUpdatedAt
 	case record.Handoff != nil:
 		return record.Handoff.ContentUpdatedAt
+	case record.Idea != nil:
+		// Ideas do not write content_updated_at: updated_at is the revision
+		// of the whole record.
+		return record.Idea.UpdatedAt
 	}
 	return time.Time{}
 }
@@ -214,6 +230,9 @@ func taxonomyOf(record Record) (string, string, string, int) {
 	case record.Handoff != nil:
 		taxonomy := record.Handoff.Taxonomy
 		return taxonomy.Subtype, string(taxonomy.Scope.Normalized()), taxonomy.TopicKey, taxonomy.NormalizedOccurrences()
+	case record.Idea != nil:
+		taxonomy := record.Idea.Taxonomy
+		return taxonomy.Subtype, string(taxonomy.Scope.Normalized()), taxonomy.TopicKey, taxonomy.NormalizedOccurrences()
 	}
 	return "", "", "", 1
 }
@@ -229,6 +248,8 @@ func (r Record) Validity() domain.Validity {
 		return r.Attempt.Validity
 	case r.Handoff != nil:
 		return r.Handoff.Validity
+	case r.Idea != nil:
+		return r.Idea.Validity
 	}
 	return domain.Validity{}
 }
@@ -244,6 +265,8 @@ func (r Record) SetValidity(validity domain.Validity) Record {
 		r.Attempt.Validity = validity
 	case r.Handoff != nil:
 		r.Handoff.Validity = validity
+	case r.Idea != nil:
+		r.Idea.Validity = validity
 	}
 	return r
 }
@@ -304,6 +327,15 @@ func (a *App) ListRecords(ctx context.Context, opts ListRecordsOptions) ([]Recor
 	records, err := a.projectRecords(ctx, project.ID)
 	if err != nil {
 		return nil, err
+	}
+	if kindsAllowIdeas(opts.Kinds) {
+		ideas, ideaErr := a.projectIdeas(ctx, project.ID)
+		if ideaErr != nil {
+			return nil, ideaErr
+		}
+		for i := range ideas {
+			records = append(records, Record{Kind: ports.RecordIdea, Idea: &ideas[i]})
+		}
 	}
 	limit := opts.Limit
 	if limit <= 0 {
@@ -400,6 +432,17 @@ func (a *App) GetRecord(ctx context.Context, projectID, id string) (Record, erro
 			return record, nil
 		}
 	}
+	if strings.HasPrefix(id, ports.RecordIdea+"-") {
+		// Ideas are not part of projectRecords (knowledge retrieval must stay
+		// free of them), but `brain record show <idea-id>` reads one.
+		idea, ideaErr := a.GetIdea(ctx, id)
+		if ideaErr == nil && idea.ProjectID == project.ID {
+			return Record{Kind: ports.RecordIdea, Idea: &idea}, nil
+		}
+		if ideaErr != nil && !errors.Is(ideaErr, domain.ErrNotFound) && !errors.Is(ideaErr, domain.ErrUnsupported) {
+			return Record{}, ideaErr
+		}
+	}
 	return Record{}, fmt.Errorf("record %q in project %s: %w", id, project.ID, domain.ErrNotFound)
 }
 
@@ -445,6 +488,10 @@ func (a *App) SetRecordPinned(ctx context.Context, projectID, id string, pinned 
 	record, err := a.GetRecord(ctx, projectID, id)
 	if err != nil {
 		return Record{}, err
+	}
+	if record.Idea != nil {
+		return Record{}, domain.NewValidationError("id",
+			fmt.Sprintf("idea %s is not pinned; ideas have no pin flag", record.Idea.ID))
 	}
 	summary := record.Summary()
 	if _, err := pinner.SetRecordPinned(ctx, summary.ProjectID, summary.Kind, summary.ID, pinned); err != nil {
@@ -540,6 +587,9 @@ func (a *App) TrashRecord(ctx context.Context, projectID, id string) (Record, er
 	if err != nil {
 		return Record{}, err
 	}
+	if record.Idea != nil {
+		return Record{}, ideaLifecycleError("trash")
+	}
 	summary := record.Summary()
 	if err := editor.TrashRecord(ctx, summary.ProjectID, summary.Kind, summary.ID); err != nil {
 		if summary.Kind == ports.RecordNote && errors.Is(err, domain.ErrNotFound) {
@@ -577,6 +627,9 @@ func (a *App) RestoreRecord(ctx context.Context, projectID, id string) (Record, 
 		return Record{}, err
 	}
 	id = strings.TrimSpace(id)
+	if domain.IsRecordID(ports.RecordIdea, id) {
+		return Record{}, ideaLifecycleError("restore")
+	}
 	kind := ""
 	for _, item := range trashed {
 		if item.ID == id {
@@ -626,17 +679,35 @@ func recordDocument(record Record) ports.Document {
 		return decisionDocument(*record.Decision)
 	case record.Attempt != nil:
 		return attemptDocument(*record.Attempt)
-	default:
+	case record.Handoff != nil:
 		return handoffDocument(*record.Handoff)
+	default:
+		// The ideas index projection lands with WS3. In 0.28.0 no write path
+		// reaches this case with an idea: trash, restore, pin and edit refuse
+		// ideas, and AddIdea/UpdateIdea use their own hook.
+		return ports.Document{}
 	}
+}
+
+// kindsAllowIdeas reports whether a record listing asked for ideas. An empty
+// kind list means every kind, including idea.
+func kindsAllowIdeas(kinds []string) bool {
+	return len(kinds) == 0 || containsString(kinds, ports.RecordIdea)
+}
+
+// ideaLifecycleError refuses an idea in a generic record lifecycle command.
+// Only `brain idea rm|restore` may move one.
+func ideaLifecycleError(action string) error {
+	return domain.NewValidationError("kind",
+		fmt.Sprintf("an idea is not handled by brain record %s; use brain idea %s", action, action))
 }
 
 func validateRecordKind(kind string) error {
 	switch kind {
-	case ports.RecordNote, ports.RecordDecision, ports.RecordAttempt, ports.RecordHandoff:
+	case ports.RecordNote, ports.RecordDecision, ports.RecordAttempt, ports.RecordHandoff, ports.RecordIdea:
 		return nil
 	}
-	return domain.NewValidationError("kind", fmt.Sprintf("unknown record kind %q (note, decision, attempt, handoff)", kind))
+	return domain.NewValidationError("kind", fmt.Sprintf("unknown record kind %q (note, decision, attempt, handoff, idea)", kind))
 }
 
 func containsString(values []string, target string) bool {

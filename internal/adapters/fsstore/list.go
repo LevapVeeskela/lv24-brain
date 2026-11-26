@@ -53,8 +53,9 @@ func (s *Store) ListHandoffs(ctx context.Context, projectID string) ([]domain.Ha
 }
 
 // Problems reports the record files that the List methods skip for projectID:
-// notes, decisions, attempts and handoffs that are unreadable, have malformed
-// frontmatter, carry an incompatible kind or schema, or are zero bytes.
+// notes, decisions, attempts, handoffs and ideas that are unreadable, have
+// malformed frontmatter, carry an incompatible kind or schema, are zero bytes,
+// or (for an idea) contain git conflict markers.
 // Results are ordered by kind, then by path. A missing project is an error; a
 // project without problems returns an empty slice.
 func (s *Store) Problems(ctx context.Context, projectID string) ([]Problem, error) {
@@ -81,10 +82,15 @@ func (s *Store) Problems(ctx context.Context, projectID string) ([]Problem, erro
 	if err != nil {
 		return nil, err
 	}
+	_, ideaProblems, err := s.scanIdeas(ctx, projectID)
+	if err != nil {
+		return nil, err
+	}
 	problems = append(problems, noteProblems...)
 	problems = append(problems, decisionProblems...)
 	problems = append(problems, attemptProblems...)
 	problems = append(problems, handoffProblems...)
+	problems = append(problems, ideaProblems...)
 	return problems, nil
 }
 

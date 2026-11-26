@@ -149,6 +149,23 @@ func NewTargetExistsError(kind, id, path string) error {
 	return &TargetExistsError{Kind: kind, ID: id, Path: path}
 }
 
+// ProblemError reports a record file the engine could not read as a valid
+// record. It is returned instead of a zero record, so a caller can show the
+// path and reason and map it to a conflict without touching the file.
+type ProblemError struct {
+	Path   string
+	Kind   string
+	Reason string
+}
+
+func (e *ProblemError) Error() string {
+	return fmt.Sprintf("%s problem at %s: %s", e.Kind, e.Path, e.Reason)
+}
+
+// Unwrap matches the problem-file contract of the local API: a conflicted or
+// unparsable file is a conflict (409), never a zero record.
+func (e *ProblemError) Unwrap() error { return ErrConflict }
+
 // RevisionConflictError reports a record edit refused because the stored
 // record changed after the caller read it. CurrentUpdatedAt is the revision the
 // caller must send to retry; the conflicting edit wrote nothing.

@@ -98,6 +98,8 @@ func (r Record) ReviewSchedule() domain.ReviewSchedule {
 		return r.Attempt.ReviewSchedule
 	case r.Handoff != nil:
 		return r.Handoff.ReviewSchedule
+	case r.Idea != nil:
+		return r.Idea.ReviewSchedule
 	}
 	return domain.ReviewSchedule{}
 }

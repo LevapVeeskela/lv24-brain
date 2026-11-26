@@ -66,6 +66,17 @@ func handoffWriteContent(handoff domain.Handoff) writeContent {
 	}
 }
 
+func ideaWriteContent(idea domain.Idea) writeContent {
+	return writeContent{
+		titleField:    "idea.title",
+		title:         idea.Title,
+		bodyField:     "idea.body",
+		body:          []string{idea.Body},
+		metadataField: "idea.tags",
+		metadata:      [][]string{idea.Tags},
+	}
+}
+
 // recordWriteContent returns the bounded content of whichever record is set.
 func recordWriteContent(record Record) writeContent {
 	switch {
@@ -77,6 +88,8 @@ func recordWriteContent(record Record) writeContent {
 		return attemptWriteContent(*record.Attempt)
 	case record.Handoff != nil:
 		return handoffWriteContent(*record.Handoff)
+	case record.Idea != nil:
+		return ideaWriteContent(*record.Idea)
 	default:
 		return writeContent{}
 	}
@@ -238,6 +251,8 @@ func recordDir(kind string) string {
 		return "attempts"
 	case ports.RecordHandoff:
 		return "handoffs"
+	case ports.RecordIdea:
+		return "ideas"
 	default:
 		return "records"
 	}
