@@ -26,7 +26,10 @@ var schemaStatements = []string{
 		origin TEXT NOT NULL DEFAULT '',
 		trust TEXT NOT NULL DEFAULT '',
 		content_hash TEXT NOT NULL DEFAULT '',
-		stub INTEGER NOT NULL DEFAULT 0
+		stub INTEGER NOT NULL DEFAULT 0,
+		priority TEXT NOT NULL DEFAULT 'normal',
+		due_at INTEGER,
+		due_date TEXT
 	)`,
 	`CREATE INDEX IF NOT EXISTS documents_project_idx ON documents(project_id)`,
 	`CREATE INDEX IF NOT EXISTS documents_content_hash_idx ON documents(project_id, content_hash)`,
@@ -83,8 +86,8 @@ var schemaStatements = []string{
 	END`,
 }
 
-const upsertSQL = `INSERT INTO documents (id, project_id, kind, title, body, updated_at, content_updated_at, valid_from, valid_to, superseded_by, supersedes, status, confidence, subtype, scope, topic_key, occurrences, pinned, origin, trust, content_hash, stub)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+const upsertSQL = `INSERT INTO documents (id, project_id, kind, title, body, updated_at, content_updated_at, valid_from, valid_to, superseded_by, supersedes, status, confidence, subtype, scope, topic_key, occurrences, pinned, origin, trust, content_hash, stub, priority, due_at, due_date)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(id) DO UPDATE SET
 	project_id = excluded.project_id,
 	kind = excluded.kind,
@@ -106,7 +109,10 @@ ON CONFLICT(id) DO UPDATE SET
 	origin = excluded.origin,
 	trust = excluded.trust,
 	content_hash = excluded.content_hash,
-	stub = excluded.stub`
+	stub = excluded.stub,
+	priority = excluded.priority,
+	due_at = excluded.due_at,
+	due_date = excluded.due_date`
 
 const upsertMetaSQL = `INSERT INTO meta (key, value) VALUES (?, ?)
 ON CONFLICT(key) DO UPDATE SET value = excluded.value`
@@ -145,7 +151,10 @@ ON CONFLICT(source_id, target_id, relation) DO UPDATE SET
 // kind+title+body, used to collapse duplicates across clones) and stub (a
 // low-signal record the retrieval hides by default), plus the meta table that
 // records index_generation, indexed_from and schema_version.
-const schemaVersion = 10
+// Version 11 adds the idea scheduling projection (priority, due_at as Unix
+// milliseconds, due_date as a local YYYY-MM-DD string). Ideas do not write
+// content_updated_at, so the reindex projects updated_at there.
+const schemaVersion = 11
 
 // dropStatements remove everything schemaStatements creates. Triggers go
 // first because they reference the tables.

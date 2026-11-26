@@ -75,8 +75,12 @@ type SearchOptions struct {
 	ProjectID string
 	Limit     int
 	// Kinds keeps only these kinds (note, decision, attempt, handoff, state,
-	// dump); naming "dump" includes dumps.
+	// idea, dump); naming "dump" includes dumps.
 	Kinds []string
+	// ExcludeKinds drops these kinds from the query. It is combined with the
+	// raw-zone exclusion: a caller can never accidentally widen a curated
+	// search into raw text. Empty keeps every kind that Kinds allows.
+	ExcludeKinds []string
 	// IncludeDumps adds connector dumps and raw-zone items (kind "item") to
 	// an unfiltered search.
 	IncludeDumps bool
@@ -303,6 +307,11 @@ func (a *App) search(ctx context.Context, opts SearchOptions, rawKinds []string,
 	}
 	if len(query.Kinds) == 0 && !opts.IncludeDumps {
 		query.ExcludeKinds = rawKinds
+	}
+	for _, kind := range opts.ExcludeKinds {
+		if kind = strings.TrimSpace(kind); kind != "" {
+			query.ExcludeKinds = append(query.ExcludeKinds, kind)
+		}
 	}
 	raw := wantsRawText(query.Kinds, opts.IncludeDumps)
 

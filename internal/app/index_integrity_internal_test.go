@@ -142,8 +142,8 @@ func TestReindexStoresIndexMetaAndStatus(t *testing.T) {
 	if status.Head != head || status.IndexedFrom != indexedFrom || status.Generation != generation {
 		t.Fatalf("status = %+v, want head %q and marker %q", status, head, indexedFrom)
 	}
-	if status.SchemaVersion != "10" {
-		t.Fatalf("schema version = %q, want 10", status.SchemaVersion)
+	if status.SchemaVersion != "11" {
+		t.Fatalf("schema version = %q, want 11", status.SchemaVersion)
 	}
 
 	gitTestWrite(t, dataDir, "README.md", "data v2\n")

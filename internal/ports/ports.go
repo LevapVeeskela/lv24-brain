@@ -98,9 +98,20 @@ type Document struct {
 	SupersededBy string
 	Supersedes   string
 	// Status is the decision status (proposed, accepted, rejected,
-	// superseded) and is empty for other kinds. Ranking treats an accepted
-	// decision as pinned authority.
+	// superseded), the idea status (open, doing, done, dropped, someday) and
+	// is empty for other kinds. Ranking treats an accepted decision as pinned
+	// authority.
 	Status string
+	// Priority is the idea priority (low, normal, high); every idea has one
+	// and other kinds carry the normal default.
+	Priority string
+	// DueAt is the timed due instant of an idea. Zero means no timed due.
+	// The index stores the instant only; the offset lives in the Markdown
+	// record and is not part of the derived projection.
+	DueAt time.Time
+	// DueDate is the local calendar date (YYYY-MM-DD) of an all-day idea.
+	// Empty means no all-day due.
+	DueDate string
 	// Confidence is the optional 0..1 author confidence of the record.
 	Confidence float64
 	// Pinned is an explicit pin set by the owner; it feeds the pin ranking
@@ -239,6 +250,18 @@ type Hit struct {
 	ValidTo   time.Time
 	// SupersededBy is the id of the record that replaced this one.
 	SupersededBy string
+	// Status is the indexed record status: a decision status or an idea
+	// status. Other kinds leave it empty.
+	Status string
+	// Priority is the idea priority (low, normal, high). Every idea carries
+	// one; other kinds carry the normal default of the index.
+	Priority string
+	// DueAt is the timed due instant of an idea; zero when the idea has no
+	// timed due (an all-day or undated idea).
+	DueAt time.Time
+	// DueDate is the all-day due date of an idea in YYYY-MM-DD; empty when
+	// the idea has no all-day due.
+	DueDate string
 	// Subtype, Scope, TopicKey and Occurrences mirror the indexed
 	// classification so a caller can show why a hit matched a filter.
 	Subtype     string

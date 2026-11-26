@@ -50,6 +50,7 @@ func (a *App) Doctor(ctx context.Context, opts DoctorOptions) (DoctorReport, err
 	checks = append(checks, a.doctorIndex(ctx))
 	checks = append(checks, a.doctorIndexGeneration(ctx))
 	checks = append(checks, a.doctorRecords(ctx))
+	checks = append(checks, a.doctorIdeas(ctx))
 	checks = append(checks, a.doctorRecordLimits(ctx))
 	checks = append(checks, a.doctorJournal(ctx))
 	checks = append(checks, a.doctorIDs(ctx))
@@ -465,12 +466,68 @@ func (a *App) doctorRecords(ctx context.Context) DoctorCheck {
 	}
 }
 
+// doctorIdeas reports the idea layer: the live count, how many are open and
+// the idea files the store skipped as problem rows. Ideas are optional and
+// report-only here; doctor never moves, rewrites or deletes one.
+func (a *App) doctorIdeas(ctx context.Context) DoctorCheck {
+	const name = "ideas"
+	if a.cfg.Mode == config.ModeServer {
+		return DoctorCheck{Name: name, Status: doctorOK, Message: "ideas are not supported in server mode"}
+	}
+	store, ok := a.deps.Store.(ports.IdeaStore)
+	if !ok {
+		return DoctorCheck{Name: name, Status: doctorOK, Message: "not checked for this store"}
+	}
+	ideas, err := store.ListIdeas(ctx, ports.IdeaFilter{})
+	if err != nil {
+		return DoctorCheck{Name: name, Status: doctorFail, Message: err.Error()}
+	}
+	open := 0
+	for _, idea := range ideas {
+		if !idea.Status.Terminal() {
+			open++
+		}
+	}
+	projects, err := a.deps.Store.ListProjects(ctx)
+	if err != nil {
+		return DoctorCheck{Name: name, Status: doctorFail, Message: err.Error()}
+	}
+	var problems []ports.RecordProblem
+	for _, project := range projects {
+		found, err := a.ideaProblems(ctx, project.ID)
+		if err != nil {
+			return DoctorCheck{Name: name, Status: doctorFail, Message: project.ID + ": " + err.Error()}
+		}
+		problems = append(problems, found...)
+	}
+	summary := fmt.Sprintf("kind idea: %d ideas (%d open)", len(ideas), open)
+	if len(ideas) == 0 {
+		summary = "kind idea: no ideas"
+	}
+	if len(problems) == 0 {
+		return DoctorCheck{Name: name, Status: doctorOK, Message: summary}
+	}
+	listed := make([]string, 0, maxListedProblems)
+	for _, problem := range problems[:min(len(problems), maxListedProblems)] {
+		listed = append(listed, a.displayPath(problem.Path)+" ("+problem.Reason+")")
+	}
+	return DoctorCheck{
+		Name:   name,
+		Status: doctorWarn,
+		Code:   "idea-problems",
+		Message: fmt.Sprintf("%s, %d problem files are skipped and not indexed: %s; resolve them in git (nothing is deleted or rewritten)",
+			summary, len(problems), strings.Join(listed, "; ")),
+	}
+}
+
 func (a *App) doctorIndex(ctx context.Context) DoctorCheck {
 	if a.cfg.Mode == config.ModeServer {
 		return DoctorCheck{Name: "index", Status: doctorOK, Message: "server mode uses the remote database"}
 	}
 	if a.deps.Index == nil {
-		return DoctorCheck{Name: "index", Status: doctorFail, Message: "local search index is not available"}
+		// The index is a local cache, not required data: a missing one only
+		// disables search until `brain index` rebuilds it.
+		return DoctorCheck{Name: "index", Status: doctorWarn, Message: "local search index is not available; run brain index (search is disabled until then)"}
 	}
 	if _, err := a.deps.Index.Search(ctx, ports.Query{Text: "brain-doctor", Limit: 1}); err != nil {
 		return DoctorCheck{Name: "index", Status: doctorFail, Message: err.Error()}
@@ -478,7 +535,15 @@ func (a *App) doctorIndex(ctx context.Context) DoctorCheck {
 	if a.indexDirty() {
 		return DoctorCheck{Name: "index", Status: doctorWarn, Message: "the index may miss records (a write or sync could not update it); run brain index"}
 	}
-	return DoctorCheck{Name: "index", Status: doctorOK, Message: "SQLite FTS5 is usable"}
+	message := "SQLite FTS5 is usable"
+	if reader, ok := a.deps.Index.(indexMetaReader); ok {
+		if meta, err := reader.Meta(ctx); err == nil {
+			if version := strings.TrimSpace(meta[indexMetaSchemaVersion]); version != "" {
+				message += " (schema " + version + ")"
+			}
+		}
+	}
+	return DoctorCheck{Name: "index", Status: doctorOK, Message: message}
 }
 
 // doctorIndexGeneration reports an index that lags the data directory. It is

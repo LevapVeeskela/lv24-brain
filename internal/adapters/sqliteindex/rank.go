@@ -189,7 +189,7 @@ func rankedSelectPrefix(includeBody bool) string {
 	builder.WriteString("\t\t\t\tMIN(1.0, COALESCE(d.confidence, 0.0))\n")
 	builder.WriteString("\t\t\t) AS pin,\n")
 	builder.WriteString("\t\t\td.valid_from AS valid_from, d.valid_to AS valid_to, d.superseded_by AS superseded_by,\n")
-	builder.WriteString("\t\t\td.status AS status, d.confidence AS confidence,\n")
+	builder.WriteString("\t\t\td.status AS status, d.priority AS priority, d.due_at AS due_at, d.due_date AS due_date, d.confidence AS confidence,\n")
 	builder.WriteString("\t\t\td.subtype AS subtype, d.scope AS scope, d.topic_key AS topic_key, d.occurrences AS occurrences,\n")
 	builder.WriteString("\t\t\td.pinned AS pinned,\n")
 	builder.WriteString("\t\t\td.content_hash AS content_hash,\n")
@@ -236,7 +236,7 @@ func rankedSelectSuffix() string {
 	)
 	SELECT id, project_id, kind, title, snippet, body, score,
 		c_bm25, c_recency, c_importance, c_pin, c_link,
-		valid_from, valid_to, superseded_by, status, confidence, subtype, scope, topic_key, occurrences, pinned, content_hash, updated_at
+		valid_from, valid_to, superseded_by, status, priority, due_at, due_date, confidence, subtype, scope, topic_key, occurrences, pinned, content_hash, updated_at
 	FROM ranked_contrib
 	WHERE score >= ?
 	ORDER BY score DESC, bm DESC, updated_at DESC, id ASC

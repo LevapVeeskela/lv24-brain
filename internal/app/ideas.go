@@ -260,14 +260,28 @@ func (a *App) ideaProjectCandidates(ctx context.Context, selector string) ([]str
 	return candidates, nil
 }
 
-// afterIdeaWrite is the search-index hook WS3 fills. Until then a write never
-// depends on the index: a failure to index must not lose the idea file.
+// afterIdeaWrite projects a written idea into the search index. A write never
+// depends on the index: a failure is reported as "written but not indexed" and
+// marks the projection dirty, so the next search repairs it and the idea file
+// is never lost. A store without an index (or a nil one) is a no-op.
 func (a *App) afterIdeaWrite(ctx context.Context, idea domain.Idea) error {
-	return nil
+	if a.deps.Index == nil {
+		return nil
+	}
+	return a.upsertIndex(ctx, ideaDocument(idea))
 }
 
-// afterIdeaTrash is the index-removal hook WS3 fills.
+// afterIdeaTrash removes a trashed idea from the search index. The file is
+// already in trash, so a failed delete only marks the index dirty; the next
+// reindex drops the row because the live file is gone.
 func (a *App) afterIdeaTrash(ctx context.Context, idea domain.Idea) error {
+	if a.deps.Index == nil {
+		return nil
+	}
+	if err := a.deps.Index.Delete(ctx, indexKey(idea.ProjectID, idea.ID)); err != nil {
+		a.markIndexDirty()
+		return fmt.Errorf("idea %s was trashed but the search index update failed: %w", idea.ID, err)
+	}
 	return nil
 }
 

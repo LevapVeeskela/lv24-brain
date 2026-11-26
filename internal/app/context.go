@@ -358,6 +358,9 @@ func (a *App) contextSearch(ctx context.Context, query, projectID string, kinds 
 		Text: query, ProjectID: projectID, Limit: contextSearchLimit, Kinds: kinds, Since: since,
 		AsOf: opts.AsOf, IncludeSuperseded: opts.IncludeSuperseded,
 		Subtype: opts.Subtype, Scope: opts.Scope, TopicKey: opts.TopicKey,
+		// Ideas are tasks, not knowledge: they must never be ranked as a
+		// decision, attempt or note even when a future caller widens Kinds.
+		ExcludeKinds: []string{ports.RecordIdea},
 	})
 }
 
