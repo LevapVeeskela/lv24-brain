@@ -224,9 +224,33 @@ func TestAddIdeaRejectsInvalidUTF8AndLongSource(t *testing.T) {
 	if _, err := a.AddIdea(ctx, app.IdeaInput{ProjectID: project.ID, Title: "ok", Source: longSource}); !errors.Is(err, domain.ErrValidation) {
 		t.Fatalf("long source id error = %v, want ErrValidation", err)
 	}
+	if _, err := a.AddIdea(ctx, app.IdeaInput{ProjectID: project.ID, Title: "legacy", ID: "idea-2026-11-26-legacy"}); !errors.Is(err, domain.ErrValidation) {
+		t.Fatalf("legacy pinned id error = %v, want ErrValidation", err)
+	}
 	listed, err := a.ListIdeas(ctx, app.IdeaListOptions{ProjectID: project.ID})
 	if err != nil || len(listed.Ideas) != 0 {
 		t.Fatalf("refused writes created ideas: %+v, %v", listed.Ideas, err)
+	}
+}
+
+func TestAddIdeaDoneSetsCompletedAt(t *testing.T) {
+	ctx := context.Background()
+	a, store := newIdeaApp(t)
+	project := seedIdeaProject(t, store, domain.Project{ID: "p", Name: "P", Kind: domain.ProjectKindRepository})
+	added, err := a.AddIdea(ctx, app.IdeaInput{
+		ProjectID: project.ID,
+		Title:     "Already finished",
+		Status:    domain.IdeaDone,
+	})
+	if err != nil {
+		t.Fatalf("AddIdea: %v", err)
+	}
+	if added.Idea.CompletedAt == nil {
+		t.Fatal("done idea was created without completed_at")
+	}
+	got, err := a.GetIdea(ctx, added.Idea.ID)
+	if err != nil || got.Status != domain.IdeaDone || got.CompletedAt == nil {
+		t.Fatalf("stored done idea = %+v, %v", got, err)
 	}
 }
 
@@ -360,6 +384,10 @@ func TestListIdeasFiltersTagsAndProblems(t *testing.T) {
 	none, err := a.ListIdeas(ctx, app.IdeaListOptions{ProjectID: project.ID, Tags: []string{"ui", "api"}})
 	if err != nil || len(none.Ideas) != 0 {
 		t.Fatalf("impossible AND tag filter = %+v, %v", none.Ideas, err)
+	}
+	byQuery, err := a.ListIdeas(ctx, app.IdeaListOptions{ProjectID: project.ID, Query: "CALENDAR"})
+	if err != nil || len(byQuery.Ideas) != 1 || byQuery.Ideas[0].Title != "UI one" {
+		t.Fatalf("query over tags = %+v, %v", byQuery.Ideas, err)
 	}
 
 	conflictID := "idea-2026-11-26-conflict-01jcs6abcdefghjkmnpqrstvwx"
@@ -506,5 +534,8 @@ func TestGetIdeaReadsAnOrphanProject(t *testing.T) {
 	all, err := a.ListIdeas(ctx, app.IdeaListOptions{All: true})
 	if err != nil || len(all.Ideas) != 1 || all.Ideas[0].ID != added.Idea.ID {
 		t.Fatalf("global list orphan = %+v, %v", all.Ideas, err)
+	}
+	if all.ProjectSource != "" {
+		t.Fatalf("all scope ProjectSource = %q, want empty (no single project)", all.ProjectSource)
 	}
 }

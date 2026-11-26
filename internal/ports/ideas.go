@@ -14,13 +14,14 @@ const RecordIdea = "idea"
 
 // IdeaFilter narrows ListIdeas.
 //
-// ProjectID empty lists every registered project. Statuses empty lists all
-// five statuses. Tags keeps only ideas that carry every listed tag
-// (case-insensitive exact match; empty keeps all). DueAfter is an inclusive
-// lower bound and DueBefore an exclusive upper bound; an undated idea is
-// excluded when either is set. Query is a case-insensitive substring over
-// title, body and tags. Limit <= 0 means no store limit; the caller caps. The
-// store applies Tags and every other predicate before Limit.
+// ProjectID empty lists every registered project plus orphan
+// projects/*/ideas directories (an idea of a removed project stays readable).
+// Statuses empty lists all five statuses. Tags keeps only ideas that carry
+// every listed tag (case-insensitive exact match; empty keeps all). DueAfter is
+// an inclusive lower bound and DueBefore an exclusive upper bound; an undated
+// idea is excluded when either is set. Query is a case-insensitive substring
+// over title, body and tags. Limit <= 0 means no store limit; the caller caps.
+// The store applies Tags and every other predicate before Limit.
 type IdeaFilter struct {
 	ProjectID string
 	Statuses  []domain.IdeaStatus
@@ -47,21 +48,25 @@ type IdeaStore interface {
 	// selector, registers a project or falls back to personal: ProjectID is an
 	// already resolved, concrete registered id.
 	AppendIdea(ctx context.Context, idea domain.Idea) (domain.SyncRevision, error)
-	// ListIdeas scans the project idea directories and returns a deterministic
-	// order: open, doing, someday, done, dropped; dated before undated; due
-	// ascending; high, normal, low; updated_at descending; id ascending.
-	// Unparsable files are skipped and reported by ProblemReporter.
+	// ListIdeas scans the idea directories of registered projects and, when
+	// ProjectID is empty, orphan projects/*/ideas directories, and returns a
+	// deterministic order: open, doing, someday, done, dropped; dated before
+	// undated; due ascending; high, normal, low; updated_at descending; id
+	// ascending. Unparsable files are skipped and reported by ProblemReporter.
 	ListIdeas(ctx context.Context, filter IdeaFilter) ([]domain.Idea, error)
 	// GetIdea finds an idea by its globally unique id across registered
-	// projects. A problem file returns its parse error instead of a zero idea.
+	// projects and orphan projects/*/ideas directories. A problem file returns
+	// a domain.ProblemError instead of a zero idea.
 	GetIdea(ctx context.Context, id string) (domain.Idea, error)
 	// UpdateIdea rewrites the stored idea in place, preserving created_at and
 	// the id, and moves the file when ProjectID changes. A known problem file
 	// is never overwritten.
 	UpdateIdea(ctx context.Context, idea domain.Idea) error
-	// TrashIdea moves a live idea to projects/<project>/trash/ideas/.
+	// TrashIdea moves a live idea to projects/<project>/trash/ideas/. The
+	// project must be registered; an orphan idea is readable but not trashable.
 	TrashIdea(ctx context.Context, projectID, id string) error
-	// RestoreIdea moves a trashed idea back. ErrNotFound when the trash has no
-	// such idea; ErrConflict when a live file already uses the id.
+	// RestoreIdea moves a trashed idea back. The project must be registered.
+	// ErrNotFound when the trash has no such idea; ErrConflict when a live
+	// file already uses the id.
 	RestoreIdea(ctx context.Context, projectID, id string) error
 }

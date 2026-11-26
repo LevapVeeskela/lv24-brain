@@ -154,6 +154,11 @@ and `permalink` (the id is the stable reference). Readers must ignore both if
 they appear in a hand-edited file. Readers must also ignore unknown keys, as
 `markdown.Parse` does for every kind.
 
+`history` is reserved and is not written or read for ideas in v1:
+`ideaFrontmatter` has no `history` field, so an unknown `history:` key is
+ignored, and the body is never split into a `## History` section. A later
+revision that needs history must define the render and split rule first.
+
 `tags` may be written in YAML block or flow style; readers accept both. The
 writer uses the block style produced by `gopkg.in/yaml.v3`. Field order in the
 file is an implementation detail; readers must not depend on it.
@@ -345,6 +350,8 @@ boundary, not `ValidationError`s.
 - `done` is never inferred from a commit or a code change. Only an explicit
   user action (CLI, desktop, MCP `done`, or an explicit `edit --status done`)
   sets it.
+- A create with `status: done` is also an explicit action: the writer sets
+  `completed_at` to now, so no done idea is written without it.
 
 ## 6. Time semantics
 
@@ -429,7 +436,9 @@ The result is reported as `project_source`:
 `brain idea add` (CLI), MCP `add`, and `POST /v1/ideas` return
 `project_source`; list responses return the resolved scope's
 `project_source` when a project was resolved implicitly and `explicit`
-otherwise.
+otherwise. A global list (`--project all`, MCP `all: true`) is not a project
+resolution: it has no single `project_source`, so the field is omitted, and
+`app.IdeaListResult.ProjectSource` stays empty for that scope.
 
 Default-scope reads use the same resolution: `brain idea list` without
 `--project`, MCP `list` without `project`, and `brief --scope current` all
@@ -544,9 +553,14 @@ Store behaviour:
   `ErrNotFound` for a missing live record/trash entry; `ErrConflict` when a
   live file already uses the id. A problem file is not moved: `TrashIdea`
   returns `domain.ProblemError` and leaves the file for manual resolution.
+  Both operations require a registered project: an orphan
+  `projects/*/ideas` idea is readable, listable and editable in place, but it
+  cannot be trashed or restored until its project is registered again.
 - The optional `ProblemReporter` (`Problems(ctx, projectID)`) reports
   `RecordProblem{Path, Kind: "idea", Reason}` exactly as it does for other
-  kinds.
+  kinds. It takes a registered project id, so the global list reports problems
+  for registered projects only; an orphan problem file is still surfaced by
+  `GetIdea` as a `domain.ProblemError`.
 - MCP `list` and `GET /v1/ideas` must expose the same `tags` filter (exact
   case-insensitive AND) in WS4/WS5; the store already applies it.
 
@@ -554,6 +568,11 @@ The generic `RecordEditor` (`TrashRecord`/`RestoreRecord`) is not extended to
 `idea` in v1: `brain record trash` and `brain record restore` refuse ideas;
 only `brain idea rm|restore` (and the API routes in §11) move them. `brain
 record list|show` may read ideas by adding `idea` to its kind allowlist.
+
+A store without the optional `IdeaStore` (server mode) has no ideas:
+`brain record list` still lists knowledge records and simply omits ideas, while
+the dedicated idea use cases (`AddIdea`, `ListIdeas`, `GetIdea`, `UpdateIdea`,
+`TrashIdea`, `RestoreIdea`) return `ErrUnsupported`.
 
 ## 9. CLI
 
@@ -995,7 +1014,10 @@ Behaviour:
 - Other ideas in the same project and other projects stay usable.
 - `brain idea list` prints a `PROBLEMS (n)` section with `path: reason`; `--json`
   includes `problems`. The command exits 0 even when problems are present, so a
-  single conflicted file cannot break an agent's session.
+  single conflicted file cannot break an agent's session. Problems are collected
+  per registered project: a problem file in an orphan `projects/*/ideas`
+  directory is not in the global list's `problems`, but `brain idea show <id>`
+  still returns the typed `ProblemError` with its path and reason.
 - `brain idea show <id>` for a problem file exits 1 with the path and reason.
 - `brain doctor` reports a warning with the count and paths (not a hard
   failure); the desktop Ideas page shows a warning row with a "resolve in git"

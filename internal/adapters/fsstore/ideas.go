@@ -417,6 +417,12 @@ func (s *Store) AppendIdea(ctx context.Context, idea domain.Idea) (domain.SyncRe
 	idea.Status = normalizedIdeaStatus(idea.Status)
 	idea.Priority = normalizedIdeaPriority(idea.Priority)
 	idea.Provenance = idea.Provenance.Normalized()
+	if idea.Status == domain.IdeaDone && idea.CompletedAt == nil {
+		// A create with status done is an explicit writer action; no done
+		// record is stored without its completion instant.
+		completed := now
+		idea.CompletedAt = &completed
+	}
 	if idea.CreatedAt.IsZero() {
 		idea.CreatedAt = now
 	} else {
