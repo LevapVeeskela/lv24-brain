@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -90,7 +91,11 @@ func (a *App) IdeaBrief(ctx context.Context, opts IdeaBriefOptions) (IdeaBriefRe
 			return IdeaBriefResult{}, err
 		}
 		currentProjectID = project.ID
-		list, err := a.ListIdeas(ctx, IdeaListOptions{ProjectID: project.ID, Statuses: statuses})
+		list, err := a.ListIdeas(ctx, IdeaListOptions{
+			ProjectID:    project.ID,
+			Statuses:     statuses,
+			SkipProblems: true,
+		})
 		if err != nil {
 			return IdeaBriefResult{}, err
 		}
@@ -102,13 +107,24 @@ func (a *App) IdeaBrief(ctx context.Context, opts IdeaBriefOptions) (IdeaBriefRe
 				return IdeaBriefResult{}, err
 			}
 			currentProjectID = project.ID
-		} else if project, _, err := a.resolveIdeaProject(ctx, ""); err == nil {
-			// The current project orders the block but does not define the
-			// scope: an unregistered working directory still gets a global
-			// brief.
-			currentProjectID = project.ID
+		} else {
+			project, _, err := a.resolveIdeaProject(ctx, "")
+			switch {
+			case err == nil:
+				currentProjectID = project.ID
+			case errors.Is(err, domain.ErrValidation):
+				// The working directory is not registered and there is no
+				// personal project: the global brief still works, it just has no
+				// project to order first.
+			default:
+				return IdeaBriefResult{}, err
+			}
 		}
-		list, err := a.ListIdeas(ctx, IdeaListOptions{All: true, Statuses: statuses})
+		list, err := a.ListIdeas(ctx, IdeaListOptions{
+			All:          true,
+			Statuses:     statuses,
+			SkipProblems: true,
+		})
 		if err != nil {
 			return IdeaBriefResult{}, err
 		}
@@ -124,8 +140,7 @@ func (a *App) IdeaBrief(ctx context.Context, opts IdeaBriefOptions) (IdeaBriefRe
 		return result, nil
 	}
 	selected := selectIdeaBriefItems(result.Ideas, currentProjectID, max, now)
-	result.Ideas = selected
-	result.Text = renderIdeaBriefText(selected, result.Open, result.DueToday, now)
+	result.Text, result.Ideas = renderIdeaBriefText(selected, result.Open, result.DueToday, now)
 	return result, nil
 }
 
@@ -177,8 +192,9 @@ func selectIdeaBriefItems(ideas []domain.Idea, currentProjectID string, max int,
 }
 
 // renderIdeaBriefText builds the header, item lines and footer, and trims items
-// until the block fits the 700-character budget.
-func renderIdeaBriefText(ideas []domain.Idea, open, dueToday int, now time.Time) string {
+// until the block fits the 700-character budget. It returns the items that were
+// actually rendered so the JSON payload and the text cannot disagree.
+func renderIdeaBriefText(ideas []domain.Idea, open, dueToday int, now time.Time) (string, []domain.Idea) {
 	for {
 		header := fmt.Sprintf("## Ideas — %d open", open)
 		if dueToday > 0 {
@@ -194,7 +210,7 @@ func renderIdeaBriefText(ideas []domain.Idea, open, dueToday int, now time.Time)
 		}
 		text := strings.Join(lines, "\n")
 		if utf8.RuneCountInString(text) <= IdeaBriefMaxCharacters || len(ideas) == 0 {
-			return text
+			return text, ideas
 		}
 		ideas = ideas[:len(ideas)-1]
 	}
@@ -347,17 +363,27 @@ func localIdeaDate(at time.Time) string {
 }
 
 // ideaDateOffset is the signed number of days from one YYYY-MM-DD date to
-// another. Both dates are calendar dates in the machine's local zone.
+// another in the machine's local calendar.
 func ideaDateOffset(from, to string) int {
-	fromDate, err := time.ParseInLocation(domain.IdeaDateLayout, from, time.Local)
+	return ideaDateOffsetIn(from, to, time.Local)
+}
+
+// ideaDateOffsetIn is ideaDateOffset with an explicit zone, so the DST behavior
+// is testable. The dates are parsed in loc for validation, then rebuilt as UTC
+// midnights: subtracting two local midnights would count a DST transition as a
+// 23- or 25-hour day, so a two-day gap could be labelled "tomorrow".
+func ideaDateOffsetIn(from, to string, loc *time.Location) int {
+	fromDate, err := time.ParseInLocation(domain.IdeaDateLayout, from, loc)
 	if err != nil {
 		return 0
 	}
-	toDate, err := time.ParseInLocation(domain.IdeaDateLayout, to, time.Local)
+	toDate, err := time.ParseInLocation(domain.IdeaDateLayout, to, loc)
 	if err != nil {
 		return 0
 	}
-	return int(toDate.Sub(fromDate).Hours() / 24)
+	fromUTC := time.Date(fromDate.Year(), fromDate.Month(), fromDate.Day(), 0, 0, 0, 0, time.UTC)
+	toUTC := time.Date(toDate.Year(), toDate.Month(), toDate.Day(), 0, 0, 0, 0, time.UTC)
+	return int(toUTC.Sub(fromUTC).Hours() / 24)
 }
 
 // IdeaGreetingMutedUntil returns the machine-local mute deadline, or the zero
@@ -406,8 +432,8 @@ func (a *App) SetIdeaGreetingMute(until *time.Time) (time.Time, error) {
 		return time.Time{}, fmt.Errorf("ideas: create agent directory: %w", err)
 	}
 	ignorePath := filepath.Join(dir, ".gitignore")
-	if err := os.WriteFile(ignorePath, []byte(ideaGreetingIgnoreEntry), 0o600); err != nil {
-		return time.Time{}, fmt.Errorf("ideas: write agent ignore file: %w", err)
+	if err := ensureIdeaIgnoreFile(ignorePath); err != nil {
+		return time.Time{}, fmt.Errorf("ideas: %w", err)
 	}
 	if err := writeIdeaLocalFile(path, append(raw, '\n')); err != nil {
 		return time.Time{}, err
@@ -416,6 +442,27 @@ func (a *App) SetIdeaGreetingMute(until *time.Time) (time.Time, error) {
 		return time.Time{}, nil
 	}
 	return *state.GreetingMutedUntil, nil
+}
+
+// ensureIdeaIgnoreFile creates the self-ignoring agent file only when it is
+// absent. The background daemon owns that file and may already have written a
+// stricter policy; the mute command must not overwrite it.
+func ensureIdeaIgnoreFile(path string) error {
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+	if errors.Is(err, os.ErrExist) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("create agent ignore file: %w", err)
+	}
+	if _, err := file.WriteString(ideaGreetingIgnoreEntry); err != nil {
+		_ = file.Close()
+		return fmt.Errorf("write agent ignore file: %w", err)
+	}
+	if err := file.Close(); err != nil {
+		return fmt.Errorf("close agent ignore file: %w", err)
+	}
+	return nil
 }
 
 // ideaGreetingStatePath is <data-dir>/agent/ideas.json. Server mode has no data
