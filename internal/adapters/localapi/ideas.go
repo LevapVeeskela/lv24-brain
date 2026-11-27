@@ -433,6 +433,17 @@ func (h *Handler) ideasCalendar(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	project := queryText(r, "project")
+	tags := ideaQueryValues(r, "tags", "tag")
+	query := queryText(r, "q")
+	options := app.IdeaListOptions{
+		ProjectID: project,
+		All:       project == "",
+		Tags:      tags,
+		Query:     query,
+		Limit:     0,
+	}
+	requested := statuses
 	if len(statuses) == 0 {
 		statuses = []domain.IdeaStatus{domain.IdeaOpen, domain.IdeaDoing, domain.IdeaSomeday}
 		if includeDone {
@@ -447,22 +458,21 @@ func (h *Handler) ideasCalendar(w http.ResponseWriter, r *http.Request) {
 		}
 		statuses = filtered
 		if len(statuses) == 0 {
-			// A status filter that names only dropped has nothing to export.
+			// A status filter that names only dropped has nothing to export, but
+			// the request still validates the project and store mode.
+			options.Statuses = requested
+			if _, err := h.opts.Ideas.ListIdeas(r.Context(), options); err != nil {
+				h.writeIdeaError(w, err)
+				return
+			}
 			w.Header().Set("Content-Type", "text/calendar; charset=utf-8")
 			w.WriteHeader(http.StatusOK)
 			_, _ = io.WriteString(w, app.RenderIdeaCalendar(nil, h.opts.Now()))
 			return
 		}
 	}
-	project := queryText(r, "project")
-	result, err := h.opts.Ideas.ListIdeas(r.Context(), app.IdeaListOptions{
-		ProjectID: project,
-		All:       project == "",
-		Statuses:  statuses,
-		Tags:      ideaQueryValues(r, "tags", "tag"),
-		Query:     queryText(r, "q"),
-		Limit:     0,
-	})
+	options.Statuses = statuses
+	result, err := h.opts.Ideas.ListIdeas(r.Context(), options)
 	if err != nil {
 		h.writeIdeaError(w, err)
 		return
