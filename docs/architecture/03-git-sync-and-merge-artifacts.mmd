@@ -1,0 +1,7 @@
+flowchart LR
+  sync["brain sync<br/>commit + fetch + rebase"] -->|"three-way"| drivers["merge drivers<br/>deterministic files"]
+  drivers -->|"clean"| merged["merged tree<br/>commit locally"]
+  drivers -->|"diverged"| artifacts["conflict artifacts<br/>state/registry"]
+  merged -->|"push"| push["private remote<br/>never force-pushed"]
+  artifacts -->|"commit artifacts"| push
+  drivers -.->|"missing"| fallback["normal conflict<br/>safe fallback"]

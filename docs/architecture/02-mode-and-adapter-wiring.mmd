@@ -1,0 +1,7 @@
+flowchart LR
+  boot["CLI + bootstrap<br/>local | git | server"] -->|"wires"| app["internal/app<br/>use cases"]
+  app -->|"uses"| ports["internal/ports<br/>interfaces only"]
+  app -->|"validates"| domain["internal/domain<br/>pure entities"]
+  ports -->|"imports"| domain
+  ports -->|"implemented by"| local["fsstore · gitstore<br/>sqliteindex"]
+  ports -->|"implemented by"| server["httpclient<br/>brain-server API"]

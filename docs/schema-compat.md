@@ -6,7 +6,7 @@ zone. The data schema stays **`schema_version: 1`**: every field below is
 optional, omitted when it has its default value, and a file written by this
 engine is still valid for an older one that ignores unknown keys.
 
-See also: [architecture](architecture.md), [security](security.md),
+See also: [architecture](architecture-deep.md), [security](security.md),
 [runbook](runbook.md).
 
 ## Record fields

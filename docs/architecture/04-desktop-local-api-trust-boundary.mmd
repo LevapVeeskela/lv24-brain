@@ -1,0 +1,5 @@
+flowchart LR
+  desktop["Desktop app<br/>token from runtime.json"] -->|"loopback + Bearer"| api["localapi-v1<br/>Host + Origin checks"]
+  browser["Browser or DNS host"] -.->|"403"| api
+  api -->|"job ids + SSE"| daemon["brain agent<br/>daemon + scheduler"]
+  daemon -->|"reads/writes"| store[("Data directory<br/>Markdown + FTS5")]
