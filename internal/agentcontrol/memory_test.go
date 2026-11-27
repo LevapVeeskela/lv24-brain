@@ -22,6 +22,12 @@ import (
 	"github.com/levapveeskela/lv24-brain/internal/ports"
 )
 
+// The production composition passes *app.App through the narrow MemoryApp
+// interface, then wires ideas with a type assertion. This compile-time check
+// makes a method-set drift fail the build instead of every ideas route at
+// runtime.
+var _ localapi.IdeaService = (*app.App)(nil)
+
 // memoryFixture is a real Markdown brain plus the memory service under test.
 type memoryFixture struct {
 	app         *app.App
@@ -404,6 +410,10 @@ func TestControlEndToEndMemoryRoutes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	idea, err := instance.AddIdea(ctx, app.IdeaInput{ProjectID: "demo", Title: "Wired idea"})
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	secrets := &fakeSecrets{}
 	registry := connectorbuild.NewRegistry()
@@ -454,6 +464,21 @@ func TestControlEndToEndMemoryRoutes(t *testing.T) {
 	resp, body = api.do(http.MethodGet, "/v1/search?project=demo&q=hello", "", nil)
 	if resp.StatusCode != http.StatusOK || !bytes.Contains(body, []byte(note.Note.ID)) {
 		t.Fatalf("search = %d %s", resp.StatusCode, body)
+	}
+
+	resp, body = api.do(http.MethodGet, "/v1/ideas?project=demo&limit=10", "", nil)
+	if resp.StatusCode != http.StatusOK || !bytes.Contains(body, []byte(idea.Idea.ID)) {
+		t.Fatalf("ideas list = %d %s", resp.StatusCode, body)
+	}
+	resp, body = api.do(http.MethodPost, "/v1/ideas", `{"title":"Created through the agent","project":"demo"}`, nil)
+	if resp.StatusCode != http.StatusCreated || !bytes.Contains(body, []byte("Created through the agent")) {
+		t.Fatalf("idea create = %d %s", resp.StatusCode, body)
+	}
+	resp, body = api.do(http.MethodPost, "/v1/ideas", `{"title":"Done through the agent","project":"demo","status":"done","completion_note":"shipped"}`, nil)
+	if resp.StatusCode != http.StatusCreated ||
+		!bytes.Contains(body, []byte(`"completion_note":"shipped"`)) ||
+		!bytes.Contains(body, []byte(`"completed_at":"`)) {
+		t.Fatalf("done idea create = %d %s", resp.StatusCode, body)
 	}
 
 	resp, body = api.do(http.MethodGet, "/v1/projects/demo/state", "", nil)

@@ -124,8 +124,14 @@ func (c *Control) Start(ctx context.Context, runtime daemon.Runtime) (int, error
 	}
 	agent := c.opts.Agent
 	var memory localapi.MemoryService
+	// The concrete app implements the idea use cases too; the assertion keeps
+	// the narrow MemoryApp contract for callers that only serve memory.
+	var ideaService localapi.IdeaService
 	if c.opts.App != nil {
 		memory = newMemoryService(c.opts.App, c.opts.Now)
+		if ideas, ok := c.opts.App.(localapi.IdeaService); ok {
+			ideaService = ideas
+		}
 	}
 	var syncService localapi.SyncService
 	if c.opts.Sync != nil {
@@ -157,6 +163,8 @@ func (c *Control) Start(ctx context.Context, runtime daemon.Runtime) (int, error
 		Heartbeat:    15 * time.Second,
 		Status:       "running",
 		Memory:       memory,
+		Ideas:        ideaService,
+		DataDir:      c.opts.DataDir,
 		Sync:         syncService,
 		Merge:        mergeService,
 		Digest:       digestService,

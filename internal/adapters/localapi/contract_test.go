@@ -209,6 +209,10 @@ func contractPath(path string) string {
 		return "/v1/records/note-1/restore"
 	case "/v1/records/{id}/review":
 		return "/v1/records/note-1/review?project=brain"
+	case "/v1/ideas/{id}":
+		return "/v1/ideas/idea-contract-1"
+	case "/v1/ideas/{id}/restore":
+		return "/v1/ideas/idea-contract-1/restore"
 	case "/v1/quarantine":
 		return "/v1/quarantine?project=brain"
 	case "/v1/quarantine/{id}/review":
@@ -255,6 +259,10 @@ func contractBody(method, path string) string {
 	case method == http.MethodPut && path == "/v1/projects/{id}/state":
 		return `{"goal":"smoke"}`
 	case method == http.MethodPatch && path == "/v1/records/{id}":
+		return `{"title":"smoke"}`
+	case method == http.MethodPost && path == "/v1/ideas":
+		return `{"title":"smoke"}`
+	case method == http.MethodPatch && path == "/v1/ideas/{id}":
 		return `{"title":"smoke"}`
 	case method == http.MethodPost && path == "/v1/records/{id}/review":
 		return `{"reviewed":true}`

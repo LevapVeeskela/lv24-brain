@@ -190,9 +190,10 @@ func TestAddIdeaRedactsSecrets(t *testing.T) {
 	project := seedIdeaProject(t, store, domain.Project{ID: "p", Name: "P", Kind: domain.ProjectKindRepository})
 	token := ideaFake("ghp_", "0123456789abcdefghijklmnopqrstuvwxyzAB")
 	result, err := a.AddIdea(ctx, app.IdeaInput{
-		ProjectID: project.ID,
-		Title:     "Rotate " + token,
-		Body:      "used " + token + " today",
+		ProjectID:      project.ID,
+		Title:          "Rotate " + token,
+		Body:           "used " + token + " today",
+		CompletionNote: "done: " + token,
 	})
 	if err != nil {
 		t.Fatalf("AddIdea: %v", err)
@@ -326,6 +327,107 @@ func TestUpdateIdeaMovesProject(t *testing.T) {
 	}
 	if !got.CreatedAt.Equal(added.Idea.CreatedAt) {
 		t.Fatalf("created_at changed: %v -> %v", added.Idea.CreatedAt, got.CreatedAt)
+	}
+}
+
+func TestAddIdeaRejectsInvalidCompletionNote(t *testing.T) {
+	ctx := context.Background()
+	a, store := newIdeaApp(t)
+	project := seedIdeaProject(t, store, domain.Project{ID: "p", Name: "P", Kind: domain.ProjectKindRepository})
+	_, err := a.AddIdea(ctx, app.IdeaInput{
+		ProjectID: project.ID, Title: "Bad note", CompletionNote: "bad\x00note",
+	})
+	if !errors.Is(err, domain.ErrValidation) {
+		t.Fatalf("invalid completion note error = %v, want validation", err)
+	}
+}
+
+func TestUpdateIdeaRejectsInvalidCompletionNote(t *testing.T) {
+	ctx := context.Background()
+	a, store := newIdeaApp(t)
+	project := seedIdeaProject(t, store, domain.Project{ID: "p", Name: "P", Kind: domain.ProjectKindRepository})
+	added, err := a.AddIdea(ctx, app.IdeaInput{ProjectID: project.ID, Title: "Note"})
+	if err != nil {
+		t.Fatalf("AddIdea: %v", err)
+	}
+	_, err = a.UpdateIdea(ctx, app.IdeaUpdateInput{
+		ID: added.Idea.ID, CompletionNote: stringPointer("bad\x00note"),
+	})
+	if !errors.Is(err, domain.ErrValidation) {
+		t.Fatalf("invalid completion note error = %v, want validation", err)
+	}
+}
+
+func TestUpdateIdeaReopenClearsCompletionNote(t *testing.T) {
+	ctx := context.Background()
+	a, store := newIdeaApp(t)
+	project := seedIdeaProject(t, store, domain.Project{ID: "p", Name: "P", Kind: domain.ProjectKindRepository})
+	added, err := a.AddIdea(ctx, app.IdeaInput{ProjectID: project.ID, Title: "Finish me"})
+	if err != nil {
+		t.Fatalf("AddIdea: %v", err)
+	}
+	done := domain.IdeaDone
+	updated, err := a.UpdateIdea(ctx, app.IdeaUpdateInput{
+		ID: added.Idea.ID, Status: &done, CompletionNote: stringPointer("shipped"),
+	})
+	if err != nil {
+		t.Fatalf("done edit: %v", err)
+	}
+	if updated.Idea.CompletionNote != "shipped" || updated.Idea.CompletedAt == nil {
+		t.Fatalf("done idea = %+v", updated.Idea)
+	}
+	open := domain.IdeaOpen
+	reopened, err := a.UpdateIdea(ctx, app.IdeaUpdateInput{ID: added.Idea.ID, Status: &open})
+	if err != nil {
+		t.Fatalf("reopen edit: %v", err)
+	}
+	if reopened.Idea.CompletionNote != "" || reopened.Idea.CompletedAt != nil {
+		t.Fatalf("reopened idea kept completion fields: %+v", reopened.Idea)
+	}
+}
+
+func TestUpdateIdeaCompareAndSwapUsesTheStoredRevision(t *testing.T) {
+	ctx := context.Background()
+	a, store := newIdeaApp(t)
+	project := seedIdeaProject(t, store, domain.Project{ID: "p", Name: "P", Kind: domain.ProjectKindRepository})
+	added, err := a.AddIdea(ctx, app.IdeaInput{ProjectID: project.ID, Title: "Original"})
+	if err != nil {
+		t.Fatalf("AddIdea: %v", err)
+	}
+	revision := added.Idea.UpdatedAt
+	if revision.Nanosecond() != 0 {
+		t.Fatalf("the returned revision %v is not the second-precision stored value", revision)
+	}
+
+	_, err = a.UpdateIdea(ctx, app.IdeaUpdateInput{
+		ID: added.Idea.ID, Title: stringPointer("Stale"), ExpectedUpdatedAt: revision.Add(-time.Hour),
+	})
+	var conflict *domain.RevisionConflictError
+	if !errors.As(err, &conflict) || !errors.Is(err, domain.ErrConflict) {
+		t.Fatalf("stale edit error = %v, want a revision conflict", err)
+	}
+	if conflict.CurrentRevision() != revision.UTC().Format(time.RFC3339) {
+		t.Fatalf("current revision = %q, want %q", conflict.CurrentRevision(), revision.UTC().Format(time.RFC3339))
+	}
+	if got, err := a.GetIdea(ctx, added.Idea.ID); err != nil || got.Title != "Original" {
+		t.Fatalf("a stale edit wrote: %q, %v", got.Title, err)
+	}
+
+	updated, err := a.UpdateIdea(ctx, app.IdeaUpdateInput{
+		ID: added.Idea.ID, Title: stringPointer("Fresh"), ExpectedUpdatedAt: revision,
+	})
+	if err != nil {
+		t.Fatalf("fresh edit: %v", err)
+	}
+	stored, err := a.GetIdea(ctx, added.Idea.ID)
+	if err != nil {
+		t.Fatalf("GetIdea after edit: %v", err)
+	}
+	if !updated.Idea.UpdatedAt.Equal(stored.UpdatedAt) {
+		t.Fatalf("returned revision %v != stored revision %v", updated.Idea.UpdatedAt, stored.UpdatedAt)
+	}
+	if stored.Title != "Fresh" {
+		t.Fatalf("stored title = %q", stored.Title)
 	}
 }
 

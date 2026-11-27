@@ -414,6 +414,12 @@ type Options struct {
 	// keeps serving the connection routes and reports memory routes as
 	// unavailable.
 	Memory MemoryService
+	// Ideas is the agent-first TODO surface. It is optional: a build without
+	// the idea use cases reports the ideas routes as unavailable.
+	Ideas IdeaService
+	// DataDir is the brain data directory. Problem-row paths are rendered
+	// relative to it when it is set; an absolute path is returned otherwise.
+	DataDir string
 	// Sync exposes the git status and one sync action. It is optional: local
 	// mode without a sync provider reports the route as unavailable.
 	Sync SyncService
