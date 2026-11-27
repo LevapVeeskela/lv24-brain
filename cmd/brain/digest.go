@@ -285,6 +285,10 @@ func renderDigest(digest app.Digest, window string) string {
 	var b bytes.Buffer
 	fmt.Fprintf(&b, "brain digest — last %s (since %s)\n", window, formatCatchupTime(digest.Since))
 	fmt.Fprintf(&b, "generated %s\n", formatCatchupTime(digest.GeneratedAt))
+	if digest.Ideas.Available {
+		fmt.Fprintf(&b, "ideas: %d open · %d due today · %d done in 24h\n",
+			digest.Ideas.Open, digest.Ideas.DueToday, digest.Ideas.DoneIn24h)
+	}
 	if len(digest.Projects) == 0 {
 		b.WriteString("\nnothing to report\n")
 		return b.String()
@@ -396,8 +400,16 @@ type jsonDigest struct {
 	Since       *string             `json:"since"`
 	GeneratedAt *string             `json:"generated_at"`
 	WrittenTo   *string             `json:"written_to"`
+	Ideas       *jsonDigestIdeas    `json:"ideas,omitempty"`
 	Projects    []jsonDigestProject `json:"projects"`
 	NeedsYou    digestNeeds         `json:"needs_you"`
+}
+
+// jsonDigestIdeas is the ideas line of the digest.
+type jsonDigestIdeas struct {
+	Open      int `json:"open"`
+	DueToday  int `json:"due_today"`
+	DoneIn24h int `json:"done_24h"`
 }
 
 type jsonDigestProject struct {
@@ -420,6 +432,13 @@ func toJSONDigest(digest app.Digest, window, writtenTo string) jsonDigest {
 		GeneratedAt: jsonTime(digest.GeneratedAt),
 		Projects:    mapAll(digest.Projects, toJSONDigestProject),
 		NeedsYou:    collectDigestNeeds(digest),
+	}
+	if digest.Ideas.Available {
+		out.Ideas = &jsonDigestIdeas{
+			Open:      digest.Ideas.Open,
+			DueToday:  digest.Ideas.DueToday,
+			DoneIn24h: digest.Ideas.DoneIn24h,
+		}
 	}
 	if writtenTo != "" {
 		out.WrittenTo = &writtenTo

@@ -12,6 +12,7 @@ import (
 	"regexp"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/levapveeskela/lv24-brain/internal/app"
 	"github.com/levapveeskela/lv24-brain/internal/bootstrap"
@@ -29,7 +30,10 @@ const (
 	sessionSummaryRunes = 600
 	// sessionContextBudget bounds the context injected at session start.
 	sessionContextBudget = 6000
-	autoHandoffPrefix    = "[auto] "
+	// sessionIdeasTimeout bounds the best-effort ideas lookup so a slow store
+	// cannot consume the whole session timeout; a failure drops only the block.
+	sessionIdeasTimeout = 2 * time.Second
+	autoHandoffPrefix   = "[auto] "
 )
 
 // hookInput is the subset of the JSON a coding agent passes to a session hook
@@ -216,6 +220,11 @@ func sessionStart(ctx context.Context, opts sessionOptions, stdout io.Writer) er
 		if err != nil {
 			return err
 		}
+		if sessionSourceIsStartup(opts) {
+			if block := sessionIdeasBlock(ctx, runtime.App, ""); block != "" {
+				text = strings.TrimRight(text, "\n") + "\n\n" + block + "\n"
+			}
+		}
 		return writeStartContext(opts, stdout, text)
 	}
 	if errors.Is(err, errNotRegistered) && opts.hook != "" {
@@ -225,7 +234,7 @@ func sessionStart(ctx context.Context, opts sessionOptions, stdout io.Writer) er
 		return err
 	}
 	defer func() { _ = runtime.Close() }()
-	text, err := sessionContext(ctx, runtime.App, target)
+	text, err := sessionContext(ctx, runtime.App, target, opts)
 	if err != nil {
 		return err
 	}
@@ -255,8 +264,14 @@ type claudeHookContext struct {
 
 // sessionContext is the curated project context plus what changed since the
 // latest handoff.
-func sessionContext(ctx context.Context, a *app.App, target app.Resolved) (string, error) {
-	summary, err := a.Bootstrap(ctx, app.BootstrapOptions{ProjectID: target.Project.ID, Budget: sessionContextBudget})
+func sessionContext(ctx context.Context, a *app.App, target app.Resolved, opts sessionOptions) (string, error) {
+	ideasBlock := ""
+	if sessionSourceIsStartup(opts) {
+		ideasBlock = sessionIdeasBlock(ctx, a, target.Project.ID)
+	}
+	summary, err := a.Bootstrap(ctx, app.BootstrapOptions{
+		ProjectID: target.Project.ID, Budget: sessionContextBudget, IdeasBlock: ideasBlock,
+	})
 	if err != nil {
 		return "", err
 	}
@@ -275,6 +290,43 @@ func sessionContext(ctx context.Context, a *app.App, target app.Resolved) (strin
 	b.WriteString("\nKeep the brain current: `brain state set` when the goal or next step changes; " +
 		"`brain note` / `brain decision` / `brain attempt` for findings; `brain handoff` at the end.\n")
 	return b.String(), nil
+}
+
+// sessionSourceIsStartup reports whether the hook asked for a fresh session
+// start. Only startup gets the Ideas block; a compaction or a resume must not
+// repeat the greeting. A manual run (no hook, no source) behaves as startup.
+func sessionSourceIsStartup(opts sessionOptions) bool {
+	switch strings.ToLower(strings.TrimSpace(opts.input.Source)) {
+	case "", "startup":
+		return true
+	default:
+		return false
+	}
+}
+
+// sessionIdeasBlock renders the session Ideas block through the shared app
+// renderer. It is best-effort: a store failure, a timeout or an oversized
+// block returns "" and only the block disappears from the session context.
+// projectID is empty at a workspace root, where the block is global.
+func sessionIdeasBlock(ctx context.Context, a *app.App, projectID string) string {
+	if a == nil {
+		return ""
+	}
+	ideaCtx, cancel := context.WithTimeout(ctx, sessionIdeasTimeout)
+	defer cancel()
+	brief, err := a.IdeaBrief(ideaCtx, app.IdeaBriefOptions{
+		ProjectID: projectID,
+		Scope:     app.IdeaBriefScopeAll,
+		Max:       app.DefaultIdeaBriefMax,
+	})
+	if err != nil {
+		return ""
+	}
+	block := strings.TrimSpace(brief.Text)
+	if block == "" || utf8.RuneCountInString(block) > app.IdeaBriefMaxCharacters {
+		return ""
+	}
+	return block
 }
 
 func sessionEnd(ctx context.Context, opts sessionOptions, stdout io.Writer) error {

@@ -8,15 +8,17 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/levapveeskela/lv24-brain/internal/app"
+	"github.com/levapveeskela/lv24-brain/internal/domain"
 	"github.com/levapveeskela/lv24-brain/internal/ports"
 )
 
 // Tool profiles. A profile is a vocabulary, not an add-on: tools/list in a
 // profile never lists two names for the same intent. The native profile serves
-// the 17 tools of 0.18; the migration profiles serve a peer vocabulary whose
+// the 18 tools of 0.28; the migration profiles serve a peer vocabulary whose
 // calls are translated to the native tool that does the work.
 const (
-	// ProfileLV24 is the native 17-tool profile and the default.
+	// ProfileLV24 is the native 18-tool profile and the default.
 	ProfileLV24 = "lv24"
 	// ProfileEngram is the 27-name engram-compatible vocabulary.
 	ProfileEngram = "engram"
@@ -398,6 +400,9 @@ func (s *Server) capabilities() Capabilities {
 			"graph_pr_symbols":        ports.MaxGraphPRSymbols,
 			"graph_pr_files":          ports.MaxGraphPRFiles,
 			"graph_diff_samples":      ports.MaxGraphDiffSamples,
+			"idea_page":               ideaMaxListLimit,
+			"idea_brief":              app.MaxIdeaBriefMax,
+			"idea_title_chars":        domain.MaxIdeaTitleChars,
 		},
 		Gaps:         s.profileGaps(),
 		RefusalCodes: RefusalCodes(),
@@ -428,6 +433,12 @@ func (s *Server) featureFlags() map[string]any {
 		"knowledge_graph": false,
 		"resources":       true,
 		"prompts":         false,
+		"ideas":           false,
+	}
+	// The idea layer is native-only: a migration vocabulary keeps its own
+	// names and does not silently gain brain_idea.
+	if s.profile.Name == ProfileLV24 {
+		features["ideas"] = true
 	}
 	switch s.profile.Name {
 	case ProfileEngram:

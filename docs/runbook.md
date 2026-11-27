@@ -909,12 +909,13 @@ handshake revision for older clients. Tool annotations, output schemas, the
 typed refusal envelope, pagination limits and the raw JSON-RPC harness are
 documented in [mcp.md](mcp.md).
 
-The 17 tools are (9 read-only, 5 append-only, 3 destructive):
+The 18 tools are (9 read-only, 6 append-only — the mixed `brain_code`/`brain_idea` are counted here — and 3 destructive):
 
 - `brain_open` - load a project's state, recent decisions, attempts and last handoff.
 - `brain_context` - context for one task: state, review findings, latest handoff, best-matching decisions/attempts/notes and failed attempts to avoid (`query`, optional `project`, `budget`, `kinds`, `since`).
 - `brain_search` - full-text search over notes, decisions, attempts and handoffs (English and Russian word forms match; optional `since`); connector dumps only with `include_dumps` or `kinds` containing `dump`.
-- `brain_record` - read records by id: `get`, `list` (paginated), `relations`, `history` and `links`.
+- `brain_record` - read records by id: `get`, `list` (paginated), `relations`, `history` and `links`; ideas are readable with `kinds:["idea"]`.
+- `brain_idea` - the agent-first TODO layer: `add`, `list`, `get`, `update`, `done`, `reopen`, `drop`, `rm`, `restore` and `brief`; `rm` moves to trash and `restore` undoes it.
 - `brain_note` - append a dated note; `suggest_topic` proposes a topic key without writing.
 - `brain_decision` - record a decision with its context, alternatives and consequences.
 - `brain_attempt` - record an attempt with its result and reason.
@@ -1482,7 +1483,7 @@ A short checklist; the reasons are in [release-0.16.md](release-0.16.md) and
    rebuilds itself when its stored version differs, but a manual rebuild is the
    cheapest way to prove it.
 4. **Restart every MCP host.** The tool list is read at startup.
-   `brain mcp --list-tools --json` must report 17 tools (9 under `--read-only`);
+   `brain mcp --list-tools --json` must report 18 tools (11 under `--read-only`);
    `--profile=lv24` is the only profile in 0.17. A retired 0.16 name answers
    `NOT_FOUND` with `try_instead`; move the client to the new tool and action,
    not just to a renamed name.

@@ -410,7 +410,7 @@ func TestCapabilitiesReflectTheActiveProfile(t *testing.T) {
 		stubs    int
 		wantGaps int
 	}{
-		{ProfileLV24, 17, 0, 0, 4},
+		{ProfileLV24, 18, 0, 0, 4},
 		{ProfileEngram, 28, 27, 0, 10},
 		{ProfileCodegraph, 9, 8, 0, 3},
 		{ProfileGraphify, 11, 10, 0, 8},

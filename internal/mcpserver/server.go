@@ -31,6 +31,7 @@ const serverInstructions = "Company Brain is the curated memory of this project.
 	"Call brain_open at the start of a session to load the project's state, decisions, attempts and last handoff, " +
 	"then brain_catchup and brain_search to find earlier work. " +
 	"Record durable findings as they happen with brain_note, brain_decision and brain_attempt (a failed approach, with its reason). " +
+	"Capture ideas only when the owner explicitly asks, with brain_idea, and never mark one done without confirmation. " +
 	"Call brain_handoff at the end of the session with a summary and the next action; git context is captured automatically. " +
 	"Never store secrets, tokens or personal data in the brain."
 
@@ -57,7 +58,7 @@ type Server struct {
 	// call to a hidden write tool gets a typed refusal.
 	tools    []tool
 	allTools []tool
-	// nativeTools and nativeByName are always the native 15-tool surface, even
+	// nativeTools and nativeByName are always the native 18-tool surface, even
 	// in a migration profile: an alias translates its legacy arguments and
 	// runs the native tool by name.
 	nativeTools  []tool

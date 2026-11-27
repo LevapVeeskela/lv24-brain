@@ -125,8 +125,8 @@ date.
   are written as the work happens and read back at the next start — by any
   agent, on any machine.
 - **Works with the agents you use.** Session hooks for Claude Code, Codex and
-  OpenCode, plus an MCP server with 16 tools (`brain_open`, `brain_context`,
-  `brain_search`, `brain_decision`, …) for anything that speaks MCP.
+  OpenCode, plus an MCP server with 18 tools (`brain_open`, `brain_context`,
+  `brain_search`, `brain_record`, `brain_idea`, …) for anything that speaks MCP.
 - **Your data, your repository.** Markdown + YAML in a private git repo you
   own, synced with plain git. Secrets are redacted on every write; this public
   repository never holds brain data.

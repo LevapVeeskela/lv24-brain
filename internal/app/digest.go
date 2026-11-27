@@ -60,6 +60,16 @@ func (p DigestProject) hasReportableContent() bool {
 		len(p.Blocked) > 0 || p.FindingCount() > 0
 }
 
+// DigestIdeas is the cross-project ideas line of a digest. Available is false
+// when the store does not support ideas (server mode); the digest then omits
+// the line instead of printing misleading zeros.
+type DigestIdeas struct {
+	Available bool
+	Open      int
+	DueToday  int
+	DoneIn24h int
+}
+
 // Digest is the morning summary across projects. Projects are ordered by
 // activity, most active first; quiet projects with nothing to report are left
 // out.
@@ -67,6 +77,7 @@ type Digest struct {
 	GeneratedAt time.Time
 	Since       time.Time
 	Projects    []DigestProject
+	Ideas       DigestIdeas
 }
 
 // Digest builds the owner's summary of what happened since opts.Since and what
@@ -95,6 +106,7 @@ func (a *App) Digest(ctx context.Context, opts DigestOptions) (Digest, error) {
 			digest.Projects = append(digest.Projects, entry)
 		}
 	}
+	digest.Ideas = a.digestIdeas(ctx, digestProjectScope(projects, opts.ProjectID), now)
 	sort.SliceStable(digest.Projects, func(i, j int) bool {
 		ai, aj := digest.Projects[i].ActivityCount(), digest.Projects[j].ActivityCount()
 		if ai != aj {
@@ -169,4 +181,45 @@ func countFindings(findings []Finding) map[FindingKind]int {
 		counts[finding.Kind]++
 	}
 	return counts
+}
+
+// digestProjectScope names the project a digest is scoped to, or "" for the
+// global digest. A selector is only a scope when it resolved to one project.
+func digestProjectScope(projects []domain.Project, selector string) string {
+	if strings.TrimSpace(selector) == "" || len(projects) != 1 {
+		return ""
+	}
+	return projects[0].ID
+}
+
+// digestIdeas counts actionable ideas for the digest line. It is best-effort:
+// an unsupported or failing idea store leaves Available false, and the digest
+// renders without the line rather than failing.
+func (a *App) digestIdeas(ctx context.Context, projectID string, now time.Time) DigestIdeas {
+	store, err := a.ideaStore()
+	if err != nil {
+		return DigestIdeas{}
+	}
+	ideas, err := store.ListIdeas(ctx, ports.IdeaFilter{ProjectID: projectID})
+	if err != nil {
+		return DigestIdeas{}
+	}
+	out := DigestIdeas{Available: true}
+	dayAgo := now.Add(-24 * time.Hour)
+	for _, idea := range ideas {
+		switch {
+		case idea.Status == domain.IdeaDone:
+			if idea.CompletedAt != nil && !idea.CompletedAt.Before(dayAgo) && !idea.CompletedAt.After(now) {
+				out.DoneIn24h++
+			}
+		case idea.Status.Terminal() || idea.Status == domain.IdeaSomeday:
+			continue
+		default:
+			out.Open++
+			if IdeaDueToday(idea, now) {
+				out.DueToday++
+			}
+		}
+	}
+	return out
 }

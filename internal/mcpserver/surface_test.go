@@ -95,7 +95,7 @@ func newSurfaceFake() *surfaceFake {
 }
 
 var nativeToolNames = []string{
-	"brain_open", "brain_context", "brain_search", "brain_record", "brain_note",
+	"brain_open", "brain_context", "brain_search", "brain_record", "brain_idea", "brain_note",
 	"brain_decision", "brain_attempt", "brain_handoff", "brain_state", "brain_catchup",
 	"brain_review", "brain_judge", "brain_projects", "brain_prompt", "brain_code",
 	"brain_graph", "brain_capabilities",
@@ -383,11 +383,11 @@ func TestSurfaceHistoryWithoutBackendIsTyped(t *testing.T) {
 func TestSurfaceReadOnlyListsReadActionsAndRefusesWrites(t *testing.T) {
 	backend := newSurfaceFake()
 	names := policyTools(t, backend, Policy{ReadOnly: true})
-	if len(names) != 10 {
-		t.Fatalf("read-only tools = %d, want 10: %v", len(names), names)
+	if len(names) != 11 {
+		t.Fatalf("read-only tools = %d, want 11: %v", len(names), names)
 	}
 	for _, name := range []string{
-		"brain_open", "brain_context", "brain_search", "brain_record",
+		"brain_open", "brain_context", "brain_search", "brain_record", "brain_idea",
 		"brain_catchup", "brain_review", "brain_projects", "brain_code",
 		"brain_graph", "brain_capabilities",
 	} {
@@ -406,6 +406,7 @@ func TestSurfaceReadOnlyListsReadActionsAndRefusesWrites(t *testing.T) {
 		{"brain_prompt", `{"action":"save","content":"x"}`},
 		{"brain_code", `{"action":"index","project":"alpha"}`},
 		{"brain_code", `{"action":"sync","project":"alpha"}`},
+		{"brain_idea", `{"action":"add","title":"x"}`},
 	} {
 		result := policyCall(t, backend, Policy{ReadOnly: true}, call.name, call.args)
 		if result["isError"] != true || structured(t, result)["code"] != RefusalUnsupported {
@@ -482,8 +483,8 @@ func TestSurfaceCapabilitiesPayload(t *testing.T) {
 		t.Fatalf("identity = %v", payload)
 	}
 	tools := payload["tools"].(map[string]any)
-	if tools["total"] != float64(17) || tools["read_only"] != float64(9) ||
-		tools["append_only"] != float64(5) || tools["destructive"] != float64(3) {
+	if tools["total"] != float64(18) || tools["read_only"] != float64(9) ||
+		tools["append_only"] != float64(6) || tools["destructive"] != float64(3) {
 		t.Fatalf("tools = %v", tools)
 	}
 	codes, _ := payload["refusal_codes"].([]any)
@@ -509,8 +510,8 @@ func TestSurfaceCapabilitiesPayload(t *testing.T) {
 
 	verbose := toolCall(t, backend, "brain_capabilities", `{"verbose":true}`)
 	details, _ := structured(t, verbose)["tools_detail"].([]any)
-	if len(details) != 17 {
-		t.Fatalf("tools_detail = %d, want 17", len(details))
+	if len(details) != 18 {
+		t.Fatalf("tools_detail = %d, want 18", len(details))
 	}
 
 	// No side effects: nothing was written or read from the knowledge store.
@@ -522,7 +523,7 @@ func TestSurfaceCapabilitiesPayload(t *testing.T) {
 
 func TestSurfaceCapabilitiesMatchTheCatalogue(t *testing.T) {
 	capabilities := CapabilityReport("test-version", DefaultProfile(), Policy{ReadOnly: true})
-	if capabilities.Tools.Total != 10 || capabilities.Tools.ReadOnly != 9 {
+	if capabilities.Tools.Total != 11 || capabilities.Tools.ReadOnly != 9 {
 		t.Fatalf("read-only capabilities = %+v", capabilities.Tools)
 	}
 	visible, omitted := CatalogForPolicy("test-version", DefaultProfile(), Policy{ReadOnly: true})

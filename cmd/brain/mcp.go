@@ -16,6 +16,7 @@ import (
 	"github.com/levapveeskela/lv24-brain/internal/config"
 	"github.com/levapveeskela/lv24-brain/internal/domain"
 	"github.com/levapveeskela/lv24-brain/internal/gitinfo"
+	"github.com/levapveeskela/lv24-brain/internal/ideasview"
 	"github.com/levapveeskela/lv24-brain/internal/mcpserver"
 	"github.com/levapveeskela/lv24-brain/internal/ports"
 	"github.com/levapveeskela/lv24-brain/internal/version"
@@ -803,6 +804,147 @@ func toMCPCatchup(result app.CatchupResult) mcpserver.Catchup {
 		out.State = &state
 	}
 	return out
+}
+
+// AddIdea implements mcpserver.IdeaBackend.
+func (b mcpBackend) AddIdea(ctx context.Context, in mcpserver.IdeaAddInput) (mcpserver.IdeaWrite, error) {
+	result, err := b.app.AddIdea(ctx, app.IdeaInput{
+		ProjectID:           in.ProjectID,
+		Title:               in.Title,
+		Body:                in.Body,
+		Priority:            domain.IdeaPriority(in.Priority),
+		DueAt:               in.DueAt,
+		DueDate:             in.DueDate,
+		RemindBeforeMinutes: in.RemindBeforeMinutes,
+		Tags:                in.Tags,
+		Source:              in.Source,
+		Provenance:          b.writeProvenance(),
+	})
+	if err != nil {
+		return mcpserver.IdeaWrite{}, err
+	}
+	return mcpserver.IdeaWrite{Idea: result.Idea, ProjectSource: result.ProjectSource}, nil
+}
+
+// ListIdeas implements mcpserver.IdeaBackend.
+func (b mcpBackend) ListIdeas(ctx context.Context, in mcpserver.IdeaListQuery) (mcpserver.IdeaList, error) {
+	statuses := make([]domain.IdeaStatus, 0, len(in.Statuses))
+	for _, status := range in.Statuses {
+		statuses = append(statuses, domain.IdeaStatus(status))
+	}
+	dueBefore, err := parseOptionalIdeaInstant("due_before", in.DueBefore)
+	if err != nil {
+		return mcpserver.IdeaList{}, err
+	}
+	dueAfter, err := parseOptionalIdeaInstant("due_after", in.DueAfter)
+	if err != nil {
+		return mcpserver.IdeaList{}, err
+	}
+	result, err := b.app.ListIdeas(ctx, app.IdeaListOptions{
+		ProjectID: in.ProjectID,
+		All:       in.All,
+		Statuses:  statuses,
+		Tags:      in.Tags,
+		DueBefore: dueBefore,
+		DueAfter:  dueAfter,
+		Query:     in.Query,
+		Limit:     in.Limit,
+	})
+	if err != nil {
+		return mcpserver.IdeaList{}, err
+	}
+	return mcpserver.IdeaList{
+		Ideas:         result.Ideas,
+		Problems:      ideasview.Problems(b.cfg.DataDir, result.Problems),
+		Total:         len(result.Ideas),
+		ProjectSource: result.ProjectSource,
+	}, nil
+}
+
+// GetIdea implements mcpserver.IdeaBackend.
+func (b mcpBackend) GetIdea(ctx context.Context, id string) (domain.Idea, error) {
+	return b.app.GetIdea(ctx, id)
+}
+
+// UpdateIdea implements mcpserver.IdeaBackend.
+func (b mcpBackend) UpdateIdea(ctx context.Context, in mcpserver.IdeaUpdateInput) (mcpserver.IdeaWrite, error) {
+	update := app.IdeaUpdateInput{
+		ID:                  in.ID,
+		ProjectID:           in.ProjectID,
+		Title:               in.Title,
+		Body:                in.Body,
+		DueAt:               in.DueAt,
+		DueDate:             in.DueDate,
+		RemindBeforeMinutes: in.RemindBeforeMinutes,
+		Tags:                in.Tags,
+		ClearDue:            in.ClearDue,
+		ClearReminder:       in.ClearReminder,
+		ClearTags:           in.ClearTags,
+	}
+	if in.Status != nil {
+		status := domain.IdeaStatus(strings.ToLower(strings.TrimSpace(*in.Status)))
+		update.Status = &status
+	}
+	if in.Priority != nil {
+		priority := domain.IdeaPriority(strings.ToLower(strings.TrimSpace(*in.Priority)))
+		update.Priority = &priority
+	}
+	if strings.TrimSpace(in.Note) != "" {
+		note := in.Note
+		update.CompletionNote = &note
+	}
+	result, err := b.app.UpdateIdea(ctx, update)
+	if err != nil {
+		return mcpserver.IdeaWrite{}, err
+	}
+	return mcpserver.IdeaWrite{Idea: result.Idea, ProjectSource: result.ProjectSource}, nil
+}
+
+// TrashIdea implements mcpserver.IdeaBackend. The id is global, so no project
+// selector is needed.
+func (b mcpBackend) TrashIdea(ctx context.Context, id string) (domain.Idea, error) {
+	return b.app.TrashIdea(ctx, "", id)
+}
+
+// RestoreIdea implements mcpserver.IdeaBackend. A non-empty project narrows
+// the trash lookup to the server's write scope.
+func (b mcpBackend) RestoreIdea(ctx context.Context, projectID, id string) (domain.Idea, error) {
+	return b.app.RestoreIdea(ctx, projectID, id)
+}
+
+// IdeaBrief implements mcpserver.IdeaBackend.
+func (b mcpBackend) IdeaBrief(ctx context.Context, in mcpserver.IdeaBriefQuery) (mcpserver.IdeaBrief, error) {
+	result, err := b.app.IdeaBrief(ctx, app.IdeaBriefOptions{
+		ProjectID: in.ProjectID,
+		Scope:     in.Scope,
+		Max:       in.Max,
+	})
+	if err != nil {
+		return mcpserver.IdeaBrief{}, err
+	}
+	return mcpserver.IdeaBrief{
+		Text:     result.Text,
+		Ideas:    result.Ideas,
+		Open:     result.Open,
+		DueToday: result.DueToday,
+		Muted:    result.Muted,
+	}, nil
+}
+
+// parseOptionalIdeaInstant parses a list due bound. The mcpserver validates
+// list text at the tool boundary too; the adapter repeats it so a direct
+// caller gets a typed validation error.
+func parseOptionalIdeaInstant(field, value string) (time.Time, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return time.Time{}, nil
+	}
+	at, err := time.Parse(time.RFC3339, value)
+	if err != nil {
+		return time.Time{}, domain.NewValidationError(field,
+			fmt.Sprintf("%q is not an RFC3339 timestamp with an offset", value))
+	}
+	return at, nil
 }
 
 // ListRecords implements mcpserver.RecordBackend.

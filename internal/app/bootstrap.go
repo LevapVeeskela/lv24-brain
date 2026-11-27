@@ -107,6 +107,14 @@ func (a *App) Bootstrap(ctx context.Context, opts BootstrapOptions) (BootstrapRe
 		}
 	}
 
+	// The caller may supply the session Ideas block: it belongs after the
+	// handoff and before the decisions, and an empty block changes nothing.
+	if block := strings.TrimRight(opts.IdeasBlock, "\n"); strings.TrimSpace(block) != "" {
+		out.WriteString("\n")
+		out.WriteString(block)
+		out.WriteString("\n")
+	}
+
 	out.WriteString("\n## Recent decisions\n")
 	if len(decisions) == 0 {
 		out.WriteString("- none recorded\n")
@@ -166,6 +174,12 @@ func (a *App) bootstrapPacked(
 	}
 	header := renderBootstrapHeader(project, a.cfg.Mode, a.revision(ctx), state, opts, quarantined, now, stateQuarantined)
 	coreText, coreRecords := renderBootstrapCore(state, handoffs, now, opts.IncludeUnreviewed)
+	// The pointer is project context, not a session greeting: a failure or a
+	// timeout drops only this small layer.
+	ideasText := ""
+	if pointer, err := a.IdeaPointer(ctx, project.ID, DefaultIdeaBriefMax); err == nil {
+		ideasText = pointer.Text
+	}
 
 	decisionRecords := make([]ContextRecord, 0, len(decisions))
 	for i := range decisions {
@@ -181,6 +195,7 @@ func (a *App) bootstrapPacked(
 	pack, err := buildContextPack(contextPackInput{
 		Budget: budget, Header: header, CoreText: coreText, CoreRecords: coreRecords,
 		Decisions: decisionRecords, Attempts: attemptRecords, Quarantined: len(quarantined),
+		Ideas: ideasText,
 	})
 	if err != nil {
 		return BootstrapResult{}, err
@@ -192,6 +207,11 @@ func (a *App) bootstrapPacked(
 		out.WriteString(core.Text)
 	} else {
 		out.WriteString(coreText)
+	}
+	if ideas, ok := contextSection(pack, ContextLayerIdeas); ok && ideas.Text != "" {
+		out.WriteString("\n")
+		out.WriteString(ideas.Text)
+		out.WriteString("\n")
 	}
 	if records := sectionRecords(pack, ContextLayerDecisions); len(records) > 0 {
 		out.WriteString("\n## Recent decisions\n")

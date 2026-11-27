@@ -239,8 +239,8 @@ func TestProtocolModernToolsListNeedsNoHandshake(t *testing.T) {
 	if meta, ok := result["_meta"].(map[string]any); !ok || meta[metaServerInfo] == nil {
 		t.Fatalf("_meta = %v", result["_meta"])
 	}
-	if got := len(toolNames(t, result)); got != 17 {
-		t.Fatalf("tools = %d, want 17", got)
+	if got := len(toolNames(t, result)); got != 18 {
+		t.Fatalf("tools = %d, want 18", got)
 	}
 }
 

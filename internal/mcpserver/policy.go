@@ -172,7 +172,7 @@ func (s *Server) refusedWriteAction(t tool, raw json.RawMessage) *Refusal {
 		return nil
 	}
 	refusal := refusalUnsupported(
-		t.Name+" action "+action+" writes the local code index; this server runs read-only",
-		t.Name+"(action="+strings.Join(t.ReadActions, "|")+"), or run brain code "+action+" in a shell")
+		t.Name+" action "+action+" writes; this server runs read-only",
+		t.Name+"(action="+strings.Join(t.ReadActions, "|")+"), or run the equivalent brain command in a shell")
 	return &refusal.Refusal
 }

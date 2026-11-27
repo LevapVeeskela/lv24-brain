@@ -122,3 +122,55 @@ func TestParseDigestWindow(t *testing.T) {
 		}
 	}
 }
+
+func TestDigestCarriesTheIdeasLine(t *testing.T) {
+	cfgPath := setupCatchupBrain(t)
+	code, stdout, stderr := runForTest(t, "idea", "add", "--config", cfgPath, "--project", "demo", "--due", "today", "--json", "Due today")
+	if code != 0 {
+		t.Fatalf("idea add due: %s", stderr)
+	}
+	var added struct {
+		Data struct {
+			Idea struct {
+				ID string `json:"id"`
+			} `json:"idea"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal([]byte(stdout), &added); err != nil || added.Data.Idea.ID == "" {
+		t.Fatalf("decode add %q: %v", stdout, err)
+	}
+	if code, _, stderr := runForTest(t, "idea", "add", "--config", cfgPath, "--project", "demo", "Open item"); code != 0 {
+		t.Fatalf("idea add open: %s", stderr)
+	}
+
+	code, stdout, stderr = runForTest(t, "digest", "--config", cfgPath)
+	if code != 0 {
+		t.Fatalf("digest: %s", stderr)
+	}
+	if !strings.Contains(stdout, "ideas: 2 open · 1 due today · 0 done in 24h") {
+		t.Fatalf("digest has no ideas line:\n%s", stdout)
+	}
+
+	if code, _, stderr := runForTest(t, "idea", "done", added.Data.Idea.ID, "--config", cfgPath); code != 0 {
+		t.Fatalf("idea done: %s", stderr)
+	}
+	code, stdout, stderr = runForTest(t, "digest", "--config", cfgPath, "--json")
+	if code != 0 {
+		t.Fatalf("digest --json: %s", stderr)
+	}
+	var envelope struct {
+		Data struct {
+			Ideas struct {
+				Open      int `json:"open"`
+				DueToday  int `json:"due_today"`
+				DoneIn24h int `json:"done_24h"`
+			} `json:"ideas"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal([]byte(stdout), &envelope); err != nil {
+		t.Fatalf("decode digest %q: %v", stdout, err)
+	}
+	if envelope.Data.Ideas.Open != 1 || envelope.Data.Ideas.DueToday != 0 || envelope.Data.Ideas.DoneIn24h != 1 {
+		t.Fatalf("digest ideas = %+v", envelope.Data.Ideas)
+	}
+}
