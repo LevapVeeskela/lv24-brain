@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -14,6 +13,7 @@ import (
 	"github.com/levapveeskela/lv24-brain/internal/bootstrap"
 	"github.com/levapveeskela/lv24-brain/internal/config"
 	"github.com/levapveeskela/lv24-brain/internal/domain"
+	"github.com/levapveeskela/lv24-brain/internal/ideasview"
 	"github.com/levapveeskela/lv24-brain/internal/ports"
 )
 
@@ -305,30 +305,10 @@ func newIdeaApp(cfgPath string, stderr io.Writer, command string) (config.BrainC
 func reportIdeaError(stderr io.Writer, command, dataDir string, err error) int {
 	var problem *domain.ProblemError
 	if errors.As(err, &problem) {
-		fmt.Fprintf(stderr, "brain %s: problem at %s: %s\n", command, ideaRelativePath(dataDir, problem.Path), problem.Reason)
+		fmt.Fprintf(stderr, "brain %s: problem at %s: %s\n", command, ideasview.RelativePath(dataDir, problem.Path), problem.Reason)
 		return 1
 	}
 	return reportError(stderr, command, err)
-}
-
-// ideaRelativePath renders a path inside the data directory with forward
-// slashes, so output is stable across machines. A path outside it stays
-// absolute.
-func ideaRelativePath(dataDir, path string) string {
-	if strings.TrimSpace(dataDir) == "" {
-		return path
-	}
-	rel, err := filepath.Rel(dataDir, path)
-	if err != nil || strings.HasPrefix(rel, "..") {
-		return path
-	}
-	return filepath.ToSlash(rel)
-}
-
-// ideaRowPath is the stable storage path of an idea, independent of the data
-// directory.
-func ideaRowPath(idea domain.Idea) string {
-	return app.IdeaStoragePath(idea)
 }
 
 // ideaWriteSource makes an id-addressed write report a project source. The id
@@ -343,34 +323,26 @@ func ideaWriteSource(source string) string {
 // ---------------------------------------------------------------------------
 // JSON rows (§9.3)
 
-// The row shape lives in internal/app, so the CLI, MCP brain_idea and the
-// local API render one idea through the same mapper.
-type jsonIdeaRow = app.IdeaRow
+// The row shape lives in internal/ideasview, so the CLI, MCP brain_idea and
+// the local API render one idea through the same mapper.
+type jsonIdeaRow = ideasview.Row
 
-func toJSONIdeaRow(idea domain.Idea, withBody bool) jsonIdeaRow {
-	return app.NewIdeaRow(idea, withBody)
-}
-
-type jsonIdeaProblem struct {
-	Path   string `json:"path"`
-	Kind   string `json:"kind"`
-	Reason string `json:"reason"`
-}
+type jsonIdeaProblem = ideasview.Problem
 
 type jsonIdeaList struct {
-	Ideas         []jsonIdeaRow     `json:"ideas"`
-	Problems      []jsonIdeaProblem `json:"problems"`
-	Total         int               `json:"total"`
-	ProjectSource string            `json:"project_source,omitempty"`
+	Ideas         []ideasview.Row     `json:"ideas"`
+	Problems      []ideasview.Problem `json:"problems"`
+	Total         int                 `json:"total"`
+	ProjectSource string              `json:"project_source,omitempty"`
 }
 
 type jsonIdeaWrite struct {
-	Idea          jsonIdeaRow `json:"idea"`
-	ProjectSource string      `json:"project_source"`
+	Idea          ideasview.Row `json:"idea"`
+	ProjectSource string        `json:"project_source"`
 }
 
 type jsonIdeaShow struct {
-	Idea jsonIdeaRow `json:"idea"`
+	Idea ideasview.Row `json:"idea"`
 }
 
 type jsonIdeaRemoved struct {
@@ -379,29 +351,15 @@ type jsonIdeaRemoved struct {
 }
 
 type jsonIdeaBrief struct {
-	Text     string        `json:"text"`
-	Ideas    []jsonIdeaRow `json:"ideas"`
-	Open     int           `json:"open"`
-	DueToday int           `json:"due_today"`
-	Muted    bool          `json:"muted"`
+	Text     string          `json:"text"`
+	Ideas    []ideasview.Row `json:"ideas"`
+	Open     int             `json:"open"`
+	DueToday int             `json:"due_today"`
+	Muted    bool            `json:"muted"`
 }
 
 type jsonIdeaMute struct {
 	MutedUntil *string `json:"muted_until"`
-}
-
-// toJSONIdeaProblems renders problem rows with data-dir-relative paths when the
-// file is inside the brain.
-func toJSONIdeaProblems(dataDir string, problems []ports.RecordProblem) []jsonIdeaProblem {
-	out := make([]jsonIdeaProblem, 0, len(problems))
-	for _, problem := range problems {
-		out = append(out, jsonIdeaProblem{
-			Path:   ideaRelativePath(dataDir, problem.Path),
-			Kind:   problem.Kind,
-			Reason: problem.Reason,
-		})
-	}
-	return out
 }
 
 // ---------------------------------------------------------------------------
@@ -538,7 +496,7 @@ func printIdeaDetail(w io.Writer, idea domain.Idea) {
 	if idea.CompletionNote != "" {
 		fmt.Fprintf(w, "note: %s\n", idea.CompletionNote)
 	}
-	fmt.Fprintf(w, "path: %s\n", ideaRowPath(idea))
+	fmt.Fprintf(w, "path: %s\n", ideasview.StoragePath(idea))
 	if strings.TrimSpace(idea.Body) != "" {
 		fmt.Fprintln(w)
 		fmt.Fprintln(w, strings.TrimRight(idea.Body, "\n"))
@@ -549,7 +507,7 @@ func printIdeaDetail(w io.Writer, idea domain.Idea) {
 func printIdeaProblems(w io.Writer, dataDir string, problems []ports.RecordProblem) {
 	fmt.Fprintf(w, "PROBLEMS (%d)\n", len(problems))
 	for _, problem := range problems {
-		fmt.Fprintf(w, "  %s: %s\n", ideaRelativePath(dataDir, problem.Path), problem.Reason)
+		fmt.Fprintf(w, "  %s: %s\n", ideasview.RelativePath(dataDir, problem.Path), problem.Reason)
 	}
 }
 
@@ -637,7 +595,7 @@ func runIdeaAdd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	}
 	if *asJSON {
 		return writeJSONReport(stdout, stderr, "idea add", jsonIdeaWrite{
-			Idea:          toJSONIdeaRow(result.Idea, true),
+			Idea:          ideasview.RowOf(result.Idea, true),
 			ProjectSource: result.ProjectSource,
 		})
 	}
@@ -714,11 +672,11 @@ func runIdeaList(args []string, stdout, stderr io.Writer) int {
 	if *asJSON {
 		rows := make([]jsonIdeaRow, 0, len(ideas))
 		for _, idea := range ideas {
-			rows = append(rows, toJSONIdeaRow(idea, false))
+			rows = append(rows, ideasview.RowOf(idea, false))
 		}
 		return writeJSONReport(stdout, stderr, "idea list", jsonIdeaList{
 			Ideas:         rows,
-			Problems:      toJSONIdeaProblems(cfg.DataDir, result.Problems),
+			Problems:      ideasview.Problems(cfg.DataDir, result.Problems),
 			Total:         total,
 			ProjectSource: result.ProjectSource,
 		})
@@ -784,7 +742,7 @@ func runIdeaShow(args []string, stdout, stderr io.Writer) int {
 		return reportIdeaError(stderr, "idea show", cfg.DataDir, err)
 	}
 	if *asJSON {
-		return writeJSONReport(stdout, stderr, "idea show", jsonIdeaShow{Idea: toJSONIdeaRow(idea, true)})
+		return writeJSONReport(stdout, stderr, "idea show", jsonIdeaShow{Idea: ideasview.RowOf(idea, true)})
 	}
 	printIdeaDetail(stdout, idea)
 	return 0
@@ -918,7 +876,7 @@ func runIdeaEdit(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	}
 	if *asJSON {
 		return writeJSONReport(stdout, stderr, "idea edit", jsonIdeaWrite{
-			Idea:          toJSONIdeaRow(result.Idea, true),
+			Idea:          ideasview.RowOf(result.Idea, true),
 			ProjectSource: ideaWriteSource(result.ProjectSource),
 		})
 	}
@@ -958,7 +916,7 @@ func ideaSetStatus(args []string, command string, status domain.IdeaStatus, note
 	}
 	if *asJSON {
 		return writeJSONReport(stdout, stderr, "idea "+command, jsonIdeaWrite{
-			Idea:          toJSONIdeaRow(result.Idea, true),
+			Idea:          ideasview.RowOf(result.Idea, true),
 			ProjectSource: ideaWriteSource(result.ProjectSource),
 		})
 	}
@@ -1039,7 +997,7 @@ func runIdeaRestore(args []string, stdout, stderr io.Writer) int {
 	}
 	if *asJSON {
 		return writeJSONReport(stdout, stderr, "idea restore", jsonIdeaWrite{
-			Idea:          toJSONIdeaRow(idea, true),
+			Idea:          ideasview.RowOf(idea, true),
 			ProjectSource: ideaWriteSource(""),
 		})
 	}
@@ -1103,7 +1061,7 @@ func runIdeaBrief(args []string, stdout, stderr io.Writer) int {
 	if *asJSON {
 		rows := make([]jsonIdeaRow, 0, len(result.Ideas))
 		for _, idea := range result.Ideas {
-			rows = append(rows, toJSONIdeaRow(idea, false))
+			rows = append(rows, ideasview.RowOf(idea, false))
 		}
 		return writeJSONReport(stdout, stderr, "idea brief", jsonIdeaBrief{
 			Text:     result.Text,

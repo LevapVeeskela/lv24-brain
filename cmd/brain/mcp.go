@@ -16,6 +16,7 @@ import (
 	"github.com/levapveeskela/lv24-brain/internal/config"
 	"github.com/levapveeskela/lv24-brain/internal/domain"
 	"github.com/levapveeskela/lv24-brain/internal/gitinfo"
+	"github.com/levapveeskela/lv24-brain/internal/ideasview"
 	"github.com/levapveeskela/lv24-brain/internal/mcpserver"
 	"github.com/levapveeskela/lv24-brain/internal/ports"
 	"github.com/levapveeskela/lv24-brain/internal/version"
@@ -854,7 +855,7 @@ func (b mcpBackend) ListIdeas(ctx context.Context, in mcpserver.IdeaListQuery) (
 	}
 	return mcpserver.IdeaList{
 		Ideas:         result.Ideas,
-		Problems:      toMCPIdeaProblems(b.cfg.DataDir, result.Problems),
+		Problems:      ideasview.Problems(b.cfg.DataDir, result.Problems),
 		Total:         len(result.Ideas),
 		ProjectSource: result.ProjectSource,
 	}, nil
@@ -928,20 +929,6 @@ func (b mcpBackend) IdeaBrief(ctx context.Context, in mcpserver.IdeaBriefQuery) 
 		DueToday: result.DueToday,
 		Muted:    result.Muted,
 	}, nil
-}
-
-// toMCPIdeaProblems renders idea problem rows with data-dir-relative paths
-// when the file is inside the brain.
-func toMCPIdeaProblems(dataDir string, problems []ports.RecordProblem) []mcpserver.IdeaProblem {
-	out := make([]mcpserver.IdeaProblem, 0, len(problems))
-	for _, problem := range problems {
-		out = append(out, mcpserver.IdeaProblem{
-			Path:   ideaRelativePath(dataDir, problem.Path),
-			Kind:   problem.Kind,
-			Reason: problem.Reason,
-		})
-	}
-	return out
 }
 
 // parseOptionalIdeaInstant parses a list due bound. The mcpserver validates

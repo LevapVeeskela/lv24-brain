@@ -10,6 +10,7 @@ import (
 
 	"github.com/levapveeskela/lv24-brain/internal/app"
 	"github.com/levapveeskela/lv24-brain/internal/domain"
+	"github.com/levapveeskela/lv24-brain/internal/ideasview"
 )
 
 // Idea action vocabulary and limits from the 0.28 contract (§10).
@@ -109,11 +110,7 @@ type IdeaWrite struct {
 }
 
 // IdeaProblem is one idea file the store skipped.
-type IdeaProblem struct {
-	Path   string `json:"path"`
-	Kind   string `json:"kind"`
-	Reason string `json:"reason"`
-}
+type IdeaProblem = ideasview.Problem
 
 // IdeaList is a filtered listing; Ideas is truncated to the requested limit and
 // Total counts the matches before it.
@@ -388,10 +385,7 @@ func (s *Server) ideaList(ctx context.Context, backend IdeaBackend, args ideaArg
 	if len(ideas) > limit {
 		ideas = ideas[:limit]
 	}
-	rows := make([]app.IdeaRow, 0, len(ideas))
-	for _, idea := range ideas {
-		rows = append(rows, app.NewIdeaRow(idea, false))
-	}
+	rows := ideasview.Rows(ideas, false)
 	problems := list.Problems
 	if problems == nil {
 		problems = []IdeaProblem{}
@@ -433,7 +427,7 @@ func (s *Server) ideaGet(ctx context.Context, backend IdeaBackend, args ideaArgs
 	}
 	return toolResult{
 		Text:       ideaText(idea, true),
-		Structured: ideaGetOutput{Idea: app.NewIdeaRow(idea, true)},
+		Structured: ideaGetOutput{Idea: ideasview.RowOf(idea, true)},
 	}, nil
 }
 
@@ -574,10 +568,7 @@ func (s *Server) ideaBrief(ctx context.Context, backend IdeaBackend, args ideaAr
 	if err != nil {
 		return toolResult{}, ideaError(err)
 	}
-	rows := make([]app.IdeaRow, 0, len(brief.Ideas))
-	for _, idea := range brief.Ideas {
-		rows = append(rows, app.NewIdeaRow(idea, false))
-	}
+	rows := ideasview.Rows(brief.Ideas, false)
 	return toolResult{
 		Text: brief.Text,
 		Structured: ideaBriefOutput{
@@ -596,35 +587,35 @@ func ideaWriteResult(result IdeaWrite) toolResult {
 	}
 	return toolResult{
 		Text:       ideaText(result.Idea, true),
-		Structured: ideaWriteOutput{Idea: app.NewIdeaRow(result.Idea, true), ProjectSource: source},
+		Structured: ideaWriteOutput{Idea: ideasview.RowOf(result.Idea, true), ProjectSource: source},
 	}
 }
 
 // ideaGetOutput is one idea with its body.
 type ideaGetOutput struct {
-	Idea app.IdeaRow `json:"idea"`
+	Idea ideasview.Row `json:"idea"`
 }
 
 // ideaWriteOutput is a mutated idea plus how its project was chosen.
 type ideaWriteOutput struct {
-	Idea          app.IdeaRow `json:"idea"`
-	ProjectSource string      `json:"project_source"`
+	Idea          ideasview.Row `json:"idea"`
+	ProjectSource string        `json:"project_source"`
 }
 
 // ideaListOutput is a filtered listing.
 type ideaListOutput struct {
-	Ideas    []app.IdeaRow `json:"ideas"`
-	Problems []IdeaProblem `json:"problems"`
-	Total    int           `json:"total"`
+	Ideas    []ideasview.Row `json:"ideas"`
+	Problems []IdeaProblem   `json:"problems"`
+	Total    int             `json:"total"`
 }
 
 // ideaBriefOutput is the shared session block.
 type ideaBriefOutput struct {
-	Text     string        `json:"text"`
-	Ideas    []app.IdeaRow `json:"ideas"`
-	Open     int           `json:"open"`
-	DueToday int           `json:"due_today"`
-	Muted    bool          `json:"muted"`
+	Text     string          `json:"text"`
+	Ideas    []ideasview.Row `json:"ideas"`
+	Open     int             `json:"open"`
+	DueToday int             `json:"due_today"`
+	Muted    bool            `json:"muted"`
 }
 
 // ideaTrashOutput is the reversible remove result.
