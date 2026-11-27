@@ -583,7 +583,15 @@ func (s *Store) UpdateIdea(ctx context.Context, idea domain.Idea) error {
 		return fmt.Errorf("fsstore: read idea %q: %w", id, err)
 	}
 	idea.CreatedAt = current.CreatedAt
+	// updated_at is the record revision: every write must move it. The store
+	// clock has second precision, so two writes in one second (or a stored
+	// revision ahead of the wall clock) would otherwise keep the same value and
+	// a compare-and-swap could not detect the stale reader. Advance at least
+	// one second past the stored revision.
 	idea.UpdatedAt = s.nowUTC()
+	if !idea.UpdatedAt.After(current.UpdatedAt) {
+		idea.UpdatedAt = current.UpdatedAt.Add(time.Second)
+	}
 	if idea.ProjectID == "" {
 		return domain.NewValidationError("idea.projectId", "is required")
 	}

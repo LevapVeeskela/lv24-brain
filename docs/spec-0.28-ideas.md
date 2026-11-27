@@ -517,7 +517,7 @@ that reorder before implementation.
 | Windows toast needs an installed AUMID; macOS needs signing | Test on installed builds; in-app banner is always the fallback; test button in Settings. |
 | Notification fatigue | One notification per trigger, quiet hours, no repeats, mute command, no streaks/guilt. |
 | Index schema bump to 11 | Local, derived, rebuilt automatically; no user data loss; `doctor` reports. |
-| Old engine sees the new kind as `RecordProblem` | Additive, not corruption; `doctor` warning; update all three machines before relying on sync; data schema stays `1`. |
+| Old engine sees the new kind | Verified on 0.27.2: idea files are ignored (doctor OK, 0 indexed, no corruption); additive, data schema stays `1`; update all three machines before relying on sync. |
 | Wrong project tag | Default cwd project, visible chip, one-click move, registry validation, agent asks only when ambiguous. |
 | Scope creep (two-way calendar, recurrence, Telegram) | Explicit non-goals; each listed separately under Later and needs its own approval. |
 

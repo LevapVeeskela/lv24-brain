@@ -301,6 +301,52 @@ func TestIdeaStatusTransitionsAndCompletion(t *testing.T) {
 	}
 }
 
+func TestUpdateIdeaStaleRevisionConflicts(t *testing.T) {
+	ctx := context.Background()
+	store, err := fsstore.New(t.TempDir())
+	if err != nil {
+		t.Fatalf("fsstore.New: %v", err)
+	}
+	cfg := config.Default()
+	cfg.Mode = config.ModeGit
+	clock := time.Date(2026, 11, 27, 1, 37, 2, 0, time.UTC)
+	a := app.New(cfg, app.Dependencies{Store: store, Now: func() time.Time { return clock }})
+	project := seedIdeaProject(t, store, domain.Project{ID: "p", Name: "P", Kind: domain.ProjectKindRepository})
+
+	added, err := a.AddIdea(ctx, app.IdeaInput{ProjectID: project.ID, Title: "First"})
+	if err != nil {
+		t.Fatalf("AddIdea: %v", err)
+	}
+	revision := added.Idea.UpdatedAt
+	updated, err := a.UpdateIdea(ctx, app.IdeaUpdateInput{
+		ID: added.Idea.ID, Title: stringPointer("Second"), ExpectedUpdatedAt: revision,
+	})
+	if err != nil {
+		t.Fatalf("UpdateIdea: %v", err)
+	}
+	if !updated.Idea.UpdatedAt.After(revision) {
+		t.Fatalf("revision did not advance: %v -> %v", revision, updated.Idea.UpdatedAt)
+	}
+
+	// A second writer that still holds the create-time revision must be
+	// refused and must not overwrite the newer title.
+	if _, err := a.UpdateIdea(ctx, app.IdeaUpdateInput{
+		ID: added.Idea.ID, Title: stringPointer("Stale"), ExpectedUpdatedAt: revision,
+	}); !errors.Is(err, domain.ErrConflict) {
+		t.Fatalf("stale CAS error = %v, want ErrConflict", err)
+	}
+	got, err := a.GetIdea(ctx, added.Idea.ID)
+	if err != nil {
+		t.Fatalf("GetIdea: %v", err)
+	}
+	if got.Title != "Second" {
+		t.Fatalf("stale write overwrote the title: %q", got.Title)
+	}
+	if !got.UpdatedAt.Equal(updated.Idea.UpdatedAt) {
+		t.Fatalf("stale write moved the revision: %v -> %v", updated.Idea.UpdatedAt, got.UpdatedAt)
+	}
+}
+
 func TestUpdateIdeaMovesProject(t *testing.T) {
 	ctx := context.Background()
 	a, store := newIdeaApp(t)

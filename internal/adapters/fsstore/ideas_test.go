@@ -410,6 +410,46 @@ func TestIdeaUpdateMovesProjectAndPreservesCreatedAt(t *testing.T) {
 	}
 }
 
+func TestIdeaUpdateAdvancesRevisionOnSameSecond(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+	project := seedProject(t, store)
+	created := time.Date(2026, 11, 26, 10, 0, 0, 0, time.UTC)
+	idea := domain.Idea{
+		ID: ideaID("2026-11-26", "revision"), ProjectID: project.ID, Title: "First",
+		Status: domain.IdeaOpen, Priority: domain.IdeaPriorityNormal, CreatedAt: created,
+	}
+	if _, err := store.AppendIdea(ctx, idea); err != nil {
+		t.Fatalf("AppendIdea: %v", err)
+	}
+	first := readIdea(t, store, idea.ID)
+
+	// The store clock is fixed, so both updates happen in the same second. The
+	// revision must still move on every write.
+	idea.Title = "Second"
+	if err := store.UpdateIdea(ctx, idea); err != nil {
+		t.Fatalf("UpdateIdea second: %v", err)
+	}
+	second := readIdea(t, store, idea.ID)
+	if !second.UpdatedAt.After(first.UpdatedAt) {
+		t.Fatalf("second revision %v is not after %v", second.UpdatedAt, first.UpdatedAt)
+	}
+
+	idea.Title = "Third"
+	if err := store.UpdateIdea(ctx, idea); err != nil {
+		t.Fatalf("UpdateIdea third: %v", err)
+	}
+	third := readIdea(t, store, idea.ID)
+	if !third.UpdatedAt.After(second.UpdatedAt) {
+		t.Fatalf("third revision %v is not after %v", third.UpdatedAt, second.UpdatedAt)
+	}
+	if !second.UpdatedAt.Equal(first.UpdatedAt.Add(time.Second)) ||
+		!third.UpdatedAt.Equal(second.UpdatedAt.Add(time.Second)) {
+		t.Fatalf("same-second revisions = %v, %v, %v; want +1s each",
+			first.UpdatedAt, second.UpdatedAt, third.UpdatedAt)
+	}
+}
+
 func TestIdeaTrashAndRestore(t *testing.T) {
 	store := newTestStore(t)
 	ctx := context.Background()

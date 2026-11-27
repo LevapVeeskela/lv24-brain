@@ -85,6 +85,10 @@ type IdeaListResult struct {
 // are the only way to remove a due, a reminder lead or the tags.
 type IdeaUpdateInput struct {
 	ID string
+	// ExpectedUpdatedAt is the revision the caller read. When non-zero, a
+	// stored revision that differs returns domain.RevisionConflictError and
+	// writes nothing; zero keeps last-write-wins.
+	ExpectedUpdatedAt time.Time
 	// ProjectID moves the idea when non-empty and different from the stored
 	// project. It must resolve to a registered project.
 	ProjectID           string
@@ -100,10 +104,6 @@ type IdeaUpdateInput struct {
 	Tags                *[]string
 	ClearTags           bool
 	CompletionNote      *string
-	// ExpectedUpdatedAt is the updated_at the caller read. When non-zero the
-	// write is a compare-and-swap: a stale value returns
-	// *domain.RevisionConflictError and writes nothing.
-	ExpectedUpdatedAt time.Time
 }
 
 // IdeaUpdateResult is the rewritten idea. ProjectSource is set only when the
@@ -526,7 +526,7 @@ func (a *App) UpdateIdea(ctx context.Context, input IdeaUpdateInput) (IdeaUpdate
 	if err != nil {
 		return IdeaUpdateResult{}, err
 	}
-	if !input.ExpectedUpdatedAt.IsZero() && !original.UpdatedAt.Equal(input.ExpectedUpdatedAt) {
+	if !input.ExpectedUpdatedAt.IsZero() && !input.ExpectedUpdatedAt.UTC().Equal(original.UpdatedAt.UTC()) {
 		return IdeaUpdateResult{}, domain.NewRevisionConflictError(ports.RecordIdea, original.ID, original.UpdatedAt)
 	}
 	idea := original
@@ -636,24 +636,18 @@ func (a *App) UpdateIdea(ctx context.Context, input IdeaUpdateInput) (IdeaUpdate
 			return IdeaUpdateResult{}, err
 		}
 	}
-	// The store truncates to seconds when it rewrites the file; the returned
-	// row must carry the same revision so expected_updated_at round-trips.
-	idea.UpdatedAt = now
 	if err := store.UpdateIdea(ctx, idea); err != nil {
 		return IdeaUpdateResult{}, err
 	}
-	// The store stamps updated_at itself, so re-read the persisted row: the
-	// response revision is then exactly what a later read returns, even when
-	// the wall clock rolls to a new second between the two writes.
-	//
-	// Decision: a failed re-read after a successful store write is non-fatal.
-	// The write already landed; returning an error would turn a durable
-	// success into an API 500 and invite a retry that rewrites the same
-	// revision. Keep the in-memory row; the next read or CAS resolves the
-	// persisted revision.
-	if stored, err := store.GetIdea(ctx, idea.ID); err == nil {
-		idea = stored
+	// The store owns the final revision (it always moves updated_at); read the
+	// stored record back so callers and CAS clients see the real revision, not
+	// the app clock's pre-write value.
+	updated, err := store.GetIdea(ctx, idea.ID)
+	if err != nil {
+		return IdeaUpdateResult{Idea: idea, Moved: moved, ProjectSource: projectSource},
+			fmt.Errorf("idea %s was updated but could not be read back: %w", idea.ID, err)
 	}
+	idea = updated
 	if moved {
 		// The store renamed the file into the new project; the old project's
 		// index key would otherwise keep returning the idea and a later trash
