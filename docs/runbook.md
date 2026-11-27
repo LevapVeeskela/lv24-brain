@@ -909,7 +909,7 @@ handshake revision for older clients. Tool annotations, output schemas, the
 typed refusal envelope, pagination limits and the raw JSON-RPC harness are
 documented in [mcp.md](mcp.md).
 
-The 18 tools are (9 read-only, 5 append-only, 1 mixed, 3 destructive):
+The 18 tools are (9 read-only, 6 append-only — the mixed `brain_code`/`brain_idea` are counted here — and 3 destructive):
 
 - `brain_open` - load a project's state, recent decisions, attempts and last handoff.
 - `brain_context` - context for one task: state, review findings, latest handoff, best-matching decisions/attempts/notes and failed attempts to avoid (`query`, optional `project`, `budget`, `kinds`, `since`).

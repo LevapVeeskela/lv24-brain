@@ -58,7 +58,7 @@ type Server struct {
 	// call to a hidden write tool gets a typed refusal.
 	tools    []tool
 	allTools []tool
-	// nativeTools and nativeByName are always the native 15-tool surface, even
+	// nativeTools and nativeByName are always the native 18-tool surface, even
 	// in a migration profile: an alias translates its legacy arguments and
 	// runs the native tool by name.
 	nativeTools  []tool

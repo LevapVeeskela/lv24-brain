@@ -277,6 +277,13 @@ func renderIdeaBriefText(ideas []domain.Idea, open, dueToday int, now time.Time)
 	}
 }
 
+// IdeaItemLine renders one idea in the same marker/due/title/project form as
+// the session block. Surfaces outside this package (MCP, API) use it so the
+// wording cannot drift from the brief.
+func IdeaItemLine(idea domain.Idea, now time.Time) string {
+	return ideaBriefLine(idea, now)
+}
+
 // ideaBriefLine renders one item: marker, due or priority chip, title and
 // project. The body is never included.
 func ideaBriefLine(idea domain.Idea, now time.Time) string {

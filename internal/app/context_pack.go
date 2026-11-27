@@ -33,6 +33,10 @@ const (
 // pointer is a small convenience layer, never a reason to starve decisions.
 const contextIdeasCapTokens = 220
 
+// contextIdeasMinBudget is the smallest total budget that includes ideas. A
+// tiny answer keeps the curated state and decisions; the pointer is optional.
+const contextIdeasMinBudget = 1000
+
 // Per-layer shares of the total token budget. The cap of a layer is
 // proportional to the budget instead of a fixed number, so a 500-token answer
 // and a 32000-token answer both spend their tokens where they matter. The
@@ -231,10 +235,12 @@ func buildContextPack(in contextPackInput) (ContextPack, error) {
 	selectedOrder := make([]string, 0, 32)
 
 	// Ideas: bounded prose, placed right after the core and before the ranked
-	// layers. A pointer that does not fit is dropped whole; a half item line
-	// is worse than no line.
-	if text := strings.TrimSpace(in.Ideas); text != "" {
-		allowance := minInt(contextIdeasCapTokens, remaining)
+	// layers. It never eats the decisions share: when the remaining budget
+	// cannot cover both, the pointer is dropped whole. A half item line is
+	// worse than no line.
+	if text := strings.TrimSpace(in.Ideas); text != "" && in.Budget >= contextIdeasMinBudget {
+		reserved := contextLayerCap(ContextLayerDecisions, in.Budget)
+		allowance := minInt(contextIdeasCapTokens, remaining-reserved)
 		tokens := textbudget.Tokens(text)
 		if allowance > 0 && tokens <= allowance {
 			pack.Sections = append(pack.Sections, ContextSection{

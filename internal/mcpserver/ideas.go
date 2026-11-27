@@ -30,9 +30,25 @@ var (
 	ideaPriorityNames = []string{
 		string(domain.IdeaPriorityLow), string(domain.IdeaPriorityNormal), string(domain.IdeaPriorityHigh),
 	}
-	ideaClearNames = []string{"due", "reminder", "tags"}
-	ideaScopes     = []string{app.IdeaBriefScopeCurrent, app.IdeaBriefScopeAll}
+	ideaClearNames  = []string{"due", "reminder", "tags"}
+	ideaScopes      = []string{app.IdeaBriefScopeCurrent, app.IdeaBriefScopeAll}
+	ideaSourceTypes = []string{"session", "note", "decision", "commit", "manual", "desktop"}
 )
+
+// ideaSourceProp is the nested source object of add.
+func ideaSourceProp() map[string]any {
+	return map[string]any{
+		"type":        "object",
+		"description": "Where the idea came from (add); optional, but type is required when the object is present.",
+		"properties": map[string]any{
+			"type":    enumProp("Source type; session/note/decision/commit need an id.", ideaSourceTypes),
+			"id":      stringProp("Session id, note id, decision id or commit hash (at most 256 bytes)."),
+			"harness": stringProp("Agent harness, for example opencode (at most 64 bytes)."),
+		},
+		"required":             []string{"type"},
+		"additionalProperties": false,
+	}
+}
 
 // IdeaAddInput is one brain_idea(action=add) request after argument parsing.
 type IdeaAddInput struct {
@@ -185,15 +201,15 @@ func (s *Server) ideaTool() tool {
 			"id":                    stringProp("Globally unique idea id (get, update, done, reopen, drop, rm, restore)."),
 			"title":                 stringProp("Idea title, 1..200 code points (add, update)."),
 			"body":                  stringProp("Markdown body, at most 1 MiB (add, update)."),
-			"project":               stringProp("Project id, alias or checkout path. Omit for the working-directory project, then personal (add, list, brief)."),
-			"all":                   boolProp("List every registered project (list); default false."),
+			"project":               stringProp("Project id, alias or checkout path (add, list, brief). add: target; list: scope, omit to resolve the working directory then personal; brief: ordering project, or the scope with scope=current."),
+			"all":                   boolProp("List every registered project (list); default false. Refused on a server limited to named projects."),
 			"status":                enumProp("New status (update).", ideaStatusNames),
 			"priority":              enumProp("Priority (add, update).", ideaPriorityNames),
 			"due_at":                stringProp("RFC3339 with an offset; mutually exclusive with due_date (add, update)."),
 			"due_date":              stringProp("YYYY-MM-DD all-day due; mutually exclusive with due_at (add, update)."),
 			"remind_before_minutes": intProp("Reminder lead in minutes, 0..10080 (add, update).", 0),
 			"tags":                  stringArrayProp("Tags, at most 10; on add/update replaces the list, on list an exact case-insensitive AND filter."),
-			"source":                objectProp("Capture source {type, id, harness} (add). Types: session, note, decision, commit, manual, desktop."),
+			"source":                ideaSourceProp(),
 			"note":                  stringProp("Completion note (done)."),
 			"reason":                stringProp("Why the idea was dropped (drop); stored in completion_note."),
 			"statuses":              enumArrayProp("Keep only these statuses (list); empty keeps every status.", ideaStatusNames),
@@ -332,8 +348,27 @@ func (s *Server) ideaList(ctx context.Context, backend IdeaBackend, args ideaArg
 	if limit < 0 || limit > ideaMaxListLimit {
 		return toolResult{}, refusalInvalidf("limit must be between 1 and %d", ideaMaxListLimit)
 	}
+	// A read must respect the project allowlist. all=true is a global read and
+	// is refused on a limited server; an omitted project follows the same
+	// resolution as brain_record (cwd, the single allowed project, or a
+	// refusal when several are allowed).
+	projectID := ""
+	if args.All {
+		if optionalString(args.Project) != "" {
+			return toolResult{}, refusalInvalid("pass either project or all=true, not both")
+		}
+		projectID, err = s.scopedReadProject(ctx, "", true, "ideas")
+		if err != nil {
+			return toolResult{}, err
+		}
+	} else {
+		projectID, err = s.optionalProject(ctx, optionalString(args.Project))
+		if err != nil {
+			return toolResult{}, err
+		}
+	}
 	list, err := backend.ListIdeas(ctx, IdeaListQuery{
-		ProjectID: optionalString(args.Project),
+		ProjectID: projectID,
 		All:       args.All,
 		Statuses:  statuses,
 		Tags:      args.Tags,
@@ -390,6 +425,11 @@ func (s *Server) ideaGet(ctx context.Context, backend IdeaBackend, args ideaArgs
 	idea, err := backend.GetIdea(ctx, id)
 	if err != nil {
 		return toolResult{}, ideaError(err)
+	}
+	// The id is global, so the stored project, not a selector, is what the
+	// read policy must check.
+	if err := s.policy.checkProject(idea.ProjectID); err != nil {
+		return toolResult{}, err
 	}
 	return toolResult{
 		Text:       ideaText(idea, true),
@@ -522,8 +562,12 @@ func (s *Server) ideaBrief(ctx context.Context, backend IdeaBackend, args ideaAr
 	if max < 1 || max > app.MaxIdeaBriefMax {
 		return toolResult{}, refusalInvalidf("max must be between 1 and %d", app.MaxIdeaBriefMax)
 	}
+	projectID, scope, err := s.ideaBriefScope(ctx, optionalString(args.Project), scope)
+	if err != nil {
+		return toolResult{}, err
+	}
 	brief, err := backend.IdeaBrief(ctx, IdeaBriefQuery{
-		ProjectID: optionalString(args.Project),
+		ProjectID: projectID,
 		Scope:     scope,
 		Max:       max,
 	})
@@ -599,17 +643,10 @@ func ideaText(idea domain.Idea, withBody bool) string {
 	return text
 }
 
-// ideaLine renders marker, due or priority chip, title and project.
+// ideaLine renders marker, due or priority chip, title and project through the
+// shared app formatter.
 func ideaLine(idea domain.Idea, now time.Time) string {
-	line := "- " + app.IdeaMarker(idea, now)
-	if label, ok := app.IdeaDueLabel(idea, now); ok && label != "" {
-		line += " " + label
-	}
-	line += " — " + idea.Title
-	if idea.ProjectID != "" {
-		line += " (" + idea.ProjectID + ")"
-	}
-	return line
+	return app.IdeaItemLine(idea, now)
 }
 
 // ideaDue parses the mutually exclusive due arguments of add.
@@ -779,6 +816,33 @@ func validateIdeaDate(value string) error {
 		return refusalInvalidf("due_date %q is not a %s date", value, domain.IdeaDateLayout)
 	}
 	return nil
+}
+
+// ideaBriefScope resolves the brief scope under the read policy. A limited
+// server may not answer a global brief (scope=all), because the global counts
+// would name projects the caller cannot read; it must ask for one project with
+// scope=current. selector is resolved and checked like any other read.
+func (s *Server) ideaBriefScope(ctx context.Context, selector, scope string) (string, string, error) {
+	if scope == app.IdeaBriefScopeCurrent {
+		projectID, err := s.optionalProject(ctx, selector)
+		if err != nil {
+			return "", "", err
+		}
+		return projectID, app.IdeaBriefScopeCurrent, nil
+	}
+	if len(s.policy.Projects) > 0 {
+		return "", "", refusalInvalidf(
+			"scope=all is not available: this server is limited to %s; pass scope=current (and optionally project)",
+			s.policy.projectList())
+	}
+	if selector != "" {
+		target, err := s.resolveTarget(ctx, selector)
+		if err != nil {
+			return "", "", err
+		}
+		return target.ID, app.IdeaBriefScopeAll, nil
+	}
+	return "", app.IdeaBriefScopeAll, nil
 }
 
 // checkIdeaAddProject enforces the write scope before an add. An explicit

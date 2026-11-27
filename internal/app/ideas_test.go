@@ -608,6 +608,15 @@ func TestBootstrapCarriesTheIdeasPointerAndSessionBlock(t *testing.T) {
 	if !strings.Contains(packed.Summary, "Demo item") {
 		t.Fatalf("packed summary has no project item:\n%s", packed.Summary)
 	}
+	// A tiny budget keeps the curated context: the optional pointer never
+	// crowds out decisions.
+	small, err := a.Bootstrap(ctx, app.BootstrapOptions{ProjectID: "demo", TokenBudget: 400})
+	if err != nil {
+		t.Fatalf("Bootstrap small: %v", err)
+	}
+	if strings.Contains(small.Summary, "ideas:") {
+		t.Fatalf("pointer crowded a 400-token answer:\n%s", small.Summary)
+	}
 
 	block := "## Ideas — 4 open · 2 due today\n- [ ] today — Demo item 0 (demo)"
 	plain, err := a.Bootstrap(ctx, app.BootstrapOptions{ProjectID: "demo", Budget: 4000, IdeasBlock: block})

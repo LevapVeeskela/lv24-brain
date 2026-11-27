@@ -18,11 +18,17 @@ type ideaFake struct {
 	fakeBackend
 	adds     []IdeaAddInput
 	lists    []IdeaListQuery
+	briefs   []IdeaBriefQuery
 	updates  []IdeaUpdateInput
 	trashed  []string
-	restored []string
+	restored []ideaRestoreCall
 	brief    IdeaBrief
 	ideas    map[string]domain.Idea
+}
+
+type ideaRestoreCall struct {
+	ProjectID string
+	ID        string
 }
 
 func newIdeaFake() *ideaFake {
@@ -58,10 +64,14 @@ func (f *ideaFake) ListIdeas(_ context.Context, in IdeaListQuery) (IdeaList, err
 }
 
 func (f *ideaFake) GetIdea(_ context.Context, id string) (domain.Idea, error) {
-	if id != "idea-alpha-1" {
+	switch id {
+	case "idea-alpha-1":
+		return domain.Idea{ID: id, ProjectID: "alpha", Title: "First", Body: "the body", Status: domain.IdeaOpen}, nil
+	case "idea-beta-1":
+		return domain.Idea{ID: id, ProjectID: "beta", Title: "Elsewhere", Status: domain.IdeaOpen}, nil
+	default:
 		return domain.Idea{}, fmt.Errorf("idea %q: %w", id, domain.ErrNotFound)
 	}
-	return domain.Idea{ID: id, ProjectID: "alpha", Title: "First", Body: "the body", Status: domain.IdeaOpen}, nil
 }
 
 func (f *ideaFake) UpdateIdea(_ context.Context, in IdeaUpdateInput) (IdeaWrite, error) {
@@ -81,12 +91,19 @@ func (f *ideaFake) TrashIdea(_ context.Context, id string) (domain.Idea, error) 
 }
 
 func (f *ideaFake) RestoreIdea(_ context.Context, projectID, id string) (domain.Idea, error) {
-	f.restored = append(f.restored, id)
-	return domain.Idea{ID: id, ProjectID: "alpha", Title: "First"}, nil
+	f.restored = append(f.restored, ideaRestoreCall{ProjectID: projectID, ID: id})
+	project := "alpha"
+	if id == "idea-beta-1" {
+		project = "beta"
+	}
+	if projectID != "" && projectID != project {
+		return domain.Idea{}, fmt.Errorf("trashed idea %q: %w", id, domain.ErrNotFound)
+	}
+	return domain.Idea{ID: id, ProjectID: project, Title: "First"}, nil
 }
 
 func (f *ideaFake) IdeaBrief(_ context.Context, in IdeaBriefQuery) (IdeaBrief, error) {
-	f.lists = append(f.lists, IdeaListQuery{ProjectID: in.ProjectID})
+	f.briefs = append(f.briefs, in)
 	return f.brief, nil
 }
 
@@ -374,6 +391,18 @@ func TestBrainIdeaWriteScope(t *testing.T) {
 	if len(backend.adds) != 1 {
 		t.Fatalf("refused add reached the backend: %+v", backend.adds)
 	}
+	// An idea stored in another project is refused before every mutation, by
+	// its global id.
+	for _, action := range []string{"done", "reopen", "drop", "rm"} {
+		args := fmt.Sprintf(`{"action":%q,"id":"idea-beta-1"}`, action)
+		refused := policyCall(t, backend, policy, "brain_idea", args)
+		if refused["isError"] != true || structured(t, refused)["code"] != RefusalUnsupported {
+			t.Fatalf("%s outside the default project = %v", action, refused)
+		}
+	}
+	if len(backend.updates) != 0 || len(backend.trashed) != 0 {
+		t.Fatalf("a refused id write reached the backend: updates=%+v trashed=%v", backend.updates, backend.trashed)
+	}
 	move := policyCall(t, backend, policy, "brain_idea", `{"action":"update","id":"idea-alpha-1","project":"beta","title":"moved"}`)
 	if move["isError"] != true || structured(t, move)["code"] != RefusalUnsupported {
 		t.Fatalf("move outside the default project = %v", move)
@@ -386,8 +415,65 @@ func TestBrainIdeaWriteScope(t *testing.T) {
 	if restore["isError"] != false {
 		t.Fatalf("restore in the default project = %v", restore)
 	}
-	if len(backend.restored) != 1 {
-		t.Fatalf("restored = %v", backend.restored)
+	if len(backend.restored) != 1 || backend.restored[0].ProjectID != "alpha" || backend.restored[0].ID != "idea-alpha-1" {
+		t.Fatalf("restored = %+v, want project alpha", backend.restored)
+	}
+	// A trashed idea of another project is not readable through the narrowed
+	// restore: it is NOT_FOUND, not a write outside the scope.
+	other := policyCall(t, backend, policy, "brain_idea", `{"action":"restore","id":"idea-beta-1"}`)
+	if other["isError"] != true || structured(t, other)["code"] != RefusalNotFound {
+		t.Fatalf("restore outside the default project = %v", other)
+	}
+	if len(backend.restored) != 2 || backend.restored[1].ProjectID != "alpha" {
+		t.Fatalf("restore calls = %+v", backend.restored)
+	}
+}
+
+func TestBrainIdeaReadScope(t *testing.T) {
+	backend := newIdeaFake()
+	policy := Policy{Projects: []string{"alpha"}}
+	// A named project outside the allowlist is refused before the read.
+	outside := policyCall(t, backend, policy, "brain_idea", `{"action":"list","project":"beta"}`)
+	if outside["isError"] != true || structured(t, outside)["code"] != RefusalInvalidArguments {
+		t.Fatalf("list outside the allowlist = %v", outside)
+	}
+	if len(backend.lists) != 0 {
+		t.Fatalf("refused list reached the backend: %+v", backend.lists)
+	}
+	// all=true is a global read and cannot be served under an allowlist.
+	all := policyCall(t, backend, policy, "brain_idea", `{"action":"list","all":true}`)
+	if all["isError"] != true {
+		t.Fatalf("all=true under an allowlist = %v", all)
+	}
+	// The allowed project, and an omitted selector (narrowed to the single
+	// allowed project), work.
+	for _, args := range []string{`{"action":"list","project":"alpha"}`, `{"action":"list"}`} {
+		if got := policyCall(t, backend, policy, "brain_idea", args); got["isError"] != false {
+			t.Fatalf("%s = %v", args, got)
+		}
+	}
+	// The global brief is refused; a current-scope brief is allowed and bound
+	// to the allowed project.
+	global := policyCall(t, backend, policy, "brain_idea", `{"action":"brief"}`)
+	if global["isError"] != true {
+		t.Fatalf("global brief under an allowlist = %v", global)
+	}
+	current := policyCall(t, backend, policy, "brain_idea", `{"action":"brief","scope":"current"}`)
+	if current["isError"] != false {
+		t.Fatalf("current brief under an allowlist = %v", current)
+	}
+	if len(backend.briefs) != 1 || backend.briefs[0].ProjectID != "alpha" || backend.briefs[0].Scope != app.IdeaBriefScopeCurrent {
+		t.Fatalf("brief query = %+v", backend.briefs)
+	}
+	if brief := policyCall(t, backend, policy, "brain_idea", `{"action":"brief","project":"beta","scope":"current"}`); brief["isError"] != true {
+		t.Fatalf("brief outside the allowlist = %v", brief)
+	}
+	// get is by global id, so its stored project is checked.
+	if got := policyCall(t, backend, policy, "brain_idea", `{"action":"get","id":"idea-beta-1"}`); got["isError"] != true {
+		t.Fatalf("get outside the allowlist = %v", got)
+	}
+	if got := policyCall(t, backend, policy, "brain_idea", `{"action":"get","id":"idea-alpha-1"}`); got["isError"] != false {
+		t.Fatalf("get inside the allowlist = %v", got)
 	}
 }
 
