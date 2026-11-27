@@ -80,6 +80,10 @@ type IdeaListResult struct {
 // are the only way to remove a due, a reminder lead or the tags.
 type IdeaUpdateInput struct {
 	ID string
+	// ExpectedUpdatedAt is the revision the caller read. When non-zero, a
+	// stored revision that differs returns domain.RevisionConflictError and
+	// writes nothing; zero keeps last-write-wins.
+	ExpectedUpdatedAt time.Time
 	// ProjectID moves the idea when non-empty and different from the stored
 	// project. It must resolve to a registered project.
 	ProjectID           string
@@ -482,6 +486,9 @@ func (a *App) UpdateIdea(ctx context.Context, input IdeaUpdateInput) (IdeaUpdate
 	if err != nil {
 		return IdeaUpdateResult{}, err
 	}
+	if !input.ExpectedUpdatedAt.IsZero() && !input.ExpectedUpdatedAt.UTC().Equal(original.UpdatedAt.UTC()) {
+		return IdeaUpdateResult{}, domain.NewRevisionConflictError(ports.RecordIdea, original.ID, original.UpdatedAt)
+	}
 	idea := original
 	wasTerminal := idea.Status.Terminal()
 	if input.Title != nil {
@@ -589,10 +596,18 @@ func (a *App) UpdateIdea(ctx context.Context, input IdeaUpdateInput) (IdeaUpdate
 			return IdeaUpdateResult{}, err
 		}
 	}
-	idea.UpdatedAt = a.now()
 	if err := store.UpdateIdea(ctx, idea); err != nil {
 		return IdeaUpdateResult{}, err
 	}
+	// The store owns the final revision (it always moves updated_at); read the
+	// stored record back so callers and CAS clients see the real revision, not
+	// the app clock's pre-write value.
+	updated, err := store.GetIdea(ctx, idea.ID)
+	if err != nil {
+		return IdeaUpdateResult{Idea: idea, Moved: moved, ProjectSource: projectSource},
+			fmt.Errorf("idea %s was updated but could not be read back: %w", idea.ID, err)
+	}
+	idea = updated
 	if err := a.afterIdeaWrite(ctx, idea); err != nil {
 		return IdeaUpdateResult{Idea: idea, Moved: moved, ProjectSource: projectSource}, err
 	}

@@ -542,12 +542,17 @@ Store behaviour:
   a zero idea.
 - `UpdateIdea` locates the stored file by id, preserves `created_at`, sets
   `updated_at` to now (UTC), validates the whole record, and rewrites
-  atomically. If `ProjectID` differs it also moves the file to the new
+  atomically. `updated_at` is strictly increasing: when the write clock has not
+  advanced past the stored revision (the store clock has second precision), it
+  writes `stored.updated_at + 1s`, so a same-second write never repeats a
+  revision. If `ProjectID` differs it also moves the file to the new
   project's directory, and the new project must be registered; an in-place edit
   of an idea whose project was later removed from the registry still works. It
   never changes the id. A problem file returns `domain.ProblemError` and is not
-  modified. Last-write-wins locally; a git conflict is surfaced as a problem
-  row (§14).
+  modified. Last-write-wins locally; the app enforces the optional
+  `expected_updated_at` (§11.4) against the stored revision and returns
+  `domain.RevisionConflictError` without writing on a mismatch. A git conflict
+  is surfaced as a problem row (§14).
 - `TrashIdea` moves `projects/<project>/ideas/<file>` to
   `projects/<project>/trash/ideas/<file>` and `RestoreIdea` moves it back.
   `ErrNotFound` for a missing live record/trash entry; `ErrConflict` when a
@@ -1046,8 +1051,9 @@ Behaviour:
 
 ### 16.1 Compatibility
 
-- Data schema stays `1`; an old engine sees `kind: idea` as an unknown record
-  and reports it as a problem, without corrupting it. Update all machines before
+- Data schema stays `1`; an old engine (0.27.2 was verified) ignores the idea
+  files: its record listings do not scan `ideas/`, `brain doctor` stays OK,
+  nothing is indexed and nothing is corrupted. Update all machines before
   relying on idea sync.
 - Index schema becomes `11`; it is local and rebuilt automatically. No user data
   is touched.
