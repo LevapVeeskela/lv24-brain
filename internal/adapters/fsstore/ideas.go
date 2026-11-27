@@ -635,9 +635,10 @@ func (s *Store) TrashIdea(ctx context.Context, projectID, id string) error {
 	if !domain.IsRecordID(ports.RecordIdea, id) {
 		return domain.NewValidationError("idea.id", fmt.Sprintf("%q is not an idea id", id))
 	}
-	if err := s.requireProject(projectID); err != nil {
-		return err
-	}
+	// The stored project is authoritative for an orphan idea: it stays
+	// readable and can be trashed through its directory after the registry
+	// forgot it. The app still resolves and validates an explicit project that
+	// differs from the stored one.
 	projectDir, err := s.projectDir(projectID)
 	if err != nil {
 		return err

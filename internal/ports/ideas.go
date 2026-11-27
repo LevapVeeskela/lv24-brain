@@ -63,7 +63,8 @@ type IdeaStore interface {
 	// is never overwritten.
 	UpdateIdea(ctx context.Context, idea domain.Idea) error
 	// TrashIdea moves a live idea to projects/<project>/trash/ideas/. The
-	// project must be registered; an orphan idea is readable but not trashable.
+	// project directory must exist; an orphan idea is trashable through its
+	// stored project, but it is never re-registered.
 	TrashIdea(ctx context.Context, projectID, id string) error
 	// RestoreIdea moves a trashed idea back. The project must be registered.
 	// ErrNotFound when the trash has no such idea; ErrConflict when a live
