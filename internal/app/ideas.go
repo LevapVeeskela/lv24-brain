@@ -670,7 +670,9 @@ func (a *App) UpdateIdea(ctx context.Context, input IdeaUpdateInput) (IdeaUpdate
 }
 
 // TrashIdea moves one idea to its project's trash. The id is global; an empty
-// project resolves through the stored idea.
+// project, or the project the stored idea names, uses the stored idea as the
+// authority. A different explicit project still resolves through the registry
+// and must match the idea.
 func (a *App) TrashIdea(ctx context.Context, projectID, id string) (domain.Idea, error) {
 	store, err := a.ideaStore()
 	if err != nil {
@@ -680,7 +682,7 @@ func (a *App) TrashIdea(ctx context.Context, projectID, id string) (domain.Idea,
 	if err != nil {
 		return domain.Idea{}, err
 	}
-	if selector := strings.TrimSpace(projectID); selector != "" && selector != "auto" {
+	if selector := strings.TrimSpace(projectID); selector != "" && selector != "auto" && selector != idea.ProjectID {
 		project, _, err := a.resolveIdeaProject(ctx, selector)
 		if err != nil {
 			return domain.Idea{}, err

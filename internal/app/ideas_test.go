@@ -468,6 +468,76 @@ func TestIdeaTrashRestoreAndCollision(t *testing.T) {
 	}
 }
 
+func TestTrashIdeaUsesStoredProjectForOrphan(t *testing.T) {
+	ctx := context.Background()
+	a, store := newIdeaApp(t)
+	project := seedIdeaProject(t, store, domain.Project{ID: "orphan", Name: "Orphan", Kind: domain.ProjectKindRepository})
+	empty, err := a.AddIdea(ctx, app.IdeaInput{ProjectID: project.ID, Title: "Empty selector"})
+	if err != nil {
+		t.Fatalf("AddIdea: %v", err)
+	}
+	stored, err := a.AddIdea(ctx, app.IdeaInput{ProjectID: project.ID, Title: "Stored selector"})
+	if err != nil {
+		t.Fatalf("AddIdea: %v", err)
+	}
+	// Forget the project: only projects/orphan/ideas remains on disk.
+	registryPath := filepath.Join(store.Root(), "registry.json")
+	if err := os.WriteFile(registryPath, []byte(`{"version":1,"projects":[]}`), 0o644); err != nil {
+		t.Fatalf("write registry: %v", err)
+	}
+
+	// A different explicit project still has to resolve through the registry
+	// and must not move the file.
+	if _, err := a.TrashIdea(ctx, "other", stored.Idea.ID); !errors.Is(err, domain.ErrValidation) {
+		t.Fatalf("TrashIdea(other) error = %v, want ErrValidation", err)
+	}
+	if _, err := os.Stat(ideaPath(store, project.ID, stored.Idea.ID)); err != nil {
+		t.Fatalf("refused trash moved the live file: %v", err)
+	}
+
+	for _, test := range []struct {
+		name     string
+		selector string
+		idea     domain.Idea
+	}{
+		{"empty selector", "", empty.Idea},
+		{"stored selector", project.ID, stored.Idea},
+	} {
+		trashed, err := a.TrashIdea(ctx, test.selector, test.idea.ID)
+		if err != nil {
+			t.Fatalf("%s: TrashIdea: %v", test.name, err)
+		}
+		if trashed.ProjectID != project.ID {
+			t.Fatalf("%s: project = %q, want %q", test.name, trashed.ProjectID, project.ID)
+		}
+		if _, err := os.Stat(ideaPath(store, project.ID, test.idea.ID)); !os.IsNotExist(err) {
+			t.Fatalf("%s: live file still exists: %v", test.name, err)
+		}
+		trashedFiles, err := filepath.Glob(filepath.Join(store.Root(), "projects", project.ID, "trash", "ideas", test.idea.ID+"*.md"))
+		if err != nil || len(trashedFiles) != 1 {
+			t.Fatalf("%s: trash files = %v, %v", test.name, trashedFiles, err)
+		}
+		if _, err := a.GetIdea(ctx, test.idea.ID); !errors.Is(err, domain.ErrNotFound) {
+			t.Fatalf("%s: trashed orphan still live: %v", test.name, err)
+		}
+	}
+
+	// Reading remains sane: no live orphan appears in the global list.
+	all, err := a.ListIdeas(ctx, app.IdeaListOptions{All: true})
+	if err != nil || len(all.Ideas) != 0 {
+		t.Fatalf("global list after orphan trash = %+v, %v", all.Ideas, err)
+	}
+	// Restore does not invent a project: it is refused, and the trashed file
+	// stays exactly where it is for manual recovery.
+	if _, err := a.RestoreIdea(ctx, project.ID, empty.Idea.ID); !errors.Is(err, domain.ErrValidation) {
+		t.Fatalf("RestoreIdea(orphan) error = %v, want ErrValidation", err)
+	}
+	remaining, err := filepath.Glob(filepath.Join(store.Root(), "projects", project.ID, "trash", "ideas", empty.Idea.ID+"*.md"))
+	if err != nil || len(remaining) != 1 {
+		t.Fatalf("restore moved the orphan trash: %v, %v", remaining, err)
+	}
+}
+
 func TestListIdeasFiltersTagsAndProblems(t *testing.T) {
 	ctx := context.Background()
 	a, store := newIdeaApp(t)

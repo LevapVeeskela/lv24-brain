@@ -456,6 +456,9 @@ func TestBrainIdeaWritesRespectTheAllowlist(t *testing.T) {
 		if got := policyCall(t, backend, restricted, "brain_idea", `{"action":"done","id":"idea-beta-1"}`); got["isError"] != true {
 			t.Fatalf("done on a beta id = %v", got)
 		}
+		if got := policyCall(t, backend, restricted, "brain_idea", `{"action":"update","id":"idea-beta-1","title":"renamed"}`); got["isError"] != true {
+			t.Fatalf("update on a beta id = %v", got)
+		}
 		if got := policyCall(t, backend, restricted, "brain_idea", `{"action":"restore","id":"idea-beta-1"}`); got["isError"] != true {
 			t.Fatalf("restore without a writable project = %v", got)
 		}
@@ -496,6 +499,9 @@ func TestBrainIdeaWritesRespectTheAllowlist(t *testing.T) {
 			if got := policyCall(t, backend, policy, "brain_idea", fmt.Sprintf(`{"action":%q,"id":"idea-beta-1"}`, action)); got["isError"] != true {
 				t.Fatalf("%s on a beta id = %v", action, got)
 			}
+		}
+		if got := policyCall(t, backend, policy, "brain_idea", `{"action":"update","id":"idea-beta-1","title":"renamed"}`); got["isError"] != true {
+			t.Fatalf("update on a beta id = %v", got)
 		}
 		if len(backend.updates) != 0 || len(backend.trashed) != 0 {
 			t.Fatalf("a refused beta mutation reached the backend: updates=%+v trashed=%+v", backend.updates, backend.trashed)
