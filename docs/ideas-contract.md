@@ -815,9 +815,10 @@ globally unique; `project` is a resolver, not part of the identity.
 
 ### 11.1 `GET /v1/ideas`
 
-Query: `project`, `status` (repeated or comma-separated), `tags` (repeated or
-comma-separated, exact case-insensitive AND; WS4), `due_before`, `due_after`
-(RFC3339), `q`, `limit` (default 100, max 1000).
+Query: `project`, `status` (repeated or comma-separated), `tags` (also accepted
+as `tag`; repeated or comma-separated, exact case-insensitive AND),
+`due_before`, `due_after` (RFC3339, `due_before` exclusive), `q`, `limit`
+(default 100, max 1000).
 
 ```json
 {
@@ -848,12 +849,15 @@ Request:
   "due_date": null,
   "remind_before_minutes": 120,
   "tags": ["ui"],
-  "source": {"type": "desktop"}
+  "source": {"type": "desktop"},
+  "completion_note": ""
 }
 ```
 
 All fields except `title` are optional. `due_at` and `due_date` are mutually
-exclusive; send one or neither. The response is `201` with
+exclusive; send one or neither. `completion_note` is validated like a record
+text field and is normally set with `done` or `dropped`; a create with
+`status: done` also stamps `completed_at`. The response is `201` with
 `{"idea": <row with body>, "project_source": "..."}`. Validation errors are
 `400`; an over-limit field is `413`; a protected project is `403`.
 
@@ -873,6 +877,8 @@ Request: any mutable field from `POST` plus `expected_updated_at?`,
   `clear_tags: true` empties the list.
 - `status` follows §5; moving to `done` sets `completed_at` to now when absent;
   reopening clears `completed_at` and `completion_note`.
+- `completion_note` is validated like a record text field; an empty string
+  clears it.
 - `expected_updated_at` is the revision the client read. A stale value returns
   `409` with `error.current_revision` and writes nothing; omitting it keeps
   last-write-wins.
@@ -910,6 +916,12 @@ The response is exactly the block the session hook prints (§13), so CLI, MCP an
 the desktop cannot drift. Body text never enters `text`.
 
 ### 11.7 `GET /v1/ideas/ical`
+
+Query: `project`, `include_done=1`, `status` (repeated or comma-separated),
+`tags`/`tag` and `q`. Without `status`, the export covers open, doing and
+someday ideas, plus done ideas when `include_done=1`; an explicit `status`
+overrides that default and `include_done`. Dropped ideas are terminal and are
+never exported.
 
 Returns `Content-Type: text/calendar; charset=utf-8` and a file export (not a
 subscription). One `VEVENT` per dated idea, with a due-time `VALARM` and an

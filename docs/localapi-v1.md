@@ -454,8 +454,9 @@ session block the CLI, MCP, API and session hook share:
 `GET /v1/ideas/ical?project=&include_done=1&status=&tags=&q=` returns
 `Content-Type: text/calendar; charset=utf-8` with one `VEVENT` per dated idea:
 `DTSTART;VALUE=DATE:YYYYMMDD` for all-day ideas, a UTC `DTSTART` for timed
-ideas, `SUMMARY` from the title, `UID` from the id and a `VALARM` from the lead
-time. This is a file export, not a live subscription. Without `status`, the
+ideas, `SUMMARY` from the title, `UID` from the id and a due-time `VALARM` plus
+an optional lead `VALARM` from `remind_before_minutes`. This is a file export,
+not a live subscription. Without `status`, the
 export covers open, doing and someday ideas, plus done ideas when
 `include_done=1`. An explicit repeated/comma-separated `status` overrides that
 default (and `include_done`); `tags`/`tag` and `q` use the same list filters as
