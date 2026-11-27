@@ -1050,7 +1050,7 @@ by `brain config use` (stored under the OS user config directory).
   or read `excluded[]` to see the reason.
 - `sync in server mode: not implemented` вЂ” server mode does not use Git sync;
   reads and writes go through the HTTP API.
-- The first command after an engine upgrade reindexes once (index schema 10);
+- The first command after an engine upgrade reindexes once (index schema 11);
   `brain index` makes that visible instead of paying it inside the first command.
 - `connection "вЂ¦" stores its account in the secret store вЂ¦ but the secret is
   missing` вЂ” the catalogue has an identity marker and this machine has no

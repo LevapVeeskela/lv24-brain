@@ -68,7 +68,7 @@ built locally; the release workflow does not ship it.
 | `internal/ports/` | Interfaces only |
 | `internal/adapters/` | fsstore, gitstore, sqliteindex, httpapi, httpclient, postgres, connectors, localapi |
 | `internal/bootstrap/` | Composition root; selects adapters by mode |
-| `internal/mcpserver/` | MCP stdio surface (17 tools) |
+| `internal/mcpserver/` | MCP stdio surface (18 tools) |
 | `internal/daemon/`, `internal/agentcontrol/` | Background agent and local API wiring |
 | `internal/mergedriver/` | Git merge drivers |
 | `internal/server/` | Server config, migrations, retention, lifecycle |

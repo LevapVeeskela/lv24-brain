@@ -65,7 +65,7 @@ a client that does not know the key ignores it.
 3600000 for discovery). `server/discover` is `cacheScope: "public"`: every
 profile advertises the same revisions and capabilities. `tools/list` is
 `public` for a writable server and `private` under `--read-only`, because a
-read-only profile lists ten tools where a writable one lists seventeen (§9).
+read-only profile lists 11 tools where a writable one lists 18 (§9).
 Tool results are never cached: each reflects current state. `resources/list`
 carries `ttlMs` 30000 and `resources/read` carries a per-resource TTL, always
 with `cacheScope: "private"` because the allowlist is part of the answer (§14).
@@ -187,7 +187,7 @@ its `readOnlyHint` is false while `x-lv24-read-actions` names the reads.
 | `brain_graph` | read | `stats` (default), `neighbors`, `path`, `communities`, `god_nodes`, `cycles`, `diff`, `pr_impact`, `surprises` | graph counts, neighbours, communities, degree ranking, path, import cycles, index deltas, local-diff impact and surprising cross-community edges |
 | `brain_capabilities` | read | – | profile, engine, tools, features, limits, gaps, refusal codes, endpoints |
 
-The write postures are exact: **9 read, 5 non-destructive writes, 3
+The write postures are exact: **9 read, 6 non-destructive writes, 3
 destructive** (`brain_state`, `brain_judge`, `brain_prompt`). `brain_projects`
 is read-only: `register` is gated by the write scope and `merge` is refused; on
 a read-only server every write action of a mixed tool is refused before the
@@ -410,7 +410,8 @@ Rules:
   every registered project.
 - `--read-only` removes `brain_note`, `brain_decision`, `brain_attempt`,
   `brain_handoff`, `brain_state`, `brain_judge` and `brain_prompt` from
-  `tools/list`; the nine read tools and the mixed `brain_code` remain. A call
+  `tools/list`; the nine read tools and the mixed `brain_code`/`brain_idea`
+  remain, for 11 listed tools. A call
   to an omitted tool is refused before the store is touched, and the read action
   of a writable-only tool (for example `brain_judge(action=list)`) is not served
   either: use `brain_record(action=relations)`. `brain_code` keeps
@@ -450,7 +451,7 @@ two names for the same intent. `--profile-version` pins the revision
 or version is a startup error with exit code 2, never a silent downgrade.
 
 ```sh
-brain mcp --profile=lv24                     # default: 17 native tools
+brain mcp --profile=lv24                     # default: 18 native tools
 brain mcp --profile=engram [--strict]        # 27 engram names + brain_capabilities
 brain mcp --profile=codegraph                # 8 codegraph names mapped to brain_code
 brain mcp --profile=graphify                 # 10 graphify names mapped to brain_code/brain_graph
@@ -458,7 +459,7 @@ brain mcp --profile=graphify                 # 10 graphify names mapped to brain
 
 | Profile | Listed names | Read | Append | Destructive | Aliases | Grades |
 |---|---:|---:|---:|---:|---|---|
-| `lv24` (default) | 17 | 9 | 5 | 3 | – | – |
+| `lv24` (default) | 18 | 9 | 6 | 3 | – | – |
 | `engram` | 28 | 12 | 7 | 9 | 27 | A 3, B 15, C 7, D 2 |
 | `codegraph` | 9 | 9 | 0 | 0 | 8 | B 5, C 3 |
 | `graphify` | 11 | 11 | 0 | 0 | 10 | B 2, C 5, D 3 |
@@ -660,7 +661,7 @@ brain mcp --list-tools --json                          # profile, policy, tools,
 brain mcp --list-tools --profile=engram                # the engram vocabulary with grades
 brain mcp --list-tools --json --profile=engram --strict
 brain mcp --list-tools --json --profile=codegraph      # the 8 mapped codegraph names
-brain mcp --list-tools --json --read-only              # the 10 tools a read-only server exposes
+brain mcp --list-tools --json --read-only              # the 11 tools a read-only server exposes
 ```
 
 The JSON document keeps the 0.16 keys (`server`, `protocol_versions`, `policy`,

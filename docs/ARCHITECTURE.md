@@ -7,7 +7,7 @@ design remains in [architecture-deep.md](architecture-deep.md); the diagram inde
 ## 1. Purpose and scope
 
 LV24 Brain is a local-first project memory engine for people and coding agents. It stores a
-project's state, notes, decisions, attempts, handoffs and review findings as Markdown with YAML
+project's state, notes, decisions, attempts, handoffs and ideas as Markdown with YAML
 frontmatter, in a local directory or a private git repository, and exposes the same records through
 a CLI, an MCP server and an optional HTTP server.
 
@@ -30,7 +30,7 @@ deployment is unsupported. The public repository never contains brain data.
 |---|---|---|
 | Human | CLI, Markdown, git | Owns the data directory and the private repo |
 | Coding agent (Claude Code, Codex, OpenCode) | Session hooks, CLI, MCP stdio | Receives curated context only by default |
-| MCP host | 17 `brain_*` tools and `memory://` resources | Stdout is protocol-only; diagnostics go to stderr |
+| MCP host | 18 `brain_*` tools and `memory://` resources | Stdout is protocol-only; diagnostics go to stderr |
 | Desktop app (`lv24-brain-desktop`) | Loopback `localapi-v1` | Bearer token from an owner-only file, exact loopback Host |
 | Private git remote | `brain sync` | Never force-pushed; conflicts become artifacts |
 | GitHub, GitLab, IMAP, Jira, Slack, … | Read-only connectors | Raw items are untrusted external text |
@@ -119,6 +119,8 @@ projects/<id>/notes/YYYY-MM-DD.md      dated note sections
 projects/<id>/decisions/YYYY-MM-DD-<slug>.md
 projects/<id>/attempts/YYYY-MM-DD-<slug>.md
 projects/<id>/handoffs/YYYY-MM-DD-HHMMSS.md
+projects/<id>/ideas/idea-YYYY-MM-DD-<slug>-<ULID>.md
+projects/<id>/trash/ideas/<file>        reversible idea delete
 proposals/<project>/<proposal-id>.md    machine-local candidates (git-ignored)
 connectors/runs/<UTC>-<source>-<run-id>.md
 index/brain.db                         derived SQLite FTS5 index
@@ -143,7 +145,7 @@ The data revision (`CurrentRevision`) covers `brain.yaml`, `registry.json`, `glo
 
 `index/brain.db` is local and git-ignored. It uses modernc SQLite with FTS5, stores the same
 validity and provenance projection as records, and matches English and Russian word forms as
-prefixes (`decisions` → `decision`, `решений` → `решение`). Local index schema is **10**. Raw
+prefixes (`decisions` → `decision`, `решений` → `решение`). Local index schema is **11**. Raw
 items, dumps and proposals are excluded from default search; `--kind item` (or `--dumps`) opts in.
 
 ### 6.3 Postgres (server mode)
@@ -228,14 +230,14 @@ it; the contract exists so the app can be replaced without changing the engine.
 
 ## 9. MCP server
 
-`brain mcp` serves the brain over stdio. The default and only profile is `lv24`: **17 tools** plus
+`brain mcp` serves the brain over stdio. The default and only profile is `lv24`: **18 tools** plus
 read-only `memory://` resources.
 
 | Class | Tools |
 |---|---|
 | Read | `brain_open`, `brain_context`, `brain_search`, `brain_record`, `brain_catchup`, `brain_review`, `brain_projects`, `brain_graph`, `brain_capabilities` |
 | Append | `brain_note`, `brain_decision`, `brain_attempt`, `brain_handoff` |
-| Mixed | `brain_code` |
+| Mixed | `brain_code`, `brain_idea` |
 | Destructive | `brain_state`, `brain_judge`, `brain_prompt` (confirmation rules apply) |
 
 Stdout carries protocol messages only; diagnostics go to stderr. The contract, refusal codes,

@@ -31,7 +31,7 @@ no database to run.
 - **Memory that survives the session.** State, decisions, attempts and handoffs are written as the
   work happens and read back at the next start by any agent, on any machine.
 - **Works with the agents you use.** Session hooks for Claude Code, Codex and OpenCode, plus an MCP
-  server with 17 tools (`brain_open`, `brain_context`, `brain_search`, `brain_decision`, …).
+  server with 18 tools (`brain_open`, `brain_context`, `brain_search`, `brain_idea`, …).
 - **Your data, your repository.** Markdown + YAML in a private git repo you own, synced with plain
   git. Secrets are redacted on every write; this public repository never holds brain data.
 - **Finds what you mean.** Full-text search matches English and Russian word forms
@@ -48,8 +48,8 @@ for git. The public repository is the engine; your brain data lives elsewhere.
 
 | Item | Value |
 |---|---|
-| Version | `v0.27.2` (tag), HEAD `6d529fc` |
-| Ship state | Engine released; 0.28 Ideas spec/plan committed, not implemented (2026-11-27) |
+| Version | `0.28.0` (release commit; `v0.28.0` tag pending) |
+| Ship state | Engine 0.28.0 release commit; tag, registry publish and docs deploy pending (2026-11-27) |
 | Visibility | Public engine, private data |
 | Repo | [LevapVeeskela/lv24-brain](https://github.com/LevapVeeskela/lv24-brain) |
 | Docs site | <https://brain.lv24.by> (en / ru / zh) |
@@ -164,14 +164,14 @@ Read [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the front door and
 | [Architecture front door](docs/ARCHITECTURE.md) | Modes, components, storage, deployment, invariants |
 | [Deep architecture](docs/architecture-deep.md) | Detailed implementation and known gaps |
 | [Agent entry](AGENTS.md) | Five-minute read path, verified commands, invariants |
-| [MCP server](docs/mcp.md) | 17 tools, resources, refusal codes, pagination |
+| [MCP server](docs/mcp.md) | 18 tools, resources, refusal codes, pagination |
 | [CLI](docs/cli.md) | Command groups, exit codes, the generated CLI reference |
 | [Status](docs/status.md) | Capability, known gaps, roadmap, all release notes |
 | [Quickstart](docs/quickstart.md) · [Install](docs/install.md) · [Update](docs/update.md) | Running and upgrading |
 | [Server deploy](docs/deploy.md) · [Security](docs/security.md) · [Runbook](docs/runbook.md) | Operations |
 | [Search](docs/search.md) · [Context budget](docs/context-budget.md) · [Review](docs/review.md) | Retrieval and curation |
 | [Relations](docs/relations.md) · [Limits](docs/limits.md) · [Schema compatibility](docs/schema-compat.md) | Data model details |
-| [Release 0.27.2](docs/release-0.27.2.md) | Latest notes; the full `docs/release-*` set is indexed in [status](docs/status.md#release-history) |
+| [Release 0.28.0](docs/release-0.28.0.md) | Latest notes; the full `docs/release-*` set is indexed in [status](docs/status.md#release-history) |
 
 ## For AI agents
 

@@ -909,7 +909,7 @@ handshake revision for older clients. Tool annotations, output schemas, the
 typed refusal envelope, pagination limits and the raw JSON-RPC harness are
 documented in [mcp.md](mcp.md).
 
-The 18 tools are (9 read-only, 6 append-only — the mixed `brain_code`/`brain_idea` are counted here — and 3 destructive):
+The 18 tools are (9 annotated read-only; a read-only server lists 11 because the mixed `brain_code`/`brain_idea` keep their read actions; 6 non-destructive writes including those two mixed tools; 3 destructive):
 
 - `brain_open` - load a project's state, recent decisions, attempts and last handoff.
 - `brain_context` - context for one task: state, review findings, latest handoff, best-matching decisions/attempts/notes and failed attempts to avoid (`query`, optional `project`, `budget`, `kinds`, `since`).
@@ -1406,6 +1406,41 @@ brain update --rollback                 # restore brain(.exe).previous
 - The updater never changes the data repository.
 - Before ordinary commands the CLI performs a notify-only daily check. Set
   `BRAIN_NO_UPDATE=1` to disable it.
+
+### Upgrade to 0.28
+
+Engine 0.28.0 adds Ideas, an agent-first TODO layer. Data schema stays 1 and
+the Markdown record format is unchanged; the local index moves to schema 11 and
+rebuilds itself once. Ideas are one file per record under
+`projects/<id>/ideas/`, so a pre-0.28 engine ignores them without touching
+them: it does not list, index or corrupt idea files (verified with 0.27.2).
+
+```sh
+brain update --yes                          # on every machine
+brain project list                          # every project an idea may target
+brain project set <id> --path <checkout>    # register a missing checkout
+brain doctor
+brain index
+brain idea brief
+brain mcp --list-tools --json                # 18 tools, 11 with --read-only
+```
+
+1. **Update all machines before relying on idea sync.** An old engine keeps
+   working and leaves idea files alone, but it cannot show, complete or remind.
+2. **Register every project you want to tag ideas to.** `brain idea add`
+   resolves the current checkout or `personal`; an unknown project id is
+   rejected with candidates instead of creating a directory. After a checkout
+   moves, `brain project set <id> --path <checkout>` restores resolution.
+3. `brain index` makes the one-time schema-11 rebuild explicit; otherwise the
+   first search or `brain open` pays it. `brain doctor` reports the `idea`
+   kind, index schema and any problem files.
+4. `brain session start` adds a capped Ideas block (at most 3 items) only on
+   `startup`; `brain idea mute --days 7` suppresses it on this machine.
+5. Server mode returns `unsupported` for the ideas CLI, MCP and local-API
+   surfaces. Reminders are desktop 1.8+: they fire only while the app or its
+   tray is alive, and `.ics` export is one-way.
+
+No data migration and no new environment variable are required.
 
 ### Upgrade to 0.27
 

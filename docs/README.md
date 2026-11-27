@@ -26,7 +26,7 @@ Chinese). This page indexes the repository docs by audience.
 | [migration.md](migration.md) | Importing a legacy Company Brain `.brain` directory |
 | [import-engram.md](import-engram.md) | Importing engram memories into brain records |
 | [exchange.md](exchange.md) | LV24 Exchange Format (LvEF v1) for portable knowledge |
-| [mcp.md](mcp.md) | MCP contract: 17 tools, resources, refusal codes, pagination |
+| [mcp.md](mcp.md) | MCP contract: 18 tools, resources, refusal codes, pagination |
 | [search.md](search.md) | Search, ranking, support tiers and progressive disclosure |
 | [context-budget.md](context-budget.md) | Layered context packing and token budgets |
 | [review.md](review.md) | Review findings, review dates and deterministic duplicates |
@@ -66,15 +66,16 @@ Chinese). This page indexes the repository docs by audience.
 | [eval.md](eval.md) | Offline retrieval evaluation fixtures, runner and baseline |
 | [spec-0.25-second-brain.md](spec-0.25-second-brain.md) | Second-brain correctness spec (Russian) |
 | [spec-0.27-honest-retrieval.md](spec-0.27-honest-retrieval.md) | Honest retrieval and belief lifecycle spec (Russian) |
-| [spec-0.28-ideas.md](spec-0.28-ideas.md) | Ideas/TODO layer spec; targets engine 0.28.0 |
+| [spec-0.28-ideas.md](spec-0.28-ideas.md) | Ideas/TODO layer spec; engine 0.28.0 and desktop 1.8.0 |
+| [ideas-contract.md](ideas-contract.md) | Frozen 0.28 storage, CLI, MCP and local-API contract |
 | [plans/2026-11-27-ideas.md](plans/2026-11-27-ideas.md) | 0.28 implementation plan and workstreams |
 | [idea-scan-2026-11.md](idea-scan-2026-11.md) | Survey of eight agent-memory MCP servers |
 
 ## Release notes
 
-Every release from 0.15 to 0.27.2 has a note under `docs/release-*.md`. The indexed table is in
+Every release from 0.15 to 0.28.0 has a note under `docs/release-*.md`. The indexed table is in
 [status.md](status.md#release-history); the latest is
-[release-0.27.2.md](release-0.27.2.md).
+[release-0.28.0.md](release-0.28.0.md).
 
 ## Conventions
 

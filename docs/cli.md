@@ -23,6 +23,7 @@ brain status
 | Start and onboard | `init`, `onboard`, `doctor`, `config`, `discover`, `project`, `agents` |
 | Session context | `open`, `bootstrap`, `context`, `catchup`, `session`, `mcp` |
 | Write records | `note`, `decision`, `attempt`, `handoff`, `state` |
+| Ideas | `idea` (`add`, `list`, `show`, `edit`, `done`, `reopen`, `drop`, `rm`, `restore`, `brief`, `mute`, `ical`) |
 | Curate and review | `review`, `duplicates`, `consolidate`, `promote`, `digest`, `record`, `prompt` |
 | Read and navigate | `search`, `get`, `timeline`, `links`, `relation`, `journal`, `status` |
 | Sync and index | `sync`, `index`, `hooks`, `event`, `graphs`, `code` |
@@ -38,6 +39,7 @@ brain open                                  # session-start brief for the curren
 brain context "add retry to sync push"      # task-shaped context pack
 brain search "checkpoint" --since 7d         # full-text search
 brain review                                # stale knowledge and pending proposals
+brain idea brief                            # today's ideas for the session block
 brain sync --status --json                  # read-only sync state
 brain sync --push                           # commit, rebase, push
 brain record list --as-of 2026-11-01         # historical view
@@ -64,5 +66,5 @@ brain record list --as-of 2026-11-01         # historical view
 
 - [Quickstart](quickstart.md) — the full first-run walkthrough with expected output.
 - [Architecture](ARCHITECTURE.md) — how commands map to use cases and adapters.
-- [MCP](mcp.md) — the 17-tool agent surface.
+- [MCP](mcp.md) — the 18-tool agent surface.
 - [Status](status.md) — what is shipped and what is still a gap.
