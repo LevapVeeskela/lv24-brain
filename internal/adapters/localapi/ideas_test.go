@@ -645,6 +645,29 @@ func TestIdeasCalendarAppliesListFilters(t *testing.T) {
 	}
 }
 
+func TestIdeasCalendarDroppedOnlyStillValidatesProjectAndMode(t *testing.T) {
+	fixture := newFixture(t)
+	fixture.ideas.listErr = domain.ErrUnsupported
+	response := request(fixture, http.MethodGet, "/v1/ideas/ical?status=dropped", "", nil)
+	if response.Code != http.StatusBadRequest ||
+		!strings.Contains(response.Body.String(), `"unsupported"`) {
+		t.Fatalf("dropped-only server mode = %d %s", response.Code, response.Body.String())
+	}
+	if len(fixture.ideas.lastList.Statuses) != 1 || fixture.ideas.lastList.Statuses[0] != domain.IdeaDropped {
+		t.Fatalf("dropped-only list options = %+v", fixture.ideas.lastList)
+	}
+
+	fixture.ideas.listErr = domain.NewValidationError("project", `"missing" is not a registered project`)
+	response = request(fixture, http.MethodGet, "/v1/ideas/ical?project=missing&status=dropped", "", nil)
+	if response.Code != http.StatusBadRequest ||
+		!strings.Contains(response.Body.String(), `"validation"`) {
+		t.Fatalf("dropped-only unknown project = %d %s", response.Code, response.Body.String())
+	}
+	if fixture.ideas.lastList.ProjectID != "missing" || fixture.ideas.lastList.All {
+		t.Fatalf("dropped-only project options = %+v", fixture.ideas.lastList)
+	}
+}
+
 func TestIdeasRequireBearerAndReportUnavailable(t *testing.T) {
 	fixture := newFixture(t)
 	requestWithoutAuth := httptest.NewRequest(http.MethodGet, "/v1/ideas", nil)
