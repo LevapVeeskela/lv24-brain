@@ -4,7 +4,8 @@ rem connectors, data sync and shared agent instructions.
 rem Task: "Company Brain Graph Refresh". Config comes from `brain config use`
 rem or BRAIN_CONFIG; keep this file ASCII and CRLF (cmd.exe).
 setlocal
-set BRAIN="C:\0project\lv24-brain\bin\brain.exe"
+rem Resolve the engine next to this script so moving the checkout needs no edit.
+set BRAIN="%~dp0..\bin\brain.exe"
 set LOG="%LOCALAPPDATA%\lv24-brain\graphs-task.log"
 if not exist "%LOCALAPPDATA%\lv24-brain" mkdir "%LOCALAPPDATA%\lv24-brain"
 rem Keep the log small: start over once it passes ~500 KB.
