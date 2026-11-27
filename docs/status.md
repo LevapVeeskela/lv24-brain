@@ -8,16 +8,17 @@ design is [ARCHITECTURE.md](ARCHITECTURE.md).
 
 | Item | Value |
 |---|---|
-| Engine version | `0.28.0` (release commit; `v0.28.0` tag pending) |
-| Repository HEAD | this release commit — "release: 0.28.0" (2026-11-27) |
-| npm | `lv24-brain@0.27.2` is the latest published (registry check, 2026-11-27); 0.28.0 not published yet |
-| PyPI launcher | `lv24-brain==0.27.2` is the latest published (registry check, 2026-11-27); 0.28.0 not published yet |
+| Engine version | `0.28.0` (`v0.28.0` tag) |
+| Repository HEAD | `3bdb872` — "release: 0.28.0" (`v0.28.0`); this docs commit follows on `main` |
+| npm | `lv24-brain@0.28.0` (registry check, 2026-11-27) |
+| PyPI launcher | `lv24-brain==0.28.0` (registry check, 2026-11-27) |
+| GitHub Release | [v0.28.0](https://github.com/LevapVeeskela/lv24-brain/releases/tag/v0.28.0) (published 2026-11-27) |
 | Go | 1.27 (`go.mod`) |
 | Data schema | 1 (Markdown + YAML frontmatter) |
 | Local index schema | 11 (SQLite FTS5) |
 | Postgres schema | 10 (server mode) |
 | MCP profile | `lv24`, 18 tools plus `memory://` resources |
-| Server image | `ghcr.io/levapveeskela/lv24-brain-server` (`linux/amd64`, `linux/arm64`) |
+| Server image | `ghcr.io/levapveeskela/lv24-brain-server:0.28.0` (`linux/amd64`, `linux/arm64`; published 2026-11-27) |
 | Docs site | <https://brain.lv24.by> (en / ru / zh) |
 | License | Apache-2.0 |
 

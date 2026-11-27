@@ -1,7 +1,6 @@
 # Release 0.28.0 - Ideas: an agent-first TODO layer
 
-Status: release commit prepared on 2026-11-27; the `v0.28.0` tag, registry
-publish and docs deploy follow from this commit.
+Status: released 2026-11-27.
 
 ## Summary
 

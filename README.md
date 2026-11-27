@@ -48,8 +48,8 @@ for git. The public repository is the engine; your brain data lives elsewhere.
 
 | Item | Value |
 |---|---|
-| Version | `0.28.0` (release commit; `v0.28.0` tag pending) |
-| Ship state | Engine 0.28.0 release commit; tag, registry publish and docs deploy pending (2026-11-27) |
+| Version | `0.28.0` (`v0.28.0` tag) |
+| Ship state | Engine 0.28.0 released; GitHub Release, npm, PyPI and GHCR published (2026-11-27) |
 | Visibility | Public engine, private data |
 | Repo | [LevapVeeskela/lv24-brain](https://github.com/LevapVeeskela/lv24-brain) |
 | Docs site | <https://brain.lv24.by> (en / ru / zh) |
