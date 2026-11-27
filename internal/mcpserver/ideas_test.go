@@ -20,13 +20,18 @@ type ideaFake struct {
 	lists    []IdeaListQuery
 	briefs   []IdeaBriefQuery
 	updates  []IdeaUpdateInput
-	trashed  []string
+	trashed  []ideaTrashCall
 	restored []ideaRestoreCall
 	brief    IdeaBrief
 	ideas    map[string]domain.Idea
 }
 
 type ideaRestoreCall struct {
+	ProjectID string
+	ID        string
+}
+
+type ideaTrashCall struct {
 	ProjectID string
 	ID        string
 }
@@ -85,8 +90,8 @@ func (f *ideaFake) UpdateIdea(_ context.Context, in IdeaUpdateInput) (IdeaWrite,
 	}}, nil
 }
 
-func (f *ideaFake) TrashIdea(_ context.Context, id string) (domain.Idea, error) {
-	f.trashed = append(f.trashed, id)
+func (f *ideaFake) TrashIdea(_ context.Context, projectID, id string) (domain.Idea, error) {
+	f.trashed = append(f.trashed, ideaTrashCall{ProjectID: projectID, ID: id})
 	return domain.Idea{ID: id, ProjectID: "alpha", Title: "First"}, nil
 }
 
@@ -254,8 +259,11 @@ func TestBrainIdeaStatusAndTrashActions(t *testing.T) {
 	if rm["isError"] != false {
 		t.Fatalf("rm = %v", rm)
 	}
-	if len(backend.trashed) != 1 || structured(t, rm)["trashed"] != true {
-		t.Fatalf("trashed = %v", backend.trashed)
+	if len(backend.trashed) != 1 || backend.trashed[0].ProjectID != "alpha" || backend.trashed[0].ID != "idea-alpha-1" {
+		t.Fatalf("trashed = %+v", backend.trashed)
+	}
+	if structured(t, rm)["trashed"] != true {
+		t.Fatalf("trash result = %v", structured(t, rm))
 	}
 	if got := toolCall(t, backend, "brain_idea", `{"action":"restore","id":"idea-alpha-1"}`); got["isError"] != false {
 		t.Fatalf("restore = %v", got)
@@ -426,6 +434,106 @@ func TestBrainIdeaWriteScope(t *testing.T) {
 	}
 	if len(backend.restored) != 2 || backend.restored[1].ProjectID != "alpha" {
 		t.Fatalf("restore calls = %+v", backend.restored)
+	}
+}
+
+func TestBrainIdeaWritesRespectTheAllowlist(t *testing.T) {
+	// A beta checkout with an alpha-only allowlist: the default project is
+	// outside the allowlist, so no implicit write may reach it.
+	restricted := Policy{Projects: []string{"alpha"}, DefaultProject: "beta", RestrictWrites: true}
+
+	t.Run("restricted", func(t *testing.T) {
+		backend := newIdeaFake()
+		if got := policyCall(t, backend, restricted, "brain_idea", `{"action":"add","title":"omitted"}`); got["isError"] != true {
+			t.Fatalf("omitted add from a beta checkout = %v", got)
+		}
+		if got := policyCall(t, backend, restricted, "brain_idea", `{"action":"add","project":"alpha","title":"alpha"}`); got["isError"] != true {
+			t.Fatalf("add to alpha without a writable default = %v", got)
+		}
+		if len(backend.adds) != 0 {
+			t.Fatalf("refused adds reached the backend: %+v", backend.adds)
+		}
+		if got := policyCall(t, backend, restricted, "brain_idea", `{"action":"done","id":"idea-beta-1"}`); got["isError"] != true {
+			t.Fatalf("done on a beta id = %v", got)
+		}
+		if got := policyCall(t, backend, restricted, "brain_idea", `{"action":"restore","id":"idea-beta-1"}`); got["isError"] != true {
+			t.Fatalf("restore without a writable project = %v", got)
+		}
+		if len(backend.restored) != 0 {
+			t.Fatalf("refused restore reached the backend: %+v", backend.restored)
+		}
+	})
+
+	t.Run("allow-write", func(t *testing.T) {
+		policy := restricted
+		policy.AllowWrite = true
+		backend := newIdeaFake()
+
+		// The default project is still outside the allowlist: an omitted add
+		// must not silently write it even though AllowWrite is set.
+		if got := policyCall(t, backend, policy, "brain_idea", `{"action":"add","title":"omitted"}`); got["isError"] != true {
+			t.Fatalf("omitted add from a beta checkout with AllowWrite = %v", got)
+		}
+		if len(backend.adds) != 0 {
+			t.Fatalf("refused omitted add reached the backend: %+v", backend.adds)
+		}
+		// An explicit allowed project is written, and the backend receives the
+		// resolved id, not the raw selector.
+		if got := policyCall(t, backend, policy, "brain_idea", `{"action":"add","project":"alpha","title":"Alpha add"}`); got["isError"] != false {
+			t.Fatalf("add to the allowed project = %v", got)
+		}
+		if len(backend.adds) != 1 || backend.adds[0].ProjectID != "alpha" {
+			t.Fatalf("add target = %+v", backend.adds)
+		}
+		if got := policyCall(t, backend, policy, "brain_idea", `{"action":"add","project":"beta","title":"Beta add"}`); got["isError"] != true {
+			t.Fatalf("add outside the allowlist = %v", got)
+		}
+		if len(backend.adds) != 1 {
+			t.Fatalf("refused beta add reached the backend: %+v", backend.adds)
+		}
+		// Every id-addressed mutation checks the stored project.
+		for _, action := range []string{"done", "reopen", "drop", "rm"} {
+			if got := policyCall(t, backend, policy, "brain_idea", fmt.Sprintf(`{"action":%q,"id":"idea-beta-1"}`, action)); got["isError"] != true {
+				t.Fatalf("%s on a beta id = %v", action, got)
+			}
+		}
+		if len(backend.updates) != 0 || len(backend.trashed) != 0 {
+			t.Fatalf("a refused beta mutation reached the backend: updates=%+v trashed=%+v", backend.updates, backend.trashed)
+		}
+		if got := policyCall(t, backend, policy, "brain_idea", `{"action":"done","id":"idea-alpha-1"}`); got["isError"] != false {
+			t.Fatalf("done on an allowed id = %v", got)
+		}
+		if len(backend.updates) != 1 {
+			t.Fatalf("allowed done did not reach the backend: %+v", backend.updates)
+		}
+		if got := policyCall(t, backend, policy, "brain_idea", `{"action":"update","id":"idea-alpha-1","project":"beta","title":"moved"}`); got["isError"] != true {
+			t.Fatalf("move outside the allowlist = %v", got)
+		}
+		// Restore never performs a global lookup under an allowlist: the single
+		// allowed project is used, so a beta id is NOT_FOUND.
+		if got := policyCall(t, backend, policy, "brain_idea", `{"action":"restore","id":"idea-beta-1"}`); got["isError"] != true || structured(t, got)["code"] != RefusalNotFound {
+			t.Fatalf("restore of a beta id without project = %v", got)
+		}
+		if len(backend.restored) != 1 || backend.restored[0].ProjectID != "alpha" {
+			t.Fatalf("restore calls = %+v", backend.restored)
+		}
+		if got := policyCall(t, backend, policy, "brain_idea", `{"action":"restore","id":"idea-beta-1","project":"beta"}`); got["isError"] != true {
+			t.Fatalf("restore restricted to the allowlist = %v", got)
+		}
+		if got := policyCall(t, backend, policy, "brain_idea", `{"action":"restore","id":"idea-alpha-1","project":"alpha"}`); got["isError"] != false {
+			t.Fatalf("restore inside the allowlist = %v", got)
+		}
+	})
+
+	// Several allowed projects: a restore without a project is ambiguous and
+	// must be refused instead of silently going global.
+	multiple := Policy{Projects: []string{"alpha", "beta"}, DefaultProject: "beta", RestrictWrites: true, AllowWrite: true}
+	backend := newIdeaFake()
+	if got := policyCall(t, backend, multiple, "brain_idea", `{"action":"restore","id":"idea-beta-1"}`); got["isError"] != true {
+		t.Fatalf("ambiguous restore under several allowed projects = %v", got)
+	}
+	if got := policyCall(t, backend, multiple, "brain_idea", `{"action":"restore","id":"idea-beta-1","project":"beta"}`); got["isError"] != false {
+		t.Fatalf("named restore inside the allowlist = %v", got)
 	}
 }
 
