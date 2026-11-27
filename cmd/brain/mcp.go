@@ -900,10 +900,10 @@ func (b mcpBackend) UpdateIdea(ctx context.Context, in mcpserver.IdeaUpdateInput
 	return mcpserver.IdeaWrite{Idea: result.Idea, ProjectSource: result.ProjectSource}, nil
 }
 
-// TrashIdea implements mcpserver.IdeaBackend. The id is global, so no project
-// selector is needed.
-func (b mcpBackend) TrashIdea(ctx context.Context, id string) (domain.Idea, error) {
-	return b.app.TrashIdea(ctx, "", id)
+// TrashIdea implements mcpserver.IdeaBackend. The handler resolves the live
+// idea's project, so the app never searches outside the policy scope.
+func (b mcpBackend) TrashIdea(ctx context.Context, projectID, id string) (domain.Idea, error) {
+	return b.app.TrashIdea(ctx, projectID, id)
 }
 
 // RestoreIdea implements mcpserver.IdeaBackend. A non-empty project narrows

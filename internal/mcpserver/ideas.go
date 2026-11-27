@@ -138,7 +138,7 @@ type IdeaBackend interface {
 	ListIdeas(ctx context.Context, in IdeaListQuery) (IdeaList, error)
 	GetIdea(ctx context.Context, id string) (domain.Idea, error)
 	UpdateIdea(ctx context.Context, in IdeaUpdateInput) (IdeaWrite, error)
-	TrashIdea(ctx context.Context, id string) (domain.Idea, error)
+	TrashIdea(ctx context.Context, projectID, id string) (domain.Idea, error)
 	RestoreIdea(ctx context.Context, projectID, id string) (domain.Idea, error)
 	IdeaBrief(ctx context.Context, in IdeaBriefQuery) (IdeaBrief, error)
 }
@@ -198,7 +198,7 @@ func (s *Server) ideaTool() tool {
 			"id":                    stringProp("Globally unique idea id (get, update, done, reopen, drop, rm, restore)."),
 			"title":                 stringProp("Idea title, 1..200 code points (add, update)."),
 			"body":                  stringProp("Markdown body, at most 1 MiB (add, update)."),
-			"project":               stringProp("Project id, alias or checkout path (add, list, brief). add: target; list: scope, omit to resolve the working directory then personal; brief: ordering project, or the scope with scope=current."),
+			"project":               stringProp("Project id, alias or checkout path (add, list, brief; optional for restore). add: target; list: scope, omit to resolve the working directory then personal; brief: ordering project, or the scope with scope=current."),
 			"all":                   boolProp("List every registered project (list); default false. Refused on a server limited to named projects."),
 			"status":                enumProp("New status (update).", ideaStatusNames),
 			"priority":              enumProp("Priority (add, update).", ideaPriorityNames),
@@ -313,11 +313,12 @@ func (s *Server) ideaAdd(ctx context.Context, backend IdeaBackend, args ideaArgs
 	if err := checkIdeaPriority(args.Priority); err != nil {
 		return toolResult{}, err
 	}
-	if err := s.checkIdeaAddProject(ctx, optionalString(args.Project)); err != nil {
+	projectID, err := s.ideaAddProject(ctx, optionalString(args.Project))
+	if err != nil {
 		return toolResult{}, err
 	}
 	result, err := backend.AddIdea(ctx, IdeaAddInput{
-		ProjectID:           optionalString(args.Project),
+		ProjectID:           projectID,
 		Title:               title,
 		Body:                optionalRaw(args.Body),
 		Priority:            optionalString(args.Priority),
@@ -505,10 +506,11 @@ func (s *Server) ideaTrash(ctx context.Context, backend IdeaBackend, args ideaAr
 	if err != nil {
 		return toolResult{}, err
 	}
-	if _, err := s.checkIdeaLiveWrite(ctx, backend, id); err != nil {
+	idea, err := s.checkIdeaLiveWrite(ctx, backend, id)
+	if err != nil {
 		return toolResult{}, err
 	}
-	if _, err := backend.TrashIdea(ctx, id); err != nil {
+	if _, err := backend.TrashIdea(ctx, idea.ProjectID, id); err != nil {
 		return toolResult{}, ideaError(err)
 	}
 	return toolResult{
@@ -522,22 +524,61 @@ func (s *Server) ideaRestore(ctx context.Context, backend IdeaBackend, args idea
 	if err != nil {
 		return toolResult{}, err
 	}
-	// A restricted server cannot look up the trashed idea's project, so it
-	// restores only from its own default project: an idea from another project
-	// is NOT_FOUND instead of a write outside the scope.
-	projectID := ""
-	if s.policy.RestrictWrites && !s.policy.AllowWrite {
-		if s.policy.DefaultProject == "" {
-			return toolResult{}, unsupportedBackend("brain_idea(action=restore)",
-				"start the server in the project checkout, or pass --allow-write")
-		}
-		projectID = s.policy.DefaultProject
+	projectID, err := s.ideaRestoreProject(ctx, optionalString(args.Project))
+	if err != nil {
+		return toolResult{}, err
 	}
 	idea, err := backend.RestoreIdea(ctx, projectID, id)
 	if err != nil {
 		return toolResult{}, ideaError(err)
 	}
 	return ideaWriteResult(IdeaWrite{Idea: idea, ProjectSource: app.IdeaProjectExplicit}), nil
+}
+
+// ideaRestoreProject resolves where a restore may look. A trashed idea has no
+// live project to read, so the project must come from the request, the single
+// allowed project, or the default project; a non-empty allowlist never permits
+// a global (empty) restore. AllowWrite widens the write scope but does not make
+// the allowlist global.
+func (s *Server) ideaRestoreProject(ctx context.Context, selector string) (string, error) {
+	if selector != "" {
+		target, err := s.writeTarget(ctx, selector)
+		if err != nil {
+			return "", err
+		}
+		return target.ID, nil
+	}
+	if len(s.policy.Projects) > 0 {
+		if len(s.policy.Projects) != 1 {
+			return "", refusalInvalidf(
+				"project is required for restore: this server is limited to %s",
+				s.policy.projectList())
+		}
+		target, err := s.resolveTarget(ctx, s.policy.Projects[0])
+		if err != nil {
+			return "", err
+		}
+		if err := s.policy.checkWrite(target.ID); err != nil {
+			return "", err
+		}
+		return target.ID, nil
+	}
+	if s.policy.RestrictWrites && !s.policy.AllowWrite {
+		defaultProject := strings.TrimSpace(s.policy.DefaultProject)
+		if defaultProject == "" {
+			return "", unsupportedBackend("brain_idea(action=restore)",
+				"start the server in the project checkout, or pass --allow-write")
+		}
+		target, err := s.resolveTarget(ctx, defaultProject)
+		if err != nil {
+			return "", err
+		}
+		if err := s.policy.checkWrite(target.ID); err != nil {
+			return "", err
+		}
+		return target.ID, nil
+	}
+	return "", nil
 }
 
 func (s *Server) ideaBrief(ctx context.Context, backend IdeaBackend, args ideaArgs) (toolResult, error) {
@@ -836,28 +877,49 @@ func (s *Server) ideaBriefScope(ctx context.Context, selector, scope string) (st
 	return "", app.IdeaBriefScopeAll, nil
 }
 
-// checkIdeaAddProject enforces the write scope before an add. An explicit
-// selector resolves through writeTarget; an omitted one follows the app's
-// working-directory resolution, which is the server's default project, so the
-// policy checks that project. A server without a default project refuses.
-func (s *Server) checkIdeaAddProject(ctx context.Context, selector string) error {
+// ideaAddProject resolves the project an add will actually write and enforces
+// both the allowlist and the write scope on it. The resolved id is passed to
+// the backend, so the app never falls back to a project the policy did not see:
+// an explicit selector resolves itself; an omitted selector uses the server's
+// default project; without one, the app's personal fallback is resolved first.
+func (s *Server) ideaAddProject(ctx context.Context, selector string) (string, error) {
 	if selector != "" {
-		_, err := s.writeTarget(ctx, selector)
-		return err
+		target, err := s.writeTarget(ctx, selector)
+		if err != nil {
+			return "", err
+		}
+		return target.ID, nil
 	}
-	if !s.policy.RestrictWrites || s.policy.AllowWrite {
-		return nil
+	if defaultProject := strings.TrimSpace(s.policy.DefaultProject); defaultProject != "" {
+		target, err := s.resolveTarget(ctx, defaultProject)
+		if err != nil {
+			return "", err
+		}
+		if err := s.policy.checkWrite(target.ID); err != nil {
+			return "", err
+		}
+		return target.ID, nil
 	}
-	return s.policy.checkWrite(s.policy.DefaultProject)
+	target, err := s.resolveTarget(ctx, "personal")
+	if err != nil {
+		return "", err
+	}
+	if err := s.policy.checkWrite(target.ID); err != nil {
+		return "", err
+	}
+	return target.ID, nil
 }
 
-// checkIdeaLiveWrite resolves the idea first and enforces the write scope on
-// its stored project. The id is global, so the idea itself supplies the project
-// a selector would otherwise name.
+// checkIdeaLiveWrite resolves the idea first and enforces both the read
+// allowlist and the write scope on its stored project. The id is global, so
+// the idea itself supplies the project a selector would otherwise name.
 func (s *Server) checkIdeaLiveWrite(ctx context.Context, backend IdeaBackend, id string) (domain.Idea, error) {
 	idea, err := backend.GetIdea(ctx, id)
 	if err != nil {
 		return domain.Idea{}, ideaError(err)
+	}
+	if err := s.policy.checkProject(idea.ProjectID); err != nil {
+		return domain.Idea{}, err
 	}
 	if err := s.policy.checkWrite(idea.ProjectID); err != nil {
 		return domain.Idea{}, err
