@@ -4,36 +4,105 @@
 
 [![npm](https://img.shields.io/npm/v/lv24-brain?label=npm&color=cb3837&logo=npm)](https://www.npmjs.com/package/lv24-brain)
 [![PyPI](https://img.shields.io/pypi/v/lv24-brain?label=PyPI&color=3775A9&logo=pypi&logoColor=white)](https://pypi.org/project/lv24-brain/)
-[![downloads](https://img.shields.io/npm/dm/lv24-brain?color=cb3837)](https://www.npmjs.com/package/lv24-brain)
 [![release](https://img.shields.io/github/v/release/LevapVeeskela/lv24-brain?color=0b6b5f&logo=github)](https://github.com/LevapVeeskela/lv24-brain/releases)
-[![GHCR](https://img.shields.io/badge/GHCR-ghcr.io%2Flevapveeskela%2Flv24--brain--server-2496ED?logo=docker&logoColor=white)](https://github.com/LevapVeeskela/lv24-brain/pkgs/container/lv24-brain-server)
+[![GHCR](https://img.shields.io/badge/GHCR-lv24--brain--server-2496ED?logo=docker&logoColor=white)](https://github.com/LevapVeeskela/lv24-brain/pkgs/container/lv24-brain-server)
 [![docs](https://img.shields.io/badge/docs-brain.lv24.by-5fd4c4)](https://brain.lv24.by)
 [![license](https://img.shields.io/badge/license-Apache--2.0-2ea44f)](LICENSE)
 [![Go](https://img.shields.io/badge/Go-1.27-00ADD8?logo=go&logoColor=white)](go.mod)
 
-**Documentation:** [English](https://brain.lv24.by) · [Русский](https://brain.lv24.by/ru/) · [中文](https://brain.lv24.by/zh/)
+**Your coding agents forget everything between sessions. LV24 Brain doesn't.**
 
-> **Your coding agents forget everything between sessions. LV24 Brain doesn't.**
-> Claude Code, Codex and OpenCode read the same project memory at the start of
-> every session and write back what they decided, what failed and what comes
-> next — on every machine you work on. Plain Markdown in your own private git
-> repository: no cloud, no vendor lock-in, no database to run.
+Claude Code, Codex, OpenCode and any MCP client read the same project memory at the start of every
+session and write back what they decided, what failed and what comes next — on every machine you
+work on. The data is plain Markdown in your own private git repository: no cloud, no vendor lock-in,
+no database to run.
 
-> **Кратко по-русски.** Общая память проектов для ИИ-агентов и людей: состояние
-> проекта, решения, неудачные попытки и handoff'ы между сессиями. Claude Code,
-> Codex и OpenCode открывают сессию с контекстом проекта и оставляют итог в
-> конце — на всех ваших машинах. Данные — обычный Markdown в вашем приватном
-> git-репозитории. Установка: `npm i -g lv24-brain`, затем
-> `brain agents sync --hooks`. Документация на русском —
-> [brain.lv24.by/ru](https://brain.lv24.by/ru/).
+**Docs:** [Documentation site](https://brain.lv24.by) · [Architecture](docs/ARCHITECTURE.md) ·
+[Agent entry](AGENTS.md) · [MCP](docs/mcp.md) · [CLI](docs/cli.md)
 
-| 🚀 Start | 🧠 Use | 🛠 Run a team |
-| --- | --- | --- |
-| [Install](#install-in-a-minute) · [See it work](#see-it-work) · [Quickstart](docs/quickstart.md) | [Agent loop](https://brain.lv24.by/loop/) · [MCP tools](https://brain.lv24.by/agents/) · [Search](https://brain.lv24.by/search/) · [CLI](https://brain.lv24.by/reference/cli/) | [Server mode](docs/deploy.md) · [Security](docs/security.md) · [Runbook](docs/runbook.md) · [Update](docs/update.md) |
+> **Кратко по-русски.** Общая память проектов для ИИ-агентов и людей: состояние проекта, решения,
+> неудачные попытки и handoff'ы между сессиями. Агенты открывают сессию с контекстом проекта и
+> оставляют итог в конце — на всех ваших машинах. Данные — обычный Markdown в вашем приватном
+> git-репозитории. Установка: `npm i -g lv24-brain`, затем `brain agents sync --hooks`.
+> Документация на русском — [brain.lv24.by/ru](https://brain.lv24.by/ru/).
+
+## What it is
+
+- **Memory that survives the session.** State, decisions, attempts and handoffs are written as the
+  work happens and read back at the next start by any agent, on any machine.
+- **Works with the agents you use.** Session hooks for Claude Code, Codex and OpenCode, plus an MCP
+  server with 17 tools (`brain_open`, `brain_context`, `brain_search`, `brain_decision`, …).
+- **Your data, your repository.** Markdown + YAML in a private git repo you own, synced with plain
+  git. Secrets are redacted on every write; this public repository never holds brain data.
+- **Finds what you mean.** Full-text search matches English and Russian word forms
+  (`decisions` → `decision`, `решений` → `решение`), with `[[id]]` links and backlinks.
+- **Keeps itself honest.** `brain review` flags stale next steps, answered questions, decisions
+  contradicted by later attempts or changed code, broken links, near-duplicates and proposals.
+- **Grows into a team server.** Optional `brain-server` with Postgres, roles, per-project ACL,
+  scoped API tokens, OIDC and an audit log.
+
+**Not:** a cloud SaaS, a vector database, a multi-tenant platform, a CRDT editor, or a replacement
+for git. The public repository is the engine; your brain data lives elsewhere.
+
+## Status
+
+| Item | Value |
+|---|---|
+| Version | `v0.27.2` (tag), HEAD `6d529fc` |
+| Ship state | Engine released; 0.28 Ideas spec/plan committed, not implemented (2026-11-27) |
+| Visibility | Public engine, private data |
+| Repo | [LevapVeeskela/lv24-brain](https://github.com/LevapVeeskela/lv24-brain) |
+| Docs site | <https://brain.lv24.by> (en / ru / zh) |
+| Hosted server | none shipped — self-host with [deploy/](deploy/) |
+| License | Apache-2.0 |
+
+Detailed capability, known gaps and release history: [docs/status.md](docs/status.md).
+
+## At a glance
+
+| Stack | Entry points | Ports | Data | Deploy |
+|---|---|---|---|---|
+| Go 1.27, stdlib HTTP, pgx, modernc SQLite FTS5, MCP Go SDK | `cmd/brain`, `cmd/brain-server` | `8080` (server), ephemeral loopback (desktop) | Markdown + SQLite FTS5, or Postgres schema 10 | npm, PyPI, signed installers, Docker Compose, GHCR |
+
+## Three modes
+
+| Mode | Store | Sync | Use when |
+|---|---|---|---|
+| `local` | Markdown + SQLite FTS5 | none | One machine, offline, scratch brain |
+| `git` | Markdown + SQLite FTS5 | `gitstore`: fetch, rebase, commit, optional push | Several machines or people, reviewable history (recommended default) |
+| `server` | HTTP API + Postgres | API + SSE | A team wants one shared service and central accounts |
+
+The same use cases run in all three; only adapters change. Server mode is single-node.
+
+## Install
+
+| Channel | Command |
+|---|---|
+| npm (Node.js 18+) | `npm i -g lv24-brain` |
+| PyPI launcher (needs Node.js 18+) | `pip install lv24-brain` |
+| Signed binary, macOS/Linux | `./installers/unix/install.sh --mode local --yes` |
+| Signed binary, Windows | `.\installers\windows\install.ps1 -Mode local` |
+
+The PyPI package is a thin launcher: it runs `npx --yes lv24-brain@<version>`, installs only
+`lv24-brain` (never `brain`), and does not bundle Node.js. npm, the signed installers and GitHub
+Releases are the canonical distribution. See [docs/install.md](docs/install.md) and
+[docs/pypi.md](docs/pypi.md).
+
+## Quick start
+
+```sh
+brain init --mode local --data-dir ~/brain
+brain config use ~/brain/brain.yaml
+brain project set myapp --path ~/repo/myapp
+brain agents sync --hooks
+cd ~/repo/myapp && brain open
+```
+
+That is the whole loop: agents read `brain open` (or `brain context "<task>"`) at session start and
+leave a handoff at the end. Next: [quickstart](docs/quickstart.md) ·
+[git mode across machines](docs/quickstart.md#2-git-mode) · [server mode](docs/deploy.md).
 
 ## See it work
-
-Before a task, an agent (or you) asks for exactly the context it needs:
 
 ```text
 $ brain context "add retry to sync push"
@@ -41,9 +110,6 @@ $ brain context "add retry to sync push"
 # myapp — context
 goal: ship offline sync for the mobile client
 next_action: add retry with backoff to `sync push`
-
-## Review findings
-- none
 
 ## Latest handoff
 - 2026-11-08 summary: queue drains on reconnect; push still fails on 502
@@ -57,419 +123,75 @@ next_action: add retry with backoff to `sync push`
 - [attempt] Infinite retry loop — hammered the API during the outage
 ```
 
-One call: state, the last handoff, the decisions and notes that match the task,
-and the approaches that already failed — so the next session does not repeat
-them. At the end of the session the hook writes a handoff, and the `Decision:`
-lines of the agent's final message land in a review inbox.
+One call returns state, the last handoff, matching decisions and notes, and approaches that already
+failed. Raw connector text stays out unless `--raw` is passed and an explicit grant exists.
 
-Raw connector text stays out of this view unless you ask for it:
-`brain context --raw` appends at most five granted excerpts from stored items.
-It is off by default, local/git only, and default-deny until the project has an
-explicit grant in `<data-dir>/context-allow.json`.
+## Architecture
 
-## Curate sources without trusting them
+- **Hexagonal core.** `internal/domain` ← `internal/ports` ← `internal/app`; adapters implement
+  ports and are selected by `internal/bootstrap` per mode.
+- **Files are the source of truth** in local/git modes. Markdown + YAML frontmatter under
+  `projects/<id>/`; the SQLite FTS5 index is derived and rebuildable.
+- **Git is the sync protocol.** Deterministic merge drivers for state, notes, registry and raw items
+  preserve both sides in committed conflict artifacts; sync never force-pushes.
+- **The server is optional.** One Go binary, Postgres schema 10, JWT/API tokens/OIDC, roles,
+  per-project ACL, audit log and SSE revisions.
+- **The desktop app talks to a frozen local contract.** `localapi-v1` is loopback-only, bearer-token
+  authenticated, exact-Host checked and additive.
 
-`brain digest --source` reads the raw items a connection already stored — it
-never contacts the provider — and previews deterministic candidates: a closed
-issue becomes a decision candidate, a merged pull request or commit a note, an
-incident an attempt. Nothing is accepted automatically:
+Read [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the front door and
+[docs/architecture-deep.md](docs/architecture-deep.md) for the deep dive. Diagram sources and SVGs live in
+[docs/architecture/](docs/architecture/).
 
-```sh
-brain digest --source gh-main                       # preview; writes nothing
-brain digest --source gh-main --project myapp --since 7d --write
-brain review --project myapp                        # pending proposals and stale/orphan findings
-brain promote proposal-gh-main-1a2b3c4d5e6f --as decision --status accepted
-brain promote proposal-gh-main-1a2b3c4d5e6f --dismiss       # or reject the candidate
-```
+## Repository map
 
-Proposals live in `<data-dir>/proposals/<project>/<id>.md`, are git-ignored and
-machine-local, never sync, do not change the data revision, and are never
-indexed by `brain search`. Promotion is the only path from a proposal into
-curated records; the new record keeps `source.proposal_id`, and a rerun never
-creates a second record. Sources marked `local-only` need `--yes`; a stale or
-orphaned candidate needs `--force`.
-
-Raw context follows the same review-first rule. Grants live in
-`<data-dir>/context-allow.json` (next to `brain.yaml`, no secrets, committed
-like `connectors/connections.json`):
-
-```json
-{
-  "schemaVersion": 1,
-  "grants": [
-    {
-      "project": "lv24-brain",
-      "connection": "github",
-      "kinds": ["issue", "pull-request", "commit"],
-      "maxAgeDays": 30,
-      "maxExcerpts": 3
-    }
-  ]
-}
-```
-
-`brain context "<task>" --raw` reads that file in local/git mode only. A missing
-file or no matching grant is default-deny. `project` and `connection` must match
-exactly; optional `kinds` defaults to every item kind, `maxAgeDays` `0` disables
-the age filter and `maxExcerpts` defaults to `5` (range `1`–`5`). Unknown
-fields, duplicate project+connection grants and invalid ids or kinds are hard
-errors. Excerpts appear only when the curated context is thin (fewer than five
-records, failed attempts and findings in total), at most five in total, 600
-runes per body and 2000 runes overall. Bodies are re-redacted at read time and
-shown as untrusted external text with connection, external id, URL and updated
-date.
-
-## Why LV24 Brain
-
-- **Memory that survives the session.** State, decisions, attempts and handoffs
-  are written as the work happens and read back at the next start — by any
-  agent, on any machine.
-- **Works with the agents you use.** Session hooks for Claude Code, Codex and
-  OpenCode, plus an MCP server with 18 tools (`brain_open`, `brain_context`,
-  `brain_search`, `brain_record`, `brain_idea`, …) for anything that speaks MCP.
-- **Your data, your repository.** Markdown + YAML in a private git repo you
-  own, synced with plain git. Secrets are redacted on every write; this public
-  repository never holds brain data.
-- **Finds what you mean.** Full-text search that matches English and Russian
-  word forms (`decisions` → `decision`, `решений` → `решение`), plus
-  `[[id]]` links with backlinks between records.
-- **Keeps itself honest.** `brain review` flags stale next steps, answered
-  questions, decisions contradicted by later attempts or by changed code,
-  broken links, near-duplicates and pending proposals.
-- **Curates only with review.** `brain digest --source` turns stored raw items
-  into candidate decisions, attempts and notes; `brain promote` writes one
-  curated record with provenance. Proposals are machine-local and never
-  accepted automatically.
-- **Safe to keep updated.** Ed25519-signed releases, SHA-256-checked installs,
-  `brain update` with rollback, npm packages with provenance.
-- **Grows into a team server.** Optional `brain-server` with Postgres,
-  per-project access control, scoped API tokens and an audit log
-  (`ghcr.io/levapveeskela/lv24-brain-server`).
-
-## Install in a minute
-
-```sh
-npm i -g lv24-brain                               # or the signed installers in docs/install.md
-brain init --mode local --data-dir ~/brain        # or --mode git with a clone of your private data repo
-brain config use ~/brain/brain.yaml
-brain project set myapp --path ~/src/myapp
-brain agents sync --hooks                         # Claude Code, Codex and OpenCode start with this context
-cd ~/src/myapp && brain open
-```
-
-The same CLI is also available on PyPI as a thin Python launcher:
-
-```sh
-pip install lv24-brain
-lv24-brain open .
-```
-
-It runs `npx --yes lv24-brain@<version>` and needs Node.js 18 or newer. It
-does not bundle Node.js or the binary, and it deliberately installs only
-`lv24-brain`, never `brain`, so it cannot shadow the native Go binary. npm and
-the signed installers remain the canonical distribution; see
-[docs/pypi.md](docs/pypi.md).
-
-That is the whole loop: agents read `brain open` (or `brain context "<task>"`)
-at session start and leave a handoff at the end. Next steps:
-[quickstart](docs/quickstart.md) · [install options](docs/install.md) ·
-[git mode across machines](docs/quickstart.md#2-git-mode) ·
-[server mode](docs/deploy.md).
-
----
-
-- Public engine (this repository): Apache-2.0.
-- Private data instance: a separate private data repository, never this repository.
-- Product design (source of truth): [docs/product-design.md](docs/product-design.md).
-
-Brain data never lives in this repository. Notes, mail, connector dumps,
-journals, indexes, backups, credentials, and machine paths belong in the private
-data repository or a local data directory.
-
-## Current status
-
-The engine has moved past the initial scaffold. Implemented and tested today:
-
-| Area | State |
+| Path | Purpose |
 |---|---|
-| CLI | `init`, `doctor`, `open`, `project list\|show\|set`, `bootstrap`, `note`, `decision`, `attempt`, `handoff`, `status`, `sync`, `index [--rebuild]`, `search <query> [--since 7d]`, `context "<task>" [--raw]` (task-focused context; adds only `pending_proposals: N`; `--raw` appends granted raw excerpts in local/git mode; MCP `brain_context`), `journal`, `event commit`, `hooks`, `config`, `discover`, `graphs`, `agents sync [--check]`, `state get|set`, `record list|show|status|supersede|trash|restore`, `links <id>` / `links --broken` (`[[id]]` links and backlinks between records), `catchup`, `digest` (cross-project morning summary; `--source <conn>` previews proposals from stored items, `--write` persists), `review [--fix]` (findings include `broken-link`, `near-duplicate`, `proposal-stale`, `proposal-orphan` and `proposal-contradicted`), `promote <id>` (promote or dismiss one proposal), `session start|end` (agent hooks), `mcp` (stdio MCP server for agents), `connector run`, `migrate [--rollback]`, `secret`, `update`, `serve`, `version`, `help`; `login` and `logout` in server mode |
-| Storage | Markdown + YAML frontmatter (`fsstore`), SQLite FTS5 index, `registry.json` project index |
-| Local search | `brain index` refreshes FTS5 from Markdown; `brain index --rebuild` discards and rebuilds it; `brain search` queries it in local/`git` mode; English and Russian word forms match as a prefix ("decisions" finds "decision", "решений" finds "решение") and `--since` limits by update time. `brain index` is local-only; `brain search` also works in server mode through `GET /v1/search` |
-| Git sync | `fetch`, `pull --rebase`, commit, optional push; read-only `--status`; conflict reporting |
-| HTTP server | Health/readiness/version, OpenAPI JSON, JWT + rotating refresh tokens, API tokens with optional scopes (read/write/admin) and project allow-list, per-project ACL, durable auth tables (migrations `0002_auth_tokens.sql` and `0003_auth_revocations.sql`, server schema 9: `0004_security_audit.sql`, `0005_knowledge_owner.sql`, `0006_api_token_expiry.sql`, `0007_search_fulltext.sql`, `0008_project_access.sql`, `0009_connector_items.sql`), security audit log (`GET /v1/audit`, admin), local admin bootstrap, OIDC (PKCE/state/nonce), roles `admin\|member\|viewer`, SSE revision stream; Postgres when `BRAIN_DATABASE_URL` is set, in-memory fallback otherwise |
-| Server-mode CLI | `brain login` / `brain logout`; one atomic OS secret-store bundle `server-session` (server URL, access token, refresh token) bound to the configured `server_url`; `server-token` remains an explicit static API-token fallback; the HTTP client refreshes once on `401` and retries; `BRAIN_TOKEN` overrides stored credentials; `brain token list\|create\|revoke` manages API tokens (list never shows secrets; `create --scope read\|write\|admin --project <id> --expires 30d\|720h` prints the secret once) |
-| Connectors (v0.12.0) | `brain connection list\|add\|remove\|migrate\|providers\|secret set\|auth` manages the local/git catalogue `connectors/connections.json` (no secrets; credentials live as `conn/<id>/<field>` in the OS keychain, set from stdin); `connection auth <id>` runs GitHub device or GitLab PKCE OAuth and stores the bundle only in the local secret store (PATs still work; the OAuth session takes precedence until `--remove`); `brain connection run <id> [--since RFC3339] [--days N] [--limit N] [--json]` runs one connection through the ingestion host (per-connection lock, secret redaction, mail address hashing, body cap, index update, run record); `brain connector run --all` runs every configured connection when the catalogue is non-empty and falls back to the legacy `--name github\|gitlab\|imap` snapshot targets when it is empty. Server mode runs the same native item-level path through `POST /v1/connectors/run`: a PostgreSQL deployment persists raw items and checkpoints (schema 9), while the in-memory development store rejects connector runs as unsupported instead of silently discarding output; `--brain-project <id>` maps items to an existing brain project (`projectId` in the API; unmapped items stay stored but out of project-scoped search). The legacy snapshot path and `connectors/runs/` records keep working in local/git mode. Native Phase 1 sources (v0.10.0) are registered alongside GitHub/GitLab/IMAP: `folders` (plain folders, Obsidian vaults, Logseq graphs), `jira` (Cloud/Data Center), `confluence` (Cloud/Data Center), `linear`, `slack` (explicitly listed channels), `notion` (pages/databases), `sentry` (issues with bounded events), `postgres-schema`/`sqlite-schema` (catalog-only schema snapshots), `rss` (RSS/Atom) and `web` (sitemaps); add them with `brain connection add ...` and run with `brain connection run <id>`. The Phase 3 `mcp` source (v0.12.0) reads MCP servers over stdio or streamable HTTP through an explicit read-only tool allow-list; results are recent-only and local-only by default |
-| Background agent (v0.12.0) | `brain agent` runs configured connections in the foreground background engine with a single instance per data dir, persisted schedules (`manual`, `@hourly`, `@daily`, `@every <duration>`), parent watchdog, bounded worker pool, cancellation, rotating redacted logs and `agent status\|stop`. The authenticated loopback control API is enabled with a per-process bearer token in the owner-only `agent/runtime.json` (ephemeral port, `{port, token, pid, version}`): health, connections CRUD/test/run/credentials, runs + SSE logs, schedules, projects, settings, engine update and shutdown; Host/Origin checks, no CORS, body limits. The desktop app is a later work package |
-| Auto-update | `brain update --check`, `--yes`, and `--rollback`; notify-only daily check; release check, Ed25519-signed manifest, SHA-256 verification, staged apply, previous binary kept; GoReleaser release workflow |
-| Installers | npm (`npm i -g lv24-brain`, platform packages `@lv24/brain-<os>-<cpu>`, `brain update` defers to npm), Windows PowerShell/BAT installer (with optional OpenCode handoff hook) and macOS/Linux bash installer |
-| Migration | `brain migrate` imports legacy `.brain` knowledge (idempotent, dry-run, path validation), registers projects, and sets `schema_version`; every import writes a backup manifest and `brain migrate --rollback <manifest.json \| latest>` reverts it (edited files are kept) |
-
-API tokens and refresh-token families are durable in Postgres (migrations
-`0002_auth_tokens.sql` and `0003_auth_revocations.sql`; the server schema is
-version 9 after `0009_connector_items.sql`), so they survive restarts and refresh rotation still revokes the whole family on
-reuse. Revocation tombstones have no expiry, so pruning expired token rows
-cannot resurrect a revoked family or session. Without
-`BRAIN_DATABASE_URL`, `brain-server` still falls back to an in-memory store that
-loses all data on restart; migrations run at startup, and an existing schema
-with pending migrations requires `BRAIN_DATABASE_BACKUP_CONFIRMED=1` after a
-backup. Multi-replica deployment remains unsupported even with durable tokens:
-the SSE broker and login rate limiter are per-process.
-
-Known gaps, stated plainly:
-
-- Server auto-update is not implemented; `BRAIN_SERVER_AUTO_UPDATE` is a
-  reserved placeholder and deployments upgrade by replacing the image.
-- Server-side connector runs use the native item-level path. With
-  `BRAIN_DATABASE_URL` they persist raw items and checkpoints in PostgreSQL
-  (`connector_items`, `connector_checkpoints`, run `connection_id`/`stats`,
-  migration `0009_connector_items.sql`, schema 9) plus the run record. The
-  per-run Markdown export contains the run record, not item content. The
-  in-memory development store has no raw zone and returns `unsupported` for
-  connector runs instead of discarding output. Pass `projectId` /
-  `--brain-project` to map server items to an existing project; unmapped
-  items are stored but excluded from project-scoped search.
-- Phase 1 `folders` reads Markdown/text/RST/HTML only (no PDF/DOCX
-  extraction yet) and uses mtime plus a scan watermark for the fast path; a
-  content change with a preserved mtime is not detected. Jira Data Center and
-  Confluence use numeric page offsets: an item updated during a long backfill
-  can shift into an already consumed page and be missed for that pass. Jira
-  Cloud and Linear use opaque/Relay cursors and are less exposed.
-- Phase 1 `slack` reads only explicitly listed channels, at most 15 history
-  messages per request and five replies per thread; a `429` is surfaced to the
-  scheduler instead of busy-retrying. Edits to messages older than the
-  five-minute overlap are not re-read with a bot token (Slack `search.messages`
-  requires a user token and is a later integration); `UpdatedAt` uses
-  `edited.ts` when a message is re-read. `notion` search has no `updated_since`
-  (results are paged newest-first and stop below the watermark), and
-  `sentry` fetches at most three newest events per issue instead of using
-  `statsPeriod`. `postgres-schema`/`sqlite-schema` read catalogs only, never
-  user rows, and removed objects are not tombstoned. `rss`/`web` never infer
-  deletes; `web` defaults to the sitemap's host and port, honors `robots.txt`
-  unless disabled, and never follows redirects.
-- The Phase 3 `mcp` source is recent-results-only by nature: MCP tools rarely
-  expose a complete history, so items are marked accordingly and the watermark
-  filters by extracted timestamps. Only tools matching the read allow-list are
-  called, destructive names are denied unconditionally, and required tool
-  inputs the source cannot safely synthesize cause that tool to be skipped.
-  stdio commands and args are local credentials (never the synced catalogue),
-  inherit the agent process environment, and must be trusted.
-- Raw-zone items are excluded from default search; opt in with
-  `brain search <query> --kind item` (legacy dumps: `--dumps` / `--kind dump`).
-- Providers do not infer deletes: a missing item is not a tombstone unless
-  the source reports one (capability `Deletes` is false for providers without
-  authoritative tombstones).
-- Curation is local and rule-based: `brain digest --source` reads raw items
-  already stored by ingestion (it never runs the connector) and writes
-  machine-local proposals under `<data-dir>/proposals/`; promotion through
-  `brain promote` is the only path into curated records and is never automatic.
-  There is no scheduled digest, no proposal merge/trash, and no proposal
-  surface in server mode, the local API or a desktop app. Candidates can be
-  noisy; review each one.
-- Raw context excerpts (`brain context --raw`) are local/git only and need an
-  explicit `context-allow.json` grant. Server mode, the desktop app and LLM
-  surfaces are deferred and do not read raw excerpts.
-- `brain sync` is not implemented in server mode; the server API is the sync
-  path.
-- `brain index` is local-only. `brain search` works in server mode through
-  `GET /v1/search`.
-
-## Requirements
-
-- No Go toolchain is needed to run a release binary.
-- Go 1.27 or newer builds the engine from source.
-- Git is required only for `git` mode and for source checkouts.
-- Docker with Compose v2 is optional and only for the server deployment files.
-
-## Quickstart
-
-The full walkthrough with expected output is in
-[docs/quickstart.md](docs/quickstart.md).
-
-### Local mode
-
-```sh
-go build -o bin/brain ./cmd/brain
-go build -o bin/brain-server ./cmd/brain-server
-./bin/brain init --mode local --data-dir ~/brain
-./bin/brain status --config ~/brain/brain.yaml
-./bin/brain note --project demo --title "First note" --body "Local smoke" \
-  --config ~/brain/brain.yaml
-./bin/brain search "Local smoke" --config ~/brain/brain.yaml
-```
-
-`brain search` reads the FTS5 index. New writes update it automatically; run
-`brain index` after adding Markdown outside the CLI, or
-`brain index --rebuild` to discard stale entries and rebuild from scratch.
-
-Windows PowerShell:
-
-```powershell
-go build -o bin\brain.exe .\cmd\brain
-go build -o bin\brain-server.exe .\cmd\brain-server
-.\bin\brain.exe init --mode local --data-dir "$env:USERPROFILE\brain"
-.\bin\brain.exe status --config "$env:USERPROFILE\brain\brain.yaml"
-```
-
-### Git mode
-
-```sh
-git clone <private-data-repo-url> ~/brain-data
-brain init --mode git --data-dir ~/brain-data --config ~/brain-data/brain.yaml
-brain sync --status --config ~/brain-data/brain.yaml
-```
-
-`brain sync` commits local changes, rebases onto the remote, and pushes only
-with `--push`. It never force-pushes. Secrets, indexes, and backups are ignored
-by the data repository's `.gitignore`.
-
-### Server mode
-
-```sh
-export BRAIN_JWT_SECRET="<at least 32 bytes>"
-export BRAIN_BOOTSTRAP_ADMIN_LOGIN="admin"
-export BRAIN_BOOTSTRAP_ADMIN_PASSWORD="<strong password>"
-# Optional: durable Postgres store. Without it the server stays in memory.
-export BRAIN_DATABASE_URL="postgres://brain:<url-encoded-password>@127.0.0.1:5432/brain?sslmode=disable"
-./bin/brain-server --addr 127.0.0.1:8080
-```
-
-Smoke checks:
-
-```sh
-curl -fsS http://127.0.0.1:8080/health
-curl -fsS http://127.0.0.1:8080/ready
-curl -fsS http://127.0.0.1:8080/version
-```
-
-The API accepts a JWT access token or an opaque API token (`brain_…`) as
-`Authorization: Bearer <token>`. `GET /openapi.json` describes the surface.
-
-Point the CLI at the server and log in with the bootstrap administrator (or
-another local account):
-
-```sh
-./bin/brain init --mode server --server-url http://127.0.0.1:8080 \
-  --config ~/brain-server.yaml
-printf '%s\n' '<admin password>' | ./bin/brain login --config ~/brain-server.yaml \
-  --login admin --password-stdin
-./bin/brain status --config ~/brain-server.yaml
-./bin/brain note --project demo --title "First note" --body "Server smoke" \
-  --config ~/brain-server.yaml
-./bin/brain connector run --name github --config ~/brain-server.yaml
-./bin/brain logout --config ~/brain-server.yaml
-```
-
-`brain login` is server-mode only. `--login` falls back to `BRAIN_LOGIN`; the
-password is read from stdin with `--password-stdin` or from `BRAIN_PASSWORD`.
-There is no `--password` flag, so the password never appears in the
-`brain login` arguments. The command stores one JSON
-credential bundle under the OS secret-store key `server-session`
-(`serverUrl`, `accessToken`, `refreshToken`) in a single write, bound to the
-normalized `server_url`. The HTTP client refreshes once on `401` and retries; a
-login-managed bundle is never sent to a different server URL, and a mismatched
-binding is refused with both URLs named. `brain logout` checks
-`GET /v1/auth/me` before rotating anything, revokes the JWT session and its
-refresh family, and clears the bundle. The refresh family is revoked
-immediately; an access JWT that was already issued stays valid until its short
-TTL.
-
-If a static API token is also stored it cannot be revoked by the CLI: logout
-still revokes the login-managed family, clears local credentials, warns, and
-exits non-zero. After logout the refresh family is gone, so no new access token
-can be minted. The old three-key layout is no longer used as a login pair:
-`server-refresh-token` and `server-auth-url` are ignored, and only
-`server-token` remains as an explicit static API-token fallback with no refresh
-and no binding. A legacy unbound JWT pair is not refreshed anymore; run
-`brain login` again.
-
-For automation, `BRAIN_TOKEN` still works and takes precedence over stored
-credentials; while it is set, `brain login` refuses to run and `brain logout`
-leaves a stored session untouched and exits non-zero. A static API token can
-also be stored with
-`printf '%s\n' '<token>' | brain secret set server-token`. See
-[docs/deploy.md](docs/deploy.md) before production use. Each release also
-publishes the server image `ghcr.io/levapveeskela/lv24-brain-server`
-(linux/amd64 and linux/arm64).
-
-## Installers
-
-With Node.js 18+, the quickest install on Windows, macOS and Linux (x64 and
-arm64) is npm; it installs only the binary for your platform and runs no
-install scripts. Update with `npm i -g lv24-brain@latest`:
-
-```sh
-npm i -g lv24-brain
-```
-
-When a release is published, the Windows installer downloads the newest asset on
-the selected channel, verifies its SHA-256, installs under
-`%LOCALAPPDATA%\Programs\lv24-brain`, and optionally adds it to `PATH`:
-
-```powershell
-.\installers\windows\install.ps1 -Mode local -InstallOpenCodeHook
-```
-
-On macOS and Linux, `installers/unix/install.sh` reads `release.json` or
-`checksums.txt`, verifies SHA-256, installs `brain` under `~/.local/bin`, and
-keeps `brain.previous` for rollback:
-
-```sh
-./installers/unix/install.sh --mode local --yes
-```
-
-Build from source if no release is available yet. Release assets are produced
-by `.github/workflows/release.yml` on `v*` tags. See
-[docs/install.md](docs/install.md) for installer options.
+| `cmd/brain/` | CLI entry point and command dispatch |
+| `cmd/brain-server/` | HTTP server entry point |
+| `internal/domain/`, `app/`, `ports/`, `adapters/`, `bootstrap/` | Hexagonal core and composition root |
+| `internal/mcpserver/`, `adapters/localapi/`, `daemon/` | Agent, desktop and local control surfaces |
+| `internal/mergedriver/`, `adapters/gitstore/` | Git sync and merge drivers |
+| `deploy/` | Dockerfile, Compose, GoReleaser, environment template |
+| `installers/`, `npm/`, `python/` | Distribution channels |
+| `docs/`, `docs/architecture/` | Documentation and diagrams |
 
 ## Documentation
 
-- [Documentation site](https://brain.lv24.by)
-- [Quickstart](docs/quickstart.md)
-- [Install](docs/install.md)
-- [Update](docs/update.md)
-- [Server deploy](docs/deploy.md)
-- [Migration from the legacy Company Brain](docs/migration.md)
-- [LV24 Exchange Format](docs/exchange.md)
-- [Architecture](docs/architecture.md)
-- [MCP server contract](docs/mcp.md)
-- [Team runbook](docs/runbook.md)
-- [Search and progressive disclosure](docs/search.md)
-- [Layered context budget](docs/context-budget.md)
-- [Review findings, dates and duplicates](docs/review.md)
-- [Relations and two-phase merge](docs/relations.md)
-- [Write limits and protected paths](docs/limits.md)
-- [Schema compatibility and engram fields](docs/schema-compat.md)
-- [Importing engram memories](docs/import-engram.md)
-- [Code graph adapter](docs/code-graph.md)
-- [Retrieval evaluation](docs/eval.md)
-- [Security and privacy](docs/security.md)
-- [Product design](docs/product-design.md)
-- [Release 0.15](docs/release-0.15.md) · [0.16](docs/release-0.16.md) · [0.17](docs/release-0.17.md)
+| Doc | What it covers |
+|---|---|
+| [Documentation site](https://brain.lv24.by) | Guides, reference and FAQ in English, Russian and Chinese |
+| [Architecture front door](docs/ARCHITECTURE.md) | Modes, components, storage, deployment, invariants |
+| [Deep architecture](docs/architecture-deep.md) | Detailed implementation and known gaps |
+| [Agent entry](AGENTS.md) | Five-minute read path, verified commands, invariants |
+| [MCP server](docs/mcp.md) | 17 tools, resources, refusal codes, pagination |
+| [CLI](docs/cli.md) | Command groups, exit codes, the generated CLI reference |
+| [Status](docs/status.md) | Capability, known gaps, roadmap, all release notes |
+| [Quickstart](docs/quickstart.md) · [Install](docs/install.md) · [Update](docs/update.md) | Running and upgrading |
+| [Server deploy](docs/deploy.md) · [Security](docs/security.md) · [Runbook](docs/runbook.md) | Operations |
+| [Search](docs/search.md) · [Context budget](docs/context-budget.md) · [Review](docs/review.md) | Retrieval and curation |
+| [Relations](docs/relations.md) · [Limits](docs/limits.md) · [Schema compatibility](docs/schema-compat.md) | Data model details |
+| [Release 0.27.2](docs/release-0.27.2.md) | Latest notes; the full `docs/release-*` set is indexed in [status](docs/status.md#release-history) |
 
-## Security boundary
+## For AI agents
 
-- Public repository: product code, docs, templates, installers, and tests only.
-- Private repository or local data directory: brain content and approved mail
-  or connector data.
-- Never commit secrets, tokens, passwords, indexes, databases, or backups.
-- Connector and server credentials resolve from the environment or the OS
-  secret store at runtime; they are never written to `brain.yaml`.
+Read in this order:
 
-See [docs/security.md](docs/security.md) for the full model.
+1. [AGENTS.md](AGENTS.md) — start here, commands, invariants, gotchas.
+2. [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — components, flows, storage, failure modes.
+3. [docs/README.md](docs/README.md) — document map by audience.
+4. [docs/mcp.md](docs/mcp.md) if you talk MCP; [docs/cli.md](docs/cli.md) if you shell out.
+5. Code entry points: `cmd/brain/main.go`, `internal/bootstrap/bootstrap.go`, then the touched
+   adapter or use case.
 
-## If it helped you, star it
-
-If this project was genuinely useful, please star the source repository:
-
-**[Star LevapVeeskela/lv24-brain on GitHub](https://github.com/LevapVeeskela/lv24-brain)**
-
-Stars raise the project's visibility for other people and AI agents, and they are a simple way to
-thank the author. Humans and agents are both welcome to star.
+Hard invariants: dependencies point inward; MCP stdout is protocol-only; the public repo never holds
+brain data or secrets; writes are atomic and the index is derived; sync never force-pushes; the
+local API is loopback-only and additive. Do not run `brain` against the public repository as a data
+directory.
 
 ## License and cost
 
 Apache-2.0. See [LICENSE](LICENSE).
 
-The project is designed for zero paid hosting and CI: GitHub Actions on the
-free allowance, GitHub Releases, and self-hosted Docker Compose. No paid
-runners, storage add-ons, or marketplace services are required or configured.
+Designed for zero paid hosting and CI: GitHub Actions on the free allowance, GitHub Releases and
+self-hosted Docker Compose. No paid runners, storage add-ons or marketplace services are required.

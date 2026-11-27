@@ -1,0 +1,5 @@
+flowchart LR
+  session["Session start<br/>brain open + context"] -->|"start"| work["Work<br/>note · decision · attempt"]
+  work -->|"records"| store[("Markdown + FTS5<br/>index/brain.db")]
+  work -->|"Decision: lines"| review["Review inbox<br/>brain review"]
+  store -->|"brain sync"| repo[("Private git repo<br/>next session")]

@@ -1,0 +1,41 @@
+{
+  "version": 1,
+  "diagrams": {
+    "session-memory-loop": {
+      "index": "01",
+      "title": "Session memory loop",
+      "slug": "session-memory-loop",
+      "hash": "8a9bff3b1833bac6",
+      "updatedAt": "2026-11-27",
+      "png": true,
+      "svg": true
+    },
+    "mode-and-adapter-wiring": {
+      "index": "02",
+      "title": "Mode and adapter wiring",
+      "slug": "mode-and-adapter-wiring",
+      "hash": "fa97c480e721ebd2",
+      "updatedAt": "2026-11-27",
+      "png": true,
+      "svg": true
+    },
+    "git-sync-and-merge-artifacts": {
+      "index": "03",
+      "title": "Git sync and merge artifacts",
+      "slug": "git-sync-and-merge-artifacts",
+      "hash": "10a886c6213675fc",
+      "updatedAt": "2026-11-27",
+      "png": true,
+      "svg": true
+    },
+    "desktop-local-api-trust-boundary": {
+      "index": "04",
+      "title": "Desktop local API trust boundary",
+      "slug": "desktop-local-api-trust-boundary",
+      "hash": "381cc1104a8516b2",
+      "updatedAt": "2026-11-27",
+      "png": true,
+      "svg": true
+    }
+  }
+}

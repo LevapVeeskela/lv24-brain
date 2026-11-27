@@ -1,0 +1,46 @@
+# LV24 Brain
+
+> Local-first project memory for coding agents and humans: state, decisions, attempts and handoffs as Markdown in a private git repository, with CLI, MCP and an optional team server.
+
+## Docs
+
+- [Start here](https://brain.lv24.by/start/): install, initialize a brain, and run the first agent session.
+- [Install](https://brain.lv24.by/install/): npm, PyPI launcher, signed installers and release assets.
+- [Modes](https://brain.lv24.by/modes/): local, git and server modes and when to use each.
+- [Agent loop](https://brain.lv24.by/loop/): how a session reads context and writes a handoff.
+- [Agents and hooks](https://brain.lv24.by/agents/): Claude Code, Codex and OpenCode integration.
+- [MCP server](https://brain.lv24.by/mcp/): the 17-tool `lv24` profile, resources and refusal codes.
+- [CLI reference](https://brain.lv24.by/reference/cli/): commands, flags and exit codes.
+- [Templates](https://brain.lv24.by/reference/templates/): state, decision, attempt and handoff formats.
+- [Architecture](https://brain.lv24.by/architecture/): components, storage and design trade-offs.
+- [Knowledge model](https://brain.lv24.by/knowledge/): state, notes, decisions, attempts, handoffs and proposals.
+- [Search](https://brain.lv24.by/search/): full-text search, ranking, support tiers and progressive disclosure.
+- [Review](https://brain.lv24.by/review/): stale knowledge, contradictions, duplicates and review dates.
+- [Temporal validity](https://brain.lv24.by/temporal/): `valid_from`, `valid_to`, supersede chains and `--as-of`.
+- [Sync](https://brain.lv24.by/sync/): git sync, merge drivers and conflict artifacts.
+- [Connectors](https://brain.lv24.by/connectors/): read-only sources, raw zone and checkpoints.
+- [Desktop app](https://brain.lv24.by/desktop/): the Tauri client and the `localapi-v1` contract.
+- [Server](https://brain.lv24.by/server/): single-node Postgres deployment, auth, roles and SSE.
+- [Security](https://brain.lv24.by/security/): trust boundaries, secrets, redaction and privacy.
+- [Exchange format](https://brain.lv24.by/exchange/): LvEF v1 for portable knowledge.
+- [Migrate](https://brain.lv24.by/migrate/): import a legacy Company Brain data directory.
+- [Import engram](https://brain.lv24.by/migrate-engram/): bring engram memories into brain records.
+- [Code graph](https://brain.lv24.by/code-graph/): native and external code-index integration.
+- [Code signing](https://brain.lv24.by/code-signing/): signed releases, manifests and verification.
+- [Update](https://brain.lv24.by/update/): `brain update`, channels and rollback.
+- [Troubleshooting](https://brain.lv24.by/troubleshooting/): common failures and diagnostics.
+- [FAQ](https://brain.lv24.by/faq/): short answers about scope, data ownership and limits.
+- [Русская документация](https://brain.lv24.by/ru/): Russian documentation index.
+- [中文文档](https://brain.lv24.by/zh/): Chinese documentation index.
+
+## Optional
+
+- [Repository](https://github.com/LevapVeeskela/lv24-brain): Apache-2.0 Go engine source.
+- [Architecture front door](https://github.com/LevapVeeskela/lv24-brain/blob/main/docs/ARCHITECTURE.md): repository-level system design with diagrams.
+- [Agent entry](https://github.com/LevapVeeskela/lv24-brain/blob/main/AGENTS.md): commands, invariants and gotchas for coding agents.
+- [Status](https://github.com/LevapVeeskela/lv24-brain/blob/main/docs/status.md): current release, gaps and release history.
+- [Releases](https://github.com/LevapVeeskela/lv24-brain/releases): binaries, checksums and signed manifests.
+- [npm](https://www.npmjs.com/package/lv24-brain): canonical CLI package.
+- [PyPI](https://pypi.org/project/lv24-brain/): thin Python launcher.
+- [Server image](https://github.com/LevapVeeskela/lv24-brain/pkgs/container/lv24-brain-server): GHCR container for server mode.
+- [License](https://github.com/LevapVeeskela/lv24-brain/blob/main/LICENSE): Apache-2.0.

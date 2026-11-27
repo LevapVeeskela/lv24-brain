@@ -1,4 +1,9 @@
-# Architecture
+# Architecture (deep dive)
+
+> Front door: [ARCHITECTURE.md](ARCHITECTURE.md). This file keeps the original detailed design and
+> was moved from `docs/architecture.md` because Windows cannot host `docs/ARCHITECTURE.md` and
+> `docs/architecture.md` in one directory (the names differ only by case). Content is unchanged
+> apart from this note and one corrected sentence about `internal/ports` imports.
 
 Go monorepo for the LV24 Brain engine. The approved product design is
 [`product-design.md`](product-design.md); this document describes what the code
@@ -84,7 +89,7 @@ internal/adapters/*          implement ports; selected at bootstrap
 ```
 
 Dependencies point inward. `internal/domain` imports no project packages and no
-I/O libraries. `internal/ports` imports only `context`, `time`, and domain.
+I/O libraries. `internal/ports` depends only on the standard library and domain.
 Adapters never leak into domain or app.
 
 ## Modes

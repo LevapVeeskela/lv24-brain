@@ -1,0 +1,11 @@
+{
+  "docs": {
+    "dir": "docs/architecture",
+    "theme": "default",
+    "backgroundColor": "#ffffff"
+  },
+  "brain": {
+    "enabled": true,
+    "project": "lv24-brain"
+  }
+}
